@@ -1,0 +1,35 @@
+<div class="resource-grid">
+  <div class="resource-card">
+    <div class="resource-card__label">CPU</div>
+    <div class="resource-card__value">{{ snapshot.cpu_percent }}%</div>
+    <div class="meter"><div class="meter__fill {{ snapshot.cpu_severity }}" style="width: {{ snapshot.cpu_percent }}%;"></div></div>
+  </div>
+  <div class="resource-card">
+    <div class="resource-card__label">Memory</div>
+    <div class="resource-card__value">{{ snapshot.mem_percent }}%</div>
+    <div class="meter"><div class="meter__fill {{ snapshot.mem_severity }}" style="width: {{ snapshot.mem_percent }}%;"></div></div>
+    <div class="resource-card__sub">{{ snapshot.mem_used_gb }} GB / {{ snapshot.mem_total_gb }} GB</div>
+  </div>
+  {% for disk in snapshot.disks %}
+  <div class="resource-card">
+    <div class="resource-card__label">Disk ({{ disk.path }})</div>
+    <div class="resource-card__value">{{ disk.percent }}%</div>
+    <div class="meter"><div class="meter__fill {{ disk.severity }}" style="width: {{ disk.percent }}%;"></div></div>
+    <div class="resource-card__sub">{{ disk.used_gb }} GB used · {{ disk.free_gb }} GB free of {{ disk.total_gb }} GB</div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if snapshot.gpus %}
+<div class="section-title" style="margin-top: 28px;">GPU</div>
+<div class="resource-grid">
+  {% for gpu in snapshot.gpus %}
+  <div class="resource-card">
+    <div class="resource-card__label">{{ gpu.name }}</div>
+    <div class="resource-card__value">{{ gpu.util_percent }}%</div>
+    <div class="meter"><div class="meter__fill" style="width: {{ gpu.util_percent }}%;"></div></div>
+    <div class="resource-card__sub">{{ gpu.mem_used_gb }} GB / {{ gpu.mem_total_gb }} GB VRAM</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

@@ -34,7 +34,8 @@ def init_db():
             check_url TEXT DEFAULT '',
             last_checked TEXT DEFAULT '',
             response_ms INTEGER DEFAULT NULL,
-            sort_order INTEGER DEFAULT 0
+            sort_order INTEGER DEFAULT 0,
+            group_name TEXT DEFAULT ''
         )
     """)
 
@@ -154,11 +155,12 @@ def get_service(service_id):
 def create_service(data):
     conn = get_db()
     conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
-          int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0))))
+          int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
+          data.get("group_name", "").strip()))
     conn.commit()
     conn.close()
 
@@ -167,11 +169,11 @@ def update_service(service_id, data):
     conn = get_db()
     conn.execute("""
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
-        auto_check=?, check_url=?, sort_order=? WHERE id=?
+        auto_check=?, check_url=?, sort_order=?, group_name=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
-          int(data.get("sort_order", 0)), service_id))
+          int(data.get("sort_order", 0)), data.get("group_name", "").strip(), service_id))
     conn.commit()
     conn.close()
 

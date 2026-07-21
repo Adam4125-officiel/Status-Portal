@@ -5,6 +5,23 @@
   <h1>Settings</h1>
 </div>
 
+<form method="POST" action="{{ url_for('admin_settings_general') }}" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label for="site_name">Server / site name</label>
+    <input type="text" id="site_name" name="site_name" value="{{ site_name }}" placeholder="Server">
+    <div class="field-hint">Shown in the topbar and page title on the public portal.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_public_resources" {{ 'checked' if show_public_resources }}>
+      Also show CPU/RAM/disk resource monitoring on the public page (it's admin-only by default)
+    </label>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save</button>
+  </div>
+</form>
+
 <form method="POST" class="form-panel">
   <div class="field">
     <label for="current_password">Current password</label>

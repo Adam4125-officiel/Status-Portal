@@ -133,16 +133,39 @@ def _enrich_incidents(incidents):
     return incidents
 
 
+def _group_services(services):
+    """Groups services by group_name, preserving sort_order within a group and the
+    order groups first appear. Ungrouped services (group_name == '') share a group
+    with an empty name, which the template renders without a subheading - so setups
+    that never use grouping look exactly as before."""
+    groups = []
+    index = {}
+    for s in services:
+        name = (s.get("group_name") or "").strip()
+        if name not in index:
+            index[name] = {"name": name, "services": []}
+            groups.append(index[name])
+        index[name]["services"].append(s)
+    return groups
+
+
 @app.route("/")
 def index():
     services = _enrich_services(db.list_services())
+    groups = _group_services(services)
     announcements = db.list_announcements(limit=10)
     incidents = _enrich_incidents(db.list_incidents(limit=8))
     info = db.get_info_page()
     overall = compute_overall_status(services)
-    return render_template("index.html", services=services, announcements=announcements,
+    site_name = db.get_setting("site_name", "Server")
+    show_public_resources = db.get_setting("show_public_resources", "0") == "1"
+    snapshot = monitoring.get_resource_snapshot() if show_public_resources else None
+    return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, info=info, overall=overall,
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS)
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
+                            site_name=site_name, show_public_resources=show_public_resources,
+                            snapshot=snapshot)
 
 
 @app.route("/api/status")
@@ -151,6 +174,7 @@ def api_status():
     incidents = _enrich_incidents(db.list_incidents(limit=8))
     announcements = db.list_announcements(limit=10)
     return jsonify({
+        "site_name": db.get_setting("site_name", "Server"),
         "overall": compute_overall_status(services),
         "services": services,
         "announcements": announcements,
@@ -397,7 +421,8 @@ def admin_info():
 @login_required
 def admin_resources():
     snapshot = monitoring.get_resource_snapshot()
-    return render_template("admin_resources.html", snapshot=snapshot, active="resources")
+    return render_template("admin_resources.html", snapshot=snapshot,
+                            refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
 
 
 # ---- Settings ----
@@ -419,7 +444,19 @@ def admin_settings():
             db.set_setting("admin_password_hash", generate_password_hash(new))
             flash("Password changed.", "success")
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS, active="settings")
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            site_name=db.get_setting("site_name", "Server"),
+                            show_public_resources=db.get_setting("show_public_resources", "0") == "1",
+                            active="settings")
+
+
+@app.route("/admin/settings/general", methods=["POST"])
+@login_required
+def admin_settings_general():
+    db.set_setting("site_name", request.form.get("site_name", "").strip() or "Server")
+    db.set_setting("show_public_resources", "1" if request.form.get("show_public_resources") else "0")
+    flash("Settings updated.", "success")
+    return redirect(url_for("admin_settings"))
 
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,13 @@
 {% if services %}
 <table class="admin-table">
   <thead>
-    <tr><th>Service</th><th>Status</th><th>Auto-check</th><th>Link</th><th></th></tr>
+    <tr><th>Service</th><th>Group</th><th>Status</th><th>Auto-check</th><th>Link</th><th></th></tr>
   </thead>
   <tbody>
     {% for s in services %}
     <tr>
       <td>{{ s.icon }} <strong>{{ s.name }}</strong></td>
+      <td>{{ s.group_name or '—' }}</td>
       <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}</td>
       <td>{{ 'yes' if s.auto_check else 'no' }}</td>
       <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a></td>

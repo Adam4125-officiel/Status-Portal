@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Server Status{% endblock %}
+{% block title %}{{ site_name }} Status{% endblock %}
 {% set status_label = {'operational': 'Operational', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
 {% set status_css = {'operational': 'ok', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
 {% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
@@ -8,7 +8,7 @@
 <div class="wrap">
 
   <div class="topbar">
-    <div class="brand"><span class="dot-server"></span> Server</div>
+    <div class="brand"><span class="dot-server"></span> {{ site_name }}</div>
     <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
       next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
     </div>
@@ -45,46 +45,49 @@
 
   <div class="section-title">Services</div>
   {% if services %}
-  <div class="services-grid">
-    {% for s in services %}
-      <div class="service-card">
-        <div class="service-card__head">
-          <div class="service-card__title">
-            <span class="service-card__icon">{{ s.icon }}</span>{{ s.name }}
+  {% for group in groups %}
+    {% if group.name %}<div class="group-title">{{ group.name }}</div>{% endif %}
+    <div class="services-grid">
+      {% for s in group.services %}
+        <div class="service-card">
+          <div class="service-card__head">
+            <div class="service-card__title">
+              <span class="service-card__icon">{{ s.icon }}</span>{{ s.name }}
+            </div>
+          </div>
+          {% if s.description %}<div class="service-card__desc">{{ s.description }}</div>{% endif %}
+          <div class="service-card__status {{ status_css[s.status] }}">
+            <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
+          </div>
+          {% if s.uptime is not none %}
+          <div>
+            <div class="uptime-bar" title="{{ s.uptime }}% uptime over the last 30 days">
+              <div class="uptime-bar__fill" style="width: {{ s.uptime }}%;"></div>
+            </div>
+            <div class="uptime-label">{{ s.uptime }}% · 30d</div>
+          </div>
+          {% endif %}
+          {% if s.links %}
+          <div class="service-card__links">
+            {% for link in s.links %}
+              <a href="{{ link.url }}" target="_blank" rel="noopener" class="link-pill">{{ link.label }}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <div class="service-card__foot">
+            <span class="service-card__ping">
+              {% if s.auto_check and s.last_checked %}
+                {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. {{ s.last_checked[11:16] }}
+              {% elif s.auto_check %}
+                check pending
+              {% else %}&nbsp;{% endif %}
+            </span>
+            <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>
           </div>
         </div>
-        {% if s.description %}<div class="service-card__desc">{{ s.description }}</div>{% endif %}
-        <div class="service-card__status {{ status_css[s.status] }}">
-          <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
-        </div>
-        {% if s.uptime is not none %}
-        <div>
-          <div class="uptime-bar" title="{{ s.uptime }}% uptime over the last 30 days">
-            <div class="uptime-bar__fill" style="width: {{ s.uptime }}%;"></div>
-          </div>
-          <div class="uptime-label">{{ s.uptime }}% · 30d</div>
-        </div>
-        {% endif %}
-        {% if s.links %}
-        <div class="service-card__links">
-          {% for link in s.links %}
-            <a href="{{ link.url }}" target="_blank" rel="noopener" class="link-pill">{{ link.label }}</a>
-          {% endfor %}
-        </div>
-        {% endif %}
-        <div class="service-card__foot">
-          <span class="service-card__ping">
-            {% if s.auto_check and s.last_checked %}
-              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. {{ s.last_checked[11:16] }}
-            {% elif s.auto_check %}
-              check pending
-            {% else %}&nbsp;{% endif %}
-          </span>
-          <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>
-        </div>
-      </div>
-    {% endfor %}
-  </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
   {% else %}
     <div class="empty-state">No services configured yet.</div>
   {% endif %}
@@ -125,6 +128,11 @@
 
   <div class="section-title">Practical info</div>
   <div class="info-block">{{ info|richtext }}</div>
+
+  {% if show_public_resources and snapshot %}
+  <div class="section-title">Server resources</div>
+  {% include "_resource_cards.html" %}
+  {% endif %}
 
   <footer class="foot">status-portal · auto-refresh active</footer>
 </div>

@@ -3,47 +3,22 @@
 {% block admin_content %}
 <div class="admin-header">
   <h1>Server resources</h1>
-</div>
-
-<div class="resource-grid">
-  <div class="resource-card">
-    <div class="resource-card__label">CPU</div>
-    <div class="resource-card__value">{{ snapshot.cpu_percent }}%</div>
-    <div class="meter"><div class="meter__fill" style="width: {{ snapshot.cpu_percent }}%;"></div></div>
-  </div>
-  <div class="resource-card">
-    <div class="resource-card__label">Memory</div>
-    <div class="resource-card__value">{{ snapshot.mem_percent }}%</div>
-    <div class="meter"><div class="meter__fill" style="width: {{ snapshot.mem_percent }}%;"></div></div>
-    <div class="resource-card__sub">{{ snapshot.mem_used_gb }} GB / {{ snapshot.mem_total_gb }} GB</div>
-  </div>
-  <div class="resource-card">
-    <div class="resource-card__label">Disk ({{ snapshot.disk_path }})</div>
-    <div class="resource-card__value">{{ snapshot.disk_percent }}%</div>
-    <div class="meter"><div class="meter__fill" style="width: {{ snapshot.disk_percent }}%;"></div></div>
-    <div class="resource-card__sub">{{ snapshot.disk_used_gb }} GB used · {{ snapshot.disk_free_gb }} GB free of {{ snapshot.disk_total_gb }} GB</div>
+  <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
+    next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
   </div>
 </div>
 
-{% if snapshot.gpus %}
-<div class="section-title" style="margin-top: 28px;">GPU</div>
-<div class="resource-grid">
-  {% for gpu in snapshot.gpus %}
-  <div class="resource-card">
-    <div class="resource-card__label">{{ gpu.name }}</div>
-    <div class="resource-card__value">{{ gpu.util_percent }}%</div>
-    <div class="meter"><div class="meter__fill" style="width: {{ gpu.util_percent }}%;"></div></div>
-    <div class="resource-card__sub">{{ gpu.mem_used_gb }} GB / {{ gpu.mem_total_gb }} GB VRAM</div>
-  </div>
-  {% endfor %}
-</div>
-{% else %}
+{% include "_resource_cards.html" %}
+
+{% if not snapshot.gpus %}
 <p style="color: var(--text-faint); font-size: 12px; margin-top: 20px;">
   No GPU data available — install <code>nvidia-ml-py</code> (NVIDIA GPUs only) for this section to appear.
 </p>
 {% endif %}
 
 <p style="color: var(--text-faint); font-size: 11px; margin-top: 24px;">
-  Live snapshot on each page load — no history is kept for these.
+  Live snapshot, auto-refreshing every {{ refresh_seconds }}s (set via <code>PORTAL_RESOURCE_REFRESH_SECONDS</code>) — no history is kept for these.
 </p>
+<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
 {% endblock %}

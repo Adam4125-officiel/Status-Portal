@@ -96,7 +96,7 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `HOST_PORT` | `5000` | Host port mapped to the container (Docker only) |
 | `PORTAL_CHECK_INTERVAL_SECONDS` | `120` | Backend health-check frequency |
 | `PORTAL_PUBLIC_REFRESH_SECONDS` | `60` | Public page auto-refresh frequency |
-| `PORTAL_MONITOR_DISK_PATH` | `/` | Disk path reported in the admin resource monitor |
+| `PORTAL_RESOURCE_REFRESH_SECONDS` | `10` | Auto-refresh frequency of the resources page (admin, and public if enabled) |
 | `PORTAL_BEHIND_PROXY` | `false` | Set `true` only if a reverse proxy sits in front (trusts its `X-Forwarded-*` headers) |
 | `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
 

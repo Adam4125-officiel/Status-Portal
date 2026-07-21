@@ -19,8 +19,8 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_CHECK_INTERVAL_SECONDS", "12
 # Public page auto-refresh frequency (browser-side full reload). Independent of the above.
 PUBLIC_REFRESH_SECONDS = int(os.environ.get("PORTAL_PUBLIC_REFRESH_SECONDS", "60"))
 
-# Disk path the admin resource monitor reports free/used space for.
-MONITOR_DISK_PATH = os.environ.get("PORTAL_MONITOR_DISK_PATH", "/")
+# How often the resources page (admin, and public if enabled) auto-refreshes itself.
+RESOURCE_REFRESH_SECONDS = int(os.environ.get("PORTAL_RESOURCE_REFRESH_SECONDS", "10"))
 
 # Set to true only if a reverse proxy (nginx, Caddy, Cloudflare Tunnel...) sits in front
 # of this app - enables trusting its X-Forwarded-* headers (client IP/scheme). Leave
