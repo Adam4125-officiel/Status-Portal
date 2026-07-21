@@ -100,7 +100,19 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_BEHIND_PROXY` | `false` | Set `true` only if a reverse proxy sits in front (trusts its `X-Forwarded-*` headers) |
 | `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
 
-## 6. Security notes
+## 6. Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Covers the DB layer, the auto-incident lifecycle, login/lockout, service grouping, and
+the Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way
+to test against real instances of those from here). Not part of `requirements.txt`
+since nothing here needs `pytest` at runtime.
+
+## 7. Security notes
 
 A few things are already in place for running this on the open internet, not just a
 LAN/Tailscale: security response headers (CSP, `X-Frame-Options`, etc.) on every
@@ -122,10 +134,13 @@ status-portal/
   serve_waitress.py       # run this in production (instead of app.py)
   config.py               # all configuration, read from env vars / .env
   db.py                    # the entire SQLite layer
-  requirements.txt
+  monitoring.py            # CPU/RAM/disk/GPU/VM snapshot for the resources page
+  integrations.py          # read-only Jellyfin/*Arr/Jellyseerr status checks
+  requirements.txt, requirements-dev.txt
   Dockerfile, docker-compose.yml, .dockerignore, .env.example
   instance/portal.db      # created automatically on first launch
   templates/               # HTML pages (Jinja2)
   static/css/style.css     # all of the styling
   static/js/               # public page auto-refresh + admin link-row editor
+  tests/                   # pytest suite (see "Running the tests" below)
 ```

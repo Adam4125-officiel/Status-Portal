@@ -4,7 +4,7 @@ No ORM, just plain SQL to stay readable and easy to modify.
 """
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "portal.db")
 
@@ -145,7 +145,7 @@ def init_db():
 
 
 def now_iso():
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------- Services ----------
@@ -382,7 +382,7 @@ def get_uptime_percentage(service_id, days=30):
     shouldn't count against uptime). Returns None if there's no history yet (e.g. a
     service with auto-check off, which never gets a status_history row)."""
     conn = get_db()
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     rows = conn.execute("""
         SELECT status FROM status_history WHERE service_id=? AND checked_at >= ? AND status != 'maintenance'
     """, (service_id, cutoff)).fetchall()

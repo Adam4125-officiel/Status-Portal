@@ -1,19 +1,19 @@
 # Roadmap / ideas not built yet
 
-A couple of bigger ideas came up while scoping this project that are deliberately not
-implemented — they need their own design pass rather than being bolted on quickly.
+## *Arr stack + Jellyseerr + Jellyfin status (done, read-only)
 
-## *Arr stack + Jellyseerr + Jellyfin log integration (admin-only)
+Implemented: `/admin/integrations` now shows read-only health/log status for Jellyfin,
+Jellyseerr/Overseerr, and Servarr-family apps (Sonarr, Radarr, Prowlarr, Lidarr,
+Readarr) via `integrations.py`. Not yet done, and worth a follow-up if wanted:
 
-Pull errors/logs from the *Arr stack (Sonarr/Radarr/Prowlarr/...), Jellyseerr, and
-Jellyfin's own API into a centralized view inside `/admin`, so failures across the
-wider media stack surface here instead of requiring five different UIs. Open questions
-to resolve before starting: which APIs/versions to target, how to store per-integration
-API keys (likely a new `integrations` table + admin form, managed the same way
-everything else here is - not env vars, since these are per-service credentials the
-admin sets up one at a time), how often to poll each one, and whether a failure there
-should be able to open an incident too (reusing the auto-incident mechanism services
-already have via `_handle_incident_lifecycle` in `app.py`).
+- Wiring a failing integration into the existing auto-incident mechanism
+  (`_handle_incident_lifecycle` in `app.py`), the same way a down service opens one.
+- Background polling (today's check is live-on-page-load, like the resource monitor -
+  no history, no notification if you're not looking at the page).
+- Verification against real, live Jellyfin/Sonarr/Radarr/Jellyseerr instances - the
+  parsing logic is tested against mocked API payloads matching the documented response
+  shapes, but this hasn't been exercised against an actual running instance of any of
+  them.
 
 ## Jellyfin-backed user permissions
 
@@ -27,5 +27,5 @@ conversation before writing any code, rather than assumptions baked in here.
 
 ---
 
-Neither idea blocks anything already built. The current single-admin auth model and
+Nothing above blocks anything already built. The current single-admin auth model and
 service schema don't preclude adding either one later.
