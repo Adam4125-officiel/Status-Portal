@@ -35,7 +35,8 @@ def init_db():
             last_checked TEXT DEFAULT '',
             response_ms INTEGER DEFAULT NULL,
             sort_order INTEGER DEFAULT 0,
-            group_name TEXT DEFAULT ''
+            group_name TEXT DEFAULT '',
+            auto_incident INTEGER NOT NULL DEFAULT 1  -- 1 = auto-open/resolve incidents on down/recovery
         )
     """)
 
@@ -169,12 +170,12 @@ def get_service(service_id):
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
-          data.get("group_name", "").strip()))
+          data.get("group_name", "").strip(), int(data.get("auto_incident", 1))))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -185,11 +186,12 @@ def update_service(service_id, data):
     conn = get_db()
     conn.execute("""
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
-        auto_check=?, check_url=?, sort_order=?, group_name=? WHERE id=?
+        auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
-          int(data.get("sort_order", 0)), data.get("group_name", "").strip(), service_id))
+          int(data.get("sort_order", 0)), data.get("group_name", "").strip(),
+          int(data.get("auto_incident", 1)), service_id))
     conn.commit()
     conn.close()
 

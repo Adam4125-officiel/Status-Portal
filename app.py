@@ -314,6 +314,7 @@ def admin_service_new():
         data = dict(request.form)
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
+        data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
@@ -331,6 +332,7 @@ def admin_service_edit(service_id):
         data = dict(request.form)
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
+        data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         db.update_service(service_id, data)
         labels = request.form.getlist("link_label")
         urls = request.form.getlist("link_url")
@@ -638,7 +640,8 @@ def run_health_checks():
                     status = "down"
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
-                _handle_incident_lifecycle(s, previous_status, status)
+                if s["auto_incident"]:
+                    _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
         except Exception as e:
             print(f"[health-check] error: {e}")

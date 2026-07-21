@@ -21,6 +21,19 @@ def test_service_crud(isolated_db):
     assert db.get_service(new["id"]) is None
 
 
+def test_service_auto_incident_defaults_on_and_is_toggleable(isolated_db):
+    # Default is on (1) when not specified, so existing behavior doesn't change for
+    # anyone who doesn't touch the new checkbox.
+    sid = db.create_service({"name": "Test", "url": "http://example.com"})
+    assert db.get_service(sid)["auto_incident"] == 1
+
+    db.update_service(sid, {"name": "Test", "url": "http://example.com", "auto_incident": 0})
+    assert db.get_service(sid)["auto_incident"] == 0
+
+    db.update_service(sid, {"name": "Test", "url": "http://example.com", "auto_incident": 1})
+    assert db.get_service(sid)["auto_incident"] == 1
+
+
 def test_service_links_replace(isolated_db):
     sid = db.list_services()[0]["id"]
     db.replace_service_links(sid, [("Tailscale", "http://100.0.0.1"), ("LAN", "http://192.168.1.1")])

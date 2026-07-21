@@ -74,6 +74,22 @@ def test_auto_incident_no_duplicate_while_still_down(isolated_db):
     assert len(db.list_incidents()) == 1
 
 
+def test_admin_service_edit_persists_auto_incident_toggle(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    # Unchecking the box in the form (i.e. omitting it from POST data) should turn it off.
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational",
+    })
+    assert db.get_service(sid)["auto_incident"] == 0
+
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational", "auto_incident": "on",
+    })
+    assert db.get_service(sid)["auto_incident"] == 1
+
+
 def test_404_renders_custom_error_page(client):
     resp = client.get("/this-route-does-not-exist")
     assert resp.status_code == 404

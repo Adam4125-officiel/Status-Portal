@@ -52,6 +52,13 @@
     <div class="field-hint">Must respond with HTTP 200. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
   </div>
   <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="auto_incident" {{ 'checked' if not service or service.auto_incident }}>
+      Automatically open an incident when this service goes down, and resolve it when it recovers
+    </label>
+    <div class="field-hint">Only applies while auto-check is on above. Turn this off if you'd rather track outages for this service manually.</div>
+  </div>
+  <div class="field">
     <label for="sort_order">Sort order</label>
     <input type="number" id="sort_order" name="sort_order" value="{{ service.sort_order if service else 0 }}">
   </div>
