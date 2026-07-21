@@ -16,6 +16,18 @@ def get_db():
     return conn
 
 
+def _ensure_column(conn, table, column, ddl):
+    """Adds `column` to `table` if an existing database predates it - CREATE TABLE IF
+    NOT EXISTS only helps for brand-new databases; a table that already exists never
+    gets new columns added to it that way, which breaks every INSERT/UPDATE touching
+    that column on any database created before that column was introduced. No real
+    migration framework here, just enough to keep existing data intact as the schema
+    grows - every column ever added to a pre-existing table must get an entry below."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_db()
@@ -128,6 +140,16 @@ def init_db():
 
     conn.commit()
 
+    # Retrofit columns added after a table already existed in some earlier version of
+    # this schema, so an existing database (with real data) isn't left behind and
+    # start failing every write that touches a newer column.
+    _ensure_column(conn, "services", "group_name", "TEXT DEFAULT ''")
+    _ensure_column(conn, "services", "auto_incident", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "incidents", "auto_created", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "integrations", "service_id", "INTEGER")
+    _ensure_column(conn, "integrations", "show_on_public", "INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
     # Seed defaults if empty
     if c.execute("SELECT COUNT(*) FROM info_page").fetchone()[0] == 0:
         c.execute("INSERT INTO info_page (id, content) VALUES (1, ?)",
@@ -208,6 +230,10 @@ def update_service_status_from_check(service_id, status, response_ms):
 
 def delete_service(service_id):
     conn = get_db()
+    # Explicit, rather than relying solely on the FK's ON DELETE SET NULL - a database
+    # that got the integrations.service_id column via _ensure_column() (i.e. it existed
+    # before that column did) never had that FK constraint defined in the first place.
+    conn.execute("UPDATE integrations SET service_id=NULL WHERE service_id=?", (service_id,))
     conn.execute("DELETE FROM services WHERE id=?", (service_id,))
     conn.commit()
     conn.close()

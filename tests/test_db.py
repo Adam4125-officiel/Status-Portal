@@ -1,4 +1,56 @@
+import sqlite3
+
 import db
+
+
+def test_init_db_retrofits_columns_on_a_pre_existing_database(tmp_path, monkeypatch):
+    """Regression test for a real bug: a database created before a given column existed
+    (services.group_name/auto_incident, incidents.auto_created,
+    integrations.service_id/show_on_public) never got that column, because CREATE
+    TABLE IF NOT EXISTS is a no-op once the table already exists - every save touching
+    that column then failed with 'no such column'. init_db() must retrofit it without
+    losing existing rows."""
+    old_db_path = tmp_path / "old_schema.db"
+    conn = sqlite3.connect(old_db_path)
+    conn.execute("""
+        CREATE TABLE services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT DEFAULT '',
+            url TEXT NOT NULL, icon TEXT DEFAULT '⚙', status TEXT NOT NULL DEFAULT 'operational',
+            manual_override INTEGER NOT NULL DEFAULT 0, auto_check INTEGER NOT NULL DEFAULT 0,
+            check_url TEXT DEFAULT '', last_checked TEXT DEFAULT '', response_ms INTEGER DEFAULT NULL,
+            sort_order INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, service_id INTEGER, title TEXT NOT NULL,
+            description TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'investigating',
+            started_at TEXT NOT NULL, resolved_at TEXT DEFAULT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE integrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL,
+            base_url TEXT NOT NULL, api_key TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute("INSERT INTO services (name, url) VALUES ('Jellyfin', 'http://server:8096')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", str(old_db_path))
+    db.init_db()  # must not raise, and must not wipe the existing row
+
+    service = db.get_service(1)
+    assert service["name"] == "Jellyfin"  # pre-existing data survived
+    assert service["auto_incident"] == 1  # backfilled with the column's default
+    assert service["group_name"] == ""
+
+    # These must no longer raise "no such column"
+    db.update_service(1, {"name": "Jellyfin", "url": "http://server:8096", "auto_incident": 0})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989",
+                                  "api_key": "x", "service_id": 1, "show_on_public": 1})
+    assert db.list_integrations_for_service(1)[0]["id"] == iid
 
 
 def test_init_db_seeds_defaults(isolated_db):
