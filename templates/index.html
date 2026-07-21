@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Statut serveur{% endblock %}
-{% set status_label = {'operational': 'Opérationnel', 'degraded': 'Dégradé', 'maintenance': 'Maintenance', 'down': 'Hors service'} %}
+{% block title %}Server Status{% endblock %}
+{% set status_label = {'operational': 'Operational', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
 {% set status_css = {'operational': 'ok', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
-{% set incident_label = {'investigating': 'Investigation', 'identified': 'Identifié', 'monitoring': 'Sous surveillance', 'resolved': 'Résolu'} %}
-{% set announce_label = {'info': 'Info', 'success': 'Succès', 'warning': 'Attention', 'critical': 'Critique'} %}
+{% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
+{% set announce_label = {'info': 'Info', 'success': 'Success', 'warning': 'Warning', 'critical': 'Critical'} %}
 {% block body %}
 <div class="wrap">
 
   <div class="topbar">
-    <div class="brand"><span class="dot-server"></span> Serveur</div>
+    <div class="brand"><span class="dot-server"></span> Server</div>
     <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
-      prochaine actualisation dans <span id="refresh-countdown">60s</span>
+      next refresh in <span id="refresh-countdown">60s</span>
     </div>
   </div>
 
@@ -18,17 +18,17 @@
     <div class="status-hero__row">
       <div class="status-hero__label">
         <span class="led {{ status_css[overall] }}"></span>
-        {% if overall == 'operational' %}Tous les services fonctionnent normalement
-        {% elif overall == 'degraded' %}Certains services sont dégradés
-        {% elif overall == 'maintenance' %}Maintenance en cours
-        {% else %}Un ou plusieurs services sont hors service{% endif %}
+        {% if overall == 'operational' %}All services are operating normally
+        {% elif overall == 'degraded' %}Some services are degraded
+        {% elif overall == 'maintenance' %}Maintenance in progress
+        {% else %}One or more services are down{% endif %}
       </div>
-      <div class="status-hero__meta">{{ services|length }} service(s) suivis</div>
+      <div class="status-hero__meta">{{ services|length }} service(s) tracked</div>
     </div>
   </div>
 
   {% if announcements %}
-  <div class="section-title">Annonces</div>
+  <div class="section-title">Announcements</div>
   {% for a in announcements %}
     <div class="announcement {{ a.type }}">
       <div class="announcement__head">
@@ -60,21 +60,21 @@
         <div class="service-card__foot">
           <span class="service-card__ping">
             {% if s.auto_check and s.last_checked %}
-              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'pas de réponse' }} · maj {{ s.last_checked[11:16] }}
+              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. {{ s.last_checked[11:16] }}
             {% elif s.auto_check %}
-              vérification en attente
+              check pending
             {% else %}&nbsp;{% endif %}
           </span>
-          <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Ouvrir →</a>
+          <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>
         </div>
       </div>
     {% endfor %}
   </div>
   {% else %}
-    <div class="empty-state">Aucun service configuré pour l'instant.</div>
+    <div class="empty-state">No services configured yet.</div>
   {% endif %}
 
-  <div class="section-title">Historique &amp; maintenances</div>
+  <div class="section-title">Incidents &amp; maintenance</div>
   {% if incidents %}
     <div style="background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 18px;">
     {% for i in incidents %}
@@ -86,21 +86,21 @@
           </div>
           {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
           <div class="incident__time">
-            débuté {{ i.started_at[:16].replace('T', ' ') }} UTC
-            {% if i.resolved_at %}· résolu {{ i.resolved_at[:16].replace('T', ' ') }} UTC{% endif %}
+            started {{ i.started_at[:16].replace('T', ' ') }} UTC
+            {% if i.resolved_at %}· resolved {{ i.resolved_at[:16].replace('T', ' ') }} UTC{% endif %}
           </div>
         </div>
       </div>
     {% endfor %}
     </div>
   {% else %}
-    <div class="empty-state">Aucun incident enregistré. Tout roule.</div>
+    <div class="empty-state">No incidents recorded. All clear.</div>
   {% endif %}
 
-  <div class="section-title">Infos pratiques</div>
+  <div class="section-title">Practical info</div>
   <div class="info-block">{{ info|richtext }}</div>
 
-  <footer class="foot">status-portal · auto-actualisation active</footer>
+  <footer class="foot">status-portal · auto-refresh active</footer>
 </div>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 {% endblock %}

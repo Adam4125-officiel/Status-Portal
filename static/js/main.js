@@ -4,7 +4,7 @@
   var el = document.getElementById('refresh-countdown');
 
   setInterval(function () {
-    if (document.hidden) return; // ne dérange pas si l'onglet n'est pas visible
+    if (document.hidden) return; // don't bother refreshing while the tab isn't visible
     remaining -= 1;
     if (remaining <= 0) {
       window.location.reload();

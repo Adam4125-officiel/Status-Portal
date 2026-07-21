@@ -1,26 +1,26 @@
 {% extends "admin_base.html" %}
-{% block title %}Annonces — Admin{% endblock %}
+{% block title %}Announcements — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Annonces</h1>
-  <a class="btn" href="{{ url_for('admin_announcement_new') }}">+ Nouvelle annonce</a>
+  <h1>Announcements</h1>
+  <a class="btn" href="{{ url_for('admin_announcement_new') }}">+ New announcement</a>
 </div>
 
 {% if announcements %}
 <table class="admin-table">
-  <thead><tr><th>Titre</th><th>Type</th><th>Épinglée</th><th>Date</th><th></th></tr></thead>
+  <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th></th></tr></thead>
   <tbody>
     {% for a in announcements %}
     <tr>
       <td>{{ a.title }}</td>
       <td>{{ a.type }}</td>
-      <td>{{ 'oui' if a.pinned else 'non' }}</td>
+      <td>{{ 'yes' if a.pinned else 'no' }}</td>
       <td>{{ a.created_at[:16].replace('T', ' ') }}</td>
       <td class="actions">
-        <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Modifier</a>
+        <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Edit</a>
         <form action="{{ url_for('admin_announcement_delete', aid=a.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Supprimer cette annonce ?');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Suppr.</button>
+              onsubmit="return confirm('Delete this announcement?');">
+          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
         </form>
       </td>
     </tr>
@@ -28,6 +28,6 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty-state">Aucune annonce pour l'instant.</div>
+<div class="empty-state">No announcements yet.</div>
 {% endif %}
 {% endblock %}

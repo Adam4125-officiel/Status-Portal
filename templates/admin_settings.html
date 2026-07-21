@@ -1,29 +1,30 @@
 {% extends "admin_base.html" %}
-{% block title %}Réglages — Admin{% endblock %}
+{% block title %}Settings — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Réglages</h1>
+  <h1>Settings</h1>
 </div>
 
 <form method="POST" class="form-panel">
   <div class="field">
-    <label for="current_password">Mot de passe actuel</label>
+    <label for="current_password">Current password</label>
     <input type="password" id="current_password" name="current_password" required>
   </div>
   <div class="field">
-    <label for="new_password">Nouveau mot de passe</label>
+    <label for="new_password">New password</label>
     <input type="password" id="new_password" name="new_password" required>
   </div>
   <div class="field">
-    <label for="confirm_password">Confirme le nouveau mot de passe</label>
+    <label for="confirm_password">Confirm new password</label>
     <input type="password" id="confirm_password" name="confirm_password" required>
   </div>
   <div class="form-actions">
-    <button type="submit" class="btn">Changer le mot de passe</button>
+    <button type="submit" class="btn">Change password</button>
   </div>
 </form>
 
 <p style="color: var(--text-faint); font-size: 12px; margin-top: 20px;">
-  Fréquence des health checks automatiques : {{ check_interval }}s (modifiable dans app.py, variable CHECK_INTERVAL_SECONDS).
+  Backend health-check frequency: every {{ check_interval }}s (change <code>CHECK_INTERVAL_SECONDS</code> in app.py).
+  This is separate from the public page's 60s auto-refresh.
 </p>
 {% endblock %}

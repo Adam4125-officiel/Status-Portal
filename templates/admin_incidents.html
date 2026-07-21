@@ -2,13 +2,13 @@
 {% block title %}Incidents — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Incidents &amp; maintenances</h1>
-  <a class="btn" href="{{ url_for('admin_incident_new') }}">+ Nouvel incident</a>
+  <h1>Incidents &amp; maintenance</h1>
+  <a class="btn" href="{{ url_for('admin_incident_new') }}">+ New incident</a>
 </div>
 
 {% if incidents %}
 <table class="admin-table">
-  <thead><tr><th>Titre</th><th>Service</th><th>Statut</th><th>Débuté</th><th></th></tr></thead>
+  <thead><tr><th>Title</th><th>Service</th><th>Status</th><th>Started</th><th></th></tr></thead>
   <tbody>
     {% for i in incidents %}
     <tr>
@@ -17,10 +17,10 @@
       <td>{{ i.status }}</td>
       <td>{{ i.started_at[:16].replace('T', ' ') }}</td>
       <td class="actions">
-        <a href="{{ url_for('admin_incident_edit', iid=i.id) }}">Modifier</a>
+        <a href="{{ url_for('admin_incident_edit', iid=i.id) }}">Edit</a>
         <form action="{{ url_for('admin_incident_delete', iid=i.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Supprimer cet incident ?');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Suppr.</button>
+              onsubmit="return confirm('Delete this incident?');">
+          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
         </form>
       </td>
     </tr>
@@ -28,6 +28,6 @@
   </tbody>
 </table>
 {% else %}
-<div class="empty-state">Aucun incident enregistré.</div>
+<div class="empty-state">No incidents recorded.</div>
 {% endif %}
 {% endblock %}

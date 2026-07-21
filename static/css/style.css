@@ -1,9 +1,9 @@
 /* ============================================================
    status-portal — design tokens
-   Esthétique : salle de contrôle réseau / rack de monitoring.
+   Aesthetic: network control room / monitoring rack.
    ============================================================ */
 :root {
-  /* Couleurs */
+  /* Colors */
   --bg-void: #0b0d12;
   --bg-panel: #12151c;
   --bg-panel-raised: #181c25;
@@ -24,7 +24,7 @@
   --maint: #a08bff;
   --maint-dim: #372c66;
 
-  /* Typo */
+  /* Typography */
   --font-display: "Space Grotesk", "Inter", sans-serif;
   --font-body: "Inter", sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;

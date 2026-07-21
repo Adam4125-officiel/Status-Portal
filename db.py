@@ -1,6 +1,6 @@
 """
-db.py — Toute la couche base de données (SQLite).
-Pas d'ORM, juste du SQL simple pour rester lisible et facile à modifier.
+db.py — The entire database layer (SQLite).
+No ORM, just plain SQL to stay readable and easy to modify.
 """
 import sqlite3
 import os
@@ -81,13 +81,13 @@ def init_db():
     # Seed defaults if empty
     if c.execute("SELECT COUNT(*) FROM info_page").fetchone()[0] == 0:
         c.execute("INSERT INTO info_page (id, content) VALUES (1, ?)",
-                   ("Ajoute ici des infos pratiques (accès SMB, VPN, contact...) depuis le panel admin.",))
+                   ("Add practical info here (SMB access, VPN, contact...) from the admin panel.",))
         conn.commit()
 
     if c.execute("SELECT COUNT(*) FROM services").fetchone()[0] == 0:
         seed = [
-            ("Jellyfin", "Streaming films & séries", "http://SERVEUR:8096", "🎬", "operational", 0, 1, "http://SERVEUR:8096/health", 0),
-            ("Partage SMB", "Accès fichiers réseau", "smb://SERVEUR/partage", "📁", "operational", 0, 0, "", 1),
+            ("Jellyfin", "Movie & TV streaming", "http://SERVER:8096", "🎬", "operational", 0, 1, "http://SERVER:8096/health", 0),
+            ("SMB share", "Network file access", "smb://SERVER/share", "📁", "operational", 0, 0, "", 1),
         ]
         c.executemany("""
             INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order)

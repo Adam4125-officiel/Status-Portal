@@ -1,14 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Connexion admin{% endblock %}
+{% block title %}Admin login{% endblock %}
 {% block body %}
 <div class="login-shell">
   <div class="login-card">
     {% if first_run %}
-      <h1>Premier lancement</h1>
-      <p class="sub">Choisis le mot de passe admin. Personne d'autre ne l'a défini pour toi, note-le bien.</p>
+      <h1>First launch</h1>
+      <p class="sub">Choose the admin password. No one else has set it for you, so write it down.</p>
     {% else %}
-      <h1>Panel admin</h1>
-      <p class="sub">Connecte-toi pour gérer le portail.</p>
+      <h1>Admin panel</h1>
+      <p class="sub">Log in to manage the portal.</p>
     {% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -19,17 +19,17 @@
 
     <form method="POST">
       <div class="field">
-        <label for="password">Mot de passe</label>
+        <label for="password">Password</label>
         <input type="password" id="password" name="password" required autofocus>
       </div>
       {% if first_run %}
       <div class="field">
-        <label for="confirm">Confirme le mot de passe</label>
+        <label for="confirm">Confirm password</label>
         <input type="password" id="confirm" name="confirm" required>
       </div>
       {% endif %}
       <div class="form-actions">
-        <button class="btn" type="submit">{{ 'Créer et se connecter' if first_run else 'Se connecter' }}</button>
+        <button class="btn" type="submit">{{ 'Create and log in' if first_run else 'Log in' }}</button>
       </div>
     </form>
   </div>

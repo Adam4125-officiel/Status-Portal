@@ -1,7 +1,7 @@
 """
-app.py — Portail de statut du serveur perso.
-Lance avec : python app.py
-Panel admin : /admin (mot de passe défini au premier lancement)
+app.py — Personal server status portal.
+Run with: python app.py
+Admin panel: /admin (password is set on first launch)
 """
 import os
 import re
@@ -17,9 +17,9 @@ import requests
 import db
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PORTAL_SECRET_KEY", "change-moi-en-prod-" + os.urandom(8).hex())
+app.secret_key = os.environ.get("PORTAL_SECRET_KEY", "change-me-in-prod-" + os.urandom(8).hex())
 
-CHECK_INTERVAL_SECONDS = 120  # fréquence des health checks auto
+CHECK_INTERVAL_SECONDS = 120  # backend health-check frequency (separate from the public page's refresh)
 
 _URL_RE = re.compile(r"(https?://[^\s<]+)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -27,8 +27,8 @@ _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
 @app.template_filter("richtext")
 def richtext_filter(text):
-    """Texte libre (annonces, page infos) -> HTML minimal et sûr.
-    Supporte **gras**, liens auto-cliquables, sauts de ligne."""
+    """Free text (announcements, info page) -> minimal, safe HTML.
+    Supports **bold**, auto-clickable links, line breaks."""
     if not text:
         return ""
     out = str(escape(text))
@@ -55,7 +55,7 @@ def is_first_run():
 
 
 # ---------------------------------------------------------------------------
-# Pages publiques
+# Public pages
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
@@ -105,9 +105,9 @@ def admin_login():
         if first_run:
             confirm = request.form.get("confirm", "")
             if len(password) < 6:
-                flash("Le mot de passe doit faire au moins 6 caractères.", "error")
+                flash("Password must be at least 6 characters.", "error")
             elif password != confirm:
-                flash("Les mots de passe ne correspondent pas.", "error")
+                flash("Passwords do not match.", "error")
             else:
                 db.set_setting("admin_password_hash", generate_password_hash(password))
                 session["logged_in"] = True
@@ -118,7 +118,7 @@ def admin_login():
                 session["logged_in"] = True
                 nxt = request.args.get("next") or url_for("admin_dashboard")
                 return redirect(nxt)
-            flash("Mot de passe incorrect.", "error")
+            flash("Incorrect password.", "error")
     return render_template("login.html", first_run=first_run)
 
 
@@ -153,7 +153,7 @@ def admin_service_new():
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         db.create_service(data)
-        flash("Service ajouté.", "success")
+        flash("Service added.", "success")
         return redirect(url_for("admin_services"))
     return render_template("admin_service_form.html", service=None, active="services")
 
@@ -163,14 +163,14 @@ def admin_service_new():
 def admin_service_edit(service_id):
     service = db.get_service(service_id)
     if not service:
-        flash("Service introuvable.", "error")
+        flash("Service not found.", "error")
         return redirect(url_for("admin_services"))
     if request.method == "POST":
         data = dict(request.form)
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         db.update_service(service_id, data)
-        flash("Service mis à jour.", "success")
+        flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
     return render_template("admin_service_form.html", service=service, active="services")
 
@@ -179,7 +179,7 @@ def admin_service_edit(service_id):
 @login_required
 def admin_service_delete(service_id):
     db.delete_service(service_id)
-    flash("Service supprimé.", "success")
+    flash("Service deleted.", "success")
     return redirect(url_for("admin_services"))
 
 
@@ -198,7 +198,7 @@ def admin_announcement_new():
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
         db.create_announcement(data)
-        flash("Annonce publiée.", "success")
+        flash("Announcement published.", "success")
         return redirect(url_for("admin_announcements"))
     return render_template("admin_announcement_form.html", announcement=None, active="announcements")
 
@@ -208,13 +208,13 @@ def admin_announcement_new():
 def admin_announcement_edit(aid):
     announcement = db.get_announcement(aid)
     if not announcement:
-        flash("Annonce introuvable.", "error")
+        flash("Announcement not found.", "error")
         return redirect(url_for("admin_announcements"))
     if request.method == "POST":
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
         db.update_announcement(aid, data)
-        flash("Annonce mise à jour.", "success")
+        flash("Announcement updated.", "success")
         return redirect(url_for("admin_announcements"))
     return render_template("admin_announcement_form.html", announcement=announcement, active="announcements")
 
@@ -223,7 +223,7 @@ def admin_announcement_edit(aid):
 @login_required
 def admin_announcement_delete(aid):
     db.delete_announcement(aid)
-    flash("Annonce supprimée.", "success")
+    flash("Announcement deleted.", "success")
     return redirect(url_for("admin_announcements"))
 
 
@@ -242,7 +242,7 @@ def admin_incident_new():
     services = db.list_services()
     if request.method == "POST":
         db.create_incident(request.form)
-        flash("Incident enregistré.", "success")
+        flash("Incident recorded.", "success")
         return redirect(url_for("admin_incidents"))
     return render_template("admin_incident_form.html", incident=None, services=services, active="incidents")
 
@@ -253,11 +253,11 @@ def admin_incident_edit(iid):
     incident = db.get_incident(iid)
     services = db.list_services()
     if not incident:
-        flash("Incident introuvable.", "error")
+        flash("Incident not found.", "error")
         return redirect(url_for("admin_incidents"))
     if request.method == "POST":
         db.update_incident(iid, request.form)
-        flash("Incident mis à jour.", "success")
+        flash("Incident updated.", "success")
         return redirect(url_for("admin_incidents"))
     return render_template("admin_incident_form.html", incident=incident, services=services, active="incidents")
 
@@ -266,7 +266,7 @@ def admin_incident_edit(iid):
 @login_required
 def admin_incident_delete(iid):
     db.delete_incident(iid)
-    flash("Incident supprimé.", "success")
+    flash("Incident deleted.", "success")
     return redirect(url_for("admin_incidents"))
 
 
@@ -276,7 +276,7 @@ def admin_incident_delete(iid):
 def admin_info():
     if request.method == "POST":
         db.set_info_page(request.form.get("content", ""))
-        flash("Page d'infos mise à jour.", "success")
+        flash("Info page updated.", "success")
         return redirect(url_for("admin_info"))
     content = db.get_info_page()
     return render_template("admin_info.html", content=content, active="info")
@@ -292,19 +292,19 @@ def admin_settings():
         confirm = request.form.get("confirm_password", "")
         stored = db.get_setting("admin_password_hash")
         if not check_password_hash(stored, current):
-            flash("Mot de passe actuel incorrect.", "error")
+            flash("Current password is incorrect.", "error")
         elif len(new) < 6:
-            flash("Le nouveau mot de passe doit faire au moins 6 caractères.", "error")
+            flash("New password must be at least 6 characters.", "error")
         elif new != confirm:
-            flash("Les mots de passe ne correspondent pas.", "error")
+            flash("Passwords do not match.", "error")
         else:
             db.set_setting("admin_password_hash", generate_password_hash(new))
-            flash("Mot de passe changé.", "success")
+            flash("Password changed.", "success")
     return render_template("admin_settings.html", check_interval=CHECK_INTERVAL_SECONDS, active="settings")
 
 
 # ---------------------------------------------------------------------------
-# Health check en tâche de fond
+# Background health check
 # ---------------------------------------------------------------------------
 def run_health_checks():
     while True:
@@ -323,7 +323,7 @@ def run_health_checks():
                     status = "down"
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
         except Exception as e:
-            print(f"[health-check] erreur: {e}")
+            print(f"[health-check] error: {e}")
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 
@@ -336,5 +336,5 @@ def start_background_checker():
 if __name__ == "__main__":
     db.init_db()
     start_background_checker()
-    # En prod (IIS/waitress), debug doit rester False.
+    # debug must stay False whenever this is reachable outside localhost.
     app.run(host="0.0.0.0", port=5000, debug=False)

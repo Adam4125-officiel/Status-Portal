@@ -1,20 +1,20 @@
 {% extends "admin_base.html" %}
-{% block title %}{{ 'Modifier' if incident else 'Nouvel' }} incident — Admin{% endblock %}
+{% block title %}{{ 'Edit' if incident else 'New' }} incident — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>{{ 'Modifier l\'incident' if incident else 'Nouvel incident / maintenance' }}</h1>
+  <h1>{{ 'Edit incident' if incident else 'New incident / maintenance' }}</h1>
 </div>
 
 <form method="POST" class="form-panel">
   <div class="field">
-    <label for="title">Titre</label>
+    <label for="title">Title</label>
     <input type="text" id="title" name="title" value="{{ incident.title if incident else '' }}" required
-           placeholder="Ex: Maintenance planifiée Jellyfin">
+           placeholder="E.g. Planned Jellyfin maintenance">
   </div>
   <div class="field">
-    <label for="service_id">Service concerné (optionnel)</label>
+    <label for="service_id">Related service (optional)</label>
     <select id="service_id" name="service_id">
-      <option value="">— Aucun / général —</option>
+      <option value="">— None / general —</option>
       {% for s in services %}
         <option value="{{ s.id }}" {{ 'selected' if incident and incident.service_id == s.id }}>{{ s.name }}</option>
       {% endfor %}
@@ -25,19 +25,19 @@
     <textarea id="description" name="description">{{ incident.description if incident else '' }}</textarea>
   </div>
   <div class="field">
-    <label for="status">Statut</label>
+    <label for="status">Status</label>
     {% set current = incident.status if incident else 'investigating' %}
     <select id="status" name="status">
-      <option value="investigating" {{ 'selected' if current == 'investigating' }}>Investigation</option>
-      <option value="identified" {{ 'selected' if current == 'identified' }}>Identifié</option>
-      <option value="monitoring" {{ 'selected' if current == 'monitoring' }}>Sous surveillance</option>
-      <option value="resolved" {{ 'selected' if current == 'resolved' }}>Résolu</option>
+      <option value="investigating" {{ 'selected' if current == 'investigating' }}>Investigating</option>
+      <option value="identified" {{ 'selected' if current == 'identified' }}>Identified</option>
+      <option value="monitoring" {{ 'selected' if current == 'monitoring' }}>Monitoring</option>
+      <option value="resolved" {{ 'selected' if current == 'resolved' }}>Resolved</option>
     </select>
-    <div class="field-hint">Passer à "Résolu" enregistre automatiquement l'heure de résolution.</div>
+    <div class="field-hint">Switching to "Resolved" automatically records the resolution time.</div>
   </div>
   <div class="form-actions">
-    <button type="submit" class="btn">{{ 'Enregistrer' if incident else 'Créer' }}</button>
-    <a href="{{ url_for('admin_incidents') }}" class="btn secondary">Annuler</a>
+    <button type="submit" class="btn">{{ 'Save' if incident else 'Create' }}</button>
+    <a href="{{ url_for('admin_incidents') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
 {% endblock %}
