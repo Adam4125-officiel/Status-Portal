@@ -97,6 +97,18 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_CHECK_INTERVAL_SECONDS` | `120` | Backend health-check frequency |
 | `PORTAL_PUBLIC_REFRESH_SECONDS` | `60` | Public page auto-refresh frequency |
 | `PORTAL_MONITOR_DISK_PATH` | `/` | Disk path reported in the admin resource monitor |
+| `PORTAL_BEHIND_PROXY` | `false` | Set `true` only if a reverse proxy sits in front (trusts its `X-Forwarded-*` headers) |
+| `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
+
+## 6. Security notes
+
+A few things are already in place for running this on the open internet, not just a
+LAN/Tailscale: security response headers (CSP, `X-Frame-Options`, etc.) on every
+response, hardened session cookie flags, a login lockout after 5 failed admin-login
+attempts (5 min cooldown), generic error pages instead of default framework ones, and
+optional `ProxyFix` support (`PORTAL_BEHIND_PROXY`) for correct behavior behind a
+reverse proxy. None of this replaces putting a real reverse proxy/WAF/TLS in front if
+you expose this beyond a VPN - it just means the app itself isn't the weak link.
 
 These two intervals are independent — don't confuse them: the health checker polls each
 service's `check_url` on its own schedule, unrelated to how often a visitor's browser

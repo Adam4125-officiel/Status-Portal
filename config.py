@@ -21,3 +21,13 @@ PUBLIC_REFRESH_SECONDS = int(os.environ.get("PORTAL_PUBLIC_REFRESH_SECONDS", "60
 
 # Disk path the admin resource monitor reports free/used space for.
 MONITOR_DISK_PATH = os.environ.get("PORTAL_MONITOR_DISK_PATH", "/")
+
+# Set to true only if a reverse proxy (nginx, Caddy, Cloudflare Tunnel...) sits in front
+# of this app - enables trusting its X-Forwarded-* headers (client IP/scheme). Leave
+# false if the app's port is reachable directly, to avoid trusting spoofable headers.
+BEHIND_PROXY = os.environ.get("PORTAL_BEHIND_PROXY", "false").lower() == "true"
+
+# Set to true once this is served over HTTPS (directly or via a TLS-terminating
+# reverse proxy) to mark the session cookie Secure - browsers then refuse to send it
+# over plain HTTP. Leave false for plain-HTTP LAN/Tailscale-only setups.
+FORCE_HTTPS_COOKIES = os.environ.get("PORTAL_FORCE_HTTPS_COOKIES", "false").lower() == "true"

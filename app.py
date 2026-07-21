@@ -20,6 +20,45 @@ import monitoring
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=config.FORCE_HTTPS_COOKIES,
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,  # 2 MB - plenty for any form on this app
+)
+
+if config.BEHIND_PROXY:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'"
+    )
+    response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
+    return response
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    return render_template("error.html", code=404, message="Page not found."), 404
+
+
+@app.errorhandler(500)
+def handle_server_error(e):
+    return render_template("error.html", code=500, message="Something went wrong."), 500
+
 
 _URL_RE = re.compile(r"(https?://[^\s<]+)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -52,6 +91,30 @@ def login_required(f):
 
 def is_first_run():
     return db.get_setting("admin_password_hash") is None
+
+
+# Global (not per-IP) login lockout: this is a single-admin app, so there's no
+# legitimate concurrent "other users" to inconvenience, and it sidesteps relying on
+# a client IP that's only trustworthy when config.BEHIND_PROXY is correctly set.
+_login_state = {"failures": 0, "locked_until": 0.0}
+LOGIN_LOCKOUT_THRESHOLD = 5
+LOGIN_LOCKOUT_SECONDS = 300
+
+
+def _login_locked():
+    return time.time() < _login_state["locked_until"]
+
+
+def _register_login_failure():
+    _login_state["failures"] += 1
+    if _login_state["failures"] >= LOGIN_LOCKOUT_THRESHOLD:
+        _login_state["locked_until"] = time.time() + LOGIN_LOCKOUT_SECONDS
+        _login_state["failures"] = 0
+
+
+def _register_login_success():
+    _login_state["failures"] = 0
+    _login_state["locked_until"] = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +178,9 @@ def compute_overall_status(services):
 def admin_login():
     first_run = is_first_run()
     if request.method == "POST":
+        if not first_run and _login_locked():
+            flash("Too many failed attempts. Try again in a few minutes.", "error")
+            return render_template("login.html", first_run=first_run)
         password = request.form.get("password", "")
         if first_run:
             confirm = request.form.get("confirm", "")
@@ -129,9 +195,11 @@ def admin_login():
         else:
             stored = db.get_setting("admin_password_hash")
             if stored and check_password_hash(stored, password):
+                _register_login_success()
                 session["logged_in"] = True
                 nxt = request.args.get("next") or url_for("admin_dashboard")
                 return redirect(nxt)
+            _register_login_failure()
             flash("Incorrect password.", "error")
     return render_template("login.html", first_run=first_run)
 
