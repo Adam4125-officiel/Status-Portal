@@ -57,11 +57,24 @@ def is_first_run():
 # ---------------------------------------------------------------------------
 # Public pages
 # ---------------------------------------------------------------------------
+def _enrich_services(services):
+    for s in services:
+        s["links"] = db.list_service_links(s["id"])
+        s["uptime"] = db.get_uptime_percentage(s["id"])
+    return services
+
+
+def _enrich_incidents(incidents):
+    for i in incidents:
+        i["updates"] = db.list_incident_updates(i["id"])
+    return incidents
+
+
 @app.route("/")
 def index():
-    services = db.list_services()
+    services = _enrich_services(db.list_services())
     announcements = db.list_announcements(limit=10)
-    incidents = db.list_incidents(limit=8)
+    incidents = _enrich_incidents(db.list_incidents(limit=8))
     info = db.get_info_page()
     overall = compute_overall_status(services)
     return render_template("index.html", services=services, announcements=announcements,
@@ -70,9 +83,9 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    services = db.list_services()
+    services = _enrich_services(db.list_services())
+    incidents = _enrich_incidents(db.list_incidents(limit=8))
     announcements = db.list_announcements(limit=10)
-    incidents = db.list_incidents(limit=8)
     return jsonify({
         "overall": compute_overall_status(services),
         "services": services,
@@ -170,9 +183,14 @@ def admin_service_edit(service_id):
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         db.update_service(service_id, data)
+        labels = request.form.getlist("link_label")
+        urls = request.form.getlist("link_url")
+        links = [(label.strip(), url.strip()) for label, url in zip(labels, urls) if label.strip() and url.strip()]
+        db.replace_service_links(service_id, links)
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_service_form.html", service=service, active="services")
+    links = db.list_service_links(service_id)
+    return render_template("admin_service_form.html", service=service, links=links, active="services")
 
 
 @app.route("/admin/services/<int:service_id>/delete", methods=["POST"])
@@ -259,7 +277,9 @@ def admin_incident_edit(iid):
         db.update_incident(iid, request.form)
         flash("Incident updated.", "success")
         return redirect(url_for("admin_incidents"))
-    return render_template("admin_incident_form.html", incident=incident, services=services, active="incidents")
+    updates = db.list_incident_updates(iid)
+    return render_template("admin_incident_form.html", incident=incident, services=services,
+                            updates=updates, active="incidents")
 
 
 @app.route("/admin/incidents/<int:iid>/delete", methods=["POST"])
@@ -268,6 +288,27 @@ def admin_incident_delete(iid):
     db.delete_incident(iid)
     flash("Incident deleted.", "success")
     return redirect(url_for("admin_incidents"))
+
+
+@app.route("/admin/incidents/<int:iid>/updates", methods=["POST"])
+@login_required
+def admin_incident_add_update(iid):
+    incident = db.get_incident(iid)
+    if not incident:
+        flash("Incident not found.", "error")
+        return redirect(url_for("admin_incidents"))
+    message = request.form.get("message", "").strip()
+    status = request.form.get("status", incident["status"])
+    if message:
+        db.create_incident_update(iid, message, status)
+        db.update_incident(iid, {
+            "service_id": incident["service_id"],
+            "title": incident["title"],
+            "description": incident["description"],
+            "status": status,
+        })
+        flash("Update posted.", "success")
+    return redirect(url_for("admin_incident_edit", iid=iid))
 
 
 # ---- Info page ----

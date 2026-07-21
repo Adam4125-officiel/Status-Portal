@@ -57,6 +57,21 @@
         <div class="service-card__status {{ status_css[s.status] }}">
           <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
         </div>
+        {% if s.uptime is not none %}
+        <div>
+          <div class="uptime-bar" title="{{ s.uptime }}% uptime over the last 30 days">
+            <div class="uptime-bar__fill" style="width: {{ s.uptime }}%;"></div>
+          </div>
+          <div class="uptime-label">{{ s.uptime }}% · 30d</div>
+        </div>
+        {% endif %}
+        {% if s.links %}
+        <div class="service-card__links">
+          {% for link in s.links %}
+            <a href="{{ link.url }}" target="_blank" rel="noopener" class="link-pill">{{ link.label }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
         <div class="service-card__foot">
           <span class="service-card__ping">
             {% if s.auto_check and s.last_checked %}
@@ -89,6 +104,17 @@
             started {{ i.started_at[:16].replace('T', ' ') }} UTC
             {% if i.resolved_at %}· resolved {{ i.resolved_at[:16].replace('T', ' ') }} UTC{% endif %}
           </div>
+          {% if i.updates %}
+          <div class="incident-updates">
+            {% for u in i.updates %}
+              <div class="incident-updates__row">
+                <span class="badge {{ u.status }}">{{ incident_label[u.status] }}</span>
+                <span class="incident-updates__msg">{{ u.message }}</span>
+                <span class="incident-updates__time">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
         </div>
       </div>
     {% endfor %}

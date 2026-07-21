@@ -40,4 +40,47 @@
     <a href="{{ url_for('admin_incidents') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
+
+{% if incident %}
+<div class="admin-header" style="margin-top: 36px;">
+  <h1 style="font-size: 16px;">Timeline</h1>
+</div>
+<form method="POST" action="{{ url_for('admin_incident_add_update', iid=incident.id) }}" class="form-panel" style="margin-bottom: 16px;">
+  <div class="field">
+    <label for="message">Post an update</label>
+    <textarea id="message" name="message" placeholder="What's the latest on this?" required></textarea>
+  </div>
+  <div class="field">
+    <label for="update_status">New status</label>
+    <select id="update_status" name="status">
+      <option value="investigating" {{ 'selected' if incident.status == 'investigating' }}>Investigating</option>
+      <option value="identified" {{ 'selected' if incident.status == 'identified' }}>Identified</option>
+      <option value="monitoring" {{ 'selected' if incident.status == 'monitoring' }}>Monitoring</option>
+      <option value="resolved" {{ 'selected' if incident.status == 'resolved' }}>Resolved</option>
+    </select>
+    <div class="field-hint">Posting also updates the incident's status above.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Post update</button>
+  </div>
+</form>
+
+{% if updates %}
+<div class="form-panel">
+  {% for u in updates %}
+  <div class="incident">
+    <div class="incident__body">
+      <div class="incident__head">
+        <span class="badge {{ u.status }}">{{ u.status }}</span>
+        <span class="incident__time">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
+      </div>
+      <div class="incident__desc">{{ u.message }}</div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">No updates posted yet.</div>
+{% endif %}
+{% endif %}
 {% endblock %}

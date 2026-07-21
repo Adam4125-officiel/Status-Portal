@@ -271,6 +271,43 @@ a:hover { text-decoration: underline; }
 .service-card__status.crit { color: var(--crit); }
 .service-card__status.maint { color: var(--maint); }
 
+.uptime-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--crit-dim);
+  overflow: hidden;
+}
+.uptime-bar__fill {
+  height: 100%;
+  background: var(--ok);
+}
+.uptime-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 3px;
+}
+
+.service-card__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.link-pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.link-pill:hover {
+  color: var(--brand);
+  border-color: var(--brand-dim);
+  text-decoration: none;
+}
+
 .service-card__foot {
   display: flex;
   align-items: center;
@@ -322,6 +359,29 @@ a:hover { text-decoration: underline; }
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-faint);
+}
+
+.incident-updates {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.incident-updates__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.incident-updates__msg { color: var(--text-dim); }
+.incident-updates__time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-left: auto;
 }
 
 .badge {

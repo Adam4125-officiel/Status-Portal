@@ -54,9 +54,28 @@
     <label for="sort_order">Sort order</label>
     <input type="number" id="sort_order" name="sort_order" value="{{ service.sort_order if service else 0 }}">
   </div>
+
+  {% if service %}
+  <div class="field">
+    <label>Extra links</label>
+    <div class="field-hint">Other ways to reach this service (Tailscale, LAN, external domain...). The link above stays the main "Open" link on the public card.</div>
+    <div id="links-rows" style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+      {% for link in links %}
+      <div class="link-row" style="display: flex; gap: 8px;">
+        <input type="text" name="link_label" placeholder="Label (e.g. Tailscale)" value="{{ link.label }}" style="flex: 1;">
+        <input type="url" name="link_url" placeholder="https://..." value="{{ link.url }}" style="flex: 2;">
+        <button type="button" class="btn secondary link-remove">✕</button>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" id="add-link" class="btn secondary" style="margin-top: 8px;">+ Add another link</button>
+  </div>
+  {% endif %}
+
   <div class="form-actions">
     <button type="submit" class="btn">{{ 'Save' if service else 'Create' }}</button>
     <a href="{{ url_for('admin_services') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
+{% if service %}<script src="{{ url_for('static', filename='js/admin_service_links.js') }}"></script>{% endif %}
 {% endblock %}
