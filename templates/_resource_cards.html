@@ -3,6 +3,14 @@
     <div class="resource-card__label">CPU</div>
     <div class="resource-card__value">{{ snapshot.cpu_percent }}%</div>
     <div class="meter"><div class="meter__fill {{ snapshot.cpu_severity }}" style="width: {{ snapshot.cpu_percent }}%;"></div></div>
+    {% if snapshot.cpu_per_core|length > 1 %}
+    <div class="core-grid" title="Per-core usage">
+      {% for core in snapshot.cpu_per_core %}
+        <div class="core-bar"><div class="core-bar__fill {{ core.severity }}" style="height: {{ core.percent }}%;"></div></div>
+      {% endfor %}
+    </div>
+    <div class="resource-card__sub">{{ snapshot.cpu_per_core|length }} cores</div>
+    {% endif %}
   </div>
   <div class="resource-card">
     <div class="resource-card__label">Memory</div>
@@ -10,9 +18,16 @@
     <div class="meter"><div class="meter__fill {{ snapshot.mem_severity }}" style="width: {{ snapshot.mem_percent }}%;"></div></div>
     <div class="resource-card__sub">{{ snapshot.mem_used_gb }} GB / {{ snapshot.mem_total_gb }} GB</div>
   </div>
+  {% if snapshot.disk_io %}
+  <div class="resource-card">
+    <div class="resource-card__label">Disk I/O (all disks)</div>
+    <div class="resource-card__value" style="font-size: 16px;">↓ {{ snapshot.disk_io.read_mb_s }} MB/s</div>
+    <div class="resource-card__sub">↑ {{ snapshot.disk_io.write_mb_s }} MB/s write</div>
+  </div>
+  {% endif %}
   {% for disk in snapshot.disks %}
   <div class="resource-card">
-    <div class="resource-card__label">Disk ({{ disk.path }})</div>
+    <div class="resource-card__label">Disk — {{ disk.display_name }}</div>
     <div class="resource-card__value">{{ disk.percent }}%</div>
     <div class="meter"><div class="meter__fill {{ disk.severity }}" style="width: {{ disk.percent }}%;"></div></div>
     <div class="resource-card__sub">{{ disk.used_gb }} GB used · {{ disk.free_gb }} GB free of {{ disk.total_gb }} GB</div>

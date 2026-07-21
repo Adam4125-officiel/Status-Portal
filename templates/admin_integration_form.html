@@ -1,0 +1,44 @@
+{% extends "admin_base.html" %}
+{% block title %}{{ 'Edit' if integration else 'New' }} integration — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>{{ 'Edit integration' if integration else 'New integration' }}</h1>
+</div>
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name" value="{{ integration.name if integration else '' }}" required placeholder="e.g. Sonarr">
+  </div>
+  <div class="field">
+    <label for="kind">Type</label>
+    {% set current = integration.kind if integration else 'arr' %}
+    <select id="kind" name="kind">
+      <option value="arr" {{ 'selected' if current == 'arr' }}>*Arr app (Sonarr/Radarr/Prowlarr/Lidarr/Readarr)</option>
+      <option value="jellyfin" {{ 'selected' if current == 'jellyfin' }}>Jellyfin</option>
+      <option value="jellyseerr" {{ 'selected' if current == 'jellyseerr' }}>Jellyseerr / Overseerr</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="base_url">Base URL</label>
+    <input type="url" id="base_url" name="base_url" value="{{ integration.base_url if integration else '' }}" required placeholder="http://192.168.1.x:8989">
+  </div>
+  <div class="field">
+    <label for="api_key">API key</label>
+    <input type="password" id="api_key" name="api_key"
+           placeholder="{{ '(unchanged — leave blank to keep the current key)' if integration else '' }}"
+           {{ 'required' if not integration else '' }}>
+    <div class="field-hint">Found in each app's Settings → General/API page. Stored so this app can read status/logs on your behalf — nothing here can change settings on those services.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="enabled" {{ 'checked' if not integration or integration.enabled }}>
+      Enabled
+    </label>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">{{ 'Save' if integration else 'Create' }}</button>
+    <a href="{{ url_for('admin_integrations') }}" class="btn secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

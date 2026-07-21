@@ -16,6 +16,22 @@
 </p>
 {% endif %}
 
+{% if vms %}
+<div class="section-title" style="margin-top: 28px;">Virtual machines (Hyper-V)</div>
+<table class="admin-table">
+  <thead><tr><th>Name</th><th>State</th><th>Uptime</th></tr></thead>
+  <tbody>
+    {% for vm in vms %}
+    <tr>
+      <td>{{ vm.name }}</td>
+      <td><span class="badge {{ 'resolved' if vm.state == 'Running' else 'investigating' }}">{{ vm.state }}</span></td>
+      <td>{{ vm.uptime }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <p style="color: var(--text-faint); font-size: 11px; margin-top: 24px;">
   Live snapshot, auto-refreshing every {{ refresh_seconds }}s (set via <code>PORTAL_RESOURCE_REFRESH_SECONDS</code>) — no history is kept for these.
 </p>

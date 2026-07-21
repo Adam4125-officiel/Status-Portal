@@ -16,6 +16,7 @@ import requests
 
 import config
 import db
+import integrations
 import monitoring
 
 app = Flask(__name__)
@@ -421,8 +422,55 @@ def admin_info():
 @login_required
 def admin_resources():
     snapshot = monitoring.get_resource_snapshot()
-    return render_template("admin_resources.html", snapshot=snapshot,
+    vms = monitoring.get_vm_snapshot()
+    return render_template("admin_resources.html", snapshot=snapshot, vms=vms,
                             refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
+
+
+# ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----
+@app.route("/admin/integrations")
+@login_required
+def admin_integrations():
+    configured = db.list_integrations()
+    statuses = {i["id"]: integrations.fetch_integration_status(i) for i in configured if i["enabled"]}
+    return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
+                            active="integrations")
+
+
+@app.route("/admin/integrations/new", methods=["GET", "POST"])
+@login_required
+def admin_integration_new():
+    if request.method == "POST":
+        data = dict(request.form)
+        data["enabled"] = 1 if request.form.get("enabled") else 0
+        db.create_integration(data)
+        flash("Integration added.", "success")
+        return redirect(url_for("admin_integrations"))
+    return render_template("admin_integration_form.html", integration=None, active="integrations")
+
+
+@app.route("/admin/integrations/<int:iid>/edit", methods=["GET", "POST"])
+@login_required
+def admin_integration_edit(iid):
+    integration = db.get_integration(iid)
+    if not integration:
+        flash("Integration not found.", "error")
+        return redirect(url_for("admin_integrations"))
+    if request.method == "POST":
+        data = dict(request.form)
+        data["enabled"] = 1 if request.form.get("enabled") else 0
+        db.update_integration(iid, data)
+        flash("Integration updated.", "success")
+        return redirect(url_for("admin_integrations"))
+    return render_template("admin_integration_form.html", integration=integration, active="integrations")
+
+
+@app.route("/admin/integrations/<int:iid>/delete", methods=["POST"])
+@login_required
+def admin_integration_delete(iid):
+    db.delete_integration(iid)
+    flash("Integration deleted.", "success")
+    return redirect(url_for("admin_integrations"))
 
 
 # ---- Settings ----

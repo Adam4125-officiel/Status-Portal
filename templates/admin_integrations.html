@@ -1,0 +1,60 @@
+{% extends "admin_base.html" %}
+{% block title %}Integrations — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Integrations</h1>
+  <a class="btn" href="{{ url_for('admin_integration_new') }}">+ New integration</a>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Read-only status checks against Jellyfin, Jellyseerr/Overseerr, and Servarr-family apps
+  (Sonarr, Radarr, Prowlarr, Lidarr, Readarr). Nothing here can control those services —
+  it only reads their health/logs.
+</p>
+
+{% if integrations %}
+{% for i in integrations %}
+  {% set status = statuses.get(i.id) %}
+  <div class="form-panel" style="margin-bottom: 12px;">
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <h2 style="font-size: 15px; margin: 0;">{{ i.name }}
+        <span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">({{ i.kind }})</span>
+      </h2>
+      <div>
+        <a href="{{ url_for('admin_integration_edit', iid=i.id) }}">Edit</a>
+        <form action="{{ url_for('admin_integration_delete', iid=i.id) }}" method="POST" style="display:inline; margin-left: 8px;"
+              onsubmit="return confirm('Delete {{ i.name }}?');">
+          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+        </form>
+      </div>
+    </div>
+
+    {% if not i.enabled %}
+      <div class="empty-state">Disabled.</div>
+    {% elif status is none %}
+      <div class="empty-state">Not checked.</div>
+    {% elif status.reachable %}
+      <div class="service-card__status ok">
+        <span class="led ok"></span>Reachable{% if status.version %} · v{{ status.version }}{% endif %}
+      </div>
+      {% if status.issues %}
+        <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 6px;">
+          {% for issue in status.issues %}
+            <div class="incident-updates__row">
+              <span class="badge {{ 'investigating' if issue.level == 'error' else 'identified' }}">{{ issue.level }}</span>
+              <span class="incident-updates__msg">{{ issue.message }}</span>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state">No warnings or errors.</div>
+      {% endif %}
+    {% else %}
+      <div class="service-card__status crit"><span class="led crit"></span>Unreachable</div>
+      <div class="empty-state">{{ status.error }}</div>
+    {% endif %}
+  </div>
+{% endfor %}
+{% else %}
+<div class="empty-state">No integrations configured yet.</div>
+{% endif %}
+{% endblock %}

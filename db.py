@@ -98,6 +98,17 @@ def init_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS integrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,  -- arr | jellyfin | jellyseerr
+            base_url TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS info_page (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             content TEXT NOT NULL DEFAULT ''
@@ -381,6 +392,56 @@ def get_uptime_percentage(service_id, days=30):
         return None
     up = sum(1 for r in rows if r["status"] != "down")
     return round(up / total * 100, 1)
+
+
+# ---------- Integrations (read-only external service status) ----------
+def list_integrations():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM integrations ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_integration(iid):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM integrations WHERE id=?", (iid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_integration(data):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO integrations (name, kind, base_url, api_key, enabled) VALUES (?, ?, ?, ?, ?)
+    """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data.get("api_key", ""),
+          int(data.get("enabled", 1))))
+    conn.commit()
+    conn.close()
+
+
+def update_integration(iid, data):
+    conn = get_db()
+    if data.get("api_key"):
+        conn.execute("""
+            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=? WHERE id=?
+        """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data["api_key"],
+              int(data.get("enabled", 1)), iid))
+    else:
+        # Blank api_key on the edit form means "keep the existing one" - never overwrite
+        # a stored key with an empty string just because the admin left the field blank.
+        conn.execute("""
+            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=? WHERE id=?
+        """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
+              int(data.get("enabled", 1)), iid))
+    conn.commit()
+    conn.close()
+
+
+def delete_integration(iid):
+    conn = get_db()
+    conn.execute("DELETE FROM integrations WHERE id=?", (iid,))
+    conn.commit()
+    conn.close()
 
 
 # ---------- Info page ----------

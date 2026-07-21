@@ -554,6 +554,30 @@ footer.foot {
 .meter__fill.warn { background: var(--warn); }
 .meter__fill.crit { background: var(--crit); }
 
+.core-grid {
+  display: flex;
+  gap: 3px;
+  align-items: flex-end;
+  height: 28px;
+  margin-top: 10px;
+}
+.core-bar {
+  flex: 1;
+  height: 100%;
+  background: var(--border-soft);
+  border-radius: 2px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+.core-bar__fill {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+}
+.core-bar__fill.ok { background: var(--ok); }
+.core-bar__fill.warn { background: var(--warn); }
+.core-bar__fill.crit { background: var(--crit); }
+
 .admin-table {
   width: 100%;
   border-collapse: collapse;
