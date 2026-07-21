@@ -498,6 +498,48 @@ footer.foot {
 .btn.secondary { background: var(--bg-panel-raised); color: var(--text-primary); border: 1px solid var(--border); }
 .btn.danger { background: var(--crit-dim); color: var(--crit); border: 1px solid var(--crit-dim); }
 
+.resource-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.resource-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.resource-card__label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.resource-card__value {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.resource-card__sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-top: 6px;
+}
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.meter__fill {
+  height: 100%;
+  background: var(--brand);
+}
+
 .admin-table {
   width: 100%;
   border-collapse: collapse;

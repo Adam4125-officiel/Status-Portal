@@ -16,6 +16,7 @@ import requests
 
 import config
 import db
+import monitoring
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -321,6 +322,14 @@ def admin_info():
         return redirect(url_for("admin_info"))
     content = db.get_info_page()
     return render_template("admin_info.html", content=content, active="info")
+
+
+# ---- Resources ----
+@app.route("/admin/resources")
+@login_required
+def admin_resources():
+    snapshot = monitoring.get_resource_snapshot()
+    return render_template("admin_resources.html", snapshot=snapshot, active="resources")
 
 
 # ---- Settings ----
