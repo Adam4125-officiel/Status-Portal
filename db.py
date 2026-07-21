@@ -4,7 +4,7 @@ No ORM, just plain SQL to stay readable and easy to modify.
 """
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "portal.db")
 
@@ -58,7 +58,41 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'investigating',  -- investigating | identified | monitoring | resolved
             started_at TEXT NOT NULL,
             resolved_at TEXT DEFAULT NULL,
+            auto_created INTEGER NOT NULL DEFAULT 0,  -- 1 = opened automatically by the health checker
             FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE SET NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS incident_updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL,  -- the incident's status at the time of this update
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (incident_id) REFERENCES incidents (id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS service_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            url TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            response_ms INTEGER DEFAULT NULL,
+            checked_at TEXT NOT NULL,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
         )
     """)
 
@@ -251,6 +285,100 @@ def delete_incident(iid):
     conn.execute("DELETE FROM incidents WHERE id=?", (iid,))
     conn.commit()
     conn.close()
+
+
+def create_auto_incident(service_id, title, status):
+    """Opens an incident from the health checker (not the admin form) — flagged
+    auto_created so the recovery path only ever auto-resolves incidents it opened itself."""
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO incidents (service_id, title, description, status, started_at, auto_created)
+        VALUES (?, ?, '', ?, ?, 1)
+    """, (service_id, title, status, now_iso()))
+    conn.commit()
+    incident_id = cur.lastrowid
+    conn.close()
+    return incident_id
+
+
+def get_open_auto_incident_for_service(service_id):
+    conn = get_db()
+    row = conn.execute("""
+        SELECT * FROM incidents WHERE service_id=? AND auto_created=1 AND status != 'resolved'
+        ORDER BY started_at DESC LIMIT 1
+    """, (service_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ---------- Incident updates (per-incident timeline) ----------
+def list_incident_updates(incident_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM incident_updates WHERE incident_id=? ORDER BY created_at DESC, id DESC
+    """, (incident_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_incident_update(incident_id, message, status):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO incident_updates (incident_id, message, status, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (incident_id, message, status, now_iso()))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Service links (multiple access URLs per service) ----------
+def list_service_links(service_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM service_links WHERE service_id=? ORDER BY sort_order, id
+    """, (service_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def replace_service_links(service_id, links):
+    """Replaces the full set of links for a service in one go — the admin form posts
+    the whole label/url list at once rather than editing rows individually."""
+    conn = get_db()
+    conn.execute("DELETE FROM service_links WHERE service_id=?", (service_id,))
+    conn.executemany("""
+        INSERT INTO service_links (service_id, label, url, sort_order) VALUES (?, ?, ?, ?)
+    """, [(service_id, label, url, i) for i, (label, url) in enumerate(links)])
+    conn.commit()
+    conn.close()
+
+
+# ---------- Status history (append-only; powers the uptime %) ----------
+def record_status_history(service_id, status, response_ms):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?, ?, ?, ?)
+    """, (service_id, status, response_ms, now_iso()))
+    conn.commit()
+    conn.close()
+
+
+def get_uptime_percentage(service_id, days=30):
+    """Share of recorded checks that were NOT 'down' over the last N days. Checks logged
+    while the service was in 'maintenance' are excluded entirely (planned maintenance
+    shouldn't count against uptime). Returns None if there's no history yet (e.g. a
+    service with auto-check off, which never gets a status_history row)."""
+    conn = get_db()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rows = conn.execute("""
+        SELECT status FROM status_history WHERE service_id=? AND checked_at >= ? AND status != 'maintenance'
+    """, (service_id, cutoff)).fetchall()
+    conn.close()
+    total = len(rows)
+    if total == 0:
+        return None
+    up = sum(1 for r in rows if r["status"] != "down")
+    return round(up / total * 100, 1)
 
 
 # ---------- Info page ----------

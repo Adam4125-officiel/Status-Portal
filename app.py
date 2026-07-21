@@ -313,6 +313,7 @@ def run_health_checks():
             for s in services:
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
                     continue
+                previous_status = s["status"]
                 start = time.time()
                 try:
                     r = requests.get(s["check_url"], timeout=5)
@@ -322,9 +323,34 @@ def run_health_checks():
                     elapsed_ms = None
                     status = "down"
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
+                db.record_status_history(s["id"], status, elapsed_ms)
+                _handle_incident_lifecycle(s, previous_status, status)
         except Exception as e:
             print(f"[health-check] error: {e}")
         time.sleep(CHECK_INTERVAL_SECONDS)
+
+
+def _handle_incident_lifecycle(service, previous_status, new_status):
+    """Auto-opens an incident the moment a service goes down, and auto-resolves it the
+    moment it recovers. Only hard 'down' transitions are automated - 'degraded' is left
+    for a human to judge, since a single slow response isn't necessarily an incident."""
+    if new_status == "down" and previous_status != "down":
+        if not db.get_open_auto_incident_for_service(service["id"]):
+            incident_id = db.create_auto_incident(
+                service["id"], f"{service['name']} is unreachable", "investigating")
+            db.create_incident_update(
+                incident_id, "Automatic health check could not reach this service.", "investigating")
+    elif new_status != "down" and previous_status == "down":
+        incident = db.get_open_auto_incident_for_service(service["id"])
+        if incident:
+            db.update_incident(incident["id"], {
+                "service_id": service["id"],
+                "title": incident["title"],
+                "description": incident["description"],
+                "status": "resolved",
+            })
+            db.create_incident_update(
+                incident["id"], "Automatic health check confirmed this service has recovered.", "resolved")
 
 
 def start_background_checker():
