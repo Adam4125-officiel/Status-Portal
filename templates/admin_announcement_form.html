@@ -1,0 +1,39 @@
+{% extends "admin_base.html" %}
+{% block title %}{{ 'Modifier' if announcement else 'Nouvelle' }} annonce — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>{{ 'Modifier l\'annonce' if announcement else 'Nouvelle annonce' }}</h1>
+</div>
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label for="title">Titre</label>
+    <input type="text" id="title" name="title" value="{{ announcement.title if announcement else '' }}" required>
+  </div>
+  <div class="field">
+    <label for="message">Message</label>
+    <textarea id="message" name="message" required>{{ announcement.message if announcement else '' }}</textarea>
+    <div class="field-hint">Astuce : **texte** pour du gras, les liens http(s) deviennent cliquables automatiquement.</div>
+  </div>
+  <div class="field">
+    <label for="type">Type</label>
+    {% set current = announcement.type if announcement else 'info' %}
+    <select id="type" name="type">
+      <option value="info" {{ 'selected' if current == 'info' }}>Info</option>
+      <option value="success" {{ 'selected' if current == 'success' }}>Succès</option>
+      <option value="warning" {{ 'selected' if current == 'warning' }}>Attention</option>
+      <option value="critical" {{ 'selected' if current == 'critical' }}>Critique</option>
+    </select>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="pinned" {{ 'checked' if announcement and announcement.pinned }}>
+      Épingler en haut de la liste
+    </label>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">{{ 'Enregistrer' if announcement else 'Publier' }}</button>
+    <a href="{{ url_for('admin_announcements') }}" class="btn secondary">Annuler</a>
+  </div>
+</form>
+{% endblock %}

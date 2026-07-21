@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Statut serveur{% endblock %}
+{% set status_label = {'operational': 'Opérationnel', 'degraded': 'Dégradé', 'maintenance': 'Maintenance', 'down': 'Hors service'} %}
+{% set status_css = {'operational': 'ok', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
+{% set incident_label = {'investigating': 'Investigation', 'identified': 'Identifié', 'monitoring': 'Sous surveillance', 'resolved': 'Résolu'} %}
+{% set announce_label = {'info': 'Info', 'success': 'Succès', 'warning': 'Attention', 'critical': 'Critique'} %}
+{% block body %}
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="dot-server"></span> Serveur</div>
+    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
+      prochaine actualisation dans <span id="refresh-countdown">60s</span>
+    </div>
+  </div>
+
+  <div class="status-hero">
+    <div class="status-hero__row">
+      <div class="status-hero__label">
+        <span class="led {{ status_css[overall] }}"></span>
+        {% if overall == 'operational' %}Tous les services fonctionnent normalement
+        {% elif overall == 'degraded' %}Certains services sont dégradés
+        {% elif overall == 'maintenance' %}Maintenance en cours
+        {% else %}Un ou plusieurs services sont hors service{% endif %}
+      </div>
+      <div class="status-hero__meta">{{ services|length }} service(s) suivis</div>
+    </div>
+  </div>
+
+  {% if announcements %}
+  <div class="section-title">Annonces</div>
+  {% for a in announcements %}
+    <div class="announcement {{ a.type }}">
+      <div class="announcement__head">
+        <div class="announcement__title">
+          {% if a.pinned %}<span class="pin-flag">📌</span>{% endif %}
+          {{ a.title }}
+        </div>
+        <div class="announcement__time">{{ a.created_at[:16].replace('T', ' ') }} UTC</div>
+      </div>
+      <div class="announcement__body">{{ a.message|richtext }}</div>
+    </div>
+  {% endfor %}
+  {% endif %}
+
+  <div class="section-title">Services</div>
+  {% if services %}
+  <div class="services-grid">
+    {% for s in services %}
+      <div class="service-card">
+        <div class="service-card__head">
+          <div class="service-card__title">
+            <span class="service-card__icon">{{ s.icon }}</span>{{ s.name }}
+          </div>
+        </div>
+        {% if s.description %}<div class="service-card__desc">{{ s.description }}</div>{% endif %}
+        <div class="service-card__status {{ status_css[s.status] }}">
+          <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
+        </div>
+        <div class="service-card__foot">
+          <span class="service-card__ping">
+            {% if s.auto_check and s.last_checked %}
+              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'pas de réponse' }} · maj {{ s.last_checked[11:16] }}
+            {% elif s.auto_check %}
+              vérification en attente
+            {% else %}&nbsp;{% endif %}
+          </span>
+          <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Ouvrir →</a>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="empty-state">Aucun service configuré pour l'instant.</div>
+  {% endif %}
+
+  <div class="section-title">Historique &amp; maintenances</div>
+  {% if incidents %}
+    <div style="background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 18px;">
+    {% for i in incidents %}
+      <div class="incident">
+        <div class="incident__body">
+          <div class="incident__head">
+            <span class="incident__title">{{ i.title }}</span>
+            <span class="badge {{ i.status }}">{{ incident_label[i.status] }}</span>
+          </div>
+          {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
+          <div class="incident__time">
+            débuté {{ i.started_at[:16].replace('T', ' ') }} UTC
+            {% if i.resolved_at %}· résolu {{ i.resolved_at[:16].replace('T', ' ') }} UTC{% endif %}
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">Aucun incident enregistré. Tout roule.</div>
+  {% endif %}
+
+  <div class="section-title">Infos pratiques</div>
+  <div class="info-block">{{ info|richtext }}</div>
+
+  <footer class="foot">status-portal · auto-actualisation active</footer>
+</div>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+{% endblock %}

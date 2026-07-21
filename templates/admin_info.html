@@ -1,0 +1,21 @@
+{% extends "admin_base.html" %}
+{% block title %}Page infos — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Page infos pratiques</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px;">
+  Ce texte s'affiche en bas du portail public (accès SMB, VPN, contact, etc).
+</p>
+
+<form method="POST" class="form-panel" style="max-width: 700px;">
+  <div class="field">
+    <label for="content">Contenu</label>
+    <textarea id="content" name="content" style="min-height: 260px;">{{ content }}</textarea>
+    <div class="field-hint">**texte** pour du gras, les liens http(s) deviennent cliquables automatiquement, retour à la ligne = nouvelle ligne.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Enregistrer</button>
+  </div>
+</form>
+{% endblock %}

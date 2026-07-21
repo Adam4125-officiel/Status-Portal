@@ -1,0 +1,29 @@
+{% extends "admin_base.html" %}
+{% block title %}Réglages — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Réglages</h1>
+</div>
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label for="current_password">Mot de passe actuel</label>
+    <input type="password" id="current_password" name="current_password" required>
+  </div>
+  <div class="field">
+    <label for="new_password">Nouveau mot de passe</label>
+    <input type="password" id="new_password" name="new_password" required>
+  </div>
+  <div class="field">
+    <label for="confirm_password">Confirme le nouveau mot de passe</label>
+    <input type="password" id="confirm_password" name="confirm_password" required>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Changer le mot de passe</button>
+  </div>
+</form>
+
+<p style="color: var(--text-faint); font-size: 12px; margin-top: 20px;">
+  Fréquence des health checks automatiques : {{ check_interval }}s (modifiable dans app.py, variable CHECK_INTERVAL_SECONDS).
+</p>
+{% endblock %}

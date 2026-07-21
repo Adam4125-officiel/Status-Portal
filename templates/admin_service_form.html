@@ -1,0 +1,62 @@
+{% extends "admin_base.html" %}
+{% block title %}{{ 'Modifier' if service else 'Nouveau' }} service — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>{{ 'Modifier le service' if service else 'Nouveau service' }}</h1>
+</div>
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label for="name">Nom</label>
+    <input type="text" id="name" name="name" value="{{ service.name if service else '' }}" required>
+  </div>
+  <div class="field">
+    <label for="icon">Icône (emoji)</label>
+    <input type="text" id="icon" name="icon" value="{{ service.icon if service else '⚙' }}" maxlength="4">
+  </div>
+  <div class="field">
+    <label for="description">Description courte</label>
+    <input type="text" id="description" name="description" value="{{ service.description if service else '' }}">
+  </div>
+  <div class="field">
+    <label for="url">Lien (redirection quand on clique sur "Ouvrir")</label>
+    <input type="url" id="url" name="url" value="{{ service.url if service else '' }}" required placeholder="http://192.168.1.x:port">
+  </div>
+  <div class="field">
+    <label for="status">Statut affiché</label>
+    <select id="status" name="status">
+      {% set current = service.status if service else 'operational' %}
+      <option value="operational" {{ 'selected' if current == 'operational' }}>Opérationnel</option>
+      <option value="degraded" {{ 'selected' if current == 'degraded' }}>Dégradé</option>
+      <option value="maintenance" {{ 'selected' if current == 'maintenance' }}>Maintenance</option>
+      <option value="down" {{ 'selected' if current == 'down' }}>Hors service</option>
+    </select>
+    <div class="field-hint">Si l'auto-check est actif, ce statut sera écrasé sauf si tu coches "Forcer" ci-dessous. Pour un service non-HTTP (SMB, FTP...), laisse l'auto-check désactivé et gère le statut ici à la main.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="manual_override" {{ 'checked' if service and service.manual_override }}>
+      Forcer ce statut (ignore l'auto-check, utile pour une maintenance planifiée ou un service non-HTTP)
+    </label>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="auto_check" {{ 'checked' if service and service.auto_check }}>
+      Vérifier automatiquement (ping HTTP toutes les 2 min — uniquement pour un service qui répond en HTTP, pas SMB/FTP)
+    </label>
+  </div>
+  <div class="field">
+    <label for="check_url">URL de vérification (si auto-check activé)</label>
+    <input type="text" id="check_url" name="check_url" value="{{ service.check_url if service else '' }}" placeholder="http://192.168.1.x:port/health">
+    <div class="field-hint">Doit répondre en HTTP 200. Laisse tout vide (et l'auto-check décoché) pour un service comme un partage SMB.</div>
+  </div>
+  <div class="field">
+    <label for="sort_order">Ordre d'affichage</label>
+    <input type="number" id="sort_order" name="sort_order" value="{{ service.sort_order if service else 0 }}">
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">{{ 'Enregistrer' if service else 'Créer' }}</button>
+    <a href="{{ url_for('admin_services') }}" class="btn secondary">Annuler</a>
+  </div>
+</form>
+{% endblock %}

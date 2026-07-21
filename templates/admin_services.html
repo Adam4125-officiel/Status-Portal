@@ -1,0 +1,35 @@
+{% extends "admin_base.html" %}
+{% block title %}Services — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Services</h1>
+  <a class="btn" href="{{ url_for('admin_service_new') }}">+ Nouveau service</a>
+</div>
+
+{% if services %}
+<table class="admin-table">
+  <thead>
+    <tr><th>Service</th><th>Statut</th><th>Auto-check</th><th>Lien</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for s in services %}
+    <tr>
+      <td>{{ s.icon }} <strong>{{ s.name }}</strong></td>
+      <td>{{ s.status }}{% if s.manual_override %} (forcé){% endif %}</td>
+      <td>{{ 'oui' if s.auto_check else 'non' }}</td>
+      <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a></td>
+      <td class="actions">
+        <a href="{{ url_for('admin_service_edit', service_id=s.id) }}">Modifier</a>
+        <form action="{{ url_for('admin_service_delete', service_id=s.id) }}" method="POST" style="display:inline"
+              onsubmit="return confirm('Supprimer {{ s.name }} ?');">
+          <button type="submit" class="btn danger" style="padding:4px 10px;">Suppr.</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">Aucun service pour l'instant.</div>
+{% endif %}
+{% endblock %}
