@@ -14,12 +14,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import Markup, escape
 import requests
 
+import config
 import db
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PORTAL_SECRET_KEY", "change-me-in-prod-" + os.urandom(8).hex())
-
-CHECK_INTERVAL_SECONDS = 120  # backend health-check frequency (separate from the public page's refresh)
+app.secret_key = config.SECRET_KEY
 
 _URL_RE = re.compile(r"(https?://[^\s<]+)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
@@ -78,7 +77,8 @@ def index():
     info = db.get_info_page()
     overall = compute_overall_status(services)
     return render_template("index.html", services=services, announcements=announcements,
-                            incidents=incidents, info=info, overall=overall)
+                            incidents=incidents, info=info, overall=overall,
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS)
 
 
 @app.route("/api/status")
@@ -341,7 +341,8 @@ def admin_settings():
         else:
             db.set_setting("admin_password_hash", generate_password_hash(new))
             flash("Password changed.", "success")
-    return render_template("admin_settings.html", check_interval=CHECK_INTERVAL_SECONDS, active="settings")
+    return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS, active="settings")
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +369,7 @@ def run_health_checks():
                 _handle_incident_lifecycle(s, previous_status, status)
         except Exception as e:
             print(f"[health-check] error: {e}")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        time.sleep(config.CHECK_INTERVAL_SECONDS)
 
 
 def _handle_incident_lifecycle(service, previous_status, new_status):

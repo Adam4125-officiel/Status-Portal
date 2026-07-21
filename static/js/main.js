@@ -1,5 +1,5 @@
 (function () {
-  var REFRESH_SECONDS = 60;
+  var REFRESH_SECONDS = window.PORTAL_REFRESH_SECONDS || 60;
   var remaining = REFRESH_SECONDS;
   var el = document.getElementById('refresh-countdown');
 

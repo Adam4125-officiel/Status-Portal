@@ -10,7 +10,7 @@
   <div class="topbar">
     <div class="brand"><span class="dot-server"></span> Server</div>
     <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
-      next refresh in <span id="refresh-countdown">60s</span>
+      next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
     </div>
   </div>
 
@@ -128,5 +128,6 @@
 
   <footer class="foot">status-portal · auto-refresh active</footer>
 </div>
+<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 {% endblock %}

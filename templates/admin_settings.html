@@ -23,8 +23,10 @@
   </div>
 </form>
 
-<p style="color: var(--text-faint); font-size: 12px; margin-top: 20px;">
-  Backend health-check frequency: every {{ check_interval }}s (change <code>CHECK_INTERVAL_SECONDS</code> in app.py).
-  This is separate from the public page's 60s auto-refresh.
+<p style="color: var(--text-faint); font-size: 12px; margin-top: 20px; line-height: 1.6;">
+  Backend health-check frequency: every {{ check_interval }}s (set via the <code>PORTAL_CHECK_INTERVAL_SECONDS</code>
+  environment variable).<br>
+  Public page auto-refresh: every {{ refresh_seconds }}s (set via <code>PORTAL_PUBLIC_REFRESH_SECONDS</code>).<br>
+  These are independent settings — no code to edit, just restart the app after changing either.
 </p>
 {% endblock %}

@@ -2,3 +2,4 @@ Flask>=3.0
 Werkzeug>=3.0
 requests>=2.31
 waitress>=3.0
+python-dotenv>=1.0
