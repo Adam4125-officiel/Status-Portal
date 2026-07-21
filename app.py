@@ -146,6 +146,16 @@ def _public_resource_visibility():
     return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
 
 
+# Integration statuses are checked in the background (see run_health_checks) and cached
+# here, keyed by integration id. Nothing in the request path ever calls
+# integrations.fetch_integration_status() directly - a slow/unreachable integration
+# (confirmed: ~10s for an unresponsive *Arr host, due to its v3->v1 fallback, each with
+# a 5s timeout) would otherwise block every single page load, including every public
+# auto-refresh cycle. That was a real bug: the public page appeared to be "stuck
+# refreshing" because it was, in fact, blocked on a slow outbound HTTP call every time.
+_integration_status_cache = {}
+
+
 def _integration_severity(status):
     if not status["reachable"]:
         return "crit"
@@ -156,20 +166,24 @@ def _integration_severity(status):
     return "ok"
 
 
+def _refresh_integration_cache():
+    for integ in db.list_integrations():
+        if not integ["enabled"]:
+            continue
+        try:
+            status = integrations.fetch_integration_status(integ)
+        except Exception as e:
+            status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
+        _integration_status_cache[integ["id"]] = {"status": status, "checked_at": db.now_iso()}
+
+
 def _attach_integration_status(services):
-    """Only for services with a linked integration that's enabled AND explicitly opted
-    into public display - this makes a live outbound call per such service, so it's
-    deliberately NOT run for api_status() (kept fast/local for API consumers) and only
-    ever touches services someone has chosen to expose this way."""
+    """Reads the cache only - see the module-level note above for why."""
     for s in services:
         linked = db.list_integrations_for_service(s["id"])
-        if linked:
-            status = integrations.fetch_integration_status(linked[0])
-            s["integration_status"] = status
-            s["integration_severity"] = _integration_severity(status)
-        else:
-            s["integration_status"] = None
-            s["integration_severity"] = None
+        entry = _integration_status_cache.get(linked[0]["id"]) if linked else None
+        s["integration_status"] = entry["status"] if entry else None
+        s["integration_severity"] = _integration_severity(entry["status"]) if entry else None
     return services
 
 
@@ -473,9 +487,26 @@ def admin_resources():
 @login_required
 def admin_integrations():
     configured = db.list_integrations()
-    statuses = {i["id"]: integrations.fetch_integration_status(i) for i in configured if i["enabled"]}
+    statuses = {i["id"]: _integration_status_cache.get(i["id"]) for i in configured if i["enabled"]}
     return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
-                            active="integrations")
+                            check_interval=config.CHECK_INTERVAL_SECONDS, active="integrations")
+
+
+@app.route("/admin/integrations/<int:iid>/check", methods=["POST"])
+@login_required
+def admin_integration_check_now(iid):
+    integration = db.get_integration(iid)
+    if not integration:
+        flash("Integration not found.", "error")
+        return redirect(url_for("admin_integrations"))
+    try:
+        status = integrations.fetch_integration_status(integration)
+    except Exception as e:
+        status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    _integration_status_cache[iid] = {"status": status, "checked_at": db.now_iso()}
+    flash("Reachable." if status["reachable"] else f"Unreachable: {status['error']}",
+          "success" if status["reachable"] else "error")
+    return redirect(url_for("admin_integrations"))
 
 
 @app.route("/admin/integrations/new", methods=["GET", "POST"])
@@ -608,6 +639,7 @@ def run_health_checks():
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
                 _handle_incident_lifecycle(s, previous_status, status)
+            _refresh_integration_cache()
         except Exception as e:
             print(f"[health-check] error: {e}")
         time.sleep(config.CHECK_INTERVAL_SECONDS)

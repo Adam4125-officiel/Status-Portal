@@ -13,14 +13,17 @@
 
 {% if integrations %}
 {% for i in integrations %}
-  {% set status = statuses.get(i.id) %}
+  {% set entry = statuses.get(i.id) %}
   <div class="form-panel" style="margin-bottom: 12px;">
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
       <h2 style="font-size: 15px; margin: 0;">{{ i.name }}
         <span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">({{ i.kind }})</span>
       </h2>
       <div>
-        <a href="{{ url_for('admin_integration_edit', iid=i.id) }}">Edit</a>
+        <form action="{{ url_for('admin_integration_check_now', iid=i.id) }}" method="POST" style="display:inline;">
+          <button type="submit" class="btn secondary" style="padding:4px 10px;">Check now</button>
+        </form>
+        <a href="{{ url_for('admin_integration_edit', iid=i.id) }}" style="margin-left: 8px;">Edit</a>
         <form action="{{ url_for('admin_integration_delete', iid=i.id) }}" method="POST" style="display:inline; margin-left: 8px;"
               onsubmit="return confirm('Delete {{ i.name }}?');">
           <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
@@ -30,15 +33,15 @@
 
     {% if not i.enabled %}
       <div class="empty-state">Disabled.</div>
-    {% elif status is none %}
-      <div class="empty-state">Not checked.</div>
-    {% elif status.reachable %}
+    {% elif entry is none %}
+      <div class="empty-state">Not checked yet — the background check runs every {{ check_interval }}s, or click "Check now".</div>
+    {% elif entry.status.reachable %}
       <div class="service-card__status ok">
-        <span class="led ok"></span>Reachable{% if status.version %} · v{{ status.version }}{% endif %}
+        <span class="led ok"></span>Reachable{% if entry.status.version %} · v{{ entry.status.version }}{% endif %}
       </div>
-      {% if status.issues %}
+      {% if entry.status.issues %}
         <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 6px;">
-          {% for issue in status.issues %}
+          {% for issue in entry.status.issues %}
             <div class="incident-updates__row">
               <span class="badge {{ 'investigating' if issue.level == 'error' else 'identified' }}">{{ issue.level }}</span>
               <span class="incident-updates__msg">{{ issue.message }}</span>
@@ -48,9 +51,11 @@
       {% else %}
         <div class="empty-state">No warnings or errors.</div>
       {% endif %}
+      <div class="resource-card__sub" style="margin-top: 8px;">Last checked {{ entry.checked_at[:16].replace('T', ' ') }} UTC</div>
     {% else %}
       <div class="service-card__status crit"><span class="led crit"></span>Unreachable</div>
-      <div class="empty-state">{{ status.error }}</div>
+      <div class="empty-state">{{ entry.status.error }}</div>
+      <div class="resource-card__sub" style="margin-top: 8px;">Last checked {{ entry.checked_at[:16].replace('T', ' ') }} UTC</div>
     {% endif %}
   </div>
 {% endfor %}

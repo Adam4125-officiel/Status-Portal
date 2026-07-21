@@ -97,6 +97,47 @@ def test_wizard_combined_creates_service_and_linked_integration(client):
     assert integs[0]["base_url"] == "http://localhost:1"
 
 
+def test_public_page_never_fetches_integrations_live(client, monkeypatch):
+    """Regression test for a real bug: the public page used to call
+    integrations.fetch_integration_status() directly on every request, so a slow or
+    unreachable integration (confirmed: ~10s for the *Arr v3->v1 fallback alone) could
+    block every single page load, including every auto-refresh cycle. Status must only
+    ever come from the background-refreshed cache (app._integration_status_cache)."""
+    import integrations as integrations_module
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("index() must not call fetch_integration_status directly")
+
+    monkeypatch.setattr(integrations_module, "fetch_integration_status", _boom)
+
+    sid = db.create_service({"name": "Sonarr", "url": "http://unreachable.example"})
+    db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://unreachable.example",
+                            "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"Sonarr" in resp.data
+
+
+def test_integration_status_cache_populates_public_display(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                                  "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
+
+    services = app_module._attach_integration_status(db.list_services())
+    service = [s for s in services if s["id"] == sid][0]
+    assert service["integration_status"] is None  # nothing cached yet
+
+    app_module._integration_status_cache[iid] = {
+        "status": {"reachable": True, "version": "3.0", "issues": [], "error": None},
+        "checked_at": "2026-01-01T00:00:00",
+    }
+    services = app_module._attach_integration_status(db.list_services())
+    service = [s for s in services if s["id"] == sid][0]
+    assert service["integration_status"]["reachable"] is True
+    assert service["integration_severity"] == "ok"
+
+
 def test_service_without_url_hides_open_button(client):
     db.create_service({"name": "NoLinkService", "url": ""})
     resp = client.get("/")

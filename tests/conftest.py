@@ -10,6 +10,10 @@ def isolated_db(tmp_path, monkeypatch):
     instance/portal.db - tests never touch real data and never see each other's."""
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "test_portal.db"))
     db.init_db()
+    # The integration status cache is a module-level global keyed by integration id -
+    # clear it so one test's cached entries can't leak into another test that happens
+    # to create an integration with the same (autoincrement, per-fresh-db) id.
+    app_module._integration_status_cache.clear()
     return db.DB_PATH
 
 
