@@ -31,6 +31,22 @@
     <div class="field-hint">Found in each app's Settings → General/API page. Stored so this app can read status/logs on your behalf — nothing here can change settings on those services.</div>
   </div>
   <div class="field">
+    <label for="service_id">Linked service (optional)</label>
+    <select id="service_id" name="service_id">
+      <option value="">— None —</option>
+      {% for s in services %}
+        <option value="{{ s.id }}" {{ 'selected' if integration and integration.service_id == s.id }}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+    <div class="field-hint">Linking lets this integration's health show on that service's public card, if you also enable the option below.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_on_public" {{ 'checked' if integration and integration.show_on_public }}>
+      Show this integration's health on the public status page (requires a linked service)
+    </label>
+  </div>
+  <div class="field">
     <label class="field-check">
       <input type="checkbox" name="enabled" {{ 'checked' if not integration or integration.enabled }}>
       Enabled

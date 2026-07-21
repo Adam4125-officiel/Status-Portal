@@ -1,4 +1,5 @@
 <div class="resource-grid">
+  {% if visible.cpu %}
   <div class="resource-card">
     <div class="resource-card__label">CPU</div>
     <div class="resource-card__value">{{ snapshot.cpu_percent }}%</div>
@@ -12,19 +13,30 @@
     <div class="resource-card__sub">{{ snapshot.cpu_per_core|length }} cores</div>
     {% endif %}
   </div>
+  {% endif %}
+  {% if visible.memory %}
   <div class="resource-card">
     <div class="resource-card__label">Memory</div>
     <div class="resource-card__value">{{ snapshot.mem_percent }}%</div>
     <div class="meter"><div class="meter__fill {{ snapshot.mem_severity }}" style="width: {{ snapshot.mem_percent }}%;"></div></div>
     <div class="resource-card__sub">{{ snapshot.mem_used_gb }} GB / {{ snapshot.mem_total_gb }} GB</div>
   </div>
-  {% if snapshot.disk_io %}
+  {% endif %}
+  {% if visible.disk_io and snapshot.disk_io %}
   <div class="resource-card">
     <div class="resource-card__label">Disk I/O (all disks)</div>
     <div class="resource-card__value" style="font-size: 16px;">↓ {{ snapshot.disk_io.read_mb_s }} MB/s</div>
     <div class="resource-card__sub">↑ {{ snapshot.disk_io.write_mb_s }} MB/s write</div>
   </div>
   {% endif %}
+  {% if visible.network and snapshot.network %}
+  <div class="resource-card">
+    <div class="resource-card__label">Network</div>
+    <div class="resource-card__value" style="font-size: 16px;">↓ {{ snapshot.network.down_mb_s }} MB/s</div>
+    <div class="resource-card__sub">↑ {{ snapshot.network.up_mb_s }} MB/s up</div>
+  </div>
+  {% endif %}
+  {% if visible.disks %}
   {% for disk in snapshot.disks %}
   <div class="resource-card">
     <div class="resource-card__label">Disk — {{ disk.display_name }}</div>
@@ -33,9 +45,10 @@
     <div class="resource-card__sub">{{ disk.used_gb }} GB used · {{ disk.free_gb }} GB free of {{ disk.total_gb }} GB</div>
   </div>
   {% endfor %}
+  {% endif %}
 </div>
 
-{% if snapshot.gpus %}
+{% if visible.gpu and snapshot.gpus %}
 <div class="section-title" style="margin-top: 28px;">GPU</div>
 <div class="resource-grid">
   {% for gpu in snapshot.gpus %}

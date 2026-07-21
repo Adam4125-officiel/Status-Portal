@@ -1,0 +1,12 @@
+<table class="admin-table">
+  <thead><tr><th>Name</th><th>State</th><th>Uptime</th></tr></thead>
+  <tbody>
+    {% for vm in vms %}
+    <tr>
+      <td>{{ vm.name }}</td>
+      <td><span class="badge {{ 'resolved' if vm.state == 'Running' else 'investigating' }}">{{ vm.state }}</span></td>
+      <td>{{ vm.uptime }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

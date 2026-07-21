@@ -12,10 +12,17 @@
     <div class="field-hint">Shown in the topbar and page title on the public portal.</div>
   </div>
   <div class="field">
-    <label class="field-check">
-      <input type="checkbox" name="show_public_resources" {{ 'checked' if show_public_resources }}>
-      Also show CPU/RAM/disk resource monitoring on the public page (it's admin-only by default)
-    </label>
+    <label>Public page: also show...</label>
+    <div class="field-hint" style="margin-bottom: 8px;">Nothing below is shown publicly unless checked — pick only what you want visitors to see. Everything is always visible in the admin-only resources page regardless.</div>
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <label class="field-check"><input type="checkbox" name="show_public_cpu" {{ 'checked' if show_public.cpu }}> CPU usage</label>
+      <label class="field-check"><input type="checkbox" name="show_public_memory" {{ 'checked' if show_public.memory }}> Memory usage</label>
+      <label class="field-check"><input type="checkbox" name="show_public_disks" {{ 'checked' if show_public.disks }}> Disk usage (paths/labels)</label>
+      <label class="field-check"><input type="checkbox" name="show_public_disk_io" {{ 'checked' if show_public.disk_io }}> Disk read/write throughput</label>
+      <label class="field-check"><input type="checkbox" name="show_public_network" {{ 'checked' if show_public.network }}> Network throughput</label>
+      <label class="field-check"><input type="checkbox" name="show_public_gpu" {{ 'checked' if show_public.gpu }}> GPU usage</label>
+      <label class="field-check"><input type="checkbox" name="show_public_vms" {{ 'checked' if show_public.vms }}> Virtual machine status</label>
+    </div>
   </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save</button>

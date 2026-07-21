@@ -134,6 +134,45 @@ def _enrich_incidents(incidents):
     return incidents
 
 
+ADMIN_RESOURCE_VISIBLE = {"cpu": True, "memory": True, "disks": True, "disk_io": True,
+                          "network": True, "gpu": True}
+
+_PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_disks",
+                         "show_public_disk_io", "show_public_network", "show_public_gpu",
+                         "show_public_vms"]
+
+
+def _public_resource_visibility():
+    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
+
+
+def _integration_severity(status):
+    if not status["reachable"]:
+        return "crit"
+    if any(i["level"] == "error" for i in status["issues"]):
+        return "crit"
+    if status["issues"]:
+        return "warn"
+    return "ok"
+
+
+def _attach_integration_status(services):
+    """Only for services with a linked integration that's enabled AND explicitly opted
+    into public display - this makes a live outbound call per such service, so it's
+    deliberately NOT run for api_status() (kept fast/local for API consumers) and only
+    ever touches services someone has chosen to expose this way."""
+    for s in services:
+        linked = db.list_integrations_for_service(s["id"])
+        if linked:
+            status = integrations.fetch_integration_status(linked[0])
+            s["integration_status"] = status
+            s["integration_severity"] = _integration_severity(status)
+        else:
+            s["integration_status"] = None
+            s["integration_severity"] = None
+    return services
+
+
 def _group_services(services):
     """Groups services by group_name, preserving sort_order within a group and the
     order groups first appear. Ungrouped services (group_name == '') share a group
@@ -152,21 +191,23 @@ def _group_services(services):
 
 @app.route("/")
 def index():
-    services = _enrich_services(db.list_services())
+    services = _attach_integration_status(_enrich_services(db.list_services()))
     groups = _group_services(services)
     announcements = db.list_announcements(limit=10)
     incidents = _enrich_incidents(db.list_incidents(limit=8))
     info = db.get_info_page()
     overall = compute_overall_status(services)
     site_name = db.get_setting("site_name", "Server")
-    show_public_resources = db.get_setting("show_public_resources", "0") == "1"
-    snapshot = monitoring.get_resource_snapshot() if show_public_resources else None
+    visible = _public_resource_visibility()
+    show_any_resource = any(visible[k] for k in ("cpu", "memory", "disks", "disk_io", "network", "gpu"))
+    snapshot = monitoring.get_resource_snapshot() if show_any_resource else None
+    vms = monitoring.get_vm_snapshot() if visible["vms"] else []
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, info=info, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
-                            site_name=site_name, show_public_resources=show_public_resources,
-                            snapshot=snapshot)
+                            site_name=site_name, visible=visible, show_any_resource=show_any_resource,
+                            snapshot=snapshot, vms=vms)
 
 
 @app.route("/api/status")
@@ -423,7 +464,7 @@ def admin_info():
 def admin_resources():
     snapshot = monitoring.get_resource_snapshot()
     vms = monitoring.get_vm_snapshot()
-    return render_template("admin_resources.html", snapshot=snapshot, vms=vms,
+    return render_template("admin_resources.html", snapshot=snapshot, vms=vms, visible=ADMIN_RESOURCE_VISIBLE,
                             refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
 
 
@@ -443,10 +484,12 @@ def admin_integration_new():
     if request.method == "POST":
         data = dict(request.form)
         data["enabled"] = 1 if request.form.get("enabled") else 0
+        data["show_on_public"] = 1 if request.form.get("show_on_public") else 0
         db.create_integration(data)
         flash("Integration added.", "success")
         return redirect(url_for("admin_integrations"))
-    return render_template("admin_integration_form.html", integration=None, active="integrations")
+    return render_template("admin_integration_form.html", integration=None, services=db.list_services(),
+                            active="integrations")
 
 
 @app.route("/admin/integrations/<int:iid>/edit", methods=["GET", "POST"])
@@ -459,10 +502,45 @@ def admin_integration_edit(iid):
     if request.method == "POST":
         data = dict(request.form)
         data["enabled"] = 1 if request.form.get("enabled") else 0
+        data["show_on_public"] = 1 if request.form.get("show_on_public") else 0
         db.update_integration(iid, data)
         flash("Integration updated.", "success")
         return redirect(url_for("admin_integrations"))
-    return render_template("admin_integration_form.html", integration=integration, active="integrations")
+    return render_template("admin_integration_form.html", integration=integration, services=db.list_services(),
+                            active="integrations")
+
+
+# ---- Add-new wizard (service, integration, or both) ----
+@app.route("/admin/new")
+@login_required
+def admin_new_picker():
+    return render_template("admin_new_picker.html", active="services")
+
+
+@app.route("/admin/new/combined", methods=["GET", "POST"])
+@login_required
+def admin_new_combined():
+    if request.method == "POST":
+        url = request.form.get("url", "").strip()
+        service_id = db.create_service({
+            "name": request.form.get("name", ""),
+            "icon": request.form.get("icon", "") or "⚙",
+            "description": request.form.get("description", ""),
+            "url": url,
+            "group_name": request.form.get("group_name", ""),
+        })
+        db.create_integration({
+            "name": request.form.get("name", ""),
+            "kind": request.form.get("kind", "arr"),
+            "base_url": url,
+            "api_key": request.form.get("api_key", ""),
+            "enabled": 1,
+            "service_id": service_id,
+            "show_on_public": 1 if request.form.get("show_on_public") else 0,
+        })
+        flash("Service and status check created.", "success")
+        return redirect(url_for("admin_services"))
+    return render_template("admin_new_combined.html", active="services")
 
 
 @app.route("/admin/integrations/<int:iid>/delete", methods=["POST"])
@@ -494,7 +572,7 @@ def admin_settings():
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
-                            show_public_resources=db.get_setting("show_public_resources", "0") == "1",
+                            show_public=_public_resource_visibility(),
                             active="settings")
 
 
@@ -502,7 +580,8 @@ def admin_settings():
 @login_required
 def admin_settings_general():
     db.set_setting("site_name", request.form.get("site_name", "").strip() or "Server")
-    db.set_setting("show_public_resources", "1" if request.form.get("show_public_resources") else "0")
+    for key in _PUBLIC_RESOURCE_KEYS:
+        db.set_setting(key, "1" if request.form.get(key) else "0")
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
 

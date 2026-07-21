@@ -24,6 +24,9 @@ _IGNORED_FSTYPES = {
 # ever reading has nothing to compare against, so disk_io is None until the second call.
 _io_cache = {"time": None, "read_bytes": None, "write_bytes": None}
 
+# Same idea for network throughput (aggregate across all interfaces).
+_net_cache = {"time": None, "sent_bytes": None, "recv_bytes": None}
+
 
 def _severity(percent):
     if percent >= 85:
@@ -47,6 +50,7 @@ def get_resource_snapshot():
         "mem_total_gb": round(mem.total / (1024 ** 3), 1),
         "disks": _get_disk_snapshots(),
         "disk_io": _get_disk_io_rate(),
+        "network": _get_network_rate(),
         "gpus": _get_gpu_snapshot(),
     }
 
@@ -140,6 +144,30 @@ def _get_disk_io_rate():
     return result
 
 
+def _get_network_rate():
+    """Aggregate upload/download throughput across all network interfaces, computed
+    from the delta since the last call - same pattern as _get_disk_io_rate(). Returns
+    None on the very first call (no baseline yet)."""
+    counters = psutil.net_io_counters()
+    if counters is None:
+        return None
+    now = time.time()
+    result = None
+    if _net_cache["time"] is not None:
+        elapsed = now - _net_cache["time"]
+        if elapsed > 0:
+            up_rate = max(counters.bytes_sent - _net_cache["sent_bytes"], 0) / elapsed
+            down_rate = max(counters.bytes_recv - _net_cache["recv_bytes"], 0) / elapsed
+            result = {
+                "up_mb_s": round(up_rate / (1024 ** 2), 2),
+                "down_mb_s": round(down_rate / (1024 ** 2), 2),
+            }
+    _net_cache["time"] = now
+    _net_cache["sent_bytes"] = counters.bytes_sent
+    _net_cache["recv_bytes"] = counters.bytes_recv
+    return result
+
+
 def _get_gpu_snapshot():
     """Best-effort NVIDIA GPU stats via the optional nvidia-ml-py package.
     Returns [] (never raises) if it's not installed or there's no NVIDIA GPU -
@@ -167,6 +195,20 @@ def _get_gpu_snapshot():
         return []
 
 
+# Hyper-V's VMState enum, as a fallback in case ConvertTo-Json ever serializes it as
+# its underlying integer instead of a name (ToString() in the PowerShell command below
+# should already prevent this - this is a second line of defense, not the primary fix).
+_VM_STATE_NAMES = {
+    "0": "Unknown", "1": "Other", "2": "Running", "3": "Off", "4": "Stopping",
+    "6": "Saved", "7": "Paused", "9": "Starting", "10": "Snapshotting",
+    "11": "Saving", "13": "Pausing", "14": "Resuming", "17": "FastSaved", "18": "FastSaving",
+}
+
+
+def _normalize_vm_state(state):
+    return _VM_STATE_NAMES.get(str(state), str(state))
+
+
 def get_vm_snapshot():
     """Best-effort list of Hyper-V VMs (Windows only). Returns [] - never raises - if
     this isn't Windows, PowerShell/Hyper-V isn't available, or the query fails for any
@@ -176,7 +218,8 @@ def get_vm_snapshot():
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-VM | Select-Object Name,State,Uptime | ConvertTo-Json -Compress"],
+             "Get-VM | Select-Object Name,@{Name='State';Expression={$_.State.ToString()}},Uptime"
+             " | ConvertTo-Json -Compress"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -187,7 +230,7 @@ def get_vm_snapshot():
         return [
             {
                 "name": vm.get("Name", "Unknown"),
-                "state": vm.get("State", "Unknown"),
+                "state": _normalize_vm_state(vm.get("State", "Unknown")),
                 "uptime": _format_uptime(vm.get("Uptime") or {}),
             }
             for vm in data

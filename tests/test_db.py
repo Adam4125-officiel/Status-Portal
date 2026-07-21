@@ -95,3 +95,29 @@ def test_integrations_crud(isolated_db):
 
     db.delete_integration(integ["id"])
     assert db.get_integration(integ["id"]) is None
+
+
+def test_create_service_returns_new_id(isolated_db):
+    new_id = db.create_service({"name": "Test", "url": ""})
+    assert isinstance(new_id, int)
+    assert db.get_service(new_id)["name"] == "Test"
+
+
+def test_integration_service_linking(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr:8989"})
+
+    # Not linked / not opted into public display -> shouldn't show up
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989",
+                                  "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 0})
+    assert db.list_integrations_for_service(sid) == []
+
+    db.update_integration(iid, {"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989",
+                                 "api_key": "", "enabled": 1, "service_id": sid, "show_on_public": 1})
+    linked = db.list_integrations_for_service(sid)
+    assert len(linked) == 1
+    assert linked[0]["id"] == iid
+
+    # Disabling it should hide it again even though show_on_public is still set
+    db.update_integration(iid, {"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989",
+                                 "api_key": "", "enabled": 0, "service_id": sid, "show_on_public": 1})
+    assert db.list_integrations_for_service(sid) == []

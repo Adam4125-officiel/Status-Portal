@@ -78,3 +78,28 @@ def test_404_renders_custom_error_page(client):
     resp = client.get("/this-route-does-not-exist")
     assert resp.status_code == 404
     assert b"Page not found" in resp.data
+
+
+def test_wizard_combined_creates_service_and_linked_integration(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/new/combined", data={
+        "name": "Sonarr", "icon": "📺", "description": "TV automation",
+        "url": "http://localhost:1", "group_name": "Media",
+        "kind": "arr", "api_key": "testkey", "show_on_public": "on",
+    })
+    assert resp.status_code == 302
+
+    services = [s for s in db.list_services() if s["name"] == "Sonarr"]
+    assert len(services) == 1
+    integs = db.list_integrations_for_service(services[0]["id"])
+    assert len(integs) == 1
+    assert integs[0]["kind"] == "arr"
+    assert integs[0]["base_url"] == "http://localhost:1"
+
+
+def test_service_without_url_hides_open_button(client):
+    db.create_service({"name": "NoLinkService", "url": ""})
+    resp = client.get("/")
+    assert b"NoLinkService" in resp.data
+    # crude but sufficient: no service card should render an Open link with an empty href
+    assert b'href="" target="_blank" rel="noopener">Open' not in resp.data

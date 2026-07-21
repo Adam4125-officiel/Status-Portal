@@ -3,7 +3,7 @@
 {% block admin_content %}
 <div class="admin-header">
   <h1>Services</h1>
-  <a class="btn" href="{{ url_for('admin_service_new') }}">+ New service</a>
+  <a class="btn" href="{{ url_for('admin_new_picker') }}">+ New</a>
 </div>
 
 {% if services %}
@@ -18,7 +18,7 @@
       <td>{{ s.group_name or '—' }}</td>
       <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}</td>
       <td>{{ 'yes' if s.auto_check else 'no' }}</td>
-      <td><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a></td>
+      <td>{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>{% else %}—{% endif %}</td>
       <td class="actions">
         <a href="{{ url_for('admin_service_edit', service_id=s.id) }}">Edit</a>
         <form action="{{ url_for('admin_service_delete', service_id=s.id) }}" method="POST" style="display:inline"

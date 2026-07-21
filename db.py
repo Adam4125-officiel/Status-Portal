@@ -104,7 +104,10 @@ def init_db():
             kind TEXT NOT NULL,  -- arr | jellyfin | jellyseerr
             base_url TEXT NOT NULL,
             api_key TEXT NOT NULL DEFAULT '',
-            enabled INTEGER NOT NULL DEFAULT 1
+            enabled INTEGER NOT NULL DEFAULT 1,
+            service_id INTEGER,
+            show_on_public INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE SET NULL
         )
     """)
 
@@ -165,15 +168,17 @@ def get_service(service_id):
 
 def create_service(data):
     conn = get_db()
-    conn.execute("""
+    cur = conn.execute("""
         INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
+    """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
           data.get("group_name", "").strip()))
     conn.commit()
+    new_id = cur.lastrowid
     conn.close()
+    return new_id
 
 
 def update_service(service_id, data):
@@ -411,30 +416,44 @@ def get_integration(iid):
 
 def create_integration(data):
     conn = get_db()
-    conn.execute("""
-        INSERT INTO integrations (name, kind, base_url, api_key, enabled) VALUES (?, ?, ?, ?, ?)
+    cur = conn.execute("""
+        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id, show_on_public)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data.get("api_key", ""),
-          int(data.get("enabled", 1))))
+          int(data.get("enabled", 1)), data.get("service_id") or None, int(data.get("show_on_public", 0))))
     conn.commit()
+    new_id = cur.lastrowid
     conn.close()
+    return new_id
 
 
 def update_integration(iid, data):
     conn = get_db()
+    service_id = data.get("service_id") or None
+    show_on_public = int(data.get("show_on_public", 0))
     if data.get("api_key"):
         conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=? WHERE id=?
+            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=?, service_id=?, show_on_public=? WHERE id=?
         """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data["api_key"],
-              int(data.get("enabled", 1)), iid))
+              int(data.get("enabled", 1)), service_id, show_on_public, iid))
     else:
         # Blank api_key on the edit form means "keep the existing one" - never overwrite
         # a stored key with an empty string just because the admin left the field blank.
         conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=? WHERE id=?
+            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?, show_on_public=? WHERE id=?
         """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
-              int(data.get("enabled", 1)), iid))
+              int(data.get("enabled", 1)), service_id, show_on_public, iid))
     conn.commit()
     conn.close()
+
+
+def list_integrations_for_service(service_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM integrations WHERE service_id=? AND enabled=1 AND show_on_public=1
+    """, (service_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def delete_integration(iid):

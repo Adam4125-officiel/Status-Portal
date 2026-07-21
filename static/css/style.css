@@ -299,6 +299,15 @@ a:hover { text-decoration: underline; }
   margin-top: 3px;
 }
 
+.service-card__integration {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
 .service-card__links {
   display: flex;
   flex-wrap: wrap;

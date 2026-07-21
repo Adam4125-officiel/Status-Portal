@@ -1,0 +1,57 @@
+{% extends "admin_base.html" %}
+{% block title %}New service + status check — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>New service + status check</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px;">
+  Creates a service card on the status page AND a linked read-only health/log check, in one step.
+</p>
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name" required placeholder="e.g. Sonarr">
+  </div>
+  <div class="field">
+    <label for="icon">Icon (emoji)</label>
+    <input type="text" id="icon" name="icon" value="⚙" maxlength="4">
+  </div>
+  <div class="field">
+    <label for="description">Short description</label>
+    <input type="text" id="description" name="description">
+  </div>
+  <div class="field">
+    <label for="url">URL</label>
+    <input type="url" id="url" name="url" placeholder="http://192.168.1.x:8989">
+    <div class="field-hint">Used both as the service's "Open" link and the status check's API base URL. Leave blank to hide the "Open" button and skip API polling.</div>
+  </div>
+  <div class="field">
+    <label for="group_name">Group / category (optional)</label>
+    <input type="text" id="group_name" name="group_name" placeholder="e.g. Media">
+  </div>
+  <div class="field">
+    <label for="kind">Status check type</label>
+    <select id="kind" name="kind">
+      <option value="arr">*Arr app (Sonarr/Radarr/Prowlarr/Lidarr/Readarr)</option>
+      <option value="jellyfin">Jellyfin</option>
+      <option value="jellyseerr">Jellyseerr / Overseerr</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="api_key">API key</label>
+    <input type="password" id="api_key" name="api_key" required>
+    <div class="field-hint">Found in each app's Settings → General/API page.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_on_public" checked>
+      Show this status check's health/warnings on the public page, on this service's card
+    </label>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Create both</button>
+    <a href="{{ url_for('admin_new_picker') }}" class="btn secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

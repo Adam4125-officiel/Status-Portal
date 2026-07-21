@@ -67,6 +67,14 @@
             <div class="uptime-label">{{ s.uptime }}% · 30d</div>
           </div>
           {% endif %}
+          {% if s.integration_status %}
+          <div class="service-card__integration">
+            <span class="led {{ s.integration_severity }}"></span>
+            {% if not s.integration_status.reachable %}API unreachable
+            {% elif s.integration_status.issues %}{{ s.integration_status.issues|length }} API warning(s)
+            {% else %}API healthy{% endif %}
+          </div>
+          {% endif %}
           {% if s.links %}
           <div class="service-card__links">
             {% for link in s.links %}
@@ -82,7 +90,7 @@
                 check pending
               {% else %}&nbsp;{% endif %}
             </span>
-            <a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>
+            {% if s.url %}<a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>{% endif %}
           </div>
         </div>
       {% endfor %}
@@ -129,9 +137,14 @@
   <div class="section-title">Practical info</div>
   <div class="info-block">{{ info|richtext }}</div>
 
-  {% if show_public_resources and snapshot %}
+  {% if show_any_resource and snapshot %}
   <div class="section-title">Server resources</div>
   {% include "_resource_cards.html" %}
+  {% endif %}
+
+  {% if visible.vms and vms %}
+  <div class="section-title">Virtual machines</div>
+  {% include "_vm_table.html" %}
   {% endif %}
 
   <footer class="foot">status-portal · auto-refresh active</footer>

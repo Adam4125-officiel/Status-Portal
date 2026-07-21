@@ -67,10 +67,13 @@ forget about it.
 
 ## 3. Daily use
 
-Everything happens in `/admin`:
+Everything happens in `/admin`. Click **+ New** on either the Services or Integrations
+list for a short wizard that asks whether you want a service, a status check, or both
+created together (the common case for Jellyfin/*Arr/Jellyseerr).
 
-- **Services**: add/edit your services (Jellyfin, SMB...), with a main link, icon, status,
-  and any number of extra links (Tailscale, LAN, external domain...). Turn on "auto-check"
+- **Services**: add/edit your services (Jellyfin, SMB...), with an optional main link
+  (leave it blank to hide the public "Open" button), icon, status, group/category, and
+  any number of extra links (Tailscale, LAN, external domain...). Turn on "auto-check"
   and give it a check URL if the service has an endpoint that responds with HTTP 200 —
   otherwise leave it on manual status and change it yourself. A service that goes down
   automatically gets an incident opened for it, and auto-resolved when it recovers.
@@ -78,8 +81,16 @@ Everything happens in `/admin`:
 - **Incidents**: history of outages/maintenance, with status
   (investigating → identified → monitoring → resolved) and a per-incident timeline of
   updates you (or the health checker) post over time.
+- **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, and *Arr apps.
+  Optionally link one to a service and opt it into public display, to show that
+  service's API health on its public card.
+- **Resources**: CPU (with per-core breakdown), memory, disks (auto-detected, with
+  volume labels where available), disk and network throughput, GPU (if
+  `nvidia-ml-py` is installed), and Hyper-V VM status (Windows only) — admin-only by
+  default; choose exactly which of these to also show on the public page from Settings.
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
-- **Settings**: change the admin password; see the current health-check/refresh intervals.
+- **Settings**: site name, per-cell public resource-monitor visibility, admin password,
+  current health-check/refresh intervals.
 
 Nothing to rebuild, nothing to redeploy: every change is in the database and visible
 immediately (or within 60s max, the time it takes for the public page to auto-refresh).

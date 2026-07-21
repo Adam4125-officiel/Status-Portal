@@ -1,0 +1,31 @@
+{% extends "admin_base.html" %}
+{% block title %}Add new — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>What do you want to add?</h1>
+</div>
+<div style="display: flex; flex-direction: column; gap: 12px; max-width: 520px;">
+  <a href="{{ url_for('admin_service_new') }}" class="form-panel" style="display: block; text-decoration: none;">
+    <strong style="color: var(--text-primary); font-size: 14.5px;">Just a service</strong>
+    <div style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">
+      A card on the status page with an optional HTTP health-check ping. Use this for
+      anything that isn't Jellyfin/Jellyseerr/a *Arr app, or if you don't need their
+      detailed status.
+    </div>
+  </a>
+  <a href="{{ url_for('admin_integration_new') }}" class="form-panel" style="display: block; text-decoration: none;">
+    <strong style="color: var(--text-primary); font-size: 14.5px;">Just a status check</strong>
+    <div style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">
+      Read-only health/log monitoring for Jellyfin, Jellyseerr, or a *Arr app, visible
+      in <code>/admin/integrations</code> only — no card on the status page.
+    </div>
+  </a>
+  <a href="{{ url_for('admin_new_combined') }}" class="form-panel" style="display: block; text-decoration: none;">
+    <strong style="color: var(--text-primary); font-size: 14.5px;">Both (recommended for Jellyfin/*Arr/Jellyseerr)</strong>
+    <div style="color: var(--text-dim); font-size: 13px; margin-top: 4px;">
+      A service card on the status page, linked to a live health/log check — one form,
+      both created together.
+    </div>
+  </a>
+</div>
+{% endblock %}

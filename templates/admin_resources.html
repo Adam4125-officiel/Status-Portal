@@ -16,20 +16,14 @@
 </p>
 {% endif %}
 
-{% if vms %}
 <div class="section-title" style="margin-top: 28px;">Virtual machines (Hyper-V)</div>
-<table class="admin-table">
-  <thead><tr><th>Name</th><th>State</th><th>Uptime</th></tr></thead>
-  <tbody>
-    {% for vm in vms %}
-    <tr>
-      <td>{{ vm.name }}</td>
-      <td><span class="badge {{ 'resolved' if vm.state == 'Running' else 'investigating' }}">{{ vm.state }}</span></td>
-      <td>{{ vm.uptime }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+{% if vms %}
+  {% include "_vm_table.html" %}
+{% else %}
+<p style="color: var(--text-faint); font-size: 12px;">
+  No Hyper-V VMs detected — this only works when the app runs directly on a Windows host
+  with Hyper-V (not in Docker), with the Hyper-V PowerShell module available.
+</p>
 {% endif %}
 
 <p style="color: var(--text-faint); font-size: 11px; margin-top: 24px;">

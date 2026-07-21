@@ -20,7 +20,8 @@
   </div>
   <div class="field">
     <label for="url">Link (opens when clicking "Open")</label>
-    <input type="url" id="url" name="url" value="{{ service.url if service else '' }}" required placeholder="http://192.168.1.x:port">
+    <input type="url" id="url" name="url" value="{{ service.url if service else '' }}" placeholder="http://192.168.1.x:port">
+    <div class="field-hint">Optional — leave blank to hide the "Open" button on the public page (e.g. for a service only reachable via one of the extra links below).</div>
   </div>
   <div class="field">
     <label for="status">Displayed status</label>
