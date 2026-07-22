@@ -282,6 +282,31 @@ def test_badge_escapes_service_name(client):
     assert b"&lt;script&gt;" in resp.data
 
 
+def test_feed_renders_valid_rss(client):
+    db.create_announcement({"title": "Heads up", "message": "Doing some work tonight."})
+    db.create_incident({"title": "Test outage", "status": "resolved"})
+
+    resp = client.get("/feed.xml")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/rss+xml"
+
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(resp.data)
+    items = root.findall("./channel/item")
+    titles = [item.findtext("title") for item in items]
+    assert any("Heads up" in t for t in titles)
+    assert any("Test outage" in t for t in titles)
+
+
+def test_feed_escapes_special_characters(client):
+    db.create_announcement({"title": "<script>alert(1)</script>", "message": "A & B"})
+    resp = client.get("/feed.xml")
+    assert resp.status_code == 200
+    assert b"<script>alert" not in resp.data
+    import xml.etree.ElementTree as ET
+    ET.fromstring(resp.data)  # must still parse as valid XML
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({

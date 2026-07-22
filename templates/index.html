@@ -168,7 +168,7 @@
   {% include "_vm_table.html" %}
   {% endif %}
 
-  <footer class="foot">status-portal · auto-refresh active</footer>
+  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a></footer>
 </div>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>

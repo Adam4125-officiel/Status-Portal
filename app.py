@@ -7,6 +7,9 @@ import os
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response
@@ -307,6 +310,61 @@ def badge_service(service_id):
     svg = _render_badge_svg(service["name"], STATUS_BADGE_LABEL[service["status"]],
                              STATUS_BADGE_COLOR[service["status"]])
     return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-cache"})
+
+
+def _rss_date(iso_str):
+    """Converts one of this app's ISO 8601 timestamps to the RFC 822 format RSS
+    requires. Falls back to 'now' for anything unparseable rather than failing the
+    whole feed over one bad row."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except (ValueError, TypeError):
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return format_datetime(dt)
+
+
+@app.route("/feed.xml")
+def feed():
+    """RSS 2.0 feed of incidents + announcements, so they can be followed in a feed
+    reader instead of checking the page or setting up Discord/ntfy. Built with
+    ElementTree (not string concatenation) so titles/messages are escaped correctly
+    regardless of what characters an admin puts in them."""
+    site_name = db.get_setting("site_name", "Server")
+    base_url = request.url_root.rstrip("/")
+
+    entries = []
+    for i in db.list_incidents(limit=20):
+        service = db.get_service(i["service_id"]) if i["service_id"] else None
+        title = f"{service['name']}: " if service else ""
+        title += f"[{i['status']}] {i['title']}"
+        description = i["description"] or ""
+        updates = db.list_incident_updates(i["id"])
+        if updates:
+            description += "\n\n" + "\n".join(f"({u['status']}) {u['message']}" for u in updates)
+        entries.append({"title": title, "description": description,
+                         "date": i["resolved_at"] or i["started_at"], "guid": f"incident-{i['id']}"})
+    for a in db.list_announcements(limit=20):
+        entries.append({"title": f"Announcement: {a['title']}", "description": a["message"],
+                         "date": a["created_at"], "guid": f"announcement-{a['id']}"})
+    entries.sort(key=lambda e: e["date"], reverse=True)
+
+    rss = ET.Element("rss", version="2.0")
+    channel = ET.SubElement(rss, "channel")
+    ET.SubElement(channel, "title").text = f"{site_name} status"
+    ET.SubElement(channel, "link").text = f"{base_url}/"
+    ET.SubElement(channel, "description").text = f"Incidents and announcements for {site_name}."
+    for entry in entries[:30]:
+        item = ET.SubElement(channel, "item")
+        ET.SubElement(item, "title").text = entry["title"]
+        ET.SubElement(item, "description").text = entry["description"]
+        ET.SubElement(item, "pubDate").text = _rss_date(entry["date"])
+        guid = ET.SubElement(item, "guid", isPermaLink="false")
+        guid.text = f"{base_url}/#{entry['guid']}"
+
+    xml_bytes = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
+    return Response(xml_bytes, mimetype="application/rss+xml")
 
 
 # ---------------------------------------------------------------------------
