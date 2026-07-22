@@ -6,10 +6,14 @@ touching the HTML.
 
 - Backend: **Python / Flask** (no need to know Flask, you manage everything from the browser)
 - Storage: **SQLite** (a single file, `instance/portal.db`, created automatically)
-- Public page auto-refreshes every 60s (configurable)
+- Public page auto-refreshes every 60s (configurable); light/dark theme toggle
 - Optional automatic health checks per service, with auto-opened/resolved incidents
+  (also from a failing Jellyfin/*Arr/Jellyseerr status check, if linked)
+- Scheduled maintenance windows that flip a service to "maintenance" and back automatically
+- Optional Discord/ntfy push notifications on incident and maintenance events
 - Per-service links (Tailscale, LAN, external domain...), per-incident update timelines,
   30-day uptime history — all editable from `/admin`, no code involved
+- Embeddable SVG status badges and an RSS feed, for use outside the page itself
 
 ---
 
@@ -82,20 +86,36 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
 - **Announcements**: banner at the top of the public portal. `**bold**`, auto-clickable links.
 - **Incidents**: history of outages/maintenance, with status
   (investigating → identified → monitoring → resolved) and a per-incident timeline of
-  updates you (or the health checker) post over time.
+  updates you (or the health checker) post over time. Each open/resolve/update can push
+  a Discord/ntfy notification if configured (see the config reference below).
+- **Maintenance**: schedule a start/end time for a service and it's automatically flipped
+  to "maintenance" and back — no need to remember to toggle it manually on either end.
+  The service's own health check is paused for the duration, so it won't falsely open
+  an incident while intentionally offline.
 - **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, and *Arr apps.
-  Optionally link one to a service and opt it into public display, to show that
-  service's API health on its public card.
+  Optionally link one to a service, opt it into public display to show that service's API
+  health on its public card, and/or let a failing check auto-open an incident on that
+  service (off by default, to avoid noise from a flaky check).
 - **Resources**: CPU (with per-core breakdown), memory, disks (auto-detected, with
   volume labels where available), disk and network throughput, GPU (if
   `nvidia-ml-py` is installed), and Hyper-V VM status (Windows only) — admin-only by
   default; choose exactly which of these to also show on the public page from Settings.
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
 - **Settings**: site name, per-cell public resource-monitor visibility, admin password,
-  current health-check/refresh intervals.
+  current health-check/refresh intervals, and whether push notifications are configured.
 
 Nothing to rebuild, nothing to redeploy: every change is in the database and visible
 immediately (or within 60s max, the time it takes for the public page to auto-refresh).
+
+### Outside the page itself
+
+- **Status badges**: `GET /badge.svg` (overall) and `GET /badge/<service-id>.svg`
+  (per-service) — small embeddable SVG pills, handy in a GitHub README or another
+  dashboard. Grab the exact URL from the "Badge" link next to each service in
+  `/admin/services`. Public, no auth, no external service call.
+- **RSS feed**: `GET /feed.xml` — incidents and announcements, for a feed reader instead
+  of checking the page or setting up Discord/ntfy.
+- **JSON status**: `GET /api/status` — the same data shown on the public page, as JSON.
 
 ## 4. Configuration reference
 
@@ -112,6 +132,8 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_RESOURCE_REFRESH_SECONDS` | `10` | Auto-refresh frequency of the resources page (admin, and public if enabled) |
 | `PORTAL_BEHIND_PROXY` | `false` | Set `true` only if a reverse proxy sits in front (trusts its `X-Forwarded-*` headers) |
 | `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
+| `PORTAL_DISCORD_WEBHOOK_URL` | *(blank = disabled)* | Discord webhook URL — get pinged on incident/maintenance events |
+| `PORTAL_NTFY_URL` | *(blank = disabled)* | Full [ntfy](https://ntfy.sh) topic URL — same events, no Discord account needed |
 
 ## 5. Running the tests
 
@@ -120,10 +142,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Covers the DB layer, the auto-incident lifecycle, login/lockout, service grouping, and
-the Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way
-to test against real instances of those from here). Not part of `requirements.txt`
-since nothing here needs `pytest` at runtime.
+Covers the DB layer, the auto-incident lifecycle (service and integration-driven),
+maintenance-window scheduling, notification dispatch, badge/feed rendering,
+login/lockout, service grouping, and the Jellyfin/*Arr/Jellyseerr status parsing
+(against mocked responses - there's no way to test against real instances of those
+from here). Not part of `requirements.txt` since nothing here needs `pytest` at runtime.
 
 ## 6. Security notes
 
@@ -149,11 +172,12 @@ status-portal/
   db.py                    # the entire SQLite layer
   monitoring.py            # CPU/RAM/disk/GPU/VM snapshot for the resources page
   integrations.py          # read-only Jellyfin/*Arr/Jellyseerr status checks
+  notifications.py         # optional Discord/ntfy push notifications
   requirements.txt, requirements-dev.txt
   Dockerfile, docker-compose.yml, .dockerignore, .env.example
   instance/portal.db      # created automatically on first launch
   templates/               # HTML pages (Jinja2)
-  static/css/style.css     # all of the styling
-  static/js/               # public page auto-refresh + admin link-row editor
+  static/css/style.css     # all of the styling (dark + light theme)
+  static/js/               # public page auto-refresh, admin link-row editor, theme toggle
   tests/                   # pytest suite (see "Running the tests" below)
 ```

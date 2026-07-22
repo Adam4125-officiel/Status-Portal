@@ -1,19 +1,17 @@
 # Roadmap / ideas not built yet
 
-## *Arr stack + Jellyseerr + Jellyfin status (done, read-only)
+Everything proposed in earlier passes has been built: per-service/per-integration
+auto-incidents, maintenance-window scheduling, Discord/ntfy push notifications, a
+light theme toggle, SVG status badges, and an RSS feed. What's left:
 
-Implemented: `/admin/integrations` now shows read-only health/log status for Jellyfin,
-Jellyseerr/Overseerr, and Servarr-family apps (Sonarr, Radarr, Prowlarr, Lidarr,
-Readarr) via `integrations.py`. Not yet done, and worth a follow-up if wanted:
+## Verification against real, live instances
 
-- Wiring a failing integration into the existing auto-incident mechanism
-  (`_handle_incident_lifecycle` in `app.py`), the same way a down service opens one.
-- Background polling (today's check is live-on-page-load, like the resource monitor -
-  no history, no notification if you're not looking at the page).
-- Verification against real, live Jellyfin/Sonarr/Radarr/Jellyseerr instances - the
-  parsing logic is tested against mocked API payloads matching the documented response
-  shapes, but this hasn't been exercised against an actual running instance of any of
-  them.
+The Jellyfin/*Arr/Jellyseerr integration parsing (`integrations.py`) is only tested
+against mocked API payloads matching the documented response shapes - this sandbox
+has no real instance of any of them to test against. Likewise the Hyper-V VM status
+and Windows volume-label code in `monitoring.py` have only ever run their Linux/no-op
+branches for real. If something looks wrong against a real instance of any of these,
+start there rather than assuming the Linux-tested paths are the problem.
 
 ## Jellyfin-backed user permissions
 
@@ -28,4 +26,4 @@ conversation before writing any code, rather than assumptions baked in here.
 ---
 
 Nothing above blocks anything already built. The current single-admin auth model and
-service schema don't preclude adding either one later.
+service schema don't preclude adding this later.
