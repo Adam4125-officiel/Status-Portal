@@ -209,22 +209,48 @@ def _normalize_vm_state(state):
     return _VM_STATE_NAMES.get(str(state), str(state))
 
 
+_VM_QUERY_COMMAND = (
+    "Import-Module Hyper-V -ErrorAction SilentlyContinue; "
+    "Get-VM | Select-Object Name,@{Name='State';Expression={$_.State.ToString()}},Uptime"
+    " | ConvertTo-Json -Compress"
+)
+
+
 def get_vm_snapshot():
     """Best-effort list of Hyper-V VMs (Windows only). Returns [] - never raises - if
     this isn't Windows, PowerShell/Hyper-V isn't available, or the query fails for any
-    reason, so the feature silently disables itself instead of crashing the page."""
+    reason, so the feature silently disables itself instead of crashing the page.
+
+    Unlike earlier, a failure is now logged (with PowerShell's actual stderr) instead of
+    silently swallowed - "no VMs shown" was indistinguishable from "the query is
+    failing" before. The single most likely real cause on a real Hyper-V host: Get-VM
+    requires the account running this app to be an Administrator or in the "Hyper-V
+    Administrators" group - if so, stderr below will say so explicitly."""
     if os.name != "nt":
         return []
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-VM | Select-Object Name,@{Name='State';Expression={$_.State.ToString()}},Uptime"
-             " | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
+    for shell in ("powershell", "pwsh"):
+        try:
+            result = subprocess.run(
+                [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _VM_QUERY_COMMAND],
+                capture_output=True, text=True, timeout=10,
+            )
+        except FileNotFoundError:
+            continue  # this shell isn't installed - try the next candidate
+        except Exception as e:
+            print(f"[monitoring] Hyper-V VM query via {shell} failed to run: {e}")
             return []
-        data = json.loads(result.stdout)
+
+        if result.returncode != 0:
+            print(f"[monitoring] Hyper-V VM query via {shell} exited {result.returncode}: "
+                  f"{result.stderr.strip() or '(no stderr output)'}")
+            return []
+        if not result.stdout.strip():
+            return []  # no VMs defined - not an error
+        try:
+            data = json.loads(result.stdout)
+        except ValueError as e:
+            print(f"[monitoring] Hyper-V VM query returned unparseable output: {e}")
+            return []
         if isinstance(data, dict):
             data = [data]
         return [
@@ -235,8 +261,8 @@ def get_vm_snapshot():
             }
             for vm in data
         ]
-    except Exception:
-        return []
+    print("[monitoring] Hyper-V VM query failed: neither 'powershell' nor 'pwsh' found on PATH")
+    return []
 
 
 def _format_uptime(uptime_obj):

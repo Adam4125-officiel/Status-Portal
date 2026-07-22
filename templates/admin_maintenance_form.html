@@ -24,16 +24,24 @@
   </div>
   <div class="field">
     <label for="starts_at">Starts at (UTC)</label>
-    <input type="datetime-local" id="starts_at" name="starts_at" required>
+    <div style="display: flex; gap: 8px;">
+      <input type="datetime-local" id="starts_at" name="starts_at" required style="flex: 1;">
+      <button type="button" id="starts_at_now" class="btn secondary" style="padding: 9px 12px;">Now</button>
+    </div>
+    <div class="field-hint">Can be in the past — useful if maintenance already started and you're only logging it now. It takes effect immediately on save.</div>
   </div>
   <div class="field">
     <label for="ends_at">Ends at (UTC)</label>
-    <input type="datetime-local" id="ends_at" name="ends_at" required>
-    <div class="field-hint">Check the current UTC time before scheduling — the server compares against UTC, not your browser's local time.</div>
+    <div style="display: flex; gap: 8px;">
+      <input type="datetime-local" id="ends_at" name="ends_at" required style="flex: 1;">
+      <button type="button" id="ends_at_now" class="btn secondary" style="padding: 9px 12px;">Now</button>
+    </div>
+    <div class="field-hint">Both fields start pre-filled with the current UTC time — edit as needed. The server compares against UTC, not your browser's local time.</div>
   </div>
   <div class="form-actions">
     <button type="submit" class="btn">Schedule</button>
     <a href="{{ url_for('admin_maintenance') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
+<script src="{{ url_for('static', filename='js/admin_maintenance_form.js') }}"></script>
 {% endblock %}

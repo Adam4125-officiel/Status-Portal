@@ -212,6 +212,23 @@ def test_admin_maintenance_window_crud(client):
     assert db.list_maintenance_windows() == []
 
 
+def test_admin_maintenance_window_with_past_start_applies_immediately(client):
+    """Regression test: scheduling a window with a start time already in the past
+    (e.g. logging maintenance that started two days ago and is still ongoing) must
+    flip the service to 'maintenance' right away, not wait for the next background
+    health-check cycle (which could be minutes away)."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    resp = client.post("/admin/maintenance/new", data={
+        "service_id": sid, "title": "Ongoing disk swap",
+        "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    assert resp.status_code == 302
+    assert db.get_service(sid)["status"] == "maintenance"
+    assert db.get_service(sid)["manual_override"] == 1
+
+
 def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
     calls = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))

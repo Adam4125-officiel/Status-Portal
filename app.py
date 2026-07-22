@@ -596,6 +596,12 @@ def admin_maintenance_new():
     services = db.list_services()
     if request.method == "POST":
         db.create_maintenance_window(request.form)
+        # Applies immediately rather than waiting for the next health-check cycle (up
+        # to PORTAL_CHECK_INTERVAL_SECONDS later) - matters most for a window whose
+        # start time is already in the past (e.g. "this has actually been going on
+        # since two days ago, I forgot to log it"), which should flip the service to
+        # maintenance right now, not minutes from now.
+        _process_maintenance_and_notify()
         flash("Maintenance window scheduled.", "success")
         return redirect(url_for("admin_maintenance"))
     return render_template("admin_maintenance_form.html", services=services, active="maintenance")
