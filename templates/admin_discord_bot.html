@@ -7,9 +7,10 @@
 
 <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
   A real Discord bot connection - separate from the simple Discord webhook notifications
-  in Settings. It can update its own presence/status and/or respond to a command word in
-  any channel it can see by posting a status summary, then keep editing that same
-  message on a timer instead of spamming new ones.
+  in Settings. It can update its own presence/status and/or respond to a
+  <code>/{{ command_name }}</code> slash command in any channel it can see by posting a
+  status summary, then keep editing that same message on a timer instead of spamming
+  new ones.
 </p>
 
 {% if not token_configured %}
@@ -20,10 +21,15 @@
   </p>
   <ol style="font-size: 13px; color: var(--text-dim); line-height: 1.8; padding-left: 20px;">
     <li>Create an application + bot at the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">Discord Developer Portal</a>.</li>
-    <li>Under Bot settings, enable the <strong>Message Content Intent</strong> - without it the bot cannot read the command word below.</li>
-    <li>Invite it to your server with permission to view channels and send/edit messages.</li>
+    <li>Invite it to your server with permission to view channels and send messages
+      (no privileged intents needed - this uses a slash command, not a text command).</li>
     <li>Install the optional dependency: <code>pip install discord.py</code></li>
-    <li>Set <code>PORTAL_DISCORD_BOT_TOKEN</code> in <code>.env</code> to the bot's token, then restart the app.</li>
+    <li>Set <code>PORTAL_DISCORD_BOT_TOKEN</code> in <code>.env</code> to the bot's token.</li>
+    <li>Optional but recommended for a single-server bot: set
+      <code>PORTAL_DISCORD_BOT_GUILD_ID</code> to your server's ID (enable Developer Mode
+      in Discord, then right-click your server icon → Copy Server ID) so the slash
+      command appears instantly instead of taking up to an hour to register globally.</li>
+    <li>Restart the app.</li>
   </ol>
 </div>
 {% else %}
@@ -40,19 +46,20 @@
   <div class="field">
     <label class="field-check">
       <input type="checkbox" name="update_presence" {{ 'checked' if update_presence }}>
-      Update the bot's presence/status (e.g. "🟢 Operational") on a timer
+      Update the bot's presence/status (e.g. "✅ All services up!") on a timer
     </label>
   </div>
   <div class="field">
     <label class="field-check">
       <input type="checkbox" name="channel_command_enabled" {{ 'checked' if channel_command_enabled }}>
-      Respond to a command word in any channel it can see
+      Respond to the slash command in any channel it can see
     </label>
-    <div class="field-hint">Posts a status message once, then keeps editing that same message on a timer instead of posting new ones.</div>
+    <div class="field-hint">Posts a status message once, then keeps editing that same message on a timer instead of posting new ones - including across an app restart, it'll keep updating the same message rather than starting a new one.</div>
   </div>
   <div class="field">
-    <label for="command_word">Command word</label>
-    <input type="text" id="command_word" name="command_word" value="{{ command_word }}" placeholder="!status">
+    <label for="command_name">Slash command name</label>
+    <input type="text" id="command_name" name="command_name" value="{{ command_name }}" placeholder="status">
+    <div class="field-hint">Shows up as <code>/{{ command_name }}</code> in Discord. Lowercase letters/numbers/-/_ only. Changing this needs an app restart to re-register with Discord.</div>
   </div>
   <div class="field">
     <label>Include in the status message</label>
@@ -61,8 +68,20 @@
       <label class="field-check"><input type="checkbox" name="include_incidents" {{ 'checked' if include.incidents }}> Recent incidents</label>
       <label class="field-check"><input type="checkbox" name="include_announcements" {{ 'checked' if include.announcements }}> Announcements</label>
       <label class="field-check"><input type="checkbox" name="include_maintenance" {{ 'checked' if include.maintenance }}> Scheduled maintenance</label>
-      <label class="field-check"><input type="checkbox" name="include_resources" {{ 'checked' if include.resources }}> Server resources (CPU/RAM)</label>
     </div>
+  </div>
+  <div class="field">
+    <label>Include in Resources (each checkable individually)</label>
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <label class="field-check"><input type="checkbox" name="resource_cpu" {{ 'checked' if resources.cpu }}> CPU usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_memory" {{ 'checked' if resources.memory }}> Memory usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_disks" {{ 'checked' if resources.disks }}> Disk usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_disk_io" {{ 'checked' if resources.disk_io }}> Disk read/write throughput</label>
+      <label class="field-check"><input type="checkbox" name="resource_network" {{ 'checked' if resources.network }}> Network throughput</label>
+      <label class="field-check"><input type="checkbox" name="resource_gpu" {{ 'checked' if resources.gpu }}> GPU usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_vms" {{ 'checked' if resources.vms }}> Virtual machine status</label>
+    </div>
+    <div class="field-hint">All off by default - the message stays short unless you opt specific ones in.</div>
   </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save</button>

@@ -45,3 +45,7 @@ NTFY_URL = os.environ.get("PORTAL_NTFY_URL", "").strip()
 # update its presence, what to include) is admin-configurable at /admin/discord-bot.
 DISCORD_BOT_TOKEN = os.environ.get("PORTAL_DISCORD_BOT_TOKEN", "").strip()
 DISCORD_BOT_REFRESH_SECONDS = int(os.environ.get("PORTAL_DISCORD_BOT_REFRESH_SECONDS", "300"))
+# Optional - if this bot only lives in one server, setting its ID here registers the
+# slash command instantly (guild-scoped sync). Left blank, the command syncs
+# globally instead, which works everywhere but can take up to an hour to first appear.
+DISCORD_BOT_GUILD_ID = os.environ.get("PORTAL_DISCORD_BOT_GUILD_ID", "").strip()

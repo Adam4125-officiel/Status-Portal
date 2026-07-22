@@ -336,14 +336,16 @@ def test_admin_discord_bot_page_shows_unconfigured_state(client, monkeypatch):
 def test_admin_discord_bot_settings_persist(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/discord-bot", data={
-        "command_word": "!portal", "update_presence": "on", "channel_command_enabled": "on",
-        "include_services": "on", "include_incidents": "on",
+        "command_name": "!Portal Status", "update_presence": "on", "channel_command_enabled": "on",
+        "include_services": "on", "include_incidents": "on", "resource_cpu": "on",
     })
     assert resp.status_code == 302
-    assert db.get_setting("discordbot_command_word") == "!portal"
+    assert db.get_setting("discordbot_command_name") == "portalstatus"  # sanitized on save
     assert db.get_setting("discordbot_update_presence") == "1"
     assert db.get_setting("discordbot_channel_command_enabled") == "1"
     assert db.get_setting("discordbot_include_announcements") == "0"  # omitted -> off
+    assert db.get_setting("discordbot_resource_cpu") == "1"
+    assert db.get_setting("discordbot_resource_memory") == "0"  # omitted -> off
 
 
 def test_public_page_shows_active_maintenance_window(client):

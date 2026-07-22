@@ -115,35 +115,52 @@ immediately (or within 60s max, the time it takes for the public page to auto-re
 
 `/admin/discord-bot` configures a real Discord bot connection that can:
 
-- Update its own presence/status (e.g. "🟢 Operational") on a timer, and/or
-- Respond to a command word (default `!status`) typed in any channel it can see, by
-  posting a status summary — then keep **editing that same message** on a timer
-  instead of posting a new one each time, to avoid spamming the channel.
+- Update its own presence/status (e.g. "✅ All services up!") on a timer, and/or
+- Respond to a `/status`-style **slash command** (name configurable) in any channel it
+  can see, by posting a status summary embed — then keep **editing that same message**
+  on a timer instead of posting a new one each time, to avoid spamming the channel.
+  This survives an app restart: the tracked message id is stored in the database, not
+  just in memory, so it keeps editing the same message rather than starting a new one.
 
-Both are independently toggleable, as is exactly what's included in the message
-(services, incidents, announcements, maintenance, resources).
+Both behaviors are independently toggleable, as is exactly what's included in the
+message: services, recent incidents, announcements, scheduled maintenance, and
+resources — where CPU, memory, disks, disk I/O, network, GPU, and VM status are each
+individually checkable (all off by default, to keep the message short unless you opt
+specific ones in).
+
+Uses a slash command, not a legacy text/prefix command — Discord's own guidance is
+that reading plain message text requires the privileged **Message Content** intent,
+which a slash command doesn't need at all. Nothing to enable in the Developer Portal
+beyond inviting the bot.
 
 To enable it:
 
 1. Create an application + bot at the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Under the bot's settings, enable the **Message Content Intent** — without it the bot
-   can't read the command word.
-3. Invite it to your server with permission to view channels and send/edit messages.
-4. `pip install discord.py` — this is an **optional** dependency, not in
+2. Invite it to your server with permission to view channels and send messages.
+3. `pip install discord.py` — this is an **optional** dependency, not in
    `requirements.txt` (same idea as `nvidia-ml-py` for GPU monitoring: nothing else in
    this app needs it, so it isn't forced on everyone).
-5. Set `PORTAL_DISCORD_BOT_TOKEN` in `.env` and restart the app.
+4. Set `PORTAL_DISCORD_BOT_TOKEN` in `.env`.
+5. Optional but recommended if this bot only lives in one server: set
+   `PORTAL_DISCORD_BOT_GUILD_ID` to that server's ID (enable Developer Mode in Discord's
+   settings, then right-click the server icon → Copy Server ID) so the slash command
+   registers instantly. Without it, the command still works, just via a global sync
+   that can take up to an hour to first appear.
+6. Restart the app.
 
 Leave `PORTAL_DISCORD_BOT_TOKEN` blank (the default) to disable this feature entirely —
 nothing related to it runs, and `discord.py` doesn't need to be installed at all.
 
-**Not verified against a real Discord server from this sandbox** — the message-building
-logic is tested directly, and the library's connection handling was smoke-tested against
-Discord's real login endpoint (confirming it starts cleanly in a background thread and
-fails gracefully on a bad token), but the actual gateway connection, command handling,
-and message-editing behavior have not been exercised against a real bot/server. If
-something doesn't work as expected, check the server console — every failure (bad
-token, missing intent, a channel it can't access) is logged there.
+**Verification status**: the previous (now-replaced) plain-text `!status` version of
+this feature was confirmed working end-to-end by actually running it. This slash-command
+rewrite has not yet been re-confirmed against a real Discord server — the
+message-building/embed logic is unit tested directly, and the connection handling was
+smoke-tested against Discord's real login endpoint (confirms it starts cleanly in a
+background thread and fails gracefully on a bad token, surfacing the error correctly on
+the admin page), but slash-command registration, the command handler itself, and the
+restart-survives-message-editing behavior haven't been exercised against a real
+bot/server yet. If something doesn't work as expected, check the server console first —
+every failure (bad token, sync error, a channel it can't access) is logged there.
 
 ### Outside the page itself
 
@@ -174,6 +191,7 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_NTFY_URL` | *(blank = disabled)* | Full [ntfy](https://ntfy.sh) topic URL — same events, no Discord account needed |
 | `PORTAL_DISCORD_BOT_TOKEN` | *(blank = disabled)* | Enables the optional Discord bot (see its own section above) — requires `pip install discord.py` |
 | `PORTAL_DISCORD_BOT_REFRESH_SECONDS` | `300` | How often the bot updates its presence / edits its tracked status messages |
+| `PORTAL_DISCORD_BOT_GUILD_ID` | *(blank = global sync)* | Set to your server's ID for instant slash-command registration on a single-server bot |
 
 ## 5. Running the tests
 

@@ -782,23 +782,28 @@ def admin_settings_general():
 @login_required
 def admin_discord_bot():
     if request.method == "POST":
-        db.set_setting("discordbot_command_word", request.form.get("command_word", "").strip() or "!status")
+        raw_name = request.form.get("command_name", "").strip()
+        db.set_setting("discordbot_command_name", discord_bot.sanitize_command_name(raw_name))
         db.set_setting("discordbot_update_presence", "1" if request.form.get("update_presence") else "0")
         db.set_setting("discordbot_channel_command_enabled",
                        "1" if request.form.get("channel_command_enabled") else "0")
         for key in discord_bot.INCLUDE_KEYS:
             db.set_setting(f"discordbot_include_{key}", "1" if request.form.get(f"include_{key}") else "0")
-        flash("Discord bot settings saved.", "success")
+        for key in discord_bot.RESOURCE_KEYS:
+            db.set_setting(f"discordbot_resource_{key}", "1" if request.form.get(f"resource_{key}") else "0")
+        flash("Discord bot settings saved. Restart the app if the command name changed.", "success")
         return redirect(url_for("admin_discord_bot"))
+    include = discord_bot.include_settings()
     return render_template("admin_discord_bot.html",
                             token_configured=bool(config.DISCORD_BOT_TOKEN),
                             status=discord_bot.get_status(),
                             refresh_seconds=config.DISCORD_BOT_REFRESH_SECONDS,
-                            command_word=db.get_setting("discordbot_command_word", "!status"),
+                            command_name=db.get_setting("discordbot_command_name", "status"),
                             update_presence=db.get_setting("discordbot_update_presence", "0") == "1",
                             channel_command_enabled=db.get_setting(
                                 "discordbot_channel_command_enabled", "0") == "1",
-                            include=discord_bot.include_settings(),
+                            include=include,
+                            resources=include["resources"],
                             active="discord-bot")
 
 
