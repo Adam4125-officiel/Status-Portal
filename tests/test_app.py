@@ -154,6 +154,46 @@ def test_integration_status_cache_populates_public_display(isolated_db):
     assert service["integration_severity"] == "ok"
 
 
+def test_integration_auto_incident_opens_and_resolves(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    integ = db.get_integration(db.create_integration({
+        "name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+        "api_key": "x", "enabled": 1, "service_id": sid, "auto_incident": 1,
+    }))
+
+    app_module._handle_integration_incident_lifecycle(integ, previous_reachable=True, new_reachable=False)
+    incident = db.get_open_auto_incident_for_service(sid)
+    assert incident is not None
+
+    app_module._handle_integration_incident_lifecycle(integ, previous_reachable=False, new_reachable=True)
+    assert db.get_incident(incident["id"])["status"] == "resolved"
+
+
+def test_integration_auto_incident_disabled_by_default(isolated_db):
+    """auto_incident defaults to 0 - a failing integration shouldn't silently start
+    opening incidents unless explicitly opted into, to avoid noise from flaky checks."""
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                                  "api_key": "x", "enabled": 1, "service_id": sid})
+    assert db.get_integration(iid)["auto_incident"] == 0
+
+
+def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
+    """_refresh_integration_cache must not fire the lifecycle on an integration's very
+    first check (no previous cache entry) - there's no real transition to react to."""
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                            "api_key": "x", "enabled": 1, "service_id": sid, "auto_incident": 1})
+
+    import integrations as integrations_module
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(integrations_module, "fetch_integration_status",
+                   lambda integ: {"reachable": False, "version": None, "issues": [], "error": "down"})
+        app_module._refresh_integration_cache()
+    assert db.get_open_auto_incident_for_service(sid) is None
+
+
 def test_service_without_url_hides_open_button(client):
     db.create_service({"name": "NoLinkService", "url": ""})
     resp = client.get("/")

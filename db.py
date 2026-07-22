@@ -120,6 +120,7 @@ def init_db():
             enabled INTEGER NOT NULL DEFAULT 1,
             service_id INTEGER,
             show_on_public INTEGER NOT NULL DEFAULT 0,
+            auto_incident INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE SET NULL
         )
     """)
@@ -148,6 +149,7 @@ def init_db():
     _ensure_column(conn, "incidents", "auto_created", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "integrations", "service_id", "INTEGER")
     _ensure_column(conn, "integrations", "show_on_public", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "integrations", "auto_incident", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     # Seed defaults if empty
@@ -445,10 +447,11 @@ def get_integration(iid):
 def create_integration(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id, show_on_public)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id, show_on_public, auto_incident)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data.get("api_key", ""),
-          int(data.get("enabled", 1)), data.get("service_id") or None, int(data.get("show_on_public", 0))))
+          int(data.get("enabled", 1)), data.get("service_id") or None, int(data.get("show_on_public", 0)),
+          int(data.get("auto_incident", 0))))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -459,18 +462,21 @@ def update_integration(iid, data):
     conn = get_db()
     service_id = data.get("service_id") or None
     show_on_public = int(data.get("show_on_public", 0))
+    auto_incident = int(data.get("auto_incident", 0))
     if data.get("api_key"):
         conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=?, service_id=?, show_on_public=? WHERE id=?
+            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=?, service_id=?,
+            show_on_public=?, auto_incident=? WHERE id=?
         """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data["api_key"],
-              int(data.get("enabled", 1)), service_id, show_on_public, iid))
+              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
     else:
         # Blank api_key on the edit form means "keep the existing one" - never overwrite
         # a stored key with an empty string just because the admin left the field blank.
         conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?, show_on_public=? WHERE id=?
+            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?,
+            show_on_public=?, auto_incident=? WHERE id=?
         """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
-              int(data.get("enabled", 1)), service_id, show_on_public, iid))
+              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
     conn.commit()
     conn.close()
 

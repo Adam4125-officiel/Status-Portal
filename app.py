@@ -170,11 +170,14 @@ def _refresh_integration_cache():
     for integ in db.list_integrations():
         if not integ["enabled"]:
             continue
+        previous = _integration_status_cache.get(integ["id"])
         try:
             status = integrations.fetch_integration_status(integ)
         except Exception as e:
             status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
         _integration_status_cache[integ["id"]] = {"status": status, "checked_at": db.now_iso()}
+        if integ["auto_incident"] and integ["service_id"] and previous is not None:
+            _handle_integration_incident_lifecycle(integ, previous["status"]["reachable"], status["reachable"])
 
 
 def _attach_integration_status(services):
@@ -518,6 +521,7 @@ def admin_integration_new():
         data = dict(request.form)
         data["enabled"] = 1 if request.form.get("enabled") else 0
         data["show_on_public"] = 1 if request.form.get("show_on_public") else 0
+        data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         db.create_integration(data)
         flash("Integration added.", "success")
         return redirect(url_for("admin_integrations"))
@@ -536,6 +540,7 @@ def admin_integration_edit(iid):
         data = dict(request.form)
         data["enabled"] = 1 if request.form.get("enabled") else 0
         data["show_on_public"] = 1 if request.form.get("show_on_public") else 0
+        data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         db.update_integration(iid, data)
         flash("Integration updated.", "success")
         return redirect(url_for("admin_integrations"))
@@ -669,6 +674,36 @@ def _handle_incident_lifecycle(service, previous_status, new_status):
             })
             db.create_incident_update(
                 incident["id"], "Automatic health check confirmed this service has recovered.", "resolved")
+
+
+def _handle_integration_incident_lifecycle(integration, previous_reachable, new_reachable):
+    """Same auto-open/auto-resolve pattern as _handle_incident_lifecycle, but driven by
+    an integration's reachability (Jellyfin/*Arr/Jellyseerr) instead of a service's own
+    health check. Shares the same incident slot as the linked service (via
+    get_open_auto_incident_for_service/create_auto_incident) - if the service's own
+    health check already opened one, this won't open a second."""
+    service_id = integration["service_id"]
+    if new_reachable is False and previous_reachable is not False:
+        if not db.get_open_auto_incident_for_service(service_id):
+            service = db.get_service(service_id)
+            name = service["name"] if service else integration["name"]
+            incident_id = db.create_auto_incident(
+                service_id, f"{name} is unreachable", "investigating")
+            db.create_incident_update(
+                incident_id, f"Automatic status check for '{integration['name']}' could not reach it.",
+                "investigating")
+    elif new_reachable is True and previous_reachable is False:
+        incident = db.get_open_auto_incident_for_service(service_id)
+        if incident:
+            db.update_incident(incident["id"], {
+                "service_id": service_id,
+                "title": incident["title"],
+                "description": incident["description"],
+                "status": "resolved",
+            })
+            db.create_incident_update(
+                incident["id"], f"Automatic status check for '{integration['name']}' confirmed recovery.",
+                "resolved")
 
 
 def start_background_checker():

@@ -48,6 +48,13 @@
   </div>
   <div class="field">
     <label class="field-check">
+      <input type="checkbox" name="auto_incident" {{ 'checked' if integration and integration.auto_incident }}>
+      Auto-open an incident on the linked service when this check fails (requires a linked service)
+    </label>
+    <div class="field-hint">Auto-resolved the moment the check is reachable again, same as a service's own health check. Off by default to avoid noisy incidents from a flaky status check.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
       <input type="checkbox" name="enabled" {{ 'checked' if not integration or integration.enabled }}>
       Enabled
     </label>
