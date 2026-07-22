@@ -225,6 +225,7 @@ reloads the public page.
 
 ```
 status-portal/
+  CLAUDE.md                # notes for future AI coding sessions on this repo
   app.py                  # Flask routes (public + admin)
   serve_waitress.py       # run this in production (instead of app.py)
   config.py               # all configuration, read from env vars / .env
