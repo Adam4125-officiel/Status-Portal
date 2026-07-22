@@ -212,6 +212,7 @@ def index():
     groups = _group_services(services)
     announcements = db.list_announcements(limit=10)
     incidents = _enrich_incidents(db.list_incidents(limit=8))
+    maintenance_windows = db.list_public_maintenance_windows()
     info = db.get_info_page()
     overall = compute_overall_status(services)
     site_name = db.get_setting("site_name", "Server")
@@ -220,7 +221,7 @@ def index():
     snapshot = monitoring.get_resource_snapshot() if show_any_resource else None
     vms = monitoring.get_vm_snapshot() if visible["vms"] else []
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
-                            incidents=incidents, info=info, overall=overall,
+                            incidents=incidents, maintenance_windows=maintenance_windows, info=info, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
@@ -238,6 +239,7 @@ def api_status():
         "services": services,
         "announcements": announcements,
         "incidents": incidents,
+        "maintenance_windows": db.list_public_maintenance_windows(),
     })
 
 
@@ -465,6 +467,33 @@ def admin_incident_add_update(iid):
     return redirect(url_for("admin_incident_edit", iid=iid))
 
 
+# ---- Maintenance windows ----
+@app.route("/admin/maintenance")
+@login_required
+def admin_maintenance():
+    windows = db.list_maintenance_windows()
+    return render_template("admin_maintenance.html", windows=windows, active="maintenance")
+
+
+@app.route("/admin/maintenance/new", methods=["GET", "POST"])
+@login_required
+def admin_maintenance_new():
+    services = db.list_services()
+    if request.method == "POST":
+        db.create_maintenance_window(request.form)
+        flash("Maintenance window scheduled.", "success")
+        return redirect(url_for("admin_maintenance"))
+    return render_template("admin_maintenance_form.html", services=services, active="maintenance")
+
+
+@app.route("/admin/maintenance/<int:mid>/delete", methods=["POST"])
+@login_required
+def admin_maintenance_delete(mid):
+    db.delete_maintenance_window(mid)
+    flash("Maintenance window removed.", "success")
+    return redirect(url_for("admin_maintenance"))
+
+
 # ---- Info page ----
 @app.route("/admin/info", methods=["GET", "POST"])
 @login_required
@@ -630,6 +659,11 @@ def admin_settings_general():
 def run_health_checks():
     while True:
         try:
+            # Runs before the per-service checks below, so a window that just started
+            # (setting manual_override=1) is already in effect for this same cycle's
+            # loop - otherwise a service being intentionally taken down for maintenance
+            # could get a spurious auto-incident opened in the same instant its window begins.
+            db.process_maintenance_windows()
             services = db.list_services()
             for s in services:
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:

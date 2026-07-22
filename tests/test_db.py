@@ -186,3 +186,58 @@ def test_integration_service_linking(isolated_db):
     db.update_integration(iid, {"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989",
                                  "api_key": "", "enabled": 0, "service_id": sid, "show_on_public": 1})
     assert db.list_integrations_for_service(sid) == []
+
+
+def test_maintenance_window_starts_and_ends(isolated_db):
+    sid = db.list_services()[0]["id"]
+    db.update_service(sid, {"name": "Jellyfin", "url": "http://server:8096", "status": "operational"})
+
+    mid = db.create_maintenance_window({
+        "service_id": sid, "title": "Upgrade", "description": "Disk swap",
+        "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    events = db.process_maintenance_windows()
+    assert len(events) == 1
+    assert events[0]["event"] == "maintenance_started"
+    assert db.get_service(sid)["status"] == "maintenance"
+    assert db.get_service(sid)["manual_override"] == 1
+    window = db.get_maintenance_window(mid)
+    assert window["applied"] == 1
+    assert window["pre_status"] == "operational"
+
+    # Not due to end yet - re-running shouldn't change anything.
+    db.process_maintenance_windows()
+    assert db.get_service(sid)["status"] == "maintenance"
+
+    # Force it into the past and confirm it restores the pre-maintenance state.
+    conn = db.get_db()
+    conn.execute("UPDATE maintenance_windows SET ends_at='2000-01-02T00:00' WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+    events = db.process_maintenance_windows()
+    assert events[0]["event"] == "maintenance_ended"
+    assert db.get_service(sid)["status"] == "operational"
+    assert db.get_service(sid)["manual_override"] == 0
+    assert db.get_maintenance_window(mid)["ended"] == 1
+
+
+def test_maintenance_window_delete_while_active_restores_service(isolated_db):
+    sid = db.list_services()[0]["id"]
+    mid = db.create_maintenance_window({
+        "service_id": sid, "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    db.process_maintenance_windows()
+    assert db.get_service(sid)["status"] == "maintenance"
+
+    db.delete_maintenance_window(mid)
+    assert db.get_service(sid)["status"] == "operational"
+    assert db.get_service(sid)["manual_override"] == 0
+
+
+def test_maintenance_window_not_yet_due_is_left_alone(isolated_db):
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Future", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    assert db.process_maintenance_windows() == []
+    assert db.get_service(sid)["status"] == "operational"

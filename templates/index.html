@@ -134,6 +134,27 @@
     <div class="empty-state">No incidents recorded. All clear.</div>
   {% endif %}
 
+  {% if maintenance_windows %}
+  <div class="section-title">Scheduled maintenance</div>
+  <div style="background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 18px;">
+  {% for w in maintenance_windows %}
+    <div class="incident">
+      <div class="incident__body">
+        <div class="incident__head">
+          <span class="incident__title">{{ w.service_name }} — {{ w.title }}</span>
+          {% if w.applied %}<span class="badge investigating">In progress</span>
+          {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
+        </div>
+        {% if w.description %}<div class="incident__desc">{{ w.description|richtext }}</div>{% endif %}
+        <div class="incident__time">
+          {{ w.starts_at[:16].replace('T', ' ') }} → {{ w.ends_at[:16].replace('T', ' ') }} UTC
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+  {% endif %}
+
   <div class="section-title">Practical info</div>
   <div class="info-block">{{ info|richtext }}</div>
 

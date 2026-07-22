@@ -126,6 +126,23 @@ def init_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_windows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            starts_at TEXT NOT NULL,
+            ends_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,   -- 1 once the service has been flipped to 'maintenance'
+            ended INTEGER NOT NULL DEFAULT 0,     -- 1 once the service has been restored
+            pre_status TEXT DEFAULT NULL,          -- service.status just before the window started
+            pre_manual_override INTEGER DEFAULT NULL,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS info_page (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             content TEXT NOT NULL DEFAULT ''
@@ -495,6 +512,124 @@ def delete_integration(iid):
     conn.execute("DELETE FROM integrations WHERE id=?", (iid,))
     conn.commit()
     conn.close()
+
+
+# ---------- Maintenance windows ----------
+def list_maintenance_windows():
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT m.*, s.name AS service_name FROM maintenance_windows m
+        JOIN services s ON s.id = m.service_id
+        ORDER BY m.starts_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_public_maintenance_windows():
+    """Windows still relevant to a visitor: not yet ended, and due to start or already
+    active - i.e. everything except ones that have already been restored."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT m.*, s.name AS service_name FROM maintenance_windows m
+        JOIN services s ON s.id = m.service_id
+        WHERE m.ended = 0 ORDER BY m.starts_at ASC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_maintenance_window(mid):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM maintenance_windows WHERE id=?", (mid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_maintenance_window(data):
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO maintenance_windows (service_id, title, description, starts_at, ends_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (data["service_id"], data["title"], data.get("description", ""),
+          data["starts_at"], data["ends_at"], now_iso()))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def delete_maintenance_window(mid):
+    """If the window is currently active (applied but not yet ended), restores the
+    service first - otherwise deleting an in-progress window would leave the service
+    stuck showing 'maintenance' forever."""
+    window = get_maintenance_window(mid)
+    if window and window["applied"] and not window["ended"]:
+        _restore_service_from_maintenance(window)
+    conn = get_db()
+    conn.execute("DELETE FROM maintenance_windows WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+
+
+def _restore_service_from_maintenance(window):
+    conn = get_db()
+    conn.execute("""
+        UPDATE services SET status=?, manual_override=? WHERE id=?
+    """, (window["pre_status"] or "operational", window["pre_manual_override"] or 0, window["service_id"]))
+    conn.execute("UPDATE maintenance_windows SET ended=1 WHERE id=?", (window["id"],))
+    conn.commit()
+    conn.close()
+
+
+def process_maintenance_windows():
+    """Called once per health-check cycle. Starts any window whose start time has
+    passed (snapshotting the service's current status/manual_override so it can be
+    restored exactly), and ends any window whose end time has passed. While a window
+    is active the service is forced to manual_override=1, so the regular auto-check
+    loop leaves its status alone for the duration. Returns a list of
+    {"event": "maintenance_started"|"maintenance_ended", "service": ..., "window": ...}
+    for anything that changed, so callers can fire notifications off the back of it."""
+    now = now_iso()
+    events = []
+    conn = get_db()
+
+    # Deliberately not filtering on ends_at here: a window entirely missed (e.g. the
+    # app was down for its whole scheduled span) should still get applied and then
+    # immediately picked up by the due_to_end pass below, rather than being silently
+    # orphaned in a permanent "scheduled but never applied" limbo.
+    due_to_start = conn.execute("""
+        SELECT * FROM maintenance_windows WHERE applied=0 AND starts_at <= ?
+    """, (now,)).fetchall()
+    for row in due_to_start:
+        window = dict(row)
+        service = conn.execute("SELECT * FROM services WHERE id=?", (window["service_id"],)).fetchone()
+        if not service:
+            conn.execute("UPDATE maintenance_windows SET applied=1, ended=1 WHERE id=?", (window["id"],))
+            continue
+        service = dict(service)
+        conn.execute("""
+            UPDATE maintenance_windows SET applied=1, pre_status=?, pre_manual_override=? WHERE id=?
+        """, (service["status"], service["manual_override"], window["id"]))
+        conn.execute("UPDATE services SET status='maintenance', manual_override=1 WHERE id=?", (service["id"],))
+        events.append({"event": "maintenance_started", "service": service, "window": window})
+
+    due_to_end = conn.execute("""
+        SELECT * FROM maintenance_windows WHERE applied=1 AND ended=0 AND ends_at <= ?
+    """, (now,)).fetchall()
+    for row in due_to_end:
+        window = dict(row)
+        service = conn.execute("SELECT * FROM services WHERE id=?", (window["service_id"],)).fetchone()
+        conn.execute("""
+            UPDATE services SET status=?, manual_override=? WHERE id=?
+        """, (window["pre_status"] or "operational", window["pre_manual_override"] or 0, window["service_id"]))
+        conn.execute("UPDATE maintenance_windows SET ended=1 WHERE id=?", (window["id"],))
+        if service:
+            events.append({"event": "maintenance_ended", "service": dict(service), "window": window})
+
+    conn.commit()
+    conn.close()
+    return events
 
 
 # ---------- Info page ----------

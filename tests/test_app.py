@@ -194,6 +194,37 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
+def test_admin_maintenance_window_crud(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    resp = client.post("/admin/maintenance/new", data={
+        "service_id": sid, "title": "Upgrade", "description": "Disk swap",
+        "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    assert resp.status_code == 302
+    windows = db.list_maintenance_windows()
+    assert len(windows) == 1
+    assert windows[0]["service_name"] == db.get_service(sid)["name"]
+
+    resp = client.post(f"/admin/maintenance/{windows[0]['id']}/delete")
+    assert resp.status_code == 302
+    assert db.list_maintenance_windows() == []
+
+
+def test_public_page_shows_active_maintenance_window(client):
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    db.process_maintenance_windows()
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"Upgrade" in resp.data
+    assert b"Scheduled maintenance" in resp.data
+
+
 def test_service_without_url_hides_open_button(client):
     db.create_service({"name": "NoLinkService", "url": ""})
     resp = client.get("/")
