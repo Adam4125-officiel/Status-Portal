@@ -9,7 +9,7 @@ import threading
 import time
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import Markup, escape
 import requests
@@ -255,6 +255,58 @@ def compute_overall_status(services):
     if "maintenance" in statuses:
         return "maintenance"
     return "operational"
+
+
+STATUS_BADGE_LABEL = {"operational": "operational", "degraded": "degraded",
+                       "maintenance": "maintenance", "down": "down"}
+STATUS_BADGE_COLOR = {"operational": "#3ddc97", "degraded": "#ffb545",
+                       "maintenance": "#a08bff", "down": "#ff5470"}
+
+
+def _render_badge_svg(label, value, color):
+    """Hand-rolled shields.io-style two-segment pill - no external service call (this
+    stays fully self-contained/offline, consistent with the rest of the app), no
+    external font/library dependency. Character-count width estimate is approximate
+    but good enough for short status words."""
+    label = str(escape(label))
+    value = str(escape(value))
+    label_width = len(label) * 6 + 20
+    value_width = len(value) * 6 + 20
+    total_width = label_width + value_width
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="20" role="img" aria-label="{label}: {value}">
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="{total_width}" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="{label_width}" height="20" fill="#2b2f3a"/>
+    <rect x="{label_width}" width="{value_width}" height="20" fill="{color}"/>
+    <rect width="{total_width}" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+    <text x="{label_width / 2}" y="14">{label}</text>
+    <text x="{label_width + value_width / 2}" y="14">{value}</text>
+  </g>
+</svg>'''
+
+
+@app.route("/badge.svg")
+def badge_overall():
+    overall = compute_overall_status(db.list_services())
+    svg = _render_badge_svg(db.get_setting("site_name", "status"),
+                             STATUS_BADGE_LABEL[overall], STATUS_BADGE_COLOR[overall])
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-cache"})
+
+
+@app.route("/badge/<int:service_id>.svg")
+def badge_service(service_id):
+    service = db.get_service(service_id)
+    if not service:
+        return Response("Service not found", status=404, mimetype="text/plain")
+    svg = _render_badge_svg(service["name"], STATUS_BADGE_LABEL[service["status"]],
+                             STATUS_BADGE_COLOR[service["status"]])
+    return Response(svg, mimetype="image/svg+xml", headers={"Cache-Control": "no-cache"})
 
 
 # ---------------------------------------------------------------------------

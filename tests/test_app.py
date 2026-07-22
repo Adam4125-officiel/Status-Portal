@@ -253,6 +253,35 @@ def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     assert "Maintenance ended" in titles
 
 
+def test_overall_badge_renders_svg(client):
+    resp = client.get("/badge.svg")
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/svg+xml"
+    assert b"operational" in resp.data
+
+
+def test_service_badge_renders_svg(client):
+    sid = db.list_services()[0]["id"]
+    resp = client.get(f"/badge/{sid}.svg")
+    assert resp.status_code == 200
+    assert b"Jellyfin" in resp.data
+
+
+def test_service_badge_404s_for_unknown_service(client):
+    resp = client.get("/badge/99999.svg")
+    assert resp.status_code == 404
+
+
+def test_badge_escapes_service_name(client):
+    """A service name containing XML-special characters must not break the SVG or
+    allow markup injection - this is admin-controlled input, but still worth guarding."""
+    sid = db.create_service({"name": "<script>&\"'", "url": "http://example.com"})
+    resp = client.get(f"/badge/{sid}.svg")
+    assert resp.status_code == 200
+    assert b"<script>" not in resp.data
+    assert b"&lt;script&gt;" in resp.data
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({
