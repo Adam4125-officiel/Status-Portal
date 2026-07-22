@@ -8,8 +8,19 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script>
+    // Applied before CSS paints, to avoid a flash of the wrong theme on load.
+    (function () {
+      if (localStorage.getItem('portal-theme') === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
 </head>
 <body>
+  <button id="theme-toggle" class="theme-toggle" style="position: fixed; top: 16px; right: 16px; z-index: 10;"
+          title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
   {% block body %}{% endblock %}
+  <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
 </body>
 </html>
