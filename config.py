@@ -37,3 +37,11 @@ FORCE_HTTPS_COOKIES = os.environ.get("PORTAL_FORCE_HTTPS_COOKIES", "false").lowe
 # maintenance window start/end, instead of only finding out by looking at the page.
 DISCORD_WEBHOOK_URL = os.environ.get("PORTAL_DISCORD_WEBHOOK_URL", "").strip()
 NTFY_URL = os.environ.get("PORTAL_NTFY_URL", "").strip()
+
+# Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
+# Blank = disabled entirely, no bot thread started. A bot token is a full login
+# credential (not just a one-way webhook URL), so like the webhook URLs it's env-only,
+# never a DB/admin-UI field. What the bot actually does (respond to a command,
+# update its presence, what to include) is admin-configurable at /admin/discord-bot.
+DISCORD_BOT_TOKEN = os.environ.get("PORTAL_DISCORD_BOT_TOKEN", "").strip()
+DISCORD_BOT_REFRESH_SECONDS = int(os.environ.get("PORTAL_DISCORD_BOT_REFRESH_SECONDS", "300"))

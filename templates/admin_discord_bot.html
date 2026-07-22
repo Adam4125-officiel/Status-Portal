@@ -1,0 +1,77 @@
+{% extends "admin_base.html" %}
+{% block title %}Discord Bot — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Discord Bot</h1>
+</div>
+
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  A real Discord bot connection - separate from the simple Discord webhook notifications
+  in Settings. It can update its own presence/status and/or respond to a command word in
+  any channel it can see by posting a status summary, then keep editing that same
+  message on a timer instead of spamming new ones.
+</p>
+
+{% if not token_configured %}
+<div class="form-panel" style="margin-bottom: 16px;">
+  <div class="empty-state" style="padding: 0 0 12px;">Not configured.</div>
+  <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+    To enable this feature:
+  </p>
+  <ol style="font-size: 13px; color: var(--text-dim); line-height: 1.8; padding-left: 20px;">
+    <li>Create an application + bot at the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">Discord Developer Portal</a>.</li>
+    <li>Under Bot settings, enable the <strong>Message Content Intent</strong> - without it the bot cannot read the command word below.</li>
+    <li>Invite it to your server with permission to view channels and send/edit messages.</li>
+    <li>Install the optional dependency: <code>pip install discord.py</code></li>
+    <li>Set <code>PORTAL_DISCORD_BOT_TOKEN</code> in <code>.env</code> to the bot's token, then restart the app.</li>
+  </ol>
+</div>
+{% else %}
+<div class="form-panel" style="margin-bottom: 16px;">
+  {% if status.connected %}
+    <div class="service-card__status ok"><span class="led ok"></span>Connected as {{ status.user }}</div>
+  {% else %}
+    <div class="service-card__status crit"><span class="led crit"></span>Not connected{% if status.last_error %} — {{ status.last_error }}{% endif %}</div>
+  {% endif %}
+</div>
+{% endif %}
+
+<form method="POST" class="form-panel">
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="update_presence" {{ 'checked' if update_presence }}>
+      Update the bot's presence/status (e.g. "🟢 Operational") on a timer
+    </label>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="channel_command_enabled" {{ 'checked' if channel_command_enabled }}>
+      Respond to a command word in any channel it can see
+    </label>
+    <div class="field-hint">Posts a status message once, then keeps editing that same message on a timer instead of posting new ones.</div>
+  </div>
+  <div class="field">
+    <label for="command_word">Command word</label>
+    <input type="text" id="command_word" name="command_word" value="{{ command_word }}" placeholder="!status">
+  </div>
+  <div class="field">
+    <label>Include in the status message</label>
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <label class="field-check"><input type="checkbox" name="include_services" {{ 'checked' if include.services }}> Services</label>
+      <label class="field-check"><input type="checkbox" name="include_incidents" {{ 'checked' if include.incidents }}> Recent incidents</label>
+      <label class="field-check"><input type="checkbox" name="include_announcements" {{ 'checked' if include.announcements }}> Announcements</label>
+      <label class="field-check"><input type="checkbox" name="include_maintenance" {{ 'checked' if include.maintenance }}> Scheduled maintenance</label>
+      <label class="field-check"><input type="checkbox" name="include_resources" {{ 'checked' if include.resources }}> Server resources (CPU/RAM)</label>
+    </div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save</button>
+  </div>
+</form>
+
+<p style="color: var(--text-faint); font-size: 12px; margin-top: 20px; line-height: 1.6;">
+  Refresh interval: every {{ refresh_seconds }}s (set via the <code>PORTAL_DISCORD_BOT_REFRESH_SECONDS</code>
+  environment variable — restart to change). The bot token itself lives in <code>.env</code>
+  as <code>PORTAL_DISCORD_BOT_TOKEN</code>, never here, since it's a login credential.
+</p>
+{% endblock %}

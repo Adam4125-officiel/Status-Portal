@@ -156,6 +156,14 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS discord_status_messages (
+            channel_id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
     # Retrofit columns added after a table already existed in some earlier version of
@@ -659,5 +667,42 @@ def set_setting(key, value):
     conn = get_db()
     conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?",
                  (key, value, value))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Discord bot status-message tracking ----------
+# One tracked message per channel the bot has posted a live status message into -
+# on each refresh, that same message is edited in place instead of a new one being
+# posted, to avoid spamming the channel. channel_id/message_id are stored as TEXT
+# since Discord snowflake IDs exceed the safe range some tooling assumes for INTEGER.
+def get_discord_status_message(channel_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM discord_status_messages WHERE channel_id=?",
+                        (str(channel_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_discord_status_messages():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM discord_status_messages").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_discord_status_message(channel_id, message_id):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO discord_status_messages (channel_id, message_id, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET message_id=?, updated_at=?
+    """, (str(channel_id), str(message_id), now_iso(), str(message_id), now_iso()))
+    conn.commit()
+    conn.close()
+
+
+def delete_discord_status_message(channel_id):
+    conn = get_db()
+    conn.execute("DELETE FROM discord_status_messages WHERE channel_id=?", (str(channel_id),))
     conn.commit()
     conn.close()

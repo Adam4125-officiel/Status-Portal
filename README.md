@@ -11,6 +11,8 @@ touching the HTML.
   (also from a failing Jellyfin/*Arr/Jellyseerr status check, if linked)
 - Scheduled maintenance windows that flip a service to "maintenance" and back automatically
 - Optional Discord/ntfy push notifications on incident and maintenance events
+- Optional Discord bot: presence/status updates and/or a self-editing status message
+  posted on command in any channel (separate from the webhook notifications above)
 - Per-service links (Tailscale, LAN, external domain...), per-incident update timelines,
   30-day uptime history — all editable from `/admin`, no code involved
 - Embeddable SVG status badges and an RSS feed, for use outside the page itself
@@ -103,9 +105,45 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
 - **Settings**: site name, per-cell public resource-monitor visibility, admin password,
   current health-check/refresh intervals, and whether push notifications are configured.
+- **Discord Bot**: a separate, optional real bot connection (not just a webhook) — see
+  its own section below.
 
 Nothing to rebuild, nothing to redeploy: every change is in the database and visible
 immediately (or within 60s max, the time it takes for the public page to auto-refresh).
+
+### Discord Bot (optional, separate from the webhook notifications above)
+
+`/admin/discord-bot` configures a real Discord bot connection that can:
+
+- Update its own presence/status (e.g. "🟢 Operational") on a timer, and/or
+- Respond to a command word (default `!status`) typed in any channel it can see, by
+  posting a status summary — then keep **editing that same message** on a timer
+  instead of posting a new one each time, to avoid spamming the channel.
+
+Both are independently toggleable, as is exactly what's included in the message
+(services, incidents, announcements, maintenance, resources).
+
+To enable it:
+
+1. Create an application + bot at the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Under the bot's settings, enable the **Message Content Intent** — without it the bot
+   can't read the command word.
+3. Invite it to your server with permission to view channels and send/edit messages.
+4. `pip install discord.py` — this is an **optional** dependency, not in
+   `requirements.txt` (same idea as `nvidia-ml-py` for GPU monitoring: nothing else in
+   this app needs it, so it isn't forced on everyone).
+5. Set `PORTAL_DISCORD_BOT_TOKEN` in `.env` and restart the app.
+
+Leave `PORTAL_DISCORD_BOT_TOKEN` blank (the default) to disable this feature entirely —
+nothing related to it runs, and `discord.py` doesn't need to be installed at all.
+
+**Not verified against a real Discord server from this sandbox** — the message-building
+logic is tested directly, and the library's connection handling was smoke-tested against
+Discord's real login endpoint (confirming it starts cleanly in a background thread and
+fails gracefully on a bad token), but the actual gateway connection, command handling,
+and message-editing behavior have not been exercised against a real bot/server. If
+something doesn't work as expected, check the server console — every failure (bad
+token, missing intent, a channel it can't access) is logged there.
 
 ### Outside the page itself
 
@@ -134,6 +172,8 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
 | `PORTAL_DISCORD_WEBHOOK_URL` | *(blank = disabled)* | Discord webhook URL — get pinged on incident/maintenance events |
 | `PORTAL_NTFY_URL` | *(blank = disabled)* | Full [ntfy](https://ntfy.sh) topic URL — same events, no Discord account needed |
+| `PORTAL_DISCORD_BOT_TOKEN` | *(blank = disabled)* | Enables the optional Discord bot (see its own section above) — requires `pip install discord.py` |
+| `PORTAL_DISCORD_BOT_REFRESH_SECONDS` | `300` | How often the bot updates its presence / edits its tracked status messages |
 
 ## 5. Running the tests
 
@@ -143,10 +183,11 @@ pytest
 ```
 
 Covers the DB layer, the auto-incident lifecycle (service and integration-driven),
-maintenance-window scheduling, notification dispatch, badge/feed rendering,
-login/lockout, service grouping, and the Jellyfin/*Arr/Jellyseerr status parsing
-(against mocked responses - there's no way to test against real instances of those
-from here). Not part of `requirements.txt` since nothing here needs `pytest` at runtime.
+maintenance-window scheduling, notification dispatch, badge/feed rendering, the
+Discord bot's message-building logic, login/lockout, service grouping, and the
+Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way to
+test against real instances of those from here). Not part of `requirements.txt` since
+nothing here needs `pytest` at runtime.
 
 ## 6. Security notes
 
@@ -173,6 +214,7 @@ status-portal/
   monitoring.py            # CPU/RAM/disk/GPU/VM snapshot for the resources page
   integrations.py          # read-only Jellyfin/*Arr/Jellyseerr status checks
   notifications.py         # optional Discord/ntfy push notifications
+  discord_bot.py           # optional Discord bot (presence + self-editing status message)
   requirements.txt, requirements-dev.txt
   Dockerfile, docker-compose.yml, .dockerignore, .env.example
   instance/portal.db      # created automatically on first launch

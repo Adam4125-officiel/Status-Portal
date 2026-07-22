@@ -324,6 +324,28 @@ def test_feed_escapes_special_characters(client):
     ET.fromstring(resp.data)  # must still parse as valid XML
 
 
+def test_admin_discord_bot_page_shows_unconfigured_state(client, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/discord-bot")
+    assert resp.status_code == 200
+    assert b"Not configured" in resp.data
+
+
+def test_admin_discord_bot_settings_persist(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/discord-bot", data={
+        "command_word": "!portal", "update_presence": "on", "channel_command_enabled": "on",
+        "include_services": "on", "include_incidents": "on",
+    })
+    assert resp.status_code == 302
+    assert db.get_setting("discordbot_command_word") == "!portal"
+    assert db.get_setting("discordbot_update_presence") == "1"
+    assert db.get_setting("discordbot_channel_command_enabled") == "1"
+    assert db.get_setting("discordbot_include_announcements") == "0"  # omitted -> off
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({

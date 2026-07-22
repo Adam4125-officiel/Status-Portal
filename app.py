@@ -19,6 +19,7 @@ import requests
 
 import config
 import db
+import discord_bot
 import integrations
 import monitoring
 import notifications
@@ -776,6 +777,31 @@ def admin_settings_general():
     return redirect(url_for("admin_settings"))
 
 
+# ---- Discord bot (separate from the simple webhook notifications above) ----
+@app.route("/admin/discord-bot", methods=["GET", "POST"])
+@login_required
+def admin_discord_bot():
+    if request.method == "POST":
+        db.set_setting("discordbot_command_word", request.form.get("command_word", "").strip() or "!status")
+        db.set_setting("discordbot_update_presence", "1" if request.form.get("update_presence") else "0")
+        db.set_setting("discordbot_channel_command_enabled",
+                       "1" if request.form.get("channel_command_enabled") else "0")
+        for key in discord_bot.INCLUDE_KEYS:
+            db.set_setting(f"discordbot_include_{key}", "1" if request.form.get(f"include_{key}") else "0")
+        flash("Discord bot settings saved.", "success")
+        return redirect(url_for("admin_discord_bot"))
+    return render_template("admin_discord_bot.html",
+                            token_configured=bool(config.DISCORD_BOT_TOKEN),
+                            status=discord_bot.get_status(),
+                            refresh_seconds=config.DISCORD_BOT_REFRESH_SECONDS,
+                            command_word=db.get_setting("discordbot_command_word", "!status"),
+                            update_presence=db.get_setting("discordbot_update_presence", "0") == "1",
+                            channel_command_enabled=db.get_setting(
+                                "discordbot_channel_command_enabled", "0") == "1",
+                            include=discord_bot.include_settings(),
+                            active="discord-bot")
+
+
 # ---------------------------------------------------------------------------
 # Background health check
 # ---------------------------------------------------------------------------
@@ -888,5 +914,6 @@ def start_background_checker():
 if __name__ == "__main__":
     db.init_db()
     start_background_checker()
+    discord_bot.start()
     # debug must stay False whenever this is reachable outside localhost.
     app.run(host="0.0.0.0", port=5000, debug=False)
