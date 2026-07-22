@@ -31,3 +31,9 @@ BEHIND_PROXY = os.environ.get("PORTAL_BEHIND_PROXY", "false").lower() == "true"
 # reverse proxy) to mark the session cookie Secure - browsers then refuse to send it
 # over plain HTTP. Leave false for plain-HTTP LAN/Tailscale-only setups.
 FORCE_HTTPS_COOKIES = os.environ.get("PORTAL_FORCE_HTTPS_COOKIES", "false").lower() == "true"
+
+# Optional outbound notifications (see notifications.py) - both blank by default
+# (disabled). Set either or both to get pinged on incident open/resolve/update and
+# maintenance window start/end, instead of only finding out by looking at the page.
+DISCORD_WEBHOOK_URL = os.environ.get("PORTAL_DISCORD_WEBHOOK_URL", "").strip()
+NTFY_URL = os.environ.get("PORTAL_NTFY_URL", "").strip()

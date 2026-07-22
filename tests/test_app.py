@@ -212,6 +212,47 @@ def test_admin_maintenance_window_crud(client):
     assert db.list_maintenance_windows() == []
 
 
+def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    service = db.list_services()[0]
+
+    app_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
+    app_module._handle_incident_lifecycle(service, previous_status="down", new_status="operational")
+
+    assert calls[0][0] == "Incident opened"
+    assert calls[1][0] == "Incident resolved"
+
+
+def test_incident_update_fires_notification(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.create_incident({"title": "Test outage", "status": "investigating"})
+    iid = db.list_incidents()[0]["id"]
+
+    client.post(f"/admin/incidents/{iid}/updates", data={"message": "Looking into it", "status": "identified"})
+
+    assert len(calls) == 1
+    assert "identified" in calls[0][0]
+    assert "Looking into it" in calls[0][1]
+
+
+def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    app_module._process_maintenance_and_notify()
+
+    # Both start and end are due at once here (window fully in the past) - both fire.
+    titles = [c[0] for c in calls]
+    assert "Maintenance started" in titles
+    assert "Maintenance ended" in titles
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({

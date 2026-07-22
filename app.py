@@ -18,6 +18,7 @@ import config
 import db
 import integrations
 import monitoring
+import notifications
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -416,6 +417,9 @@ def admin_incident_new():
     services = db.list_services()
     if request.method == "POST":
         db.create_incident(request.form)
+        service = db.get_service(request.form.get("service_id")) if request.form.get("service_id") else None
+        prefix = f"{service['name']}: " if service else ""
+        notifications.notify("Incident opened", f"{prefix}{request.form.get('title', '')}")
         flash("Incident recorded.", "success")
         return redirect(url_for("admin_incidents"))
     return render_template("admin_incident_form.html", incident=None, services=services, active="incidents")
@@ -463,6 +467,7 @@ def admin_incident_add_update(iid):
             "description": incident["description"],
             "status": status,
         })
+        notifications.notify(f"Incident update — {status}", f"{incident['title']}: {message}")
         flash("Update posted.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -640,6 +645,8 @@ def admin_settings():
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
                             show_public=_public_resource_visibility(),
+                            discord_configured=bool(config.DISCORD_WEBHOOK_URL),
+                            ntfy_configured=bool(config.NTFY_URL),
                             active="settings")
 
 
@@ -656,6 +663,16 @@ def admin_settings_general():
 # ---------------------------------------------------------------------------
 # Background health check
 # ---------------------------------------------------------------------------
+def _process_maintenance_and_notify():
+    for event in db.process_maintenance_windows():
+        service_name = event["service"]["name"]
+        window_title = event["window"]["title"]
+        if event["event"] == "maintenance_started":
+            notifications.notify("Maintenance started", f"{service_name}: {window_title}")
+        else:
+            notifications.notify("Maintenance ended", f"{service_name}: {window_title}")
+
+
 def run_health_checks():
     while True:
         try:
@@ -663,7 +680,7 @@ def run_health_checks():
             # (setting manual_override=1) is already in effect for this same cycle's
             # loop - otherwise a service being intentionally taken down for maintenance
             # could get a spurious auto-incident opened in the same instant its window begins.
-            db.process_maintenance_windows()
+            _process_maintenance_and_notify()
             services = db.list_services()
             for s in services:
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
@@ -697,9 +714,11 @@ def _handle_incident_lifecycle(service, previous_status, new_status):
                 service["id"], f"{service['name']} is unreachable", "investigating")
             db.create_incident_update(
                 incident_id, "Automatic health check could not reach this service.", "investigating")
+            notifications.notify("Incident opened", f"{service['name']} is unreachable.")
     elif new_status != "down" and previous_status == "down":
         incident = db.get_open_auto_incident_for_service(service["id"])
         if incident:
+            notifications.notify("Incident resolved", f"{service['name']} has recovered.")
             db.update_incident(incident["id"], {
                 "service_id": service["id"],
                 "title": incident["title"],
@@ -726,9 +745,13 @@ def _handle_integration_incident_lifecycle(integration, previous_reachable, new_
             db.create_incident_update(
                 incident_id, f"Automatic status check for '{integration['name']}' could not reach it.",
                 "investigating")
+            notifications.notify("Incident opened", f"{name}: status check '{integration['name']}' failed.")
     elif new_reachable is True and previous_reachable is False:
         incident = db.get_open_auto_incident_for_service(service_id)
         if incident:
+            service = db.get_service(service_id)
+            name = service["name"] if service else integration["name"]
+            notifications.notify("Incident resolved", f"{name} has recovered.")
             db.update_incident(incident["id"], {
                 "service_id": service_id,
                 "title": incident["title"],
