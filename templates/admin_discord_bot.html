@@ -62,6 +62,11 @@
     <div class="field-hint">Shows up as <code>/{{ command_name }}</code> in Discord. Lowercase letters/numbers/-/_ only. Changing this needs an app restart to re-register with Discord.</div>
   </div>
   <div class="field">
+    <label for="allowed_user_ids">Allowed Discord user IDs (optional)</label>
+    <textarea id="allowed_user_ids" name="allowed_user_ids" placeholder="123456789012345678, 234567890123456789">{{ allowed_user_ids }}</textarea>
+    <div class="field-hint">Comma or newline separated. <strong>Leave blank and anyone in the server can use this command</strong> - set this if you want to restrict who can trigger it (e.g. to avoid spam). Enable Developer Mode in Discord's settings, then right-click a user → Copy User ID.</div>
+  </div>
+  <div class="field">
     <label>Include in the status message</label>
     <div style="display: flex; flex-direction: column; gap: 6px;">
       <label class="field-check"><input type="checkbox" name="include_services" {{ 'checked' if include.services }}> Services</label>

@@ -121,6 +121,9 @@ immediately (or within 60s max, the time it takes for the public page to auto-re
   on a timer instead of posting a new one each time, to avoid spamming the channel.
   This survives an app restart: the tracked message id is stored in the database, not
   just in memory, so it keeps editing the same message rather than starting a new one.
+  Optionally restrict who can even use the command (a comma/newline-separated list of
+  Discord user IDs in the admin page) — leave it blank and anyone in the server can
+  use it; set it to stop randos from spamming the command.
 
 Both behaviors are independently toggleable, as is exactly what's included in the
 message: services, recent incidents, announcements, scheduled maintenance, and

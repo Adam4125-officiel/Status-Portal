@@ -62,6 +62,24 @@ def include_settings():
     return include
 
 
+def allowed_user_ids():
+    """Discord user IDs (as strings) permitted to invoke the slash command - parsed
+    from a comma/newline-separated DB setting. An empty result means unrestricted
+    (anyone in the server can use it) - this is the default, so the command keeps
+    working for anyone who hasn't set this up, but it's called out clearly in the
+    admin UI since leaving it unrestricted is exactly what allows the spam/abuse this
+    setting exists to prevent."""
+    raw = db.get_setting("discordbot_allowed_user_ids", "")
+    return {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
+
+
+def normalize_user_ids(raw):
+    """Cleans up admin-entered input (mixed commas/newlines/whitespace, digits only
+    per ID) into a canonical comma-separated string for storage/redisplay."""
+    ids = [part.strip() for part in (raw or "").replace("\n", ",").split(",") if part.strip()]
+    return ", ".join(ids)
+
+
 def _overall_status(services):
     statuses = [s["status"] for s in services]
     if "down" in statuses:
@@ -209,6 +227,13 @@ def _make_client_class(discord, app_commands, tasks):
                 if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
                     await interaction.response.send_message(
                         "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
+                    return
+                allowed = allowed_user_ids()
+                if allowed and str(interaction.user.id) not in allowed:
+                    print(f"[discord-bot] rejected /{command_name} from unauthorized user "
+                          f"{interaction.user} ({interaction.user.id})")
+                    await interaction.response.send_message(
+                        "You're not authorized to use this command.", ephemeral=True)
                     return
                 embed = build_embed(discord, build_status_data(include_settings()))
                 await interaction.response.send_message(embed=embed)

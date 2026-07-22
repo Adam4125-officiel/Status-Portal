@@ -78,15 +78,33 @@ DB-backed Settings pages, not a code edit.
   call) — the fallback matters because a cold gateway cache right after a restart
   would otherwise look identical to "channel deleted" and wrongly drop the tracked
   row.
+- **Access control**: `discordbot_allowed_user_ids` (DB setting, comma/newline
+  separated Discord user IDs) restricts who can invoke the slash command — checked
+  inside the command callback itself (`allowed_user_ids()` / `normalize_user_ids()`),
+  not via Discord's own per-guild command permissions UI, so it's portable across
+  whatever server the bot is invited to without extra per-server setup. **Empty list
+  = unrestricted (default)** — this was a deliberate choice so the command keeps
+  working for anyone who hasn't configured it, at the cost of being open by default;
+  the admin page calls this out explicitly rather than silently locking everyone out.
+  An unauthorized attempt is logged to the console (with the offending user/id) and
+  gets an ephemeral "not authorized" reply, without ever building the (heavier) status
+  embed — the point is to stop both spam *and* the wasted work of building a response
+  nobody authorized should see.
 - **Verification status**: the old prefix-command version was confirmed working
   end-to-end by the user actually running it. The slash-command rewrite has *not*
-  been re-confirmed against a real Discord server as of 2026-07-22 — message-building
-  and the embed logic are unit tested, and a real (fake-token) connection attempt was
-  smoke-tested against Discord's actual login endpoint to confirm the background
-  thread behaves correctly and fails gracefully, but slash-command registration, the
-  command handler itself, and the restart-survives-editing behavior are unverified
-  against a live server/bot. Don't assume "the bot" is confirmed working as a whole
-  just because an earlier version of it was — ask what specifically was tested.
+  been re-confirmed against a real Discord server as of 2026-07-22 — message-building,
+  the embed logic, and (unusually thoroughly for this module) the command callback's
+  own authorization logic are all unit tested by actually constructing a `StatusBot`
+  and invoking its real registered `command.callback(interaction)` with a mocked
+  `Interaction` (see `_build_test_client()`/`_make_interaction()` in
+  `tests/test_discord_bot.py`) — not just testing the helper functions around it. A
+  real (fake-token) connection attempt was also smoke-tested against Discord's actual
+  login endpoint to confirm the background thread behaves correctly and fails
+  gracefully. What's still unverified: actual slash-command *registration/sync*
+  against Discord's API, and the restart-survives-editing behavior, both of which
+  need a real bot/server to exercise. Don't assume "the bot" is confirmed working as a
+  whole just because an earlier version of it was, or because one code path is now
+  well-tested — ask what specifically was tested.
 - `discord.py` is installed in this dev sandbox's Python environment for testing
   purposes even though it's not in `requirements.txt` (it's optional). If it's ever
   missing here and you need to verify code again: `pip install discord.py`.
@@ -109,10 +127,16 @@ DB-backed Settings pages, not a code edit.
 
 ## Release process
 
-Do this when the user says the session/work is done and they've confirmed things are
-working — this is standing, pre-authorized (per the same blanket authorization
-covering commit/push/shell commands for this project); no need to ask again each
-time, just do it.
+**Trigger**: the user says the session/work is done *and* that things are working —
+e.g. "this session ends here", "that's it for today, everything works", "we're done,
+thanks". Not every "looks good" or "great, that works" mid-session — those are just
+confirmation of one change, not a signal to release. When genuinely unsure whether a
+message means "wrap up the whole session" vs. "this one thing is fine, keep going",
+ask rather than guessing — a release is a public, visible action.
+
+Once the trigger fires: this is standing, pre-authorized (per the same blanket
+authorization covering commit/push/shell commands for this project, granted
+2026-07-22) — don't ask for confirmation again each time, just run the steps below.
 
 1. **Versioning**: `vMAJOR.MINOR.PATCH`, with an optional `-rc.N` suffix for anything
    not yet user-verified end-to-end (mark the GitHub release as a pre-release too).

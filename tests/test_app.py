@@ -338,6 +338,7 @@ def test_admin_discord_bot_settings_persist(client):
     resp = client.post("/admin/discord-bot", data={
         "command_name": "!Portal Status", "update_presence": "on", "channel_command_enabled": "on",
         "include_services": "on", "include_incidents": "on", "resource_cpu": "on",
+        "allowed_user_ids": "123,456\n789",
     })
     assert resp.status_code == 302
     assert db.get_setting("discordbot_command_name") == "portalstatus"  # sanitized on save
@@ -346,6 +347,7 @@ def test_admin_discord_bot_settings_persist(client):
     assert db.get_setting("discordbot_include_announcements") == "0"  # omitted -> off
     assert db.get_setting("discordbot_resource_cpu") == "1"
     assert db.get_setting("discordbot_resource_memory") == "0"  # omitted -> off
+    assert db.get_setting("discordbot_allowed_user_ids") == "123, 456, 789"  # normalized on save
 
 
 def test_public_page_shows_active_maintenance_window(client):

@@ -1,6 +1,33 @@
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import db
 import config
 import discord_bot
+
+
+def _make_interaction(user_id, channel_id=555):
+    interaction = MagicMock()
+    interaction.user = MagicMock()
+    interaction.user.id = user_id
+    interaction.user.__str__ = lambda self: f"user#{user_id}"
+    interaction.channel_id = channel_id
+    interaction.response = AsyncMock()
+    interaction.original_response = AsyncMock(return_value=MagicMock(id=999))
+    return interaction
+
+
+def _build_test_client():
+    """Constructs a real StatusBot (no network call - just __init__, which registers
+    the slash command) so the actual authorization logic inside the command handler
+    can be exercised directly, not just the parsing helpers around it."""
+    import discord
+    from discord import app_commands
+    from discord.ext import tasks
+    client_cls = discord_bot._make_client_class(discord, app_commands, tasks)
+    client = client_cls(intents=discord.Intents.default())
+    command_name = discord_bot.sanitize_command_name(db.get_setting("discordbot_command_name", "status"))
+    return client.tree.get_command(command_name)
 
 
 def test_build_status_data_respects_include_toggles(isolated_db):
@@ -120,3 +147,68 @@ def test_discord_status_message_db_roundtrip(isolated_db):
 
     db.delete_discord_status_message(123)
     assert db.get_discord_status_message(123) is None
+
+
+def test_allowed_user_ids_parsing(isolated_db):
+    assert discord_bot.allowed_user_ids() == set()  # unrestricted by default
+    db.set_setting("discordbot_allowed_user_ids", "123, 456\n789")
+    assert discord_bot.allowed_user_ids() == {"123", "456", "789"}
+
+
+def test_normalize_user_ids():
+    assert discord_bot.normalize_user_ids("123,456\n789") == "123, 456, 789"
+    assert discord_bot.normalize_user_ids("  ") == ""
+    assert discord_bot.normalize_user_ids(None) == ""
+
+
+def test_slash_command_rejects_unauthorized_user(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    db.set_setting("discordbot_allowed_user_ids", "111")
+    command = _build_test_client()
+
+    interaction = _make_interaction(user_id=222)
+    asyncio.run(command.callback(interaction))
+
+    interaction.response.send_message.assert_called_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "not authorized" in args[0]
+    assert kwargs.get("ephemeral") is True
+    assert db.get_discord_status_message(555) is None  # rejected - no message ever tracked
+
+
+def test_slash_command_allows_authorized_user(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    db.set_setting("discordbot_allowed_user_ids", "111")
+    command = _build_test_client()
+
+    interaction = _make_interaction(user_id=111)
+    asyncio.run(command.callback(interaction))
+
+    interaction.response.send_message.assert_called_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "embed" in kwargs
+    assert db.get_discord_status_message(555)["message_id"] == "999"
+
+
+def test_slash_command_unrestricted_when_allow_list_empty(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    # discordbot_allowed_user_ids left unset entirely
+    command = _build_test_client()
+
+    interaction = _make_interaction(user_id=999999)
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "embed" in kwargs  # anyone is let through when no allow-list is configured
+
+
+def test_slash_command_disabled_takes_priority_over_authorization(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "0")
+    db.set_setting("discordbot_allowed_user_ids", "111")
+    command = _build_test_client()
+
+    interaction = _make_interaction(user_id=111)  # would be authorized, but feature is off
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "disabled" in args[0]
