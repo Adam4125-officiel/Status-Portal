@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ site_name }} Status{% endblock %}
-{% set status_label = {'operational': 'Operational', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
-{% set status_css = {'operational': 'ok', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
+{% set status_label = {'operational': 'Operational', 'slow': 'Slow', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
+{% set status_css = {'operational': 'ok', 'slow': 'warn', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
 {% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
 {% set announce_label = {'info': 'Info', 'success': 'Success', 'warning': 'Warning', 'critical': 'Critical'} %}
 {% block body %}
@@ -19,6 +19,7 @@
       <div class="status-hero__label">
         <span class="led {{ status_css[overall] }}"></span>
         {% if overall == 'operational' %}All services are operating normally
+        {% elif overall == 'slow' %}Some services are responding slowly
         {% elif overall == 'degraded' %}Some services are degraded
         {% elif overall == 'maintenance' %}Maintenance in progress
         {% else %}One or more services are down{% endif %}

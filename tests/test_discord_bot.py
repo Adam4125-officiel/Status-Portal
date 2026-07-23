@@ -30,6 +30,18 @@ def _build_test_client():
     return client.tree.get_command(command_name)
 
 
+def test_overall_status_ranks_slow_between_operational_and_degraded():
+    assert discord_bot._overall_status([{"status": "operational"}, {"status": "slow"}]) == "slow"
+    assert discord_bot._overall_status([{"status": "slow"}, {"status": "degraded"}]) == "degraded"
+    assert discord_bot._overall_status([{"status": "operational"}]) == "operational"
+
+
+def test_slow_status_has_full_display_plumbing():
+    for table in (discord_bot.STATUS_ICON, discord_bot.STATUS_LABEL,
+                  discord_bot.PRESENCE_TEXT, discord_bot._EMBED_COLOR_NAME):
+        assert "slow" in table
+
+
 def test_build_status_data_respects_include_toggles(isolated_db):
     db.create_incident({"title": "Test outage", "status": "investigating"})
     db.create_announcement({"title": "Heads up", "message": "Doing work tonight."})

@@ -27,19 +27,21 @@ import monitoring
 
 _state = {"connected": False, "user": None, "last_error": None}
 
-STATUS_ICON = {"operational": "🟢", "degraded": "🟡", "maintenance": "🟣", "down": "🔴"}
-STATUS_LABEL = {"operational": "Operational", "degraded": "Degraded",
+STATUS_ICON = {"operational": "🟢", "slow": "🐢", "degraded": "🟡", "maintenance": "🟣", "down": "🔴"}
+STATUS_LABEL = {"operational": "Operational", "slow": "Slow", "degraded": "Degraded",
                 "maintenance": "Maintenance", "down": "Down"}
 
 # Phrasing for the bot's own presence/activity text and embed summary specifically -
 # "Operational" reads like a status-page label, not something you'd say out loud.
 PRESENCE_TEXT = {
     "operational": "✅ All services up!",
+    "slow": "🐢 Some services are responding slowly",
     "degraded": "⚠️ Some services are degraded",
     "down": "🔴 Some services are down",
     "maintenance": "🛠 Maintenance in progress",
 }
-_EMBED_COLOR_NAME = {"operational": "green", "degraded": "gold", "down": "red", "maintenance": "purple"}
+_EMBED_COLOR_NAME = {"operational": "green", "slow": "orange", "degraded": "gold",
+                      "down": "red", "maintenance": "purple"}
 
 RESOURCE_KEYS = ("cpu", "memory", "disks", "disk_io", "network", "gpu", "vms")
 _RESOURCE_DEFAULTS = {key: "0" for key in RESOURCE_KEYS}  # all off by default, admin opts in per-item
@@ -88,6 +90,8 @@ def _overall_status(services):
         return "degraded"
     if "maintenance" in statuses:
         return "maintenance"
+    if "slow" in statuses:
+        return "slow"
     return "operational"
 
 

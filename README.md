@@ -56,6 +56,23 @@ a real domain, a tunnel (Cloudflare Tunnel, etc.), or nothing at all if it's LAN
 None of that is this project's concern — point whatever you use at
 `http://<this-machine>:<PORTAL_PORT>` and you're done.
 
+### Updating to a new release
+
+1. Stop the running process (`Ctrl+C`, or stop the service/task if it runs in the
+   background).
+2. Download the new release zip and extract it directly over your existing
+   `status-portal` folder, overwriting the `.py`/template/static files.
+3. Leave `instance/` alone — don't delete it, don't extract over it manually.
+   There's nothing to do here: the release zip is built with `git archive`, which
+   only ever includes files tracked in git, and `instance/portal.db` never has
+   been one. Extracting the zip can't touch it — your services, incidents,
+   announcements, and admin password all survive untouched.
+4. `pip install -r requirements.txt` again, in case a dependency changed.
+5. Start it back up (`python serve_waitress.py`).
+
+No database migration step, no export/import — the "unzip and replace" you were
+already doing is the whole process.
+
 ## 2. Run it with Docker (optional alternative)
 
 If you'd rather run it in a container instead of directly on the host:

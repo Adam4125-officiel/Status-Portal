@@ -7,6 +7,42 @@ def test_compute_overall_status():
     assert app_module.compute_overall_status([{"status": "operational"}, {"status": "degraded"}]) == "degraded"
     assert app_module.compute_overall_status([{"status": "down"}, {"status": "maintenance"}]) == "down"
     assert app_module.compute_overall_status([{"status": "maintenance"}]) == "maintenance"
+    assert app_module.compute_overall_status([{"status": "operational"}, {"status": "slow"}]) == "slow"
+    assert app_module.compute_overall_status([{"status": "slow"}, {"status": "degraded"}]) == "degraded"
+
+
+class _FakeResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def test_check_status_for_response_only_5xx_is_degraded():
+    # A 401/403 login prompt (e.g. Bazarr's Basic Auth) or a 404 still means the
+    # server answered - only an actual server-side (5xx) error counts as degraded.
+    assert app_module._check_status_for_response(_FakeResponse(200), 50, None) == "operational"
+    assert app_module._check_status_for_response(_FakeResponse(401), 50, None) == "operational"
+    assert app_module._check_status_for_response(_FakeResponse(403), 50, None) == "operational"
+    assert app_module._check_status_for_response(_FakeResponse(404), 50, None) == "operational"
+    assert app_module._check_status_for_response(_FakeResponse(500), 50, None) == "degraded"
+    assert app_module._check_status_for_response(_FakeResponse(503), 50, None) == "degraded"
+
+
+def test_check_status_for_response_slow_threshold():
+    assert app_module._check_status_for_response(_FakeResponse(200), 100, 2000) == "operational"
+    assert app_module._check_status_for_response(_FakeResponse(200), 2500, 2000) == "slow"
+    assert app_module._check_status_for_response(_FakeResponse(200), 2500, None) == "operational"
+    # A slow response that's also a server error stays degraded, not slow.
+    assert app_module._check_status_for_response(_FakeResponse(500), 2500, 2000) == "degraded"
+
+
+def test_within_grace_period(monkeypatch):
+    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic())
+    assert app_module._within_grace_period({"startup_grace_seconds": 60}) is True
+    assert app_module._within_grace_period({"startup_grace_seconds": 0}) is False
+    assert app_module._within_grace_period({"startup_grace_seconds": None}) is False
+
+    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic() - 120)
+    assert app_module._within_grace_period({"startup_grace_seconds": 60}) is False
 
 
 def test_group_services():
@@ -88,6 +124,51 @@ def test_admin_service_edit_persists_auto_incident_toggle(client):
         "name": "Jellyfin", "url": "http://server:8096", "status": "operational", "auto_incident": "on",
     })
     assert db.get_service(sid)["auto_incident"] == 1
+
+
+def test_admin_service_edit_persists_slow_threshold_and_grace_period(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational",
+        "slow_threshold_ms": "1500", "startup_grace_seconds": "90",
+    })
+    service = db.get_service(sid)
+    assert service["slow_threshold_ms"] == 1500
+    assert service["startup_grace_seconds"] == 90
+
+    # Blank threshold means "disabled" (None), not 0.
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational",
+        "slow_threshold_ms": "", "startup_grace_seconds": "",
+    })
+    service = db.get_service(sid)
+    assert service["slow_threshold_ms"] is None
+    assert service["startup_grace_seconds"] == 0
+
+
+def test_grace_period_gate_suppresses_incident_lifecycle(isolated_db, monkeypatch):
+    """run_health_checks() itself is an untested infinite loop (pre-existing), but
+    its incident-opening gate is `if s["auto_incident"] and not
+    _within_grace_period(s): _handle_incident_lifecycle(...)` - this exercises that
+    exact combination against a real service row."""
+    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic())
+    service = db.list_services()[0]
+    db.update_service(service["id"], {**service, "startup_grace_seconds": 60, "auto_incident": 1})
+    service = db.get_service(service["id"])
+
+    calls = []
+    monkeypatch.setattr(app_module, "_handle_incident_lifecycle", lambda *a, **k: calls.append(a))
+
+    if service["auto_incident"] and not app_module._within_grace_period(service):
+        app_module._handle_incident_lifecycle(service, "operational", "down")
+    assert calls == []  # still within the grace window - suppressed
+
+    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic() - 120)
+    if service["auto_incident"] and not app_module._within_grace_period(service):
+        app_module._handle_incident_lifecycle(service, "operational", "down")
+    assert len(calls) == 1  # grace window elapsed - fires normally
 
 
 def test_404_renders_custom_error_page(client):

@@ -28,6 +28,7 @@
     <select id="status" name="status">
       {% set current = service.status if service else 'operational' %}
       <option value="operational" {{ 'selected' if current == 'operational' }}>Operational</option>
+      <option value="slow" {{ 'selected' if current == 'slow' }}>Slow</option>
       <option value="degraded" {{ 'selected' if current == 'degraded' }}>Degraded</option>
       <option value="maintenance" {{ 'selected' if current == 'maintenance' }}>Maintenance</option>
       <option value="down" {{ 'selected' if current == 'down' }}>Down</option>
@@ -49,7 +50,12 @@
   <div class="field">
     <label for="check_url">Check URL (if auto-check is on)</label>
     <input type="text" id="check_url" name="check_url" value="{{ service.check_url if service else '' }}" placeholder="http://192.168.1.x:port/health">
-    <div class="field-hint">Must respond with HTTP 200. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
+    <div class="field-hint">A response is treated as reachable regardless of status code (a 401/403 login prompt still counts as up) - only a 5xx server error or a failed connection counts against it. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
+  </div>
+  <div class="field">
+    <label for="slow_threshold_ms">Slow threshold (ms)</label>
+    <input type="number" id="slow_threshold_ms" name="slow_threshold_ms" min="0" value="{{ service.slow_threshold_ms if service and service.slow_threshold_ms else '' }}" placeholder="e.g. 2000">
+    <div class="field-hint">If auto-check takes longer than this to respond, show "Slow" instead of "Operational". Leave blank to disable.</div>
   </div>
   <div class="field">
     <label class="field-check">
@@ -57,6 +63,11 @@
       Automatically open an incident when this service goes down, and resolve it when it recovers
     </label>
     <div class="field-hint">Only applies while auto-check is on above. Turn this off if you'd rather track outages for this service manually.</div>
+  </div>
+  <div class="field">
+    <label for="startup_grace_seconds">Startup grace period (seconds)</label>
+    <input type="number" id="startup_grace_seconds" name="startup_grace_seconds" min="0" value="{{ service.startup_grace_seconds if service else 0 }}">
+    <div class="field-hint">Delay before this service's checks are allowed to open an automatic incident after the portal starts, giving it time to boot. Status and response time are still recorded normally during this window - only incident creation is held back.</div>
   </div>
   <div class="field">
     <label for="sort_order">Sort order</label>

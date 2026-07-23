@@ -175,6 +175,8 @@ def init_db():
     _ensure_column(conn, "integrations", "service_id", "INTEGER")
     _ensure_column(conn, "integrations", "show_on_public", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "integrations", "auto_incident", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "services", "slow_threshold_ms", "INTEGER DEFAULT NULL")
+    _ensure_column(conn, "services", "startup_grace_seconds", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     # Seed defaults if empty
@@ -216,15 +218,21 @@ def get_service(service_id):
     return dict(row) if row else None
 
 
+def _slow_threshold_ms(data):
+    raw = str(data.get("slow_threshold_ms") or "").strip()
+    return int(raw) if raw else None
+
+
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
-          data.get("group_name", "").strip(), int(data.get("auto_incident", 1))))
+          data.get("group_name", "").strip(), int(data.get("auto_incident", 1)),
+          _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0)))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -235,12 +243,14 @@ def update_service(service_id, data):
     conn = get_db()
     conn.execute("""
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
-        auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=? WHERE id=?
+        auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
+        slow_threshold_ms=?, startup_grace_seconds=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
           int(data.get("sort_order", 0)), data.get("group_name", "").strip(),
-          int(data.get("auto_incident", 1)), service_id))
+          int(data.get("auto_incident", 1)), _slow_threshold_ms(data),
+          int(data.get("startup_grace_seconds") or 0), service_id))
     conn.commit()
     conn.close()
 

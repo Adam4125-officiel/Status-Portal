@@ -37,6 +37,12 @@ if config.BEHIND_PROXY:
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
+# Reference point for each service's startup_grace_seconds - "time since the portal
+# process started", not since the service itself booted (good enough since they're
+# expected to start around the same time). monotonic() so a system clock change
+# can't skew it.
+_APP_START = time.monotonic()
+
 
 @app.after_request
 def set_security_headers(response):
@@ -182,7 +188,9 @@ def _refresh_integration_cache():
             status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
         _integration_status_cache[integ["id"]] = {"status": status, "checked_at": db.now_iso()}
         if integ["auto_incident"] and integ["service_id"] and previous is not None:
-            _handle_integration_incident_lifecycle(integ, previous["status"]["reachable"], status["reachable"])
+            linked_service = db.get_service(integ["service_id"])
+            if not linked_service or not _within_grace_period(linked_service):
+                _handle_integration_incident_lifecycle(integ, previous["status"]["reachable"], status["reachable"])
 
 
 def _attach_integration_status(services):
@@ -258,13 +266,15 @@ def compute_overall_status(services):
         return "degraded"
     if "maintenance" in statuses:
         return "maintenance"
+    if "slow" in statuses:
+        return "slow"
     return "operational"
 
 
 STATUS_BADGE_LABEL = {"operational": "operational", "degraded": "degraded",
-                       "maintenance": "maintenance", "down": "down"}
+                       "maintenance": "maintenance", "down": "down", "slow": "slow"}
 STATUS_BADGE_COLOR = {"operational": "#3ddc97", "degraded": "#ffb545",
-                       "maintenance": "#a08bff", "down": "#ff5470"}
+                       "maintenance": "#a08bff", "down": "#ff5470", "slow": "#ffb545"}
 
 
 def _render_badge_svg(label, value, color):
@@ -823,6 +833,27 @@ def _process_maintenance_and_notify():
             notifications.notify("Maintenance ended", f"{service_name}: {window_title}")
 
 
+def _check_status_for_response(r, elapsed_ms, slow_threshold_ms):
+    """A response was received at all, so the service is reachable - only a 5xx
+    (actual server-side error) counts as degraded. Anything else the server sends
+    back, including a 401/403 auth challenge (e.g. Bazarr's login prompt) or a 404,
+    means it answered and is up. 'Slow' is purely a latency observation layered on
+    top of an otherwise-healthy response, never on top of a 5xx."""
+    if r.status_code >= 500:
+        return "degraded"
+    if slow_threshold_ms and elapsed_ms > slow_threshold_ms:
+        return "slow"
+    return "operational"
+
+
+def _within_grace_period(service):
+    """True while a service is still inside its configured post-startup grace
+    window (time since this process started, not since the service itself booted -
+    good enough since they're expected to start around the same time)."""
+    grace = service.get("startup_grace_seconds") or 0
+    return grace > 0 and (time.monotonic() - _APP_START) < grace
+
+
 def run_health_checks():
     while True:
         try:
@@ -840,13 +871,16 @@ def run_health_checks():
                 try:
                     r = requests.get(s["check_url"], timeout=5)
                     elapsed_ms = int((time.time() - start) * 1000)
-                    status = "operational" if r.ok else "degraded"
+                    status = _check_status_for_response(r, elapsed_ms, s["slow_threshold_ms"])
                 except requests.RequestException:
                     elapsed_ms = None
                     status = "down"
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
-                if s["auto_incident"]:
+                # Status/response time are recorded above regardless - only the
+                # auto-incident escalation is held back during the grace window, so a
+                # service that's still booting doesn't get an incident opened on it.
+                if s["auto_incident"] and not _within_grace_period(s):
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
         except Exception as e:
