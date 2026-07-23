@@ -59,3 +59,60 @@ def test_fetch_integration_status_dispatch():
 
     result = integrations.fetch_integration_status({"kind": "unknown", "base_url": "x", "api_key": "y"})
     assert "Unknown integration kind" in result["error"]
+
+
+def test_fetch_jellyfin_sessions_counts_transcodes_only():
+    fake_sessions = [
+        {"PlayState": {"PlayMethod": "Transcode"}},
+        {"PlayState": {"PlayMethod": "DirectPlay"}},
+        {"PlayState": {"PlayMethod": "Transcode"}},
+        {},  # no PlayState at all - shouldn't crash
+    ]
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value=fake_sessions)
+    with patch("requests.get", return_value=resp):
+        assert integrations.fetch_jellyfin_sessions("http://jellyfin:8096", "key") == 2
+
+
+def test_fetch_jellyfin_sessions_degrades_to_zero_on_failure():
+    assert integrations.fetch_jellyfin_sessions("http://localhost:1", "key") == 0
+
+
+def test_fetch_jellyfin_running_tasks_filters_running_state():
+    fake_tasks = [
+        {"Name": "Trickplay Image Extraction", "State": "Running"},
+        {"Name": "Scan Media Library", "State": "Idle"},
+    ]
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value=fake_tasks)
+    with patch("requests.get", return_value=resp):
+        tasks = integrations.fetch_jellyfin_running_tasks("http://jellyfin:8096", "key")
+    assert tasks == ["Trickplay Image Extraction"]
+
+
+def test_fetch_jellyfin_running_tasks_degrades_to_empty_on_failure():
+    assert integrations.fetch_jellyfin_running_tasks("http://localhost:1", "key") == []
+
+
+def test_high_load_thresholds_defaults(isolated_db):
+    assert integrations.high_load_thresholds() == {"cpu_percent": 90, "disk_io_mbs": 150, "network_mbs": 80}
+
+
+def test_evaluate_high_load_merges_jellyfin_activity(isolated_db):
+    integrations._jellyfin_activity_cache["transcoding"] = 0
+    integrations._jellyfin_activity_cache["running_tasks"] = []
+    snapshot = {"cpu_percent": 10, "disks": [], "network": None}
+    assert integrations.evaluate_high_load(snapshot) == {"active": False, "reasons": []}
+
+    integrations._jellyfin_activity_cache["transcoding"] = 3
+    result = integrations.evaluate_high_load(snapshot)
+    assert result["active"] is True
+    assert "3 active transcode(s)" in result["reasons"]
+
+    integrations._jellyfin_activity_cache["transcoding"] = 0
+    integrations._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
+    result = integrations.evaluate_high_load(snapshot)
+    assert result["active"] is True
+    assert any("Trickplay" in r for r in result["reasons"])

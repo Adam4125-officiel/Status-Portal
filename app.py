@@ -145,12 +145,12 @@ def _enrich_incidents(incidents):
     return incidents
 
 
-ADMIN_RESOURCE_VISIBLE = {"cpu": True, "memory": True, "disks": True, "disk_io": True,
+ADMIN_RESOURCE_VISIBLE = {"cpu": True, "memory": True, "disks": True,
                           "network": True, "gpu": True}
 
 _PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_disks",
-                         "show_public_disk_io", "show_public_network", "show_public_gpu",
-                         "show_public_vms"]
+                         "show_public_network", "show_public_gpu",
+                         "show_public_vms", "show_public_highload"]
 
 
 def _public_resource_visibility():
@@ -192,6 +192,17 @@ def _refresh_integration_cache():
             if not linked_service or not _within_grace_period(linked_service):
                 _handle_integration_incident_lifecycle(integ, previous["status"]["reachable"], status["reachable"])
 
+    # High-load detection wants a couple of Jellyfin-specific signals (active
+    # transcode count, running scheduled tasks like trickplay generation) beyond
+    # plain reachability - refreshed here (background loop) for the same reason as
+    # everything else in this function: never queried live from a request handler.
+    jellyfin = next((i for i in db.list_integrations() if i["kind"] == "jellyfin" and i["enabled"]), None)
+    if jellyfin:
+        try:
+            integrations.refresh_jellyfin_activity_cache(jellyfin["base_url"], jellyfin["api_key"])
+        except Exception as e:
+            print(f"[health-check] Jellyfin activity refresh failed: {e}")
+
 
 def _attach_integration_status(services):
     """Reads the cache only - see the module-level note above for why."""
@@ -230,15 +241,19 @@ def index():
     overall = compute_overall_status(services)
     site_name = db.get_setting("site_name", "Server")
     visible = _public_resource_visibility()
-    show_any_resource = any(visible[k] for k in ("cpu", "memory", "disks", "disk_io", "network", "gpu"))
-    snapshot = monitoring.get_resource_snapshot() if show_any_resource else None
-    vms = monitoring.get_vm_snapshot() if visible["vms"] else []
+    show_any_resource = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
+    # High-load detection needs a live snapshot even if none of the resource cards
+    # themselves are set to display - the badge is a separate toggle from them.
+    snapshot = monitoring.get_resource_snapshot() if (show_any_resource or visible["highload"]) else None
+    vms = monitoring.get_cached_vm_snapshot() if visible["vms"] else []
+    high_load = integrations.evaluate_high_load(snapshot) if (visible["highload"] and snapshot) \
+        else {"active": False, "reasons": []}
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, maintenance_windows=maintenance_windows, info=info, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
-                            snapshot=snapshot, vms=vms)
+                            snapshot=snapshot, vms=vms, high_load=high_load)
 
 
 @app.route("/api/status")
@@ -643,7 +658,7 @@ def admin_info():
 @login_required
 def admin_resources():
     snapshot = monitoring.get_resource_snapshot()
-    vms = monitoring.get_vm_snapshot()
+    vms = monitoring.get_cached_vm_snapshot()
     return render_template("admin_resources.html", snapshot=snapshot, vms=vms, visible=ADMIN_RESOURCE_VISIBLE,
                             refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
 
@@ -772,6 +787,7 @@ def admin_settings():
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
                             show_public=_public_resource_visibility(),
+                            highload_thresholds=integrations.high_load_thresholds(),
                             discord_configured=bool(config.DISCORD_WEBHOOK_URL),
                             ntfy_configured=bool(config.NTFY_URL),
                             active="settings")
@@ -783,6 +799,9 @@ def admin_settings_general():
     db.set_setting("site_name", request.form.get("site_name", "").strip() or "Server")
     for key in _PUBLIC_RESOURCE_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
+    for key, default in integrations.HIGHLOAD_DEFAULTS.items():
+        raw = request.form.get(f"highload_{key}", "").strip()
+        db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
 
@@ -956,6 +975,7 @@ def start_background_checker():
 if __name__ == "__main__":
     db.init_db()
     start_background_checker()
+    monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
     discord_bot.start()
     # debug must stay False whenever this is reachable outside localhost.
     app.run(host="0.0.0.0", port=5000, debug=False)

@@ -51,10 +51,51 @@ def test_build_status_data_respects_include_toggles(isolated_db):
     data = discord_bot.build_status_data(everything_on)
     headings = [h for h, _ in data["sections"]]
     assert "Services" in headings
+    assert "Active incident(s)" in headings  # still-open ("investigating") incident
     assert "Recent incidents" in headings
     assert "Announcements" in headings
     joined = "\n".join(line for _, lines in data["sections"] for line in lines)
     assert "Jellyfin" in joined and "Test outage" in joined and "Heads up" in joined
+
+
+def test_build_status_data_active_incident_disappears_once_resolved(isolated_db):
+    db.create_incident({"title": "Test outage", "status": "investigating"})
+    incident = db.list_incidents()[0]
+    include = {"services": False, "incidents": True, "announcements": False,
+               "maintenance": False, "resources": {}}
+
+    data = discord_bot.build_status_data(include)
+    assert dict(data["sections"])["Active incident(s)"] == ["🚨 [investigating] Test outage"]
+
+    db.update_incident(incident["id"], {"title": "Test outage", "status": "resolved"})
+    data = discord_bot.build_status_data(include)
+    assert "Active incident(s)" not in dict(data["sections"])
+
+
+def test_build_status_data_includes_service_links(isolated_db):
+    service = db.list_services()[0]
+    db.replace_service_links(service["id"], [("Tailscale", "https://ts.example/jellyfin")])
+    include = {"services": True, "incidents": False, "announcements": False,
+               "maintenance": False, "resources": {}}
+    data = discord_bot.build_status_data(include)
+    service_lines = dict(data["sections"])["Services"]
+    assert any("[Tailscale](https://ts.example/jellyfin)" in line for line in service_lines)
+
+
+def test_build_status_data_highload_section(isolated_db, monkeypatch):
+    include = {"services": False, "incidents": False, "announcements": False,
+               "maintenance": False, "resources": {}, "highload": True}
+
+    monkeypatch.setattr(discord_bot.monitoring, "get_resource_snapshot", lambda: {})
+    monkeypatch.setattr(discord_bot.integrations, "evaluate_high_load",
+                         lambda snap: {"active": False, "reasons": []})
+    data = discord_bot.build_status_data(include)
+    assert "High load" not in dict(data["sections"])
+
+    monkeypatch.setattr(discord_bot.integrations, "evaluate_high_load",
+                         lambda snap: {"active": True, "reasons": ["CPU 95%"]})
+    data = discord_bot.build_status_data(include)
+    assert dict(data["sections"])["High load"] == ["⚠ CPU 95%"]
 
     everything_off = {"services": False, "incidents": False, "announcements": False,
                        "maintenance": False, "resources": {}}
@@ -66,8 +107,7 @@ def test_build_status_data_respects_include_toggles(isolated_db):
 def test_build_status_data_resource_toggles_are_individually_checkable(isolated_db):
     only_cpu = {"services": False, "incidents": False, "announcements": False,
                 "maintenance": False, "resources": {"cpu": True, "memory": False, "disks": False,
-                                                      "disk_io": False, "network": False,
-                                                      "gpu": False, "vms": False}}
+                                                      "network": False, "gpu": False, "vms": False}}
     data = discord_bot.build_status_data(only_cpu)
     assert len(data["sections"]) == 1
     heading, lines = data["sections"][0]

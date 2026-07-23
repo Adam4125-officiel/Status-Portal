@@ -23,6 +23,7 @@ import threading
 
 import config
 import db
+import integrations
 import monitoring
 
 _state = {"connected": False, "user": None, "last_error": None}
@@ -43,11 +44,12 @@ PRESENCE_TEXT = {
 _EMBED_COLOR_NAME = {"operational": "green", "slow": "orange", "degraded": "gold",
                       "down": "red", "maintenance": "purple"}
 
-RESOURCE_KEYS = ("cpu", "memory", "disks", "disk_io", "network", "gpu", "vms")
+RESOURCE_KEYS = ("cpu", "memory", "disks", "network", "gpu", "vms")
 _RESOURCE_DEFAULTS = {key: "0" for key in RESOURCE_KEYS}  # all off by default, admin opts in per-item
 
-INCLUDE_KEYS = ("services", "incidents", "announcements", "maintenance")
-_INCLUDE_DEFAULTS = {"services": "1", "incidents": "1", "announcements": "1", "maintenance": "1"}
+INCLUDE_KEYS = ("services", "incidents", "announcements", "maintenance", "highload")
+_INCLUDE_DEFAULTS = {"services": "1", "incidents": "1", "announcements": "1", "maintenance": "1",
+                     "highload": "0"}  # opt-in, like resources - costs a live resource snapshot
 
 
 def get_status():
@@ -114,21 +116,30 @@ def _resource_lines(toggles):
         return []
     lines = []
     if toggles.get("cpu"):
-        lines.append(f"CPU: {snap['cpu_percent']}%")
+        cpu_line = f"CPU: {snap['cpu_percent']}%"
+        if snap.get("cpu_temp_c") is not None:
+            cpu_line += f", {snap['cpu_temp_c']}°C"
+        lines.append(cpu_line)
     if toggles.get("memory"):
         lines.append(f"RAM: {snap['mem_used_gb']}/{snap['mem_total_gb']} GB ({snap['mem_percent']}%)")
     if toggles.get("disks"):
         for d in snap["disks"]:
-            lines.append(f"💽 {d['display_name']}: {d['percent']}% used, {d['free_gb']} GB free")
-    if toggles.get("disk_io") and snap["disk_io"]:
-        lines.append(f"Disk I/O: ↓{snap['disk_io']['read_mb_s']} MB/s ↑{snap['disk_io']['write_mb_s']} MB/s")
+            line = f"💽 {d['display_name']}: {d['percent']}% used, {d['free_gb']} GB free"
+            if d.get("temp_c") is not None:
+                line += f", {d['temp_c']}°C"
+            if d.get("io"):
+                line += f" (↓{d['io']['read_mb_s']} ↑{d['io']['write_mb_s']} MB/s)"
+            lines.append(line)
     if toggles.get("network") and snap["network"]:
         lines.append(f"Network: ↓{snap['network']['down_mb_s']} MB/s ↑{snap['network']['up_mb_s']} MB/s")
     if toggles.get("gpu"):
         for g in snap["gpus"]:
-            lines.append(f"🎮 {g['name']}: {g['util_percent']}%, {g['mem_used_gb']}/{g['mem_total_gb']} GB")
+            line = f"🎮 {g['name']}: {g['util_percent']}%, {g['mem_used_gb']}/{g['mem_total_gb']} GB"
+            if g.get("temp_c") is not None:
+                line += f", {g['temp_c']}°C"
+            lines.append(line)
     if toggles.get("vms"):
-        for vm in monitoring.get_vm_snapshot():
+        for vm in monitoring.get_cached_vm_snapshot():
             lines.append(f"🖥 {vm['name']}: {vm['state']}")
     return lines
 
@@ -144,8 +155,15 @@ def build_status_data(include):
     sections = []
 
     if include.get("services") and services:
-        lines = [f"{STATUS_ICON.get(s['status'], '⚪')} **{s['name']}** — "
-                 f"{STATUS_LABEL.get(s['status'], s['status'])}" for s in services]
+        lines = []
+        for s in services:
+            line = (f"{STATUS_ICON.get(s['status'], '⚪')} **{s['name']}** — "
+                    f"{STATUS_LABEL.get(s['status'], s['status'])}")
+            all_links = ([("Open", s["url"])] if s.get("url") else []) + \
+                [(l["label"], l["url"]) for l in db.list_service_links(s["id"])]
+            if all_links:
+                line += " (" + ", ".join(f"[{label}]({url})" for label, url in all_links) + ")"
+            lines.append(line)
         sections.append(("Services", lines))
 
     if include.get("maintenance"):
@@ -159,6 +177,13 @@ def build_status_data(include):
             sections.append(("Scheduled maintenance", lines))
 
     if include.get("incidents"):
+        # Any still-open incident, uncapped and separate from the "recent" list below
+        # - a long-running incident shouldn't silently scroll out of the summary just
+        # because newer (already-resolved) incidents pushed it past a 5-item cap.
+        open_incidents = [i for i in db.list_incidents(limit=20) if i["status"] != "resolved"]
+        if open_incidents:
+            lines = [f"🚨 [{i['status']}] {i['title']}" for i in open_incidents]
+            sections.append(("Active incident(s)", lines))
         incidents = db.list_incidents(limit=5)
         if incidents:
             lines = [f"• [{i['status']}] {i['title']}" for i in incidents]
@@ -173,6 +198,14 @@ def build_status_data(include):
     resource_lines = _resource_lines(include.get("resources") or {})
     if resource_lines:
         sections.append(("Resources", resource_lines))
+
+    if include.get("highload"):
+        try:
+            high_load = integrations.evaluate_high_load(monitoring.get_resource_snapshot())
+        except Exception:
+            high_load = {"active": False, "reasons": []}
+        if high_load["active"]:
+            sections.append(("High load", [f"⚠ {r}" for r in high_load["reasons"]]))
 
     return {"site_name": site_name, "overall": overall, "sections": sections}
 

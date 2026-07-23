@@ -10,6 +10,9 @@ to care which kind of service it's showing:
 """
 import requests
 
+import db
+import monitoring
+
 TIMEOUT = 5
 
 
@@ -110,3 +113,84 @@ def fetch_jellyseerr_status(base_url, api_key):
         pass
 
     return {"reachable": True, "version": version, "issues": issues, "error": None}
+
+
+# ---------------------------------------------------------------------------
+# High server load indicator
+# ---------------------------------------------------------------------------
+# Jellyfin-derived load signals (active transcodes, running scheduled tasks such as
+# trickplay image extraction) - refreshed from app.py's existing background
+# health-check loop, never fetched live from a request handler, same rule as every
+# other outbound HTTP call in this app. Defaults represent "nothing configured/no
+# data yet", which is exactly correct until the first refresh happens.
+_jellyfin_activity_cache = {"transcoding": 0, "running_tasks": []}
+
+
+def fetch_jellyfin_sessions(base_url, api_key):
+    """Count of active playback sessions currently transcoding
+    (PlayState.PlayMethod == "Transcode") - one signal used to detect high server
+    load. Best-effort: any failure returns 0 rather than raising, same
+    degrade-gracefully pattern as every fetcher above."""
+    base_url = base_url.rstrip("/")
+    headers = {"X-Emby-Token": api_key}
+    try:
+        r = requests.get(f"{base_url}/Sessions", headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+        sessions = r.json()
+    except (requests.RequestException, ValueError):
+        return 0
+    return sum(1 for s in sessions if (s.get("PlayState") or {}).get("PlayMethod") == "Transcode")
+
+
+def fetch_jellyfin_running_tasks(base_url, api_key):
+    """Names of currently-running Jellyfin scheduled tasks. Trickplay image
+    extraction and library scans don't show up as playback sessions - a running
+    scheduled task is the only way the Jellyfin API surfaces them. Best-effort:
+    any failure returns []."""
+    base_url = base_url.rstrip("/")
+    headers = {"X-Emby-Token": api_key}
+    try:
+        r = requests.get(f"{base_url}/ScheduledTasks", headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+        tasks = r.json()
+    except (requests.RequestException, ValueError):
+        return []
+    return [t.get("Name", "task") for t in tasks if t.get("State") == "Running"]
+
+
+def refresh_jellyfin_activity_cache(base_url, api_key):
+    """Called from app.py's background health-check loop (never from a request
+    handler) for the first enabled Jellyfin-kind integration, if any."""
+    _jellyfin_activity_cache["transcoding"] = fetch_jellyfin_sessions(base_url, api_key)
+    _jellyfin_activity_cache["running_tasks"] = fetch_jellyfin_running_tasks(base_url, api_key)
+
+
+def get_cached_jellyfin_activity():
+    return dict(_jellyfin_activity_cache)
+
+
+HIGHLOAD_DEFAULTS = {"cpu_percent": "90", "disk_io_mbs": "150", "network_mbs": "80"}
+
+
+def high_load_thresholds():
+    """Admin-configurable thresholds (DB settings, editable at /admin/settings) -
+    read here rather than duplicated in both app.py and discord_bot.py, since both
+    need the exact same setting keys/defaults to stay in sync with each other."""
+    return {key: int(db.get_setting(f"highload_{key}", default))
+            for key, default in HIGHLOAD_DEFAULTS.items()}
+
+
+def evaluate_high_load(snapshot):
+    """The one place both the public page (app.py) and the Discord bot compute the
+    "server under high load" indicator, so the two can't drift out of sync -
+    combines monitoring.evaluate_high_load() (system-metric thresholds: CPU, disk
+    I/O, network) with the Jellyfin-derived signals cached above."""
+    result = monitoring.evaluate_high_load(snapshot, high_load_thresholds())
+    activity = get_cached_jellyfin_activity()
+    if activity["transcoding"] > 0:
+        result["reasons"].append(f"{activity['transcoding']} active transcode(s)")
+        result["active"] = True
+    if activity["running_tasks"]:
+        result["reasons"].append("Running: " + ", ".join(activity["running_tasks"]))
+        result["active"] = True
+    return result
