@@ -67,6 +67,34 @@ settings-table read that `admin_service_new` uses to pre-populate the "New servi
 form (`admin_service_form.html` already renders these same fields for editing, so
 the same template can take an optional `defaults` context when `service` is None).
 
+## Possible Linux-specific fork/mode
+
+Idea floated 2026-07-23, prompted by live-testing the retry feature entirely in
+this (Linux) sandbox with real HTTP servers and no shortcuts — a reminder that
+almost everything in this app (services/incidents/announcements/maintenance, the
+Discord bot, integrations, high-load via system metrics, retry, slow status, grace
+periods) is already fully cross-platform, built on psutil/Flask/SQLite with nothing
+OS-specific. The *only* Windows-only pieces are in `monitoring.py`: Hyper-V VM
+detection, Windows volume labels, CPU/disk temperature (PowerShell/CIM), and
+per-disk I/O's drive-letter-to-PhysicalDriveN correlation.
+
+Not started, just noted — if picked up, a Linux-native `monitoring.py` backend
+would likely be *simpler* than the Windows one in places, not harder:
+
+- **Per-disk I/O** is actually easier on Linux — `psutil.disk_io_counters(perdisk=True)`
+  already returns clean device names (`sda`, `nvme0n1`) with no PhysicalDriveN-style
+  correlation step needed; only partition→parent-disk name mapping (stripping a
+  trailing partition number/`pN` suffix) is required, which is more
+  straightforward than the Windows `Get-Partition`/`Get-PhysicalDisk` dance.
+- **CPU temperature** — `psutil.sensors_temperatures()` works natively on Linux
+  (reads `/sys/class/hwmon` under the hood), no PowerShell/CIM subprocess needed at
+  all, and no ACPI-thermal-zone unreliability class of problem.
+- **Per-disk temperature** — likely still needs `smartctl` (or parsing
+  `/sys/class/hwmon` labels, less reliable) for the same reason as the
+  HWiNFO/smartmontools option discussed above — no free lunch here on either OS.
+- **VM detection** — Hyper-V doesn't apply; would need a different concept
+  entirely (libvirt/KVM, or Docker container status) rather than a direct port.
+
 ## Jellyfin-backed user permissions
 
 Use Jellyfin's own user database as an identity source, so individual Jellyfin
