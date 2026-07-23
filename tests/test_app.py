@@ -539,6 +539,16 @@ def test_public_page_incident_and_announcement_times_carry_utc_data_attribute(cl
     assert b' UTC</span>' in resp.data  # no-JS fallback text still reads as UTC
 
 
+def test_public_page_service_last_checked_carries_utc_data_attribute(isolated_db, client):
+    service = db.list_services()[0]
+    db.update_service(service["id"], {**service, "auto_check": 1, "check_url": "http://x"})
+    db.update_service_status_from_check(service["id"], "operational", 42)
+
+    resp = client.get("/")
+    assert b'class="local-time-short" data-utc="' in resp.data
+    assert b"42 ms" in resp.data
+
+
 def test_service_without_url_hides_open_button(client):
     db.create_service({"name": "NoLinkService", "url": ""})
     resp = client.get("/")

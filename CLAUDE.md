@@ -85,15 +85,22 @@ DB-backed Settings pages, not a code edit.
   single-attempt behavior.
 - **Timestamps are rendered server-side as UTC, converted to the visitor's local
   time client-side (added 2026-07-23).** Every public timestamp
-  (`index.html`: announcements, incidents/updates, maintenance windows) is wrapped
-  as `<span class="local-time" data-utc="{iso}">{utc fallback text}</span>`;
-  `static/js/local_time.js` finds every `.local-time[data-utc]` element on load and
-  overwrites its text with `Date.toLocaleString()` in the browser's own timezone.
-  The UTC fallback text stays in the DOM for no-JS clients/JS failures — the server
-  itself has no idea what timezone a visitor is in, so this has to happen
-  client-side; don't try to guess/convert timezones server-side. If you add another
-  timestamp to the public page, follow the same `data-utc` pattern rather than
-  rendering raw UTC text directly.
+  (`index.html`: announcements, incidents/updates, maintenance windows, and a
+  service card's "upd. HH:MM" last-checked time) is wrapped as
+  `<span class="local-time" data-utc="{iso}">{utc fallback text}</span>` (or
+  `class="local-time-short"` for the compact service-card spot, which gets
+  hour:minute only — no date/timezone-name clutter — instead of the full format);
+  `static/js/local_time.js` finds every `.local-time[data-utc]`/
+  `.local-time-short[data-utc]` element on load and overwrites its text with
+  `Date.toLocaleString()` in the browser's own timezone. The UTC fallback text
+  stays in the DOM for no-JS clients/JS failures — the server itself has no idea
+  what timezone a visitor is in, so this has to happen client-side; don't try to
+  guess/convert timezones server-side. **First pass (2026-07-23) missed the
+  service-card timestamp** — caught by the user testing rc.2, not by review or
+  tests — so when adding another timestamp to the public page, actually grep for
+  `_at[` / `[:16]` / `[11:16]` across every template first rather than trusting
+  that the obvious spots (incidents/announcements/maintenance) are the only ones;
+  follow the same `data-utc` pattern for whatever turns up.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 

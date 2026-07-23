@@ -94,7 +94,7 @@
           <div class="service-card__foot">
             <span class="service-card__ping">
               {% if s.auto_check and s.last_checked %}
-                {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. {{ s.last_checked[11:16] }}
+                {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. <span class="local-time-short" data-utc="{{ s.last_checked }}">{{ s.last_checked[11:16] }} UTC</span>
               {% elif s.auto_check %}
                 check pending
               {% else %}&nbsp;{% endif %}
