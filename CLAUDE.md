@@ -289,11 +289,18 @@ authorization covering commit/push/shell commands for this project, granted
 
 1. **Versioning**: `vMAJOR.MINOR.PATCH`, with an optional `-rc.N` suffix for anything
    not yet user-verified end-to-end (mark the GitHub release as a pre-release too).
-   First tagged release is `v1.0.0` — the project reached a "working great",
-   feature-complete state as of 2026-07-22. Bump MINOR for new features, PATCH for
-   bug-fix-only changes, MAJOR only for an actual breaking change (should be rare —
-   the whole `_ensure_column` schema policy exists specifically to avoid needing
-   these).
+   First tagged release is `v1.0.0` (2026-07-22). Bump MINOR for new features, PATCH
+   for bug-fix-only changes, MAJOR only for an actual breaking change (should be
+   rare — the whole `_ensure_column` schema policy exists specifically to avoid
+   needing these). `v1.1.0` (2026-07-23) is the second, shipped as a **full
+   release, not `-rc`**, by the user's explicit call — despite the Windows-only
+   monitoring pieces (CPU/disk temp, per-disk I/O, VM detection), Jellyfin
+   `/Sessions`/`/ScheduledTasks` parsing, and the Discord guild whitelist's
+   `guild.leave()` call all still being unverified against the real thing (only
+   unit-tested/mocked) at release time. That was a deliberate, informed tradeoff by
+   the user, not an oversight — don't read "it's a full release" as "everything in
+   it was end-to-end confirmed"; check the per-feature verification notes above for
+   what actually was.
 2. **Changelog**: build from `git log <previous-tag>..HEAD --oneline`, grouped
    informally into Added / Fixed / Changed, written as the release body. Keep it
    readable — a person, not a machine, reads this.
