@@ -50,6 +50,23 @@ take on a new dependency or implementation. If revisited, the options considered
   is queryable the same simple way this app already queries Hyper-V. More things to
   install, but each piece is simpler than shared-memory parsing.
 
+## Global per-service defaults (form pre-fill, not live inheritance)
+
+Requested 2026-07-23: a "service defaults" section in Settings covering the
+per-service knobs added this session — slow threshold, startup grace period, retry
+count/interval, auto-incident — so creating a new service starts pre-filled with
+the admin's usual values instead of the hardcoded defaults (0/disabled) every time.
+
+Scope, as discussed: **pre-fill only, not a live-cascading override system.** Once
+a service is created, its stored column values are just normal per-service values
+like today — changing the global defaults later doesn't retroactively affect
+services that already exist, and there's no "inherit from global" flag/UI needed on
+the per-service form. This keeps `run_health_checks()` and the rest of the schema
+completely unchanged; the only new code is a `service_defaults_*` (or similar)
+settings-table read that `admin_service_new` uses to pre-populate the "New service"
+form (`admin_service_form.html` already renders these same fields for editing, so
+the same template can take an optional `defaults` context when `service` is None).
+
 ## Jellyfin-backed user permissions
 
 Use Jellyfin's own user database as an identity source, so individual Jellyfin
