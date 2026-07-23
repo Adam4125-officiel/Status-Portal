@@ -73,6 +73,27 @@ DB-backed Settings pages, not a code edit.
   incident over it. Measured from `app._APP_START` (process start), not from
   anything service-specific — good enough since services are expected to boot
   around the same time as the portal itself, not something to over-engineer.
+- **`retry_count`/`retry_interval_seconds` (per service, added 2026-07-23) retry a
+  'down' result inline before it's ever recorded, not after.** `app._check_service_status()`
+  wraps `app._run_single_check()` — only a `down` outcome is retried (degraded/slow/
+  operational are never worth retrying, and only `down` ever opens an auto-incident),
+  the first non-down result wins immediately, and this blocks the background
+  health-check thread for up to `retry_count * retry_interval_seconds` seconds for
+  that one service — an intentional tradeoff (background thread, not a request
+  handler), not a bug. `retry_count=0` (the default, and the value every
+  pre-existing service gets via `_ensure_column`) preserves the exact original
+  single-attempt behavior.
+- **Timestamps are rendered server-side as UTC, converted to the visitor's local
+  time client-side (added 2026-07-23).** Every public timestamp
+  (`index.html`: announcements, incidents/updates, maintenance windows) is wrapped
+  as `<span class="local-time" data-utc="{iso}">{utc fallback text}</span>`;
+  `static/js/local_time.js` finds every `.local-time[data-utc]` element on load and
+  overwrites its text with `Date.toLocaleString()` in the browser's own timezone.
+  The UTC fallback text stays in the DOM for no-JS clients/JS failures — the server
+  itself has no idea what timezone a visitor is in, so this has to happen
+  client-side; don't try to guess/convert timezones server-side. If you add another
+  timestamp to the public page, follow the same `data-utc` pattern rather than
+  rendering raw UTC text directly.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
@@ -102,6 +123,17 @@ DB-backed Settings pages, not a code edit.
   `None` gracefully (same pattern as GPU detection with no NVIDIA card), but "shows
   nothing" on the user's actual box needs confirming there, not assumed to be a bug
   here.
+- **Confirmed on real hardware (2026-07-23)**: CPU temp via the ACPI thermal zone
+  returns nothing at all on the user's desktop (common — that WMI class is really
+  meant for laptops/OEM systems with ACPI-exposed thermal zones, not enthusiast
+  desktop boards reading sensors via the Super I/O/EC chip, which is what tools
+  like HWiNFO do instead). `Get-StorageReliabilityCounter` also returned a literal
+  `0` (not null) for one drive — `_query_windows_disk_details()` now treats `0` the
+  same as "no reading" (a real drive is never 0°C) rather than displaying it as if
+  it were a genuine reading. Neither of these swaps in a better data source (see
+  `ROADMAP.md` → "More reliable CPU/disk temperature via HWiNFO" for the two
+  options considered and why they weren't built yet) — don't assume this is fully
+  fixed just because the obviously-wrong `0°C` display is gone.
 
 ## High-load indicator (`monitoring.evaluate_high_load()` / `integrations.evaluate_high_load()`)
 
@@ -118,6 +150,13 @@ DB-backed Settings pages, not a code edit.
   somewhere neither of them owns. If you add another cross-cutting signal both the
   web page and the bot need, this is probably where it belongs, not duplicated in
   both.
+- **The public page can also show Jellyfin's running scheduled tasks directly**
+  (`show_public_jellyfin_tasks` setting, added 2026-07-23) — separate from the
+  high-load indicator above, this just renders
+  `integrations.get_cached_jellyfin_activity()["running_tasks"]` (trickplay
+  generation, library scans, etc.) as its own "Jellyfin activity" section whenever
+  the list is non-empty, regardless of whether high-load's thresholds are also
+  tripped. Reads the same background-refreshed cache — no extra polling added.
 
 ## Discord bot (`discord_bot.py`) — reworked 2026-07-22, read this before touching it again
 

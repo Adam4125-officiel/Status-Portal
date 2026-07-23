@@ -2,6 +2,7 @@ import pytest
 
 import db
 import app as app_module
+import integrations as integrations_module
 
 
 @pytest.fixture
@@ -14,6 +15,11 @@ def isolated_db(tmp_path, monkeypatch):
     # clear it so one test's cached entries can't leak into another test that happens
     # to create an integration with the same (autoincrement, per-fresh-db) id.
     app_module._integration_status_cache.clear()
+    # Same idea for the Jellyfin activity cache (transcode count/running tasks) -
+    # module-level, not tied to any one integration id, so it can't be reset just by
+    # a fresh DB.
+    integrations_module._jellyfin_activity_cache["transcoding"] = 0
+    integrations_module._jellyfin_activity_cache["running_tasks"] = []
     return db.DB_PATH
 
 

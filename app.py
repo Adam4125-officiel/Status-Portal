@@ -150,7 +150,7 @@ ADMIN_RESOURCE_VISIBLE = {"cpu": True, "memory": True, "disks": True,
 
 _PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_disks",
                          "show_public_network", "show_public_gpu",
-                         "show_public_vms", "show_public_highload"]
+                         "show_public_vms", "show_public_highload", "show_public_jellyfin_tasks"]
 
 
 def _public_resource_visibility():
@@ -248,12 +248,13 @@ def index():
     vms = monitoring.get_cached_vm_snapshot() if visible["vms"] else []
     high_load = integrations.evaluate_high_load(snapshot) if (visible["highload"] and snapshot) \
         else {"active": False, "reasons": []}
+    jellyfin_activity = integrations.get_cached_jellyfin_activity() if visible["jellyfin_tasks"] else None
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, maintenance_windows=maintenance_windows, info=info, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
-                            snapshot=snapshot, vms=vms, high_load=high_load)
+                            snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity)
 
 
 @app.route("/api/status")
@@ -876,6 +877,37 @@ def _within_grace_period(service):
     return grace > 0 and (time.monotonic() - _APP_START) < grace
 
 
+def _run_single_check(check_url, slow_threshold_ms):
+    """One HTTP attempt against check_url. Returns (status, elapsed_ms)."""
+    start = time.time()
+    try:
+        r = requests.get(check_url, timeout=5)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
+    except requests.RequestException:
+        return "down", None
+
+
+def _check_service_status(service):
+    """Runs a service's health check, retrying only a 'down' result - a degraded/
+    slow/operational result is never worth retrying, and only 'down' ever opens an
+    auto-incident (see _handle_incident_lifecycle), so retrying anything else would
+    just delay the loop for no benefit. `retry_count` extra attempts are made
+    (0 = disabled, the historical single-attempt behavior), spaced
+    `retry_interval_seconds` apart; the first non-down result wins immediately, so a
+    service that recovers seconds later never triggers a spurious incident. Runs
+    inline in the background health-check thread - not a request handler, so
+    blocking here for the retry window is the intended tradeoff, not a bug."""
+    status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+    retries_left = service.get("retry_count") or 0
+    interval = service.get("retry_interval_seconds") or 0
+    while status == "down" and retries_left > 0:
+        time.sleep(interval)
+        status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+        retries_left -= 1
+    return status, elapsed_ms
+
+
 def run_health_checks():
     while True:
         try:
@@ -889,14 +921,7 @@ def run_health_checks():
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
                     continue
                 previous_status = s["status"]
-                start = time.time()
-                try:
-                    r = requests.get(s["check_url"], timeout=5)
-                    elapsed_ms = int((time.time() - start) * 1000)
-                    status = _check_status_for_response(r, elapsed_ms, s["slow_threshold_ms"])
-                except requests.RequestException:
-                    elapsed_ms = None
-                    status = "down"
+                status, elapsed_ms = _check_service_status(s)
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
                 # Status/response time are recorded above regardless - only the

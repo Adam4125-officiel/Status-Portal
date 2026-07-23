@@ -45,7 +45,7 @@
           {% if a.pinned %}<span class="pin-flag">📌</span>{% endif %}
           {{ a.title }}
         </div>
-        <div class="announcement__time">{{ a.created_at[:16].replace('T', ' ') }} UTC</div>
+        <div class="announcement__time"><span class="local-time" data-utc="{{ a.created_at }}">{{ a.created_at[:16].replace('T', ' ') }} UTC</span></div>
       </div>
       <div class="announcement__body">{{ a.message|richtext }}</div>
     </div>
@@ -121,8 +121,8 @@
           </div>
           {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
           <div class="incident__time">
-            started {{ i.started_at[:16].replace('T', ' ') }} UTC
-            {% if i.resolved_at %}· resolved {{ i.resolved_at[:16].replace('T', ' ') }} UTC{% endif %}
+            started <span class="local-time" data-utc="{{ i.started_at }}">{{ i.started_at[:16].replace('T', ' ') }} UTC</span>
+            {% if i.resolved_at %}· resolved <span class="local-time" data-utc="{{ i.resolved_at }}">{{ i.resolved_at[:16].replace('T', ' ') }} UTC</span>{% endif %}
           </div>
           {% if i.updates %}
           <div class="incident-updates">
@@ -130,7 +130,7 @@
               <div class="incident-updates__row">
                 <span class="badge {{ u.status }}">{{ incident_label[u.status] }}</span>
                 <span class="incident-updates__msg">{{ u.message }}</span>
-                <span class="incident-updates__time">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
+                <span class="incident-updates__time local-time" data-utc="{{ u.created_at }}">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
               </div>
             {% endfor %}
           </div>
@@ -156,7 +156,8 @@
         </div>
         {% if w.description %}<div class="incident__desc">{{ w.description|richtext }}</div>{% endif %}
         <div class="incident__time">
-          {{ w.starts_at[:16].replace('T', ' ') }} → {{ w.ends_at[:16].replace('T', ' ') }} UTC
+          <span class="local-time" data-utc="{{ w.starts_at }}">{{ w.starts_at[:16].replace('T', ' ') }} UTC</span> →
+          <span class="local-time" data-utc="{{ w.ends_at }}">{{ w.ends_at[:16].replace('T', ' ') }} UTC</span>
         </div>
       </div>
     </div>
@@ -177,8 +178,14 @@
   {% include "_vm_table.html" %}
   {% endif %}
 
+  {% if jellyfin_activity and jellyfin_activity.running_tasks %}
+  <div class="section-title">Jellyfin activity</div>
+  <div class="info-block">🔧 Running: {{ jellyfin_activity.running_tasks|join(', ') }}</div>
+  {% endif %}
+
   <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a></footer>
 </div>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/local_time.js') }}"></script>
 {% endblock %}

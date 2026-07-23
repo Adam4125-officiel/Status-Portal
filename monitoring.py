@@ -389,7 +389,12 @@ def _query_windows_disk_details():
     consumer SATA/NVMe drives return null through it even though the drive itself
     reports a SMART temperature; that's a Windows storage-stack limitation, not
     something fixable here, so a disk with no temperature just shows none rather
-    than a guess. Returns {drive_letter: {"disk_number": int, "temp_c": float|None}}."""
+    than a guess. A handful of drives (observed: one whose SMART temperature is
+    only exposed as attribute 190 "Airflow Temperature" rather than the attribute
+    194 "Temperature"/"Drive Temperature" this counter expects) come back as a
+    literal 0 instead of null - 0C is never a real drive reading in practice, so
+    it's treated the same as "no reading" rather than displayed as if it were one.
+    Returns {drive_letter: {"disk_number": int, "temp_c": float|None}}."""
     if os.name != "nt":
         return {}
     stdout = _run_powershell(_DISK_DETAILS_QUERY_COMMAND, timeout=15)
@@ -408,7 +413,7 @@ def _query_windows_disk_details():
         if disk_number is None:
             continue
         temp = entry.get("TemperatureC")
-        temp_c = float(temp) if isinstance(temp, (int, float)) else None
+        temp_c = float(temp) if isinstance(temp, (int, float)) and temp else None
         letters = entry.get("DriveLetters") or []
         if isinstance(letters, str):
             letters = [letters]

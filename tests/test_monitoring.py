@@ -139,6 +139,20 @@ def test_query_windows_disk_details_parses_output(monkeypatch):
     assert details["E"] == {"disk_number": 1, "temp_c": None}
 
 
+def test_query_windows_disk_details_treats_zero_temperature_as_no_reading(monkeypatch):
+    """Get-StorageReliabilityCounter returns a literal 0 (not null) for some drives
+    it can't properly read - observed on a drive whose SMART temperature is only
+    exposed as attribute 190 "Airflow Temperature" rather than attribute 194
+    "Temperature"/"Drive Temperature". 0C is never a real reading, so it should
+    display the same as no reading at all, not as if the drive were freezing."""
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    fake_json = '{"DiskNumber":2,"TemperatureC":0,"DriveLetters":["F"]}'
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda *a, **k: SimpleNamespace(returncode=0, stdout=fake_json, stderr=""))
+    details = monitoring._query_windows_disk_details()
+    assert details["F"] == {"disk_number": 2, "temp_c": None}
+
+
 def test_query_windows_disk_details_handles_single_disk_as_dict(monkeypatch):
     """Same PowerShell/ConvertTo-Json gotcha as the Hyper-V VM query: exactly one
     result comes back as a bare object, not a one-item array."""

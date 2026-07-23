@@ -107,9 +107,14 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   own). Optionally set a **startup grace period (seconds)**: status/response time are
   still recorded normally, but no automatic incident opens for that service until the
   grace period (since the portal itself started) has elapsed, so a slow-booting
-  service doesn't get flagged down before it's even had a chance to start. A service
-  that goes down (outside its grace period) automatically gets an incident opened for
-  it, and auto-resolved when it recovers.
+  service doesn't get flagged down before it's even had a chance to start. Optionally
+  set **retry attempts / seconds between retries**: if a check fails, it's retried
+  that many times (spaced that many seconds apart) before being treated as actually
+  down — handles a service that blips and recovers on its own within seconds/minutes
+  without opening a spurious incident (0 retries = mark it down on the first failed
+  check, the original behavior). A service that goes down (outside its grace period,
+  after any configured retries) automatically gets an incident opened for it, and
+  auto-resolved when it recovers.
 - **Announcements**: banner at the top of the public portal. `**bold**`, auto-clickable links.
 - **Incidents**: history of outages/maintenance, with status
   (investigating → identified → monitoring → resolved) and a per-incident timeline of
@@ -136,7 +141,9 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   bot that lights up when CPU, disk I/O, or network exceed admin-configurable
   thresholds (Settings) — or, if a Jellyfin integration is configured, when Jellyfin
   reports an active transcode or a running background task (e.g. trickplay image
-  extraction).
+  extraction). Separately, the public page can also show **which** Jellyfin
+  background tasks are currently running (its own "Jellyfin activity" section,
+  toggle in Settings) regardless of whether the high-load thresholds are tripped.
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
 - **Settings**: site name, per-cell public resource-monitor visibility, high-load
   thresholds, admin password, current health-check/refresh intervals, and whether
@@ -146,6 +153,12 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
 
 Nothing to rebuild, nothing to redeploy: every change is in the database and visible
 immediately (or within 60s max, the time it takes for the public page to auto-refresh).
+
+Every timestamp on the public page (incidents, announcements, maintenance windows)
+is shown in **the visitor's own local time**, not UTC — the server renders UTC and a
+small script converts it in the browser, since the server has no way to know a
+visitor's timezone. If JavaScript is unavailable, it falls back to showing the UTC
+time with a "UTC" label instead of silently showing the wrong time.
 
 ### Discord Bot (optional, separate from the webhook notifications above)
 
@@ -296,6 +309,6 @@ status-portal/
   instance/portal.db      # created automatically on first launch
   templates/               # HTML pages (Jinja2)
   static/css/style.css     # all of the styling (dark + light theme)
-  static/js/               # public page auto-refresh, admin link-row editor, theme toggle
+  static/js/               # public page auto-refresh, local-time conversion, admin link-row editor, theme toggle
   tests/                   # pytest suite (see "Running the tests" below)
 ```

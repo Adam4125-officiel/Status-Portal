@@ -21,6 +21,35 @@ hardware, so "shows nothing" there may be the platform, not a bug. If something
 looks wrong against a real instance of any of these, start there rather than
 assuming the Linux-tested paths are the problem.
 
+## More reliable CPU/disk temperature via HWiNFO
+
+Confirmed on the user's real box (2026-07-23): the current sources are unreliable
+on desktop/enthusiast hardware — CPU temp via the ACPI thermal zone
+(`MSAcpi_ThermalZoneTemperature`) returns nothing at all, and per-disk temp via
+`Get-StorageReliabilityCounter` returns a literal `0` (now treated as "no
+reading", not displayed as a real 0°C — see `monitoring._query_windows_disk_details()`)
+for at least one drive, apparently one whose SMART temperature is only exposed as
+attribute 190 "Airflow Temperature" rather than attribute 194
+"Temperature"/"Drive Temperature". The user already runs HWiNFO, which reads both
+sensors correctly on this exact hardware.
+
+Discussed 2026-07-23, deliberately not built yet — the user chose to leave it as
+today's graceful-degradation behavior (temp just doesn't show) for now rather than
+take on a new dependency or implementation. If revisited, the options considered:
+
+- **Read HWiNFO's Shared Memory** (leaning option) — reuses a tool already running
+  and already correctly identifying these exact sensors, no new software to
+  install. Requires "Shared Memory Support" enabled in HWiNFO Sensors' settings and
+  HWiNFO kept running. More implementation work here: HWiNFO has no WMI provider,
+  so this means parsing a documented but non-trivial binary shared-memory layout
+  via `ctypes`/`mmap`, and temps go blank if HWiNFO isn't running.
+- **smartmontools (`smartctl`) for disks + LibreHardwareMonitor's WMI provider for
+  CPU** — two more standard, focused tools instead of one shared-memory
+  integration. `smartctl` reads raw SMART attribute 194 first, falling back to 190,
+  which would fix the specific drive precisely. LibreHardwareMonitor's WMI provider
+  is queryable the same simple way this app already queries Hyper-V. More things to
+  install, but each piece is simpler than shared-memory parsing.
+
 ## Jellyfin-backed user permissions
 
 Use Jellyfin's own user database as an identity source, so individual Jellyfin

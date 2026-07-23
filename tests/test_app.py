@@ -45,6 +45,67 @@ def test_within_grace_period(monkeypatch):
     assert app_module._within_grace_period({"startup_grace_seconds": 60}) is False
 
 
+def test_check_service_status_no_retry_marks_down_on_first_failure(monkeypatch):
+    calls = []
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        raise app_module.requests.RequestException("connection refused")
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    sleeps = []
+    monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
+
+    service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 0,
+               "retry_interval_seconds": 5}
+    status, elapsed_ms = app_module._check_service_status(service)
+
+    assert status == "down"
+    assert elapsed_ms is None
+    assert len(calls) == 1  # no retries when retry_count is 0 - same as historical behavior
+    assert sleeps == []
+
+
+def test_check_service_status_retries_and_recovers(monkeypatch):
+    """A blip that resolves itself on the second attempt should never reach 'down'
+    at all - this is the whole point of the retry feature."""
+    responses = [
+        app_module.requests.RequestException("timeout"),
+        _FakeResponse(200),
+    ]
+
+    def fake_get(url, timeout):
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    sleeps = []
+    monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
+
+    service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 3,
+               "retry_interval_seconds": 10}
+    status, elapsed_ms = app_module._check_service_status(service)
+
+    assert status == "operational"
+    assert sleeps == [10]  # stopped retrying the moment it recovered - not all 3 attempts
+
+
+def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
+    monkeypatch.setattr(app_module.requests, "get",
+                         lambda url, timeout: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
+    sleeps = []
+    monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
+
+    service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 2,
+               "retry_interval_seconds": 3}
+    status, elapsed_ms = app_module._check_service_status(service)
+
+    assert status == "down"
+    assert sleeps == [3, 3]  # both retries used, still down
+
+
 def test_group_services():
     services = [
         {"group_name": "Media", "name": "Jellyfin"},
@@ -146,6 +207,28 @@ def test_admin_service_edit_persists_slow_threshold_and_grace_period(client):
     service = db.get_service(sid)
     assert service["slow_threshold_ms"] is None
     assert service["startup_grace_seconds"] == 0
+
+
+def test_admin_service_edit_persists_retry_settings(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational",
+        "retry_count": "3", "retry_interval_seconds": "15",
+    })
+    service = db.get_service(sid)
+    assert service["retry_count"] == 3
+    assert service["retry_interval_seconds"] == 15
+
+    # Blank fields fall back to the disabled/default values, not an error.
+    client.post(f"/admin/services/{sid}/edit", data={
+        "name": "Jellyfin", "url": "http://server:8096", "status": "operational",
+        "retry_count": "", "retry_interval_seconds": "",
+    })
+    service = db.get_service(sid)
+    assert service["retry_count"] == 0
+    assert service["retry_interval_seconds"] == 5
 
 
 def test_grace_period_gate_suppresses_incident_lifecycle(isolated_db, monkeypatch):
@@ -442,6 +525,18 @@ def test_public_page_shows_active_maintenance_window(client):
     assert resp.status_code == 200
     assert b"Upgrade" in resp.data
     assert b"Scheduled maintenance" in resp.data
+    # Raw UTC stays as a data attribute (JS fallback / no-JS clients) - the browser
+    # converts it to local time client-side, the server can't know the visitor's zone.
+    assert b'class="local-time" data-utc="2000-01-01T00:00"' in resp.data
+
+
+def test_public_page_incident_and_announcement_times_carry_utc_data_attribute(client):
+    db.create_announcement({"title": "Heads up", "message": "test"})
+    db.create_incident({"title": "Test outage", "status": "resolved"})
+
+    resp = client.get("/")
+    assert b'class="local-time" data-utc="' in resp.data
+    assert b' UTC</span>' in resp.data  # no-JS fallback text still reads as UTC
 
 
 def test_service_without_url_hides_open_button(client):
@@ -450,3 +545,29 @@ def test_service_without_url_hides_open_button(client):
     assert b"NoLinkService" in resp.data
     # crude but sufficient: no service card should render an Open link with an empty href
     assert b'href="" target="_blank" rel="noopener">Open' not in resp.data
+
+
+def test_public_page_shows_jellyfin_tasks_when_enabled(client):
+    import integrations as integrations_module
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
+
+    resp = client.get("/")
+    assert b"Trickplay Image Extraction" in resp.data
+    assert b"Jellyfin activity" in resp.data
+
+
+def test_public_page_hides_jellyfin_tasks_when_disabled(client):
+    import integrations as integrations_module
+    # show_public_jellyfin_tasks left unset (default off)
+    integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
+
+    resp = client.get("/")
+    assert b"Trickplay Image Extraction" not in resp.data
+
+
+def test_public_page_hides_jellyfin_activity_section_when_no_tasks_running(client):
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
+    resp = client.get("/")
+    assert b"Jellyfin activity" not in resp.data

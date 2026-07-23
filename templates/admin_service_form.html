@@ -58,6 +58,16 @@
     <div class="field-hint">If auto-check takes longer than this to respond, show "Slow" instead of "Operational". Leave blank to disable.</div>
   </div>
   <div class="field">
+    <label for="retry_count">Retry attempts before marking down</label>
+    <input type="number" id="retry_count" name="retry_count" min="0" value="{{ service.retry_count if service else 0 }}">
+    <div class="field-hint">If a check fails, retry this many times before treating it as actually down (and opening an incident, if enabled below) - handles a service that blips and recovers on its own within seconds/minutes. 0 = mark it down on the first failed check, like before.</div>
+  </div>
+  <div class="field">
+    <label for="retry_interval_seconds">Seconds between retries</label>
+    <input type="number" id="retry_interval_seconds" name="retry_interval_seconds" min="1" value="{{ service.retry_interval_seconds if service else 5 }}">
+    <div class="field-hint">Only matters if retry attempts above is more than 0. E.g. 3 attempts × 10s = up to 30 extra seconds before this service is marked down.</div>
+  </div>
+  <div class="field">
     <label class="field-check">
       <input type="checkbox" name="auto_incident" {{ 'checked' if not service or service.auto_incident }}>
       Automatically open an incident when this service goes down, and resolve it when it recovers
