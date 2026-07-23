@@ -73,17 +73,17 @@
       <label class="field-check"><input type="checkbox" name="include_incidents" {{ 'checked' if include.incidents }}> Recent incidents</label>
       <label class="field-check"><input type="checkbox" name="include_announcements" {{ 'checked' if include.announcements }}> Announcements</label>
       <label class="field-check"><input type="checkbox" name="include_maintenance" {{ 'checked' if include.maintenance }}> Scheduled maintenance</label>
+      <label class="field-check"><input type="checkbox" name="include_highload" {{ 'checked' if include.highload }}> High-load indicator</label>
     </div>
   </div>
   <div class="field">
     <label>Include in Resources (each checkable individually)</label>
     <div style="display: flex; flex-direction: column; gap: 6px;">
-      <label class="field-check"><input type="checkbox" name="resource_cpu" {{ 'checked' if resources.cpu }}> CPU usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_cpu" {{ 'checked' if resources.cpu }}> CPU usage (+ temperature if available)</label>
       <label class="field-check"><input type="checkbox" name="resource_memory" {{ 'checked' if resources.memory }}> Memory usage</label>
-      <label class="field-check"><input type="checkbox" name="resource_disks" {{ 'checked' if resources.disks }}> Disk usage</label>
-      <label class="field-check"><input type="checkbox" name="resource_disk_io" {{ 'checked' if resources.disk_io }}> Disk read/write throughput</label>
+      <label class="field-check"><input type="checkbox" name="resource_disks" {{ 'checked' if resources.disks }}> Disk usage, temperature, and I/O (per disk)</label>
       <label class="field-check"><input type="checkbox" name="resource_network" {{ 'checked' if resources.network }}> Network throughput</label>
-      <label class="field-check"><input type="checkbox" name="resource_gpu" {{ 'checked' if resources.gpu }}> GPU usage</label>
+      <label class="field-check"><input type="checkbox" name="resource_gpu" {{ 'checked' if resources.gpu }}> GPU usage (+ temperature if available)</label>
       <label class="field-check"><input type="checkbox" name="resource_vms" {{ 'checked' if resources.vms }}> Virtual machine status</label>
     </div>
     <div class="field-hint">All off by default - the message stays short unless you opt specific ones in.</div>

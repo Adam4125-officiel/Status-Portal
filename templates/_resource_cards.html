@@ -2,7 +2,7 @@
   {% if visible.cpu %}
   <div class="resource-card">
     <div class="resource-card__label">CPU</div>
-    <div class="resource-card__value">{{ snapshot.cpu_percent }}%</div>
+    <div class="resource-card__value">{{ snapshot.cpu_percent }}%{% if snapshot.cpu_temp_c is not none %} · {{ snapshot.cpu_temp_c }}°C{% endif %}</div>
     <div class="meter"><div class="meter__fill {{ snapshot.cpu_severity }}" style="width: {{ snapshot.cpu_percent }}%;"></div></div>
     {% if snapshot.cpu_per_core|length > 1 %}
     <div class="core-grid" title="Per-core usage">
@@ -22,13 +22,6 @@
     <div class="resource-card__sub">{{ snapshot.mem_used_gb }} GB / {{ snapshot.mem_total_gb }} GB</div>
   </div>
   {% endif %}
-  {% if visible.disk_io and snapshot.disk_io %}
-  <div class="resource-card">
-    <div class="resource-card__label">Disk I/O (all disks)</div>
-    <div class="resource-card__value" style="font-size: 16px;">↓ {{ snapshot.disk_io.read_mb_s }} MB/s</div>
-    <div class="resource-card__sub">↑ {{ snapshot.disk_io.write_mb_s }} MB/s write</div>
-  </div>
-  {% endif %}
   {% if visible.network and snapshot.network %}
   <div class="resource-card">
     <div class="resource-card__label">Network</div>
@@ -40,9 +33,12 @@
   {% for disk in snapshot.disks %}
   <div class="resource-card">
     <div class="resource-card__label">Disk — {{ disk.display_name }}</div>
-    <div class="resource-card__value">{{ disk.percent }}%</div>
+    <div class="resource-card__value">{{ disk.percent }}%{% if disk.temp_c is not none %} · {{ disk.temp_c }}°C{% endif %}</div>
     <div class="meter"><div class="meter__fill {{ disk.severity }}" style="width: {{ disk.percent }}%;"></div></div>
     <div class="resource-card__sub">{{ disk.used_gb }} GB used · {{ disk.free_gb }} GB free of {{ disk.total_gb }} GB</div>
+    {% if disk.io %}
+    <div class="resource-card__sub">↓ {{ disk.io.read_mb_s }} MB/s · ↑ {{ disk.io.write_mb_s }} MB/s</div>
+    {% endif %}
   </div>
   {% endfor %}
   {% endif %}
@@ -54,7 +50,7 @@
   {% for gpu in snapshot.gpus %}
   <div class="resource-card">
     <div class="resource-card__label">{{ gpu.name }}</div>
-    <div class="resource-card__value">{{ gpu.util_percent }}%</div>
+    <div class="resource-card__value">{{ gpu.util_percent }}%{% if gpu.temp_c is not none %} · {{ gpu.temp_c }}°C{% endif %}</div>
     <div class="meter"><div class="meter__fill" style="width: {{ gpu.util_percent }}%;"></div></div>
     <div class="resource-card__sub">{{ gpu.mem_used_gb }} GB / {{ gpu.mem_total_gb }} GB VRAM</div>
   </div>

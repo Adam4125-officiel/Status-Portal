@@ -26,6 +26,14 @@
       </div>
       <div class="status-hero__meta">{{ services|length }} service(s) tracked</div>
     </div>
+    {% if high_load.active %}
+    <div class="status-hero__row" style="margin-top: 6px;">
+      <div class="status-hero__label" style="font-size: 13px; color: var(--warn);">
+        <span class="led warn"></span>
+        High load — {{ high_load.reasons|join(', ') }}
+      </div>
+    </div>
+    {% endif %}
   </div>
 
   {% if announcements %}

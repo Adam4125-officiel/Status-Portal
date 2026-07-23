@@ -17,12 +17,28 @@
     <div style="display: flex; flex-direction: column; gap: 6px;">
       <label class="field-check"><input type="checkbox" name="show_public_cpu" {{ 'checked' if show_public.cpu }}> CPU usage</label>
       <label class="field-check"><input type="checkbox" name="show_public_memory" {{ 'checked' if show_public.memory }}> Memory usage</label>
-      <label class="field-check"><input type="checkbox" name="show_public_disks" {{ 'checked' if show_public.disks }}> Disk usage (paths/labels)</label>
-      <label class="field-check"><input type="checkbox" name="show_public_disk_io" {{ 'checked' if show_public.disk_io }}> Disk read/write throughput</label>
+      <label class="field-check"><input type="checkbox" name="show_public_disks" {{ 'checked' if show_public.disks }}> Disk usage, temperature, and I/O (per disk)</label>
       <label class="field-check"><input type="checkbox" name="show_public_network" {{ 'checked' if show_public.network }}> Network throughput</label>
       <label class="field-check"><input type="checkbox" name="show_public_gpu" {{ 'checked' if show_public.gpu }}> GPU usage</label>
       <label class="field-check"><input type="checkbox" name="show_public_vms" {{ 'checked' if show_public.vms }}> Virtual machine status</label>
+      <label class="field-check"><input type="checkbox" name="show_public_highload" {{ 'checked' if show_public.highload }}> High-load indicator</label>
     </div>
+  </div>
+  <div class="field">
+    <label>High-load thresholds</label>
+    <div class="field-hint" style="margin-bottom: 8px;">The high-load indicator lights up if any of these is exceeded (or if Jellyfin reports an active transcode or a running background task like trickplay generation, when a Jellyfin integration is configured).</div>
+  </div>
+  <div class="field">
+    <label for="highload_cpu_percent">CPU %</label>
+    <input type="number" id="highload_cpu_percent" name="highload_cpu_percent" min="0" max="100" value="{{ highload_thresholds.cpu_percent }}">
+  </div>
+  <div class="field">
+    <label for="highload_disk_io_mbs">Disk I/O (MB/s, summed across disks)</label>
+    <input type="number" id="highload_disk_io_mbs" name="highload_disk_io_mbs" min="0" value="{{ highload_thresholds.disk_io_mbs }}">
+  </div>
+  <div class="field">
+    <label for="highload_network_mbs">Network (MB/s, summed up+down)</label>
+    <input type="number" id="highload_network_mbs" name="highload_network_mbs" min="0" value="{{ highload_thresholds.network_mbs }}">
   </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save</button>
