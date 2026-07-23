@@ -936,10 +936,23 @@ def run_health_checks():
 
 
 def _handle_incident_lifecycle(service, previous_status, new_status):
-    """Auto-opens an incident the moment a service goes down, and auto-resolves it the
-    moment it recovers. Only hard 'down' transitions are automated - 'degraded' is left
-    for a human to judge, since a single slow response isn't necessarily an incident."""
-    if new_status == "down" and previous_status != "down":
+    """Auto-opens an incident whenever a service is down and doesn't already have one
+    open, and auto-resolves it the moment it recovers. Only hard 'down' transitions
+    ever resolve - 'degraded' is left for a human to judge, since a single slow
+    response isn't necessarily an incident.
+
+    The open side is deliberately level-triggered (checks new_status alone, not
+    previous_status != "down") rather than edge-triggered - idempotency already
+    comes from the get_open_auto_incident_for_service() guard below, and an
+    edge-trigger silently breaks for a service whose status was already 'down' the
+    last time this function *would* have run had a startup grace period not
+    suppressed the call: services.status still gets written to 'down' every cycle
+    during grace (status/response time are recorded regardless), so by the time the
+    grace period elapses, previous_status is already 'down' and an edge-trigger
+    would never see a fresh transition again - the service could stay down forever
+    with no incident ever opening. Caught by live-testing the grace period feature
+    against a real always-refusing HTTP server (2026-07-23), not by unit tests."""
+    if new_status == "down":
         if not db.get_open_auto_incident_for_service(service["id"]):
             incident_id = db.create_auto_incident(
                 service["id"], f"{service['name']} is unreachable", "investigating")
@@ -965,9 +978,14 @@ def _handle_integration_incident_lifecycle(integration, previous_reachable, new_
     an integration's reachability (Jellyfin/*Arr/Jellyseerr) instead of a service's own
     health check. Shares the same incident slot as the linked service (via
     get_open_auto_incident_for_service/create_auto_incident) - if the service's own
-    health check already opened one, this won't open a second."""
+    health check already opened one, this won't open a second.
+
+    Same level-triggered-open reasoning as _handle_incident_lifecycle applies here -
+    _integration_status_cache is also updated every cycle regardless of grace, so an
+    edge-trigger on previous_reachable would have the same "never opens after a
+    grace-suppressed cycle" bug."""
     service_id = integration["service_id"]
-    if new_reachable is False and previous_reachable is not False:
+    if new_reachable is False:
         if not db.get_open_auto_incident_for_service(service_id):
             service = db.get_service(service_id)
             name = service["name"] if service else integration["name"]

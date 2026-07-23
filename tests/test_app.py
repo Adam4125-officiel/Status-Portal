@@ -171,6 +171,40 @@ def test_auto_incident_no_duplicate_while_still_down(isolated_db):
     assert len(db.list_incidents()) == 1
 
 
+def test_auto_incident_opens_even_when_previous_status_was_already_down(isolated_db):
+    """Regression test: a service whose failures were suppressed by a startup grace
+    period still has services.status written to 'down' every cycle (status/response
+    time are always recorded) - only the incident-lifecycle *call* was skipped. So
+    the first call to this function once grace ends can legitimately be handed
+    previous_status='down' (not 'operational') even though no incident has ever
+    been opened yet. The open side must not require previous_status != 'down' to
+    fire - that edge-trigger previously meant a service could stay down forever
+    with no incident, once its downtime happened to start during its own grace
+    window. Caught by live-testing the grace period feature end-to-end
+    (2026-07-23), not originally caught by unit tests."""
+    service = db.list_services()[0]
+    assert db.get_open_auto_incident_for_service(service["id"]) is None
+
+    app_module._handle_incident_lifecycle(service, previous_status="down", new_status="down")
+
+    incident = db.get_open_auto_incident_for_service(service["id"])
+    assert incident is not None, "an incident must open even without a fresh transition into 'down'"
+
+
+def test_integration_auto_incident_opens_even_when_previous_reachable_was_already_false(isolated_db):
+    """Same regression as test_auto_incident_opens_even_when_previous_status_was_already_down,
+    for the integration-driven path (_integration_status_cache is likewise updated
+    every cycle regardless of grace)."""
+    service_id = db.list_services()[0]["id"]
+    integration = {"id": 1, "name": "Jellyfin", "service_id": service_id}
+    assert db.get_open_auto_incident_for_service(service_id) is None
+
+    app_module._handle_integration_incident_lifecycle(integration, previous_reachable=False, new_reachable=False)
+
+    incident = db.get_open_auto_incident_for_service(service_id)
+    assert incident is not None
+
+
 def test_admin_service_edit_persists_auto_incident_toggle(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     sid = db.list_services()[0]["id"]

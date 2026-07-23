@@ -83,6 +83,23 @@ DB-backed Settings pages, not a code edit.
   handler), not a bug. `retry_count=0` (the default, and the value every
   pre-existing service gets via `_ensure_column`) preserves the exact original
   single-attempt behavior.
+- **`_handle_incident_lifecycle()`'s open side must stay level-triggered, not
+  edge-triggered — this already broke once (2026-07-23).** It used to require
+  `previous_status != "down"` to open an incident. That's wrong: `services.status`
+  is written to `"down"` every cycle regardless of the grace period (only the
+  lifecycle *call* is suppressed during grace, not the status write), so a service
+  whose downtime started during its own grace window would have `previous_status`
+  already `"down"` the first time the call is ever actually made — no "fresh
+  transition" would ever be detected again, and the service could stay down
+  forever with zero incident. Fixed by opening whenever `new_status == "down"`,
+  full stop, relying only on the existing `get_open_auto_incident_for_service()`
+  idempotency guard (same fix applied to `_handle_integration_incident_lifecycle()`,
+  same root cause via `_integration_status_cache`). **This was caught by live-testing
+  against a real always-refusing HTTP server with real `time.monotonic()` timing —
+  not by unit tests**, because every existing test called this function with a
+  hand-picked `previous_status="operational"` and never exercised the
+  grace-then-still-down sequence. If you touch either lifecycle function again, add
+  a live/real-timing test alongside the mocked unit tests, not instead of them.
 - **Timestamps are rendered server-side as UTC, converted to the visitor's local
   time client-side (added 2026-07-23).** Every public timestamp
   (`index.html`: announcements, incidents/updates, maintenance windows, and a
