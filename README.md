@@ -99,9 +99,17 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
 - **Services**: add/edit your services (Jellyfin, SMB...), with an optional main link
   (leave it blank to hide the public "Open" button), icon, status, group/category, and
   any number of extra links (Tailscale, LAN, external domain...). Turn on "auto-check"
-  and give it a check URL if the service has an endpoint that responds with HTTP 200 —
-  otherwise leave it on manual status and change it yourself. A service that goes down
-  automatically gets an incident opened for it, and auto-resolved when it recovers.
+  and give it a check URL to have it pinged automatically — any response counts as
+  reachable (a 401/403 login prompt from a service that gates its UI behind Basic
+  Auth still means it's up), only a 5xx or a failed connection counts against it.
+  Optionally set a **slow threshold (ms)**: a healthy-but-slow response shows "Slow"
+  instead of "Operational" (purely informational — it never opens an incident on its
+  own). Optionally set a **startup grace period (seconds)**: status/response time are
+  still recorded normally, but no automatic incident opens for that service until the
+  grace period (since the portal itself started) has elapsed, so a slow-booting
+  service doesn't get flagged down before it's even had a chance to start. A service
+  that goes down (outside its grace period) automatically gets an incident opened for
+  it, and auto-resolved when it recovers.
 - **Announcements**: banner at the top of the public portal. `**bold**`, auto-clickable links.
 - **Incidents**: history of outages/maintenance, with status
   (investigating → identified → monitoring → resolved) and a per-incident timeline of
@@ -115,13 +123,24 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   Optionally link one to a service, opt it into public display to show that service's API
   health on its public card, and/or let a failing check auto-open an incident on that
   service (off by default, to avoid noise from a flaky check).
-- **Resources**: CPU (with per-core breakdown), memory, disks (auto-detected, with
-  volume labels where available), disk and network throughput, GPU (if
-  `nvidia-ml-py` is installed), and Hyper-V VM status (Windows only) — admin-only by
-  default; choose exactly which of these to also show on the public page from Settings.
+- **Resources**: CPU (with per-core breakdown and temperature, Windows only), memory,
+  disks (auto-detected, with volume labels where available, and — Windows only —
+  per-disk temperature and per-disk read/write throughput, replacing the old
+  single system-wide I/O reading), network throughput, GPU (if `nvidia-ml-py` is
+  installed, with temperature), and Hyper-V VM status (Windows only) — admin-only by
+  default; choose exactly which of these to also show on the public page from
+  Settings. CPU/disk temperature are best-effort even on Windows — some hardware
+  doesn't expose them through the APIs used here, in which case they're just omitted
+  rather than shown as zero.
+- **High-load indicator**: a badge on the public page and (optionally) the Discord
+  bot that lights up when CPU, disk I/O, or network exceed admin-configurable
+  thresholds (Settings) — or, if a Jellyfin integration is configured, when Jellyfin
+  reports an active transcode or a running background task (e.g. trickplay image
+  extraction).
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
-- **Settings**: site name, per-cell public resource-monitor visibility, admin password,
-  current health-check/refresh intervals, and whether push notifications are configured.
+- **Settings**: site name, per-cell public resource-monitor visibility, high-load
+  thresholds, admin password, current health-check/refresh intervals, and whether
+  push notifications are configured.
 - **Discord Bot**: a separate, optional real bot connection (not just a webhook) — see
   its own section below.
 
@@ -143,10 +162,24 @@ immediately (or within 60s max, the time it takes for the public page to auto-re
   use it; set it to stop randos from spamming the command.
 
 Both behaviors are independently toggleable, as is exactly what's included in the
-message: services, recent incidents, announcements, scheduled maintenance, and
-resources — where CPU, memory, disks, disk I/O, network, GPU, and VM status are each
-individually checkable (all off by default, to keep the message short unless you opt
-specific ones in).
+message: services (each shown with its status — including "Slow" — and any
+configured links), an always-visible **active incidents** section that stays until
+resolved (separate from the capped recent-incidents list, so a long-running incident
+can't scroll out of view), announcements, scheduled maintenance, an optional
+high-load section, and resources — where CPU, memory, disks (now including
+temperature/I/O where available), network, GPU, and VM status are each individually
+checkable (all off by default, to keep the message short unless you opt specific
+ones in).
+
+**Server whitelist (security control, separate from the user allowlist above)**:
+`/admin/discord-bot` also has an optional comma/newline-separated list of Discord
+server (guild) IDs. If set, the bot automatically **leaves** any server it's in
+whose ID isn't on the list — checked the moment it's invited to a new server, and
+again on every reconnect, so removing a server from the list later still takes
+effect. Leave it blank (the default) and the bot stays in any server it's invited
+to. This is stronger than the user allowlist: an unwanted server could otherwise
+still see the bot's presence/status updates even if nobody there is authorized to
+run the slash command.
 
 Uses a slash command, not a legacy text/prefix command — Discord's own guidance is
 that reading plain message text requires the privileged **Message Content** intent,
@@ -174,13 +207,15 @@ nothing related to it runs, and `discord.py` doesn't need to be installed at all
 **Verification status**: the previous (now-replaced) plain-text `!status` version of
 this feature was confirmed working end-to-end by actually running it. This slash-command
 rewrite has not yet been re-confirmed against a real Discord server — the
-message-building/embed logic is unit tested directly, and the connection handling was
+message-building/embed logic, the command handler's authorization, and the guild
+whitelist's leave behavior are all unit tested directly, and the connection handling was
 smoke-tested against Discord's real login endpoint (confirms it starts cleanly in a
 background thread and fails gracefully on a bad token, surfacing the error correctly on
-the admin page), but slash-command registration, the command handler itself, and the
-restart-survives-message-editing behavior haven't been exercised against a real
-bot/server yet. If something doesn't work as expected, check the server console first —
-every failure (bad token, sync error, a channel it can't access) is logged there.
+the admin page), but slash-command registration, the command handler itself, the
+restart-survives-message-editing behavior, and the guild whitelist's actual
+`guild.leave()` call haven't been exercised against a real bot/server yet. If something
+doesn't work as expected, check the server console first — every failure (bad token,
+sync error, a channel it can't access) is logged there.
 
 ### Outside the page itself
 
@@ -220,12 +255,14 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Covers the DB layer, the auto-incident lifecycle (service and integration-driven),
-maintenance-window scheduling, notification dispatch, badge/feed rendering, the
-Discord bot's message-building logic, login/lockout, service grouping, and the
-Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way to
-test against real instances of those from here). Not part of `requirements.txt` since
-nothing here needs `pytest` at runtime.
+Covers the DB layer, the auto-incident lifecycle (service and integration-driven,
+including the startup grace period), maintenance-window scheduling, notification
+dispatch, badge/feed rendering, the Discord bot's message-building logic (including
+the guild whitelist's leave behavior) and login/lockout, service grouping, the
+slow-status/high-load logic, and the Jellyfin/*Arr/Jellyseerr status parsing
+(against mocked responses - there's no way to test against real instances of those,
+or the Windows-only temperature/per-disk-I/O code, from here). Not part of
+`requirements.txt` since nothing here needs `pytest` at runtime.
 
 ## 6. Security notes
 

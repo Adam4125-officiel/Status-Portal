@@ -49,6 +49,75 @@ DB-backed Settings pages, not a code edit.
 - **This app is meant to survive its own restart cleanly.** State that needs to
   persist across a process restart (maintenance-window progress, the Discord bot's
   tracked live-message id) lives in SQLite, never only in memory.
+- **Status values aren't just `operational`/`degraded`/`maintenance`/`down`.**
+  `slow` was added 2026-07-23 as a purely cosmetic tier (an otherwise-healthy
+  response slower than a service's configured `slow_threshold_ms`) — it never
+  opens/resolves an auto-incident on its own, and ranks between `maintenance` and
+  `operational` in every overall-status precedence list. Any place one of these four
+  original statuses is enumerated (badge colors, CSS class maps, Discord
+  icon/label/presence-text tables, `compute_overall_status()` /
+  `discord_bot._overall_status()`) needs a `slow` entry too — grep for `"degraded"`
+  across the codebase before assuming you've found every status-aware spot.
+- **A health-check response is "reachable" based on getting a response at all, not
+  a 2xx.** Only a 5xx (or a connection failure/timeout, which stays `down`) counts
+  against a service — a 401/403 login prompt or a 404 still means the server
+  answered. This was a deliberate fix (2026-07-23) for services that gate their
+  whole UI behind HTTP Basic Auth (e.g. Bazarr): pinging their `check_url` used to
+  come back non-2xx and get misread as "degraded" even though the service was
+  completely healthy.
+- **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
+  `app._within_grace_period(service)` gates the call to
+  `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —
+  status and response time are still recorded on every cycle regardless, so the
+  public page reflects reality during the grace window, it just won't open an
+  incident over it. Measured from `app._APP_START` (process start), not from
+  anything service-specific — good enough since services are expected to boot
+  around the same time as the portal itself, not something to over-engineer.
+
+## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
+
+- The Windows-only, PowerShell/CIM-backed queries (Hyper-V VM list, CPU
+  temperature, per-disk temperature + drive-letter-to-physical-disk mapping) are
+  **polled by a background thread** (`monitoring.start_background_refresh()`,
+  started from both `app.py` and `serve_waitress.py` at startup, same as
+  `start_background_checker()`/`discord_bot.start()`) into a module-level cache
+  (`_WINDOWS_CACHE`), not queried live inside a request handler — this is the same
+  "never call slow I/O in a request handler" rule as the integration cache, just
+  applied to local subprocess calls instead of outbound HTTP. `get_vm_snapshot()`
+  and the new `_query_*()` functions stay live/directly-callable (that's what's
+  unit-tested by mocking `subprocess.run`); `get_cached_vm_snapshot()` and
+  `get_resource_snapshot()`'s `cpu_temp_c`/per-disk `temp_c`/`io` fields are the
+  cache-reading wrappers request handlers should use instead.
+- Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
+  physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
+  `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,
+  which has no equivalent implemented here for Linux. The old aggregate
+  (all-disks-combined) I/O reading was retired in favor of this — there's no
+  system-wide I/O card anymore, only per-disk.
+- **Unverified against real hardware** (this sandbox is Linux): CPU temp via the
+  ACPI thermal zone WMI namespace and disk temp via
+  `Get-StorageReliabilityCounter` are both well-known-unreliable on real Windows
+  hardware — many systems return null/nothing through either, not a bug, a
+  limitation of what Windows exposes without a third-party tool. Both degrade to
+  `None` gracefully (same pattern as GPU detection with no NVIDIA card), but "shows
+  nothing" on the user's actual box needs confirming there, not assumed to be a bug
+  here.
+
+## High-load indicator (`monitoring.evaluate_high_load()` / `integrations.evaluate_high_load()`)
+
+- Split across two functions on purpose: `monitoring.evaluate_high_load(snapshot,
+  thresholds)` is pure (no DB access — keeps `monitoring.py` DB-free, a constraint
+  that predates this feature) and only compares system metrics (CPU/disk-I/O/network)
+  against admin-configured thresholds. `integrations.evaluate_high_load(snapshot)`
+  wraps it and layers in Jellyfin-derived signals (active transcode count via
+  `/Sessions`, running scheduled tasks like trickplay generation via
+  `/ScheduledTasks`, cached the same way `_integration_status_cache` works).
+  `integrations.py` is the single place both `app.py` (public page) and
+  `discord_bot.py` call this from — `discord_bot.py` can't import `app.py` (circular:
+  `app.py` already imports `discord_bot.py`), so the shared logic had to live
+  somewhere neither of them owns. If you add another cross-cutting signal both the
+  web page and the bot need, this is probably where it belongs, not duplicated in
+  both.
 
 ## Discord bot (`discord_bot.py`) — reworked 2026-07-22, read this before touching it again
 
@@ -90,18 +159,33 @@ DB-backed Settings pages, not a code edit.
   gets an ephemeral "not authorized" reply, without ever building the (heavier) status
   embed — the point is to stop both spam *and* the wasted work of building a response
   nobody authorized should see.
+- **Server (guild) whitelist — added 2026-07-23**: `discordbot_guild_whitelist` (DB
+  setting, same comma/newline-separated-IDs shape as the user allowlist —
+  `allowed_guild_ids()`/`normalize_guild_ids()`, sharing `_parse_id_list()` with the
+  user-allowlist functions) is a *different kind* of control than the user
+  allowlist above: it doesn't just refuse a command, it makes the bot **leave** any
+  server not on the list, via `StatusBot._enforce_guild_whitelist()` — called from
+  both `on_guild_join` (the moment it's invited somewhere) and `on_ready` (every
+  reconnect, looping `self.guilds`, so editing the whitelist to remove a server it's
+  already in actually takes effect next reconnect, not just for future invites).
+  Empty = unrestricted, same default-open convention as the user allowlist. This
+  matters because presence/status updates are visible to a server just by the bot
+  being in it, regardless of whether anyone there is authorized to run the slash
+  command — refusing the command alone wouldn't stop that.
 - **Verification status**: the old prefix-command version was confirmed working
   end-to-end by the user actually running it. The slash-command rewrite has *not*
-  been re-confirmed against a real Discord server as of 2026-07-22 — message-building,
+  been re-confirmed against a real Discord server as of 2026-07-23 — message-building,
   the embed logic, and (unusually thoroughly for this module) the command callback's
-  own authorization logic are all unit tested by actually constructing a `StatusBot`
-  and invoking its real registered `command.callback(interaction)` with a mocked
-  `Interaction` (see `_build_test_client()`/`_make_interaction()` in
-  `tests/test_discord_bot.py`) — not just testing the helper functions around it. A
+  own authorization logic and the guild-whitelist leave behavior are all unit tested
+  by actually constructing a `StatusBot` and invoking its real registered
+  `command.callback(interaction)` / `on_ready()` / `_enforce_guild_whitelist()` with
+  mocked Discord objects (see `_build_bot()`/`_make_interaction()`/`_make_guild()` in
+  `tests/test_discord_bot.py`) — not just testing the helper functions around them. A
   real (fake-token) connection attempt was also smoke-tested against Discord's actual
   login endpoint to confirm the background thread behaves correctly and fails
   gracefully. What's still unverified: actual slash-command *registration/sync*
-  against Discord's API, and the restart-survives-editing behavior, both of which
+  against Discord's API, the restart-survives-editing behavior, and the guild
+  whitelist's actual `guild.leave()` call against Discord's real API — all of which
   need a real bot/server to exercise. Don't assume "the bot" is confirmed working as a
   whole just because an earlier version of it was, or because one code path is now
   well-tested — ask what specifically was tested.
@@ -115,12 +199,14 @@ DB-backed Settings pages, not a code edit.
   whatever routes actually changed before calling something done. Several real bugs
   (the integration-blocking page load, the maintenance-window timing bug) were only
   ever caught by actually running the server, never by unit tests alone.
-- This sandbox is Linux. Hyper-V VM detection, Windows volume labels, real
-  Jellyfin/*Arr/Jellyseerr instances, and a real Discord gateway connection can't be
-  fully exercised here. Say so explicitly rather than implying full verification —
-  and if the user reports a bug in one of these areas, ask for the actual error text
-  first (most of these paths now log real errors instead of swallowing them) rather
-  than guessing blind again.
+- This sandbox is Linux. Hyper-V VM detection, Windows volume labels, CPU/disk
+  temperature and per-disk I/O (all Windows-only, PowerShell/CIM-backed), real
+  Jellyfin/*Arr/Jellyseerr instances (including the newer `/Sessions` and
+  `/ScheduledTasks` fetchers behind the high-load indicator), and a real Discord
+  gateway connection can't be fully exercised here. Say so explicitly rather than
+  implying full verification — and if the user reports a bug in one of these areas,
+  ask for the actual error text first (most of these paths now log real errors
+  instead of swallowing them) rather than guessing blind again.
 - Clean up after smoke testing: remove any `instance/portal.db` created during a
   test run, and any cookie jars, before finishing — don't leave a test admin password
   or fake data sitting in what could become the user's real database.
