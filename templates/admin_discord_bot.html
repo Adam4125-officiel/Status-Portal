@@ -67,6 +67,11 @@
     <div class="field-hint">Comma or newline separated. <strong>Leave blank and anyone in the server can use this command</strong> - set this if you want to restrict who can trigger it (e.g. to avoid spam). Enable Developer Mode in Discord's settings, then right-click a user → Copy User ID.</div>
   </div>
   <div class="field">
+    <label for="guild_whitelist">Allowed servers (optional)</label>
+    <textarea id="guild_whitelist" name="guild_whitelist" placeholder="123456789012345678, 234567890123456789">{{ guild_whitelist }}</textarea>
+    <div class="field-hint">Comma or newline separated server (guild) IDs. <strong>Leave blank and the bot stays in any server it's invited to.</strong> If set, the bot automatically leaves any server whose ID isn't on this list - checked the moment it's invited, and again every time it (re)connects, so removing a server later still takes effect. Enable Developer Mode in Discord's settings, then right-click a server icon → Copy Server ID.</div>
+  </div>
+  <div class="field">
     <label>Include in the status message</label>
     <div style="display: flex; flex-direction: column; gap: 6px;">
       <label class="field-check"><input type="checkbox" name="include_services" {{ 'checked' if include.services }}> Services</label>

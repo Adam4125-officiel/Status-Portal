@@ -17,17 +17,30 @@ def _make_interaction(user_id, channel_id=555):
     return interaction
 
 
-def _build_test_client():
-    """Constructs a real StatusBot (no network call - just __init__, which registers
-    the slash command) so the actual authorization logic inside the command handler
-    can be exercised directly, not just the parsing helpers around it."""
+def _build_bot():
+    """Constructs a real StatusBot (no network call - just __init__)."""
     import discord
     from discord import app_commands
     from discord.ext import tasks
     client_cls = discord_bot._make_client_class(discord, app_commands, tasks)
-    client = client_cls(intents=discord.Intents.default())
+    return client_cls(intents=discord.Intents.default())
+
+
+def _build_test_client():
+    """Constructs a real StatusBot (no network call - just __init__, which registers
+    the slash command) so the actual authorization logic inside the command handler
+    can be exercised directly, not just the parsing helpers around it."""
+    client = _build_bot()
     command_name = discord_bot.sanitize_command_name(db.get_setting("discordbot_command_name", "status"))
     return client.tree.get_command(command_name)
+
+
+def _make_guild(guild_id, name="Test Server"):
+    guild = MagicMock()
+    guild.id = guild_id
+    guild.name = name
+    guild.leave = AsyncMock()
+    return guild
 
 
 def test_overall_status_ranks_slow_between_operational_and_degraded():
@@ -264,3 +277,67 @@ def test_slash_command_disabled_takes_priority_over_authorization(isolated_db):
 
     args, kwargs = interaction.response.send_message.call_args
     assert "disabled" in args[0]
+
+
+def test_allowed_guild_ids_parsing(isolated_db):
+    assert discord_bot.allowed_guild_ids() == set()  # unrestricted by default
+    db.set_setting("discordbot_guild_whitelist", "111, 222\n333")
+    assert discord_bot.allowed_guild_ids() == {"111", "222", "333"}
+
+
+def test_normalize_guild_ids():
+    assert discord_bot.normalize_guild_ids("111,222\n333") == "111, 222, 333"
+    assert discord_bot.normalize_guild_ids("  ") == ""
+    assert discord_bot.normalize_guild_ids(None) == ""
+
+
+def test_enforce_guild_whitelist_leaves_unlisted_server(isolated_db, capsys):
+    db.set_setting("discordbot_guild_whitelist", "111")
+    bot = _build_bot()
+    guild = _make_guild(222, name="Unwanted Server")
+
+    left = asyncio.run(bot._enforce_guild_whitelist(guild))
+
+    assert left is True
+    guild.leave.assert_awaited_once()
+    assert "Unwanted Server" in capsys.readouterr().out
+
+
+def test_enforce_guild_whitelist_keeps_listed_server(isolated_db):
+    db.set_setting("discordbot_guild_whitelist", "111")
+    bot = _build_bot()
+    guild = _make_guild(111)
+
+    left = asyncio.run(bot._enforce_guild_whitelist(guild))
+
+    assert left is False
+    guild.leave.assert_not_called()
+
+
+def test_enforce_guild_whitelist_unrestricted_when_empty(isolated_db):
+    # discordbot_guild_whitelist left unset entirely
+    bot = _build_bot()
+    guild = _make_guild(999999)
+
+    left = asyncio.run(bot._enforce_guild_whitelist(guild))
+
+    assert left is False
+    guild.leave.assert_not_called()
+
+
+def test_on_ready_re_enforces_whitelist_for_already_joined_guilds(isolated_db, monkeypatch):
+    db.set_setting("discordbot_guild_whitelist", "111")
+    bot = _build_bot()
+    kept = _make_guild(111)
+    unwanted = _make_guild(222)
+    monkeypatch.setattr(type(bot), "guilds", property(lambda self: [kept, unwanted]))
+    fake_user = MagicMock()
+    fake_user.__str__ = lambda self: "TestBot#0001"
+    monkeypatch.setattr(type(bot), "user", property(lambda self: fake_user))
+    bot.refresh_loop = MagicMock()
+    bot.refresh_loop.is_running = MagicMock(return_value=True)  # skip actually starting it
+
+    asyncio.run(bot.on_ready())
+
+    kept.leave.assert_not_called()
+    unwanted.leave.assert_awaited_once()

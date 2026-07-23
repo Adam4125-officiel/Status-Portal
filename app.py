@@ -822,6 +822,8 @@ def admin_discord_bot():
             db.set_setting(f"discordbot_resource_{key}", "1" if request.form.get(f"resource_{key}") else "0")
         db.set_setting("discordbot_allowed_user_ids",
                         discord_bot.normalize_user_ids(request.form.get("allowed_user_ids", "")))
+        db.set_setting("discordbot_guild_whitelist",
+                        discord_bot.normalize_guild_ids(request.form.get("guild_whitelist", "")))
         flash("Discord bot settings saved. Restart the app if the command name changed.", "success")
         return redirect(url_for("admin_discord_bot"))
     include = discord_bot.include_settings()
@@ -836,6 +838,7 @@ def admin_discord_bot():
                             include=include,
                             resources=include["resources"],
                             allowed_user_ids=db.get_setting("discordbot_allowed_user_ids", ""),
+                            guild_whitelist=db.get_setting("discordbot_guild_whitelist", ""),
                             active="discord-bot")
 
 

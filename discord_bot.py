@@ -66,6 +66,12 @@ def include_settings():
     return include
 
 
+def _parse_id_list(raw):
+    """Shared parsing for every comma/newline-separated Discord-ID list setting in
+    this module (allowed user IDs, allowed guild/server IDs)."""
+    return [part.strip() for part in (raw or "").replace("\n", ",").split(",") if part.strip()]
+
+
 def allowed_user_ids():
     """Discord user IDs (as strings) permitted to invoke the slash command - parsed
     from a comma/newline-separated DB setting. An empty result means unrestricted
@@ -73,15 +79,25 @@ def allowed_user_ids():
     working for anyone who hasn't set this up, but it's called out clearly in the
     admin UI since leaving it unrestricted is exactly what allows the spam/abuse this
     setting exists to prevent."""
-    raw = db.get_setting("discordbot_allowed_user_ids", "")
-    return {part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()}
+    return set(_parse_id_list(db.get_setting("discordbot_allowed_user_ids", "")))
 
 
 def normalize_user_ids(raw):
     """Cleans up admin-entered input (mixed commas/newlines/whitespace, digits only
     per ID) into a canonical comma-separated string for storage/redisplay."""
-    ids = [part.strip() for part in (raw or "").replace("\n", ",").split(",") if part.strip()]
-    return ", ".join(ids)
+    return ", ".join(_parse_id_list(raw))
+
+
+def allowed_guild_ids():
+    """Discord server (guild) IDs (as strings) this bot is allowed to remain in -
+    parsed the same way as allowed_user_ids(). An empty result means unrestricted
+    (the bot stays in any server it's invited to) - same default-open rationale as
+    the user allowlist, called out in the admin UI."""
+    return set(_parse_id_list(db.get_setting("discordbot_guild_whitelist", "")))
+
+
+def normalize_guild_ids(raw):
+    return ", ".join(_parse_id_list(raw))
 
 
 def _overall_status(services):
@@ -293,11 +309,40 @@ def _make_client_class(discord, app_commands, tasks):
                       "(can take up to an hour to first appear - set PORTAL_DISCORD_BOT_GUILD_ID "
                       "for instant registration on a single server)")
 
+        async def _enforce_guild_whitelist(self, guild):
+            """Leaves `guild` immediately if a server whitelist is configured and
+            this guild isn't on it - the whitelist is a security control, so it's
+            enforced by actually leaving, not just by refusing the slash command
+            (an unwanted server could otherwise still see the bot's presence/status
+            updates). An empty whitelist means unrestricted, same default-open
+            convention as the user allowlist. Returns True if it left."""
+            whitelist = allowed_guild_ids()
+            if whitelist and str(guild.id) not in whitelist:
+                print(f"[discord-bot] leaving server '{guild.name}' ({guild.id}) - "
+                      f"not in the configured server whitelist")
+                try:
+                    await guild.leave()
+                except Exception as e:
+                    print(f"[discord-bot] failed to leave server {guild.id}: {e}")
+                return True
+            return False
+
+        async def on_guild_join(self, guild):
+            # Catches the whitelist at the moment the bot is invited to a new
+            # server - the earliest point it can act, before anyone there gets a
+            # chance to use the slash command.
+            await self._enforce_guild_whitelist(guild)
+
         async def on_ready(self):
             _state["connected"] = True
             _state["user"] = str(self.user)
             _state["last_error"] = None
             print(f"[discord-bot] connected as {self.user}")
+            # Also re-checked on every (re)connect, not just on_guild_join - covers
+            # a server the bot was already in before the whitelist was configured
+            # or edited, so tightening it later actually takes effect.
+            for guild in list(self.guilds):
+                await self._enforce_guild_whitelist(guild)
             if not self.refresh_loop.is_running():
                 self.refresh_loop.start()
 
