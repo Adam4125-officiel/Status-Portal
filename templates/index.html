@@ -67,6 +67,7 @@
           {% if s.description %}<div class="service-card__desc">{{ s.description }}</div>{% endif %}
           <div class="service-card__status {{ status_css[s.status] }}">
             <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
+            {% if s.ignore_in_overall_status %}<span class="service-card__ignored" title="This service doesn't affect the overall status banner above">excluded from overall</span>{% endif %}
           </div>
           {% if s.uptime is not none %}
           <div>

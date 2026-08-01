@@ -277,14 +277,15 @@ def _slow_threshold_ms(data):
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
           data.get("group_name", "").strip(), int(data.get("auto_incident", 1)),
           _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0),
-          int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5)))
+          int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
+          int(data.get("ignore_in_overall_status", 0))))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -296,14 +297,16 @@ def update_service(service_id, data):
     conn.execute("""
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
         auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
-        slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=? WHERE id=?
+        slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=?,
+        ignore_in_overall_status=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
           int(data.get("sort_order", 0)), data.get("group_name", "").strip(),
           int(data.get("auto_incident", 1)), _slow_threshold_ms(data),
           int(data.get("startup_grace_seconds") or 0), int(data.get("retry_count") or 0),
-          int(data.get("retry_interval_seconds") or 5), service_id))
+          int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),
+          service_id))
     conn.commit()
     conn.close()
 

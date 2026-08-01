@@ -80,6 +80,13 @@
     <div class="field-hint">Delay before this service's checks are allowed to open an automatic incident after the portal starts, giving it time to boot. Status and response time are still recorded normally during this window - only incident creation is held back.</div>
   </div>
   <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="ignore_in_overall_status" {{ 'checked' if service and service.ignore_in_overall_status }}>
+      Exclude this service from the overall status banner
+    </label>
+    <div class="field-hint">This service's own card still shows its real status normally. If it's down while everything else is fine, the top banner still says "All services are operating normally" instead of reporting an outage for a service you've marked as not affecting overall status (e.g. something non-critical or expected to flap).</div>
+  </div>
+  <div class="field">
     <label for="sort_order">Sort order</label>
     <input type="number" id="sort_order" name="sort_order" value="{{ service.sort_order if service else 0 }}">
   </div>

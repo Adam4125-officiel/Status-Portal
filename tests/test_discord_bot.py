@@ -49,6 +49,11 @@ def test_overall_status_ranks_slow_between_operational_and_degraded():
     assert discord_bot._overall_status([{"status": "operational"}]) == "operational"
 
 
+def test_overall_status_ignores_flagged_services():
+    services = [{"status": "down", "ignore_in_overall_status": 1}, {"status": "operational"}]
+    assert discord_bot._overall_status(services) == "operational"
+
+
 def test_slow_status_has_full_display_plumbing():
     for table in (discord_bot.STATUS_ICON, discord_bot.STATUS_LABEL,
                   discord_bot.PRESENCE_TEXT, discord_bot._EMBED_COLOR_NAME):

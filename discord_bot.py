@@ -101,6 +101,9 @@ def normalize_guild_ids(raw):
 
 
 def _overall_status(services):
+    """Mirrors app.compute_overall_status() - a service with ignore_in_overall_status
+    set is excluded from this aggregate the same way, so the two never disagree."""
+    services = [s for s in services if not s.get("ignore_in_overall_status")]
     statuses = [s["status"] for s in services]
     if "down" in statuses:
         return "down"

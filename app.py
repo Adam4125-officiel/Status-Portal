@@ -273,6 +273,13 @@ def api_status():
 
 
 def compute_overall_status(services):
+    """A service with ignore_in_overall_status set still shows its own real status on
+    its own card - it's only excluded here, from the aggregate banner. E.g. an
+    ignored service that's down alongside otherwise-healthy services must still show
+    "All Services Up" overall. Any place this precedence list is duplicated
+    (discord_bot._overall_status()) needs the same filter - grep for "degraded"
+    across the codebase before assuming every status-aware spot is covered."""
+    services = [s for s in services if not s.get("ignore_in_overall_status")]
     if not services:
         return "operational"
     statuses = [s["status"] for s in services]
@@ -457,6 +464,7 @@ def admin_service_new():
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
+        data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
@@ -475,6 +483,7 @@ def admin_service_edit(service_id):
         data["manual_override"] = 1 if request.form.get("manual_override") else 0
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
+        data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         db.update_service(service_id, data)
         labels = request.form.getlist("link_label")
         urls = request.form.getlist("link_url")

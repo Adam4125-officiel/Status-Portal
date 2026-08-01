@@ -8,6 +8,23 @@ def test_compute_overall_status():
     assert app_module.compute_overall_status([{"status": "down"}, {"status": "maintenance"}]) == "down"
     assert app_module.compute_overall_status([{"status": "maintenance"}]) == "maintenance"
     assert app_module.compute_overall_status([{"status": "operational"}, {"status": "slow"}]) == "slow"
+
+
+def test_compute_overall_status_ignores_flagged_services():
+    services = [
+        {"status": "down", "ignore_in_overall_status": 1},
+        {"status": "operational", "ignore_in_overall_status": 0},
+    ]
+    assert app_module.compute_overall_status(services) == "operational"
+
+    # A down, non-ignored service among the rest still reports down as normal.
+    services[1]["status"] = "down"
+    services[1]["ignore_in_overall_status"] = 0
+    assert app_module.compute_overall_status(services) == "down"
+
+    # Every service ignored -> nothing left to aggregate over -> operational.
+    assert app_module.compute_overall_status(
+        [{"status": "down", "ignore_in_overall_status": 1}]) == "operational"
     assert app_module.compute_overall_status([{"status": "slow"}, {"status": "degraded"}]) == "degraded"
 
 

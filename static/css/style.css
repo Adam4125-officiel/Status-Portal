@@ -319,6 +319,13 @@ a:hover { text-decoration: underline; }
 .service-card__status.warn { color: var(--warn); }
 .service-card__status.crit { color: var(--crit); }
 .service-card__status.maint { color: var(--maint); }
+.service-card__ignored {
+  margin-left: auto;
+  font-size: 9.5px;
+  text-transform: none;
+  color: var(--text-faint);
+  letter-spacing: 0;
+}
 
 .uptime-bar {
   height: 4px;

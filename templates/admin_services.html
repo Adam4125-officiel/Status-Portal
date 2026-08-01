@@ -16,7 +16,7 @@
     <tr>
       <td>{{ s.icon }} <strong>{{ s.name }}</strong></td>
       <td>{{ s.group_name or '—' }}</td>
-      <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}</td>
+      <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}{% if s.ignore_in_overall_status %} <span style="color: var(--text-faint);">(ignored)</span>{% endif %}</td>
       <td>{{ 'yes' if s.auto_check else 'no' }}</td>
       <td>{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>{% else %}—{% endif %}</td>
       <td class="actions">
