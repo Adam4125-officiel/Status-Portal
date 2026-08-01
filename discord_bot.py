@@ -203,7 +203,11 @@ def build_status_data(include):
         if open_incidents:
             lines = [f"🚨 [{i['status']}] {i['title']}" for i in open_incidents]
             sections.append(("Active incident(s)", lines))
-        incidents = db.list_incidents(limit=5)
+        # Resolved only, and filtered before capping to 5 - an incident moves here
+        # once it's resolved, not while it's still open (it's already shown above,
+        # in "Active incident(s)"); filtering after a limit=5 fetch could let
+        # currently-open incidents crowd out older resolved ones from this list.
+        incidents = [i for i in db.list_incidents(limit=20) if i["status"] == "resolved"][:5]
         if incidents:
             lines = [f"• [{i['status']}] {i['title']}" for i in incidents]
             sections.append(("Recent incidents", lines))

@@ -62,6 +62,7 @@ def test_slow_status_has_full_display_plumbing():
 
 def test_build_status_data_respects_include_toggles(isolated_db):
     db.create_incident({"title": "Test outage", "status": "investigating"})
+    db.create_incident({"title": "Old outage", "status": "resolved"})
     db.create_announcement({"title": "Heads up", "message": "Doing work tonight."})
 
     everything_on = {"services": True, "incidents": True, "announcements": True,
@@ -70,10 +71,11 @@ def test_build_status_data_respects_include_toggles(isolated_db):
     headings = [h for h, _ in data["sections"]]
     assert "Services" in headings
     assert "Active incident(s)" in headings  # still-open ("investigating") incident
-    assert "Recent incidents" in headings
+    assert "Recent incidents" in headings  # only the already-resolved one
     assert "Announcements" in headings
     joined = "\n".join(line for _, lines in data["sections"] for line in lines)
     assert "Jellyfin" in joined and "Test outage" in joined and "Heads up" in joined
+    assert dict(data["sections"])["Recent incidents"] == ["• [resolved] Old outage"]
 
 
 def test_build_status_data_active_incident_disappears_once_resolved(isolated_db):
@@ -88,6 +90,20 @@ def test_build_status_data_active_incident_disappears_once_resolved(isolated_db)
     db.update_incident(incident["id"], {"title": "Test outage", "status": "resolved"})
     data = discord_bot.build_status_data(include)
     assert "Active incident(s)" not in dict(data["sections"])
+
+
+def test_build_status_data_open_incident_not_in_recents(isolated_db):
+    """Regression test: an open incident used to appear in both "Active incident(s)"
+    and "Recent incidents" (the latter was every incident regardless of status) -
+    it should only ever move to "recents" once resolved."""
+    db.create_incident({"title": "Ongoing outage", "status": "investigating"})
+    include = {"services": False, "incidents": True, "announcements": False,
+               "maintenance": False, "resources": {}}
+
+    data = discord_bot.build_status_data(include)
+    sections = dict(data["sections"])
+    assert sections["Active incident(s)"] == ["🚨 [investigating] Ongoing outage"]
+    assert "Recent incidents" not in sections
 
 
 def test_build_status_data_includes_service_links(isolated_db):
