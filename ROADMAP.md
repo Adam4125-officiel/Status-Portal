@@ -105,6 +105,35 @@ authentication path alongside the existing single-admin-password login, plus a
 visibility/permissions model per piece of content - worth a dedicated design
 conversation before writing any code, rather than assumptions baked in here.
 
+## Serve the admin panel on a separate port/subdomain from the public page
+
+Idea from the user, 2026-08-01: run `/admin/*` on a different port (or a
+dedicated subdomain) than the public status page, so the two can be exposed
+completely independently — e.g. the public page reachable from the open
+internet as today, while `/admin` is only reachable via Tailscale, a
+different reverse-proxy rule, or not published externally at all. Right now
+they're inseparable: same Flask app, same port, `/admin` just happens to
+require login.
+
+Worth doing, not started. Roughly two shapes to pick between if this gets
+picked up:
+- **Two WSGI listeners, one Flask app** — run the existing `app` object on a
+  second port too (waitress supports binding multiple listeners, or run two
+  `serve()` calls in separate threads), with a `before_request` check that
+  404s `/admin/*` on the public-facing port and 404s everything *except*
+  `/admin/*` on the admin-facing port. Simplest change, no code duplication,
+  same process/DB connection pool.
+- **Split into two Flask apps / blueprints** sharing `db.py` — cleaner
+  separation but a bigger refactor (route registration, shared `before_request`
+  hooks like CSRF and security headers would need to move to whatever's
+  common, static file serving duplicated or centralized).
+
+The first option is almost certainly the right call unless a reason turns up
+not to — far less code churn for the same practical outcome. Needs a
+decision on how the second port's bind address/number is configured
+(probably a new `PORTAL_ADMIN_PORT` env var in `config.py`, unset = today's
+behavior, single port, both public and admin).
+
 ---
 
 Nothing above blocks anything already built. The current single-admin auth model and
