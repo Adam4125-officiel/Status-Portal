@@ -401,9 +401,14 @@ a:hover { text-decoration: underline; }
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px 16px;
-  margin-bottom: 10px;
+  padding: 16px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.15s ease;
 }
+.incident-bubble:hover { border-color: var(--brand-dim); }
 .incident-bubble .incident__body { flex: 1; min-width: 0; }
 
 /* Used within admin_incident_form.html's timeline (updates list inside a
@@ -443,20 +448,36 @@ a:hover { text-decoration: underline; }
   color: var(--text-faint);
 }
 
+/* A left border + per-row dot reads as a timeline of updates nested inside the
+   incident's own card, distinct from the card's own title/description/badge
+   above it - each row here is one status change over the incident's lifetime
+   (newest first), not a flat unrelated list. */
 .incident-updates {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border-soft);
+  margin-top: 4px;
+  padding: 6px 0 2px 16px;
+  border-left: 2px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
 }
 .incident-updates__row {
+  position: relative;
   display: flex;
   align-items: baseline;
   gap: 8px;
   flex-wrap: wrap;
   font-size: 12.5px;
+}
+.incident-updates__row::before {
+  content: "";
+  position: absolute;
+  left: -20px;
+  top: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  box-shadow: 0 0 0 2px var(--bg-panel);
 }
 .incident-updates__msg { color: var(--text-dim); }
 .incident-updates__time {

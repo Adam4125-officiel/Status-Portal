@@ -353,6 +353,29 @@ def test_build_snapshot_data_reports_down_services_and_open_incident_detail(isol
     assert "Looking into it." in text
     assert "[identified]" in text
     assert "[investigating]" in text
+    assert "**Test outage**" in text  # bold title for readability
+    assert "> Root cause unknown so far." in text  # blockquoted detail, not flat text
+
+
+def test_build_snapshot_text_separates_multiple_open_incidents(isolated_db):
+    """Regression test for readability feedback: two open incidents used to run
+    together with no visual break - each must now get its own bold title line and
+    a blank-line gap before the next one."""
+    services = db.list_services()
+    db.create_incident({"title": "First outage", "status": "investigating"},
+                        service_ids=[services[0]["id"]])
+    db.create_incident({"title": "Second outage", "status": "monitoring"},
+                        service_ids=[services[1]["id"]])
+
+    data = discord_bot.build_snapshot_data()
+    text = discord_bot.build_snapshot_text(data)
+
+    assert "**First outage**" in text
+    assert "**Second outage**" in text
+    assert text.count("🚨 **") == 2
+    # A blank line separates the two incident blocks (order isn't asserted here -
+    # list_incidents() sorts by started_at DESC, whichever ran second sorts first).
+    assert "\n\n🚨 **" in text
 
 
 def test_build_snapshot_data_counts_only_in_progress_maintenance(isolated_db):

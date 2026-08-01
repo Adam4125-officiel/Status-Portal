@@ -277,24 +277,33 @@ def build_snapshot_data():
 
 
 def build_snapshot_text(data):
+    """Uses Discord's own markdown (bold title line, blockquote for everything
+    underneath it) to give each incident the same visual hierarchy as the public
+    page's incident cards - consecutive '>' lines render as one continuous quoted
+    block with a left bar in every Discord client, so an incident's detail reads
+    as clearly nested under its own title instead of blending into a flat wall of
+    text. A blank line between incidents keeps multiple open ones from running
+    together."""
     if not data["down"] and not data["incidents"] and not data["maintenance_count"]:
         return "✅ All services up. No open incidents or maintenance."
     parts = []
     if data["down"]:
-        parts.append("🔴 Down: " + ", ".join(data["down"]))
+        parts.append("🔴 **Down:** " + ", ".join(data["down"]))
+        parts.append("")
     for i in data["incidents"]:
-        header = f"🚨 [{i['status']}] {i['title']}"
+        title_line = f"🚨 **{i['title']}** — [{i['status']}]"
         if i["service_names"]:
-            header += f" — {i['service_names']}"
-        header += f" (started {i['started_at'][:16].replace('T', ' ')} UTC)"
-        parts.append(header)
+            title_line += f" · {i['service_names']}"
+        parts.append(title_line)
+        parts.append(f"> Started {i['started_at'][:16].replace('T', ' ')} UTC")
         if i["description"]:
-            parts.append(f"↳ {i['description']}")
+            parts.append(f"> {i['description']}")
         for u in i["updates"]:
-            parts.append(f"↳ [{u['status']}] {u['message']} ({u['created_at'][:16].replace('T', ' ')} UTC)")
+            parts.append(f"> [{u['status']}] {u['message']} — {u['created_at'][:16].replace('T', ' ')} UTC")
+        parts.append("")
     if data["maintenance_count"]:
         parts.append(f"🛠 {data['maintenance_count']} maintenance window(s) in progress")
-    return _truncate("\n".join(parts), 1900)
+    return _truncate("\n".join(parts).strip(), 1900)
 
 
 def _truncate(text, limit):
