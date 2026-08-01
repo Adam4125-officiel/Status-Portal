@@ -212,6 +212,37 @@ def _public_resource_visibility():
     return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
 
 
+# The public page's reorderable content blocks - the topbar/status-hero/footer stay
+# fixed (they're page chrome, not content). Each key maps 1:1 to a
+# templates/sections/<key>.html partial, which owns its own "is there anything to
+# show" guard - index() doesn't filter this list by content, it's included
+# unconditionally in whatever order is configured, same as today's fixed order.
+PUBLIC_SECTIONS = [
+    ("announcements", "Announcements"),
+    ("services", "Services"),
+    ("incidents", "Incidents & maintenance"),
+    ("info", "Practical info"),
+    ("resources", "Server resources"),
+    ("vms", "Virtual machines"),
+    ("jellyfin_activity", "Jellyfin activity"),
+]
+_DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
+
+
+def _public_section_order():
+    """Admin-configured order, stored as a comma-separated settings value. Any
+    stored key that's no longer recognized is silently dropped, and any valid key
+    missing from the stored value (e.g. a new section added after the admin last
+    saved this) is appended at the end in its default position - so nothing
+    silently disappears from the page just because the setting predates it."""
+    raw = db.get_setting("public_layout_order", "")
+    stored = [k.strip() for k in raw.split(",") if k.strip()]
+    valid_keys = {key for key, _ in PUBLIC_SECTIONS}
+    order = [k for k in stored if k in valid_keys]
+    order += [k for k in _DEFAULT_SECTION_ORDER if k not in order]
+    return order
+
+
 # Integration statuses are checked in the background (see run_health_checks) and cached
 # here, keyed by integration id. Nothing in the request path ever calls
 # integrations.fetch_integration_status() directly - a slow/unreachable integration
@@ -309,7 +340,8 @@ def index():
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
-                            snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity)
+                            snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
+                            section_order=_public_section_order())
 
 
 @app.route("/api/status")
@@ -902,6 +934,8 @@ def admin_settings():
         else:
             db.set_setting("admin_password_hash", generate_password_hash(new))
             flash("Password changed.", "success")
+    section_order = _public_section_order()
+    section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
@@ -909,6 +943,7 @@ def admin_settings():
                             highload_thresholds=integrations.high_load_thresholds(),
                             discord_configured=bool(config.DISCORD_WEBHOOK_URL),
                             ntfy_configured=bool(config.NTFY_URL),
+                            section_order=section_order, section_labels=section_labels,
                             active="settings")
 
 
@@ -921,6 +956,9 @@ def admin_settings_general():
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
         raw = request.form.get(f"highload_{key}", "").strip()
         db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)
+    layout_order = request.form.get("layout_order", "").strip()
+    if layout_order:
+        db.set_setting("public_layout_order", layout_order)
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
 

@@ -26,6 +26,22 @@
     </div>
   </div>
   <div class="field">
+    <label>Public page layout</label>
+    <div class="field-hint" style="margin-bottom: 8px;">The order these blocks appear in on the public page — the top status banner and footer always stay fixed. Move rows up/down; a section still only shows when it actually has something to show (e.g. "Virtual machines" stays hidden if none are detected), this just controls where it appears when it does.</div>
+    <ul id="layout-order-list" style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px;">
+      {% for key in section_order %}
+      <li data-key="{{ key }}" style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-panel-raised); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 12px;">
+        <span style="font-size: 13px;">{{ section_labels[key] }}</span>
+        <span>
+          <button type="button" class="btn secondary move-up" style="padding: 3px 9px;" title="Move up">↑</button>
+          <button type="button" class="btn secondary move-down" style="padding: 3px 9px;" title="Move down">↓</button>
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+    <input type="hidden" name="layout_order" id="layout_order_input" value="{{ section_order|join(',') }}">
+  </div>
+  <div class="field">
     <label>High-load thresholds</label>
     <div class="field-hint" style="margin-bottom: 8px;">The high-load indicator lights up if any of these is exceeded (or if Jellyfin reports an active transcode or a running background task like trickplay generation, when a Jellyfin integration is configured).</div>
   </div>
@@ -75,4 +91,5 @@
   ntfy {{ 'configured' if ntfy_configured else 'not configured' }}
   (<code>PORTAL_NTFY_URL</code>). Set either in <code>.env</code> — no admin-UI field, since it's a secret URL.
 </p>
+<script src="{{ url_for('static', filename='js/admin_layout_order.js') }}"></script>
 {% endblock %}

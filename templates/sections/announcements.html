@@ -1,0 +1,15 @@
+{% if announcements %}
+<div class="section-title">Announcements</div>
+{% for a in announcements %}
+  <div class="announcement {{ a.type }}">
+    <div class="announcement__head">
+      <div class="announcement__title">
+        {% if a.pinned %}<span class="pin-flag">📌</span>{% endif %}
+        {{ a.title }}
+      </div>
+      <div class="announcement__time"><span class="local-time" data-utc="{{ a.created_at }}">{{ a.created_at[:16].replace('T', ' ') }} UTC</span></div>
+    </div>
+    <div class="announcement__body">{{ a.message|richtext }}</div>
+  </div>
+{% endfor %}
+{% endif %}

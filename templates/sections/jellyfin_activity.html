@@ -1,0 +1,4 @@
+{% if jellyfin_activity and jellyfin_activity.running_tasks %}
+<div class="section-title">Jellyfin activity</div>
+<div class="info-block">🔧 Running: {{ jellyfin_activity.running_tasks|join(', ') }}</div>
+{% endif %}

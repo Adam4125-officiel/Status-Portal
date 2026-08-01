@@ -778,6 +778,47 @@ def test_admin_vm_control_route_rejects_unknown_action(client):
     assert b"Unknown VM action" in resp.data
 
 
+def test_public_section_order_defaults_to_original_order(isolated_db):
+    order = app_module._public_section_order()
+    assert order == ["announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"]
+
+
+def test_public_section_order_respects_stored_setting(isolated_db):
+    db.set_setting("public_layout_order", "vms,services,announcements")
+    order = app_module._public_section_order()
+    # Stored order first, then every other valid key appended in its default position.
+    assert order[:3] == ["vms", "services", "announcements"]
+    assert set(order) == {"announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"}
+
+
+def test_public_section_order_drops_unknown_keys(isolated_db):
+    db.set_setting("public_layout_order", "vms,not-a-real-section,services")
+    order = app_module._public_section_order()
+    assert "not-a-real-section" not in order
+    assert order[:2] == ["vms", "services"]
+
+
+def test_admin_settings_general_saves_layout_order(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={"layout_order": "vms,services,incidents,announcements,info,resources,jellyfin_activity"})
+    assert resp.status_code == 302
+    assert db.get_setting("public_layout_order") == "vms,services,incidents,announcements,info,resources,jellyfin_activity"
+    assert app_module._public_section_order()[0] == "vms"
+
+
+def test_public_page_renders_sections_in_configured_order(client):
+    """End-to-end: the stored order must actually change relative position in the
+    rendered HTML, not just the value _public_section_order() returns."""
+    db.set_setting("public_layout_order", "info,services,incidents,vms,resources,jellyfin_activity,announcements")
+
+    resp = client.get("/")
+    html = resp.data.decode()
+    # "Practical info" and "Services" both always render regardless of data present -
+    # "info" was moved ahead of "services" in the order above (default order has it
+    # the other way around).
+    assert html.index("Practical info") < html.index(">Services<")
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({

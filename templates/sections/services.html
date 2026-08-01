@@ -1,0 +1,57 @@
+<div class="section-title">Services</div>
+{% if services %}
+{% for group in groups %}
+  {% if group.name %}<div class="group-title">{{ group.name }}</div>{% endif %}
+  <div class="services-grid">
+    {% for s in group.services %}
+      <div class="service-card">
+        <div class="service-card__head">
+          <div class="service-card__title">
+            <span class="service-card__icon">{{ s.icon }}</span>{{ s.name }}
+          </div>
+        </div>
+        {% if s.description %}<div class="service-card__desc">{{ s.description }}</div>{% endif %}
+        <div class="service-card__status {{ status_css[s.status] }}">
+          <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
+          {% if s.ignore_in_overall_status %}<span class="service-card__ignored" title="This service doesn't affect the overall status banner above">excluded from overall</span>{% endif %}
+        </div>
+        {% if s.retrying %}
+        <div class="service-card__note" title="A health check just failed and is being retried before this is reported as down">⏳ retrying…</div>
+        {% elif s.in_grace_period %}
+        <div class="service-card__note" title="Auto-incidents are suppressed for this service until its startup grace period elapses">🕐 startup grace period</div>
+        {% endif %}
+        {% if s.uptime is not none %}
+        <div class="status-bar {{ status_css[s.status] }}" title="{{ s.uptime }}% uptime over the last 30 days"></div>
+        {% endif %}
+        {% if s.integration_status %}
+        <div class="service-card__integration">
+          <span class="led {{ s.integration_severity }}"></span>
+          {% if not s.integration_status.reachable %}API unreachable
+          {% elif s.integration_status.issues %}{{ s.integration_status.issues|length }} API warning(s)
+          {% else %}API healthy{% endif %}
+        </div>
+        {% endif %}
+        {% if s.links %}
+        <div class="service-card__links">
+          {% for link in s.links %}
+            <a href="{{ link.url }}" target="_blank" rel="noopener" class="link-pill">{{ link.label }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+        <div class="service-card__foot">
+          <span class="service-card__ping">
+            {% if s.auto_check and s.last_checked %}
+              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }} · upd. <span class="local-time-short" data-utc="{{ s.last_checked }}">{{ s.last_checked[11:16] }} UTC</span>
+            {% elif s.auto_check %}
+              check pending
+            {% else %}&nbsp;{% endif %}
+          </span>
+          {% if s.url %}<a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>{% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% endfor %}
+{% else %}
+  <div class="empty-state">No services configured yet.</div>
+{% endif %}
