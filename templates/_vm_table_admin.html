@@ -1,0 +1,22 @@
+<table class="admin-table">
+  <thead><tr><th>Name</th><th>State</th><th>Uptime</th><th></th></tr></thead>
+  <tbody>
+    {% for vm in vms %}
+    <tr>
+      <td>{{ vm.name }}</td>
+      <td><span class="badge {{ 'resolved' if vm.state == 'Running' else 'investigating' }}">{{ vm.state }}</span></td>
+      <td>{{ vm.uptime }}</td>
+      <td class="actions">
+        {% for action, label in [('start', 'Start'), ('restart', 'Restart'), ('stop', 'Stop')] %}
+        <form action="{{ url_for('admin_vm_control') }}" method="POST" style="display:inline"
+              onsubmit="return confirm('{{ label }} VM {{ vm.name }}?');">
+          <input type="hidden" name="name" value="{{ vm.name }}">
+          <input type="hidden" name="action" value="{{ action }}">
+          <button type="submit" class="btn secondary" style="padding:4px 10px;">{{ label }}</button>
+        </form>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -344,6 +344,77 @@ def get_vm_snapshot():
     ]
 
 
+_VM_ACTION_COMMANDS = {
+    "start": "Start-VM -Name '{name}'",
+    "stop": "Stop-VM -Name '{name}' -Force",
+    "restart": "Restart-VM -Name '{name}' -Force",
+}
+
+
+def control_vm(name, action):
+    """Starts/stops/restarts a Hyper-V VM by name (Windows only). This is an
+    explicit, one-shot admin action (a button click) - like the existing
+    integration "Check now" button, calling out to PowerShell live here is the
+    sanctioned exception to the project's rule against slow I/O in a request
+    handler, since nothing automatic ever calls this.
+
+    `name` is validated against the *live* get_vm_snapshot() result - an allow-list,
+    not string sanitization - before it's ever substituted into the PowerShell
+    command: only a name Hyper-V itself currently reports for a real VM is
+    accepted, so there is no way to inject an arbitrary command via this parameter.
+    A legitimate name containing a single quote is still handled correctly (PowerShell
+    single-quote escaping: doubled), it just also has to actually match a live VM
+    first. Returns (success: bool, message: str) for a flash message."""
+    if os.name != "nt":
+        return False, "VM control is only available on Windows with Hyper-V."
+    command_template = _VM_ACTION_COMMANDS.get(action)
+    if not command_template:
+        return False, f"Unknown VM action: {action}"
+    live_names = {vm["name"] for vm in get_vm_snapshot()}
+    if name not in live_names:
+        return False, f"'{name}' isn't a currently known VM - refusing to act on it."
+    command = command_template.format(name=name.replace("'", "''"))
+    stdout = _run_powershell(command, timeout=30)
+    if stdout is None:
+        return False, f"Failed to {action} '{name}' - see the server log for details."
+    return True, f"'{name}': {action} command sent."
+
+
+_HOST_ACTION_COMMANDS_NT = {
+    "restart": ["shutdown", "/r", "/t", "5"],
+    "shutdown": ["shutdown", "/s", "/t", "5"],
+}
+_HOST_ACTION_COMMANDS_POSIX = {
+    "restart": ["shutdown", "-r", "now"],
+    "shutdown": ["shutdown", "-h", "now"],
+}
+
+
+def control_host(action):
+    """Restarts or shuts down the machine this app is running on - by far the most
+    destructive action in this app. Deliberately minimal surface: exactly two fixed
+    actions, each a hardcoded argument list with zero user-controlled input
+    anywhere, so (unlike control_vm() above) there is no injection surface to
+    reason about at all - there's simply nothing to inject into. Same "explicit
+    one-shot admin action" exception to the no-slow-I/O-in-a-request-handler rule
+    as control_vm(). The admin route calling this requires a typed confirmation on
+    top of the usual login+CSRF protection, given the blast radius.
+
+    A short delay (Windows: /t 5; Linux has no equivalent flag, so this is
+    immediate there) gives the HTTP response a moment to actually reach the
+    browser before the machine goes down. Returns (success: bool, message: str)."""
+    commands = _HOST_ACTION_COMMANDS_NT if os.name == "nt" else _HOST_ACTION_COMMANDS_POSIX
+    command = commands.get(action)
+    if not command:
+        return False, f"Unknown host action: {action}"
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        _logger.exception("Failed to %s the host", action)
+        return False, f"Failed to {action} the host: {e}"
+    return True, f"Host {action} command sent."
+
+
 _CPU_TEMP_QUERY_COMMAND = (
     "$t = (Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature "
     "-ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty CurrentTemperature); "

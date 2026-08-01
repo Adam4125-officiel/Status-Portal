@@ -218,3 +218,114 @@ def test_evaluate_high_load_network_threshold():
     result = monitoring.evaluate_high_load(snapshot, {"network_mbs": 100})
     assert result["active"] is True
     assert "Network 120 MB/s" in result["reasons"]
+
+
+def test_control_vm_rejects_unknown_name(monkeypatch):
+    """The allow-list check: a name that isn't a currently-live VM must be refused
+    before any PowerShell command is ever built, regardless of platform."""
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    monkeypatch.setattr(monitoring, "get_vm_snapshot", lambda: [{"name": "web01", "state": "Running", "uptime": "1h"}])
+    calls = []
+    monkeypatch.setattr(monitoring.subprocess, "run", lambda *a, **k: calls.append(a) or SimpleNamespace(
+        returncode=0, stdout="", stderr=""))
+
+    success, message = monitoring.control_vm("not-a-real-vm", "stop")
+
+    assert success is False
+    assert "not-a-real-vm" in message
+    assert calls == []  # never even attempted the PowerShell call
+
+
+def test_control_vm_rejects_unknown_action(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    monkeypatch.setattr(monitoring, "get_vm_snapshot", lambda: [{"name": "web01", "state": "Running", "uptime": "1h"}])
+    success, message = monitoring.control_vm("web01", "delete-everything")
+    assert success is False
+    assert "Unknown" in message
+
+
+def test_control_vm_not_available_on_non_windows(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    success, message = monitoring.control_vm("web01", "start")
+    assert success is False
+    assert "Windows" in message
+
+
+def test_control_vm_sends_correct_powershell_command_for_a_known_vm(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    monkeypatch.setattr(monitoring, "get_vm_snapshot", lambda: [{"name": "web01", "state": "Off", "uptime": "0m"}])
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(monitoring.subprocess, "run", fake_run)
+    success, message = monitoring.control_vm("web01", "start")
+
+    assert success is True
+    assert "web01" in message
+    assert "Start-VM" in captured["cmd"][-1]
+    assert "web01" in captured["cmd"][-1]
+
+
+def test_control_vm_escapes_single_quotes_in_name(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    monkeypatch.setattr(monitoring, "get_vm_snapshot",
+                         lambda: [{"name": "O'Brien-VM", "state": "Off", "uptime": "0m"}])
+    captured = {}
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda cmd, **k: captured.update(cmd=cmd) or SimpleNamespace(
+                             returncode=0, stdout="ok", stderr=""))
+
+    success, _ = monitoring.control_vm("O'Brien-VM", "stop")
+
+    assert success is True
+    assert "O''Brien-VM" in captured["cmd"][-1]  # PowerShell single-quote escaping
+
+
+def test_control_host_uses_fixed_argument_list(monkeypatch):
+    """No string interpolation anywhere in the command - always a fixed list of
+    literal arguments, regardless of platform."""
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    captured = {}
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda cmd, **k: captured.update(cmd=cmd) or SimpleNamespace(
+                             returncode=0, stdout="", stderr=""))
+
+    success, message = monitoring.control_host("restart")
+
+    assert success is True
+    assert captured["cmd"] == ["shutdown", "/r", "/t", "5"]
+    assert isinstance(captured["cmd"], list)
+
+
+def test_control_host_posix_command(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    captured = {}
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda cmd, **k: captured.update(cmd=cmd) or SimpleNamespace(
+                             returncode=0, stdout="", stderr=""))
+
+    success, message = monitoring.control_host("shutdown")
+
+    assert success is True
+    assert captured["cmd"] == ["shutdown", "-h", "now"]
+
+
+def test_control_host_rejects_unknown_action():
+    success, message = monitoring.control_host("format-drive")
+    assert success is False
+    assert "Unknown" in message
+
+
+def test_control_host_handles_subprocess_failure(monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+
+    def raise_error(cmd, **kwargs):
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(monitoring.subprocess, "run", raise_error)
+    success, message = monitoring.control_host("restart")
+    assert success is False
+    assert "not permitted" in message

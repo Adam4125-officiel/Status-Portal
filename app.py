@@ -751,6 +751,37 @@ def admin_resources():
                             refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
 
 
+@app.route("/admin/resources/host-control", methods=["POST"])
+@login_required
+def admin_host_control():
+    """Restarts/shuts down the host machine itself - see monitoring.control_host()
+    for why this is safe from an injection standpoint (zero user-controlled input:
+    exactly two fixed actions). The blast radius comes entirely from what the
+    action *does*, not from anything an attacker could smuggle into it - login +
+    CSRF (already required on every admin POST) plus the typed client-side
+    confirmation in admin_resources.html are the mitigations for that."""
+    action = request.form.get("action", "")
+    if action not in ("restart", "shutdown"):
+        flash("Unknown host action.", "error")
+        return redirect(url_for("admin_resources"))
+    success, message = monitoring.control_host(action)
+    flash(message, "success" if success else "error")
+    return redirect(url_for("admin_resources"))
+
+
+@app.route("/admin/resources/vm-control", methods=["POST"])
+@login_required
+def admin_vm_control():
+    name = request.form.get("name", "")
+    action = request.form.get("action", "")
+    if action not in ("start", "stop", "restart"):
+        flash("Unknown VM action.", "error")
+        return redirect(url_for("admin_resources"))
+    success, message = monitoring.control_vm(name, action)
+    flash(message, "success" if success else "error")
+    return redirect(url_for("admin_resources"))
+
+
 # ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----
 @app.route("/admin/integrations")
 @login_required

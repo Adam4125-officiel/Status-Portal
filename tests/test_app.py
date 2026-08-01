@@ -725,6 +725,59 @@ def test_admin_discord_bot_guilds_page(client, monkeypatch):
     assert db.get_setting("discordbot_channel_whitelist") == "555, 666"
 
 
+def test_admin_host_control_route_rejects_unknown_action(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/resources/host-control", data={"action": "format-drive"})
+    assert resp.status_code == 302
+    resp = client.get("/admin/resources")
+    assert b"Unknown host action" in resp.data
+
+
+def test_admin_host_control_route_calls_monitoring_and_flashes_result(client, monkeypatch):
+    """Only ever exercises this through a mocked monitoring.control_host() - never
+    the real function, which would actually try to run a shutdown/restart command
+    on whatever machine runs the test suite."""
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, f"Host {action} command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/resources/host-control", data={"action": "restart"})
+
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+    resp = client.get("/admin/resources")
+    assert b"Host restart command sent" in resp.data
+
+
+def test_admin_host_control_requires_login(client):
+    resp = client.post("/admin/resources/host-control", data={"action": "restart"})
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_vm_control_route_calls_monitoring_and_flashes_result(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_vm",
+                         lambda name, action: calls.append((name, action)) or (True, f"'{name}': {action} command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/resources/vm-control", data={"name": "web01", "action": "restart"})
+
+    assert resp.status_code == 302
+    assert calls == [("web01", "restart")]
+    resp = client.get("/admin/resources")
+    assert b"web01" in resp.data and b"command sent" in resp.data
+
+
+def test_admin_vm_control_route_rejects_unknown_action(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/resources/vm-control", data={"name": "web01", "action": "delete-everything"})
+    assert resp.status_code == 302
+    resp = client.get("/admin/resources")
+    assert b"Unknown VM action" in resp.data
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({
