@@ -70,12 +70,7 @@
             {% if s.ignore_in_overall_status %}<span class="service-card__ignored" title="This service doesn't affect the overall status banner above">excluded from overall</span>{% endif %}
           </div>
           {% if s.uptime is not none %}
-          <div>
-            <div class="uptime-bar" title="{{ s.uptime }}% uptime over the last 30 days">
-              <div class="uptime-bar__fill" style="width: {{ s.uptime }}%;"></div>
-            </div>
-            <div class="uptime-label">{{ s.uptime }}% · 30d</div>
-          </div>
+          <div class="status-bar {{ status_css[s.status] }}" title="{{ s.uptime }}% uptime over the last 30 days"></div>
           {% endif %}
           {% if s.integration_status %}
           <div class="service-card__integration">

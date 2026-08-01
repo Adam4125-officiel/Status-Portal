@@ -327,22 +327,18 @@ a:hover { text-decoration: underline; }
   letter-spacing: 0;
 }
 
-.uptime-bar {
+/* A simple visual indicator, not a history/timeline - full-width, colored to match
+   the service's *current* status only (see status_css in index.html). The 30-day
+   uptime % is still tracked (get_uptime_percentage()) and surfaces as a hover
+   tooltip rather than a visible fraction. */
+.status-bar {
   height: 4px;
   border-radius: 2px;
-  background: var(--crit-dim);
-  overflow: hidden;
 }
-.uptime-bar__fill {
-  height: 100%;
-  background: var(--ok);
-}
-.uptime-label {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-faint);
-  margin-top: 3px;
-}
+.status-bar.ok { background: var(--ok); }
+.status-bar.warn { background: var(--warn); }
+.status-bar.crit { background: var(--crit); }
+.status-bar.maint { background: var(--maint); }
 
 .service-card__integration {
   display: flex;
