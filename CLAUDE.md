@@ -118,6 +118,66 @@ DB-backed Settings pages, not a code edit.
   `_at[` / `[:16]` / `[11:16]` across every template first rather than trusting
   that the obvious spots (incidents/announcements/maintenance) are the only ones;
   follow the same `data-utc` pattern for whatever turns up.
+- **A many-to-many relationship (multi-service incidents/maintenance, added
+  2026-08-01) gets a join table with its own per-row state, not a schema
+  rewrite.** `maintenance_window_services`/`incident_services` are the source of
+  truth for which service(s) a window/incident covers; the legacy single
+  `service_id` column on `maintenance_windows`/`incidents` stays populated with
+  the *first* selected service so every pre-existing single-service reader
+  (auto-incident creation, RSS, the badge endpoints) keeps working with zero
+  changes. A one-time backfill in `init_db()` seeds the join table for any row
+  written before it existed (`WHERE id NOT IN (SELECT DISTINCT ... FROM
+  <join_table>)` — idempotent, safe to re-run every startup). Each service in a
+  multi-service maintenance window gets its *own* `pre_status`/
+  `pre_manual_override` in the join table (a window covering 3 services needs 3
+  independent restore points) — the legacy columns on `maintenance_windows`
+  only mirror the primary service's snapshot, for cheap no-join reads. If you
+  add another one-to-many-turned-many-to-many relationship later, follow this
+  same shape rather than dropping the legacy column.
+- **Every admin POST is CSRF-protected (added 2026-08-01) via a before_request
+  hook in `app.py`, not per-route.** A per-session token
+  (`app._get_csrf_token()`, registered as the `csrf_token()` Jinja global) is
+  injected into every `<form method="POST">` by `static/js/csrf.js` reading a
+  `<meta name="csrf-token">` tag `base.html` renders on every page — templates
+  themselves never hand-embed the token, which is deliberate: hand-adding it to
+  the ~16 templates with a POST form risked silently missing one. Any new
+  admin route just needs to live under `/admin/` (the check is
+  `request.path.startswith("/admin/")` + `method == "POST"`) — no per-route
+  wiring required. The check is bypassed when `app.testing` is set, since the
+  test client posts raw form dicts and never runs the injection JS; if you
+  need to test the mechanism itself (not bypass it), see
+  `test_csrf_protection_rejects_missing_or_wrong_token` in `tests/test_app.py`
+  for the pattern (a client that does NOT set `TESTING`, extracting the real
+  token from a GET response first).
+- **Never interpolate a value from outside the portal's own admin into an
+  inline JS event-handler attribute (e.g. `onsubmit="return confirm('...' +
+  x + '...')"`).** This bit the project already: the Hyper-V VM-name
+  confirmation dialog did exactly this, and Jinja's HTML-attribute escaping
+  doesn't protect a value that the browser HTML-decodes and then hands to the
+  JS engine a second time as code — a VM name containing a `'` (Hyper-V
+  doesn't forbid it, and whoever can create/rename a VM on the host isn't
+  necessarily the portal's own web-admin) could break out and inject script.
+  Fixed by moving the value into a plain `data-*` attribute and reading it
+  from a JS listener instead (`static/js/admin_vm_control.js`) — safe because
+  it's then only ever used as a JS *string value*, never re-inserted into
+  HTML or re-evaluated as code. The pre-existing `onsubmit="confirm('Delete
+  {{ s.name }}?')"` pattern in `admin_services.html`/`admin_maintenance.html`
+  is different/lower-risk (only the already-fully-privileged portal admin
+  ever sets those names — self-XSS, no privilege gain) and was deliberately
+  left alone, but don't copy that pattern for any value that can originate
+  from outside the portal's own admin (an external API, another local
+  account/service, etc.).
+- **A background thread that can shell out to run a real OS command (host
+  restart/shutdown, VM control, added 2026-08-01) must never be exercised for
+  real in this sandbox, or against any environment you're not certain you're
+  allowed to affect** — not even to see it "fail". `monitoring.control_host()`/
+  `control_vm()` are unit-tested exclusively via a mocked `subprocess.run`;
+  verify by reading the mocked call arguments, never by actually invoking the
+  route live. `control_vm()` happens to safely no-op on non-Windows before
+  reaching `subprocess` at all (its `os.name` guard is the very first line),
+  so *that* one route is fine to hit live in this Linux sandbox — `control_host()`
+  has no such guard (host restart/shutdown applies on both platforms on
+  purpose) and must never be POSTed to outside of a mocked test.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
@@ -255,6 +315,94 @@ DB-backed Settings pages, not a code edit.
 - `discord.py` is installed in this dev sandbox's Python environment for testing
   purposes even though it's not in `requirements.txt` (it's optional). If it's ever
   missing here and you need to verify code again: `pip install discord.py`.
+- **Two slash commands now share one authorization gate (added 2026-08-01).**
+  `/snapshot` (a short, one-shot plain-text reply — down services + whether
+  any incident/maintenance is currently open, built by
+  `build_snapshot_data()`/`build_snapshot_text()`, never tracked/edited like
+  the main `/status` message) was added alongside the existing configurable
+  main command. Both now call a shared `StatusBot._check_command_authorized()`
+  (enabled-toggle → channel whitelist → user allow-list, in that order) instead
+  of duplicating the checks — if you add a third command, call this helper
+  too rather than re-inlining the checks. `_register_command()` guards against
+  an admin naming their configurable command literally `snapshot` (falls back
+  to `status`), since that would otherwise collide with the fixed command name
+  at registration time and crash bot startup.
+- **Channel whitelist (`discordbot_channel_whitelist`, added 2026-08-01)** is a
+  *different kind* of control from the guild whitelist: it only refuses to
+  reply in an unlisted channel (checked in `_check_command_authorized()`), it
+  never makes the bot leave anything — a channel isn't something the bot can
+  be a "member" of independently of its server. Same
+  empty-means-unrestricted/comma-or-newline-separated-IDs convention as the
+  user/guild allow-lists, sharing `_parse_id_list()`.
+- **`discord_bot._state["guilds"]`** (added 2026-08-01) is a read-only snapshot
+  of every server/channel the bot is currently in, populated straight from the
+  gateway cache (`self.guilds`/`guild.text_channels` — no extra API calls) by
+  `StatusBot._snapshot_guilds()`, called from `on_ready`, `on_guild_join`, the
+  new `on_guild_remove` handler, and every `_refresh()` tick. Backs the new
+  `/admin/discord-bot/guilds` admin page (server/channel list + the channel
+  whitelist form) — same "reflects whatever the bot thread last reported"
+  pattern `get_status()` already used for connection state, just extended to
+  cover membership too. Like the rest of this module's Discord-API-dependent
+  behavior, the actual gateway-cache correctness is unverified against a real
+  server as of 2026-08-01 — only unit-tested via mocked `discord.Guild`/
+  `discord.TextChannel` objects.
+
+## Crash logging (`logging_setup.py`) — added 2026-08-01
+
+- `logging_setup.init_logging()` configures Python's standard `logging` module
+  (rotating file under `instance/logs/app.log`, same gitignored directory as
+  the DB, plus the console) — called once from `app.py`/`serve_waitress.py`'s
+  `__main__` blocks, **never at plain import time**, specifically so importing
+  these modules under pytest doesn't create log files as a side effect. If you
+  add a third entry point, call it there too, in the same spot (before
+  `db.init_db()`).
+- Every background-thread error path that used to `print(f"[tag] ...")`
+  (health-check loop, `monitoring`'s Windows refresh, `discord_bot`) now goes
+  through `logging.getLogger(__name__)` instead — `.exception(...)` inside an
+  `except` block (auto-captures the traceback), `.info()`/`.warning()` for
+  non-error diagnostics. Follow this pattern for any new print-style
+  diagnostic rather than reintroducing bare `print()`.
+- `threading.excepthook` is set to `logging_setup._log_thread_exception` —
+  catches a background thread dying from something *outside* its own
+  try/except (the health-check loop, monitoring refresh, and the Discord bot
+  each already wrap their own loop bodies, but this is the safety net for
+  anything that slips past that). Without this, a thread dying this way used
+  to be completely silent — "services just stopped updating" with zero trace
+  anywhere.
+- **Tests that need to assert on logged output must use pytest's `caplog`
+  fixture, not `capsys`** — `capsys` only captures direct `print()`/stdout
+  writes, and with no logging configured during tests (see above), a bare
+  `logging.Logger` call goes through Python's "handler of last resort" straight
+  to *stderr* with no formatting, which `capsys.readouterr().out` won't see
+  either. See `tests/test_monitoring.py`'s `test_vm_snapshot_logs_stderr_on_failure`
+  or `tests/test_discord_bot.py`'s `test_start_logs_clearly_when_discord_py_missing`
+  for the pattern (`with caplog.at_level("ERROR"): ...` then assert against
+  `caplog.text`).
+
+## Public page layout (`templates/sections/`) — added 2026-08-01
+
+- Each of the 7 public-page content blocks (announcements, services,
+  incidents & maintenance, practical info, resources, VMs, Jellyfin activity)
+  is its own partial under `templates/sections/<key>.html`, each owning its
+  own "is there anything to show" guard exactly as it did when inline in
+  `index.html`. The topbar/status-hero/footer are page chrome, not content,
+  and stay hardcoded at the top/bottom of `index.html` — they were
+  deliberately never made reorderable.
+- `app._public_section_order()` reads the `public_layout_order` setting
+  (comma-separated section keys) and is the *only* place that decides
+  render order — `index.html` just does
+  `{% include 'sections/' ~ key ~ '.html' %}` in a loop over whatever list it's
+  handed. **If you add an 8th section**, add its key to the `PUBLIC_SECTIONS`
+  list in `app.py` (which doubles as the label lookup for the admin reorder
+  UI) — `_public_section_order()` already appends any valid key missing from a
+  stale stored value at the end, so an admin who saved a custom order before
+  your new section existed still sees it (just at the bottom, not
+  disappeared).
+- The reorder UI on `/admin/settings` (`admin_layout_order.js`) is a plain
+  up/down-button list, not drag-and-drop — deliberate, to stay dependency-free
+  like every other admin-side JS file in this app (`admin_service_links.js`,
+  `admin_maintenance_form.js`, etc.). Don't introduce a drag-and-drop library
+  for this without discussing it first.
 
 ## Testing/verification habits (established over many sessions — keep following them)
 
@@ -273,6 +421,20 @@ DB-backed Settings pages, not a code edit.
 - Clean up after smoke testing: remove any `instance/portal.db` created during a
   test run, and any cookie jars, before finishing — don't leave a test admin password
   or fake data sitting in what could become the user's real database.
+- **Never live-invoke anything that shells out to actually restart/shut down a
+  machine (`monitoring.control_host()`), even in this sandbox, even just to
+  "see what happens."** Verify exclusively via a mocked `subprocess.run` in
+  pytest — see the bullet under "Conventions that matter" above. A "failed"
+  real attempt is still an inappropriate action to take against an
+  environment you don't own outright.
+- **A `/code-review`-style security pass over a session's accumulated diff is
+  worth running before a release that adds any new admin-facing control
+  surface** (added a genuinely new class of risk to this codebase 2026-08-01:
+  host/VM power controls) — it caught a real XSS bug
+  (inline-onsubmit-with-untrusted-VM-name, see "Conventions that matter") that
+  manual review and the existing test suite both missed. Doesn't replace the
+  live `curl`/browser smoke testing above, but catches a different class of
+  issue than either does alone.
 
 ## Release process
 
