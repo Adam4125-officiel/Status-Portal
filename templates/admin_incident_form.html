@@ -12,13 +12,14 @@
            placeholder="E.g. Planned Jellyfin maintenance">
   </div>
   <div class="field">
-    <label for="service_id">Related service (optional)</label>
-    <select id="service_id" name="service_id">
-      <option value="">— None / general —</option>
+    <label for="service_id">Related service(s) (optional)</label>
+    {% set selected_ids = incident.services|map(attribute='id')|list if incident else [] %}
+    <select id="service_id" name="service_id" multiple size="6">
       {% for s in services %}
-        <option value="{{ s.id }}" {{ 'selected' if incident and incident.service_id == s.id }}>{{ s.name }}</option>
+        <option value="{{ s.id }}" {{ 'selected' if s.id in selected_ids }}>{{ s.name }}</option>
       {% endfor %}
     </select>
+    <div class="field-hint">Ctrl/Cmd-click (or shift-click) to select more than one, or none for a general incident.</div>
   </div>
   <div class="field">
     <label for="description">Description</label>

@@ -128,6 +128,136 @@ def test_auto_incident_helpers(isolated_db):
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
+def test_incident_multi_service_create_and_replace(isolated_db):
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+
+    iid = db.create_incident({"title": "Storage outage", "status": "investigating"},
+                              service_ids=[s1, s2])
+    incident = db.get_incident(iid)
+    assert {s["id"] for s in incident["services"]} == {s1, s2}
+    assert incident["service_id"] == s1  # primary/first stays on the legacy column
+
+    # Editing to drop down to just one service replaces the association entirely.
+    db.update_incident(iid, {"title": "Storage outage", "status": "investigating"}, service_ids=[s2])
+    incident = db.get_incident(iid)
+    assert [s["id"] for s in incident["services"]] == [s2]
+
+    # A status-only update (service_ids omitted) must leave services untouched -
+    # this is the path admin_incident_add_update()/the auto-incident lifecycle use.
+    db.update_incident(iid, {"title": "Storage outage", "status": "resolved"})
+    incident = db.get_incident(iid)
+    assert [s["id"] for s in incident["services"]] == [s2]
+    assert incident["status"] == "resolved"
+
+
+def test_incident_with_no_service_stays_general(isolated_db):
+    iid = db.create_incident({"title": "General notice", "status": "investigating"})
+    incident = db.get_incident(iid)
+    assert incident["services"] == []
+    assert incident["service_id"] is None
+
+
+def test_maintenance_window_multi_service_applies_and_restores_independently(isolated_db):
+    """Two services in one window must each get their own pre_status snapshot and
+    restore independently - a shared single pre_status/pre_manual_override (the old
+    single-service schema) would corrupt one of them."""
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+    db.update_service(s1, {**db.get_service(s1), "status": "operational"})
+    db.update_service(s2, {**db.get_service(s2), "status": "degraded"})
+
+    mid = db.create_maintenance_window({
+        "title": "Network switch upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    }, service_ids=[s1, s2])
+    events = db.process_maintenance_windows()
+    assert len(events) == 2
+    assert db.get_service(s1)["status"] == "maintenance"
+    assert db.get_service(s2)["status"] == "maintenance"
+
+    window = db.get_maintenance_window(mid)
+    assert {s["id"] for s in window["services"]} == {s1, s2}
+
+    conn = db.get_db()
+    conn.execute("UPDATE maintenance_windows SET ends_at='2000-01-02T00:00' WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+    events = db.process_maintenance_windows()
+    assert len(events) == 2
+    assert db.get_service(s1)["status"] == "operational"  # each restored to its own pre-status
+    assert db.get_service(s2)["status"] == "degraded"
+
+
+def test_maintenance_window_delete_while_active_restores_all_services(isolated_db):
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+    mid = db.create_maintenance_window({
+        "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    }, service_ids=[s1, s2])
+    db.process_maintenance_windows()
+    assert db.get_service(s1)["status"] == "maintenance"
+    assert db.get_service(s2)["status"] == "maintenance"
+
+    db.delete_maintenance_window(mid)
+    assert db.get_service(s1)["status"] == "operational"
+    assert db.get_service(s2)["status"] == "operational"
+
+
+def test_maintenance_window_edit_updates_fields_and_services(isolated_db):
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+    mid = db.create_maintenance_window({
+        "title": "Upgrade", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    }, service_ids=[s1])
+
+    db.update_maintenance_window(mid, {
+        "title": "Upgrade (rescheduled)", "starts_at": "2099-02-01T00:00", "ends_at": "2099-02-02T00:00",
+    }, service_ids=[s1, s2])
+    window = db.get_maintenance_window(mid)
+    assert window["title"] == "Upgrade (rescheduled)"
+    assert {s["id"] for s in window["services"]} == {s1, s2}
+
+    # service_ids omitted (the "already applied" path in app.py) must leave services alone.
+    db.update_maintenance_window(mid, {
+        "title": "Upgrade (rescheduled again)", "starts_at": "2099-02-01T00:00", "ends_at": "2099-02-03T00:00",
+    })
+    window = db.get_maintenance_window(mid)
+    assert window["title"] == "Upgrade (rescheduled again)"
+    assert {s["id"] for s in window["services"]} == {s1, s2}
+
+
+def test_backfill_seeds_join_tables_for_pre_existing_single_service_rows(isolated_db):
+    """Regression test for the multi-service migration: a maintenance_windows/incidents
+    row written before incident_services/maintenance_window_services existed (or by
+    code that still only knows the single legacy service_id column) must still read
+    back correctly through the new join-table-based helpers after init_db() runs
+    again - simulated here by inserting directly via raw SQL, bypassing the ORM-less
+    helper functions entirely, then re-running init_db()."""
+    sid = db.list_services()[0]["id"]
+    conn = db.get_db()
+    conn.execute("""
+        INSERT INTO incidents (service_id, title, description, status, started_at)
+        VALUES (?, 'Legacy incident', '', 'investigating', ?)
+    """, (sid, db.now_iso()))
+    conn.execute("""
+        INSERT INTO maintenance_windows (service_id, title, starts_at, ends_at, created_at)
+        VALUES (?, 'Legacy window', '2099-01-01T00:00', '2099-01-02T00:00', ?)
+    """, (sid, db.now_iso()))
+    conn.commit()
+    conn.close()
+
+    db.init_db()  # re-run: must backfill the join tables without raising or duplicating
+
+    incident = db.list_incidents()[0]
+    assert incident["service_names"] == db.get_service(sid)["name"]
+    window = db.list_maintenance_windows()[0]
+    assert window["service_names"] == db.get_service(sid)["name"]
+
+    db.init_db()  # idempotent - running it again must not duplicate the backfilled rows
+    assert len(db.get_incident(incident["id"])["services"]) == 1
+    assert len(db.get_maintenance_window(window["id"])["services"]) == 1
+
+
 def test_uptime_percentage(isolated_db):
     sid = db.list_services()[0]["id"]
     assert db.get_uptime_percentage(sid) is None  # no history yet

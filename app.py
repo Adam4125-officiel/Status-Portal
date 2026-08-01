@@ -363,8 +363,7 @@ def feed():
 
     entries = []
     for i in db.list_incidents(limit=20):
-        service = db.get_service(i["service_id"]) if i["service_id"] else None
-        title = f"{service['name']}: " if service else ""
+        title = f"{i['service_names']}: " if i["service_names"] else ""
         title += f"[{i['status']}] {i['title']}"
         description = i["description"] or ""
         updates = db.list_incident_updates(i["id"])
@@ -553,9 +552,10 @@ def admin_incidents():
 def admin_incident_new():
     services = db.list_services()
     if request.method == "POST":
-        db.create_incident(request.form)
-        service = db.get_service(request.form.get("service_id")) if request.form.get("service_id") else None
-        prefix = f"{service['name']}: " if service else ""
+        service_ids = request.form.getlist("service_id")
+        db.create_incident(request.form, service_ids)
+        names = [db.get_service(sid)["name"] for sid in service_ids if db.get_service(sid)]
+        prefix = f"{', '.join(names)}: " if names else ""
         notifications.notify("Incident opened", f"{prefix}{request.form.get('title', '')}")
         flash("Incident recorded.", "success")
         return redirect(url_for("admin_incidents"))
@@ -571,7 +571,8 @@ def admin_incident_edit(iid):
         flash("Incident not found.", "error")
         return redirect(url_for("admin_incidents"))
     if request.method == "POST":
-        db.update_incident(iid, request.form)
+        service_ids = request.form.getlist("service_id")
+        db.update_incident(iid, request.form, service_ids)
         flash("Incident updated.", "success")
         return redirect(url_for("admin_incidents"))
     updates = db.list_incident_updates(iid)
@@ -622,7 +623,8 @@ def admin_maintenance():
 def admin_maintenance_new():
     services = db.list_services()
     if request.method == "POST":
-        db.create_maintenance_window(request.form)
+        service_ids = request.form.getlist("service_id")
+        db.create_maintenance_window(request.form, service_ids)
         # Applies immediately rather than waiting for the next health-check cycle (up
         # to PORTAL_CHECK_INTERVAL_SECONDS later) - matters most for a window whose
         # start time is already in the past (e.g. "this has actually been going on
@@ -632,6 +634,27 @@ def admin_maintenance_new():
         flash("Maintenance window scheduled.", "success")
         return redirect(url_for("admin_maintenance"))
     return render_template("admin_maintenance_form.html", services=services, active="maintenance")
+
+
+@app.route("/admin/maintenance/<int:mid>/edit", methods=["GET", "POST"])
+@login_required
+def admin_maintenance_edit(mid):
+    window = db.get_maintenance_window(mid)
+    services = db.list_services()
+    if not window:
+        flash("Maintenance window not found.", "error")
+        return redirect(url_for("admin_maintenance"))
+    if request.method == "POST":
+        # Once a window is already applied, its service selector is disabled
+        # client-side (see admin_maintenance_form.html) - a disabled <select> submits
+        # nothing at all, so pass service_ids=None (leave associated services alone)
+        # rather than reading an empty list and wiping every association.
+        service_ids = request.form.getlist("service_id") if not window["applied"] else None
+        db.update_maintenance_window(mid, request.form, service_ids)
+        _process_maintenance_and_notify()
+        flash("Maintenance window updated.", "success")
+        return redirect(url_for("admin_maintenance"))
+    return render_template("admin_maintenance_form.html", services=services, window=window, active="maintenance")
 
 
 @app.route("/admin/maintenance/<int:mid>/delete", methods=["POST"])

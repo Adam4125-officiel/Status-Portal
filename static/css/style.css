@@ -407,6 +407,7 @@ a:hover { text-decoration: underline; }
   flex-wrap: wrap;
 }
 .incident__title { font-weight: 600; font-size: 14px; }
+.incident__services { font-weight: 500; color: var(--text-faint); font-size: 12.5px; }
 .incident__desc {
   font-size: 13px;
   color: var(--text-dim);

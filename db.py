@@ -142,6 +142,36 @@ def init_db():
         )
     """)
 
+    # service_id/pre_status/pre_manual_override above stay as the "primary" (first
+    # selected) service for backward compatibility with any pre-multi-service row -
+    # this table is the actual source of truth for which service(s) a window applies
+    # to, each with its own pre-state snapshot (a window covering 3 services needs 3
+    # independent restore points, not one shared pair of columns).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS maintenance_window_services (
+            window_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            pre_status TEXT DEFAULT NULL,
+            pre_manual_override INTEGER DEFAULT NULL,
+            PRIMARY KEY (window_id, service_id),
+            FOREIGN KEY (window_id) REFERENCES maintenance_windows (id) ON DELETE CASCADE,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
+    # Same idea for incidents - incidents.service_id stays as the "primary" service
+    # (used by RSS/auto-incident/anything that only ever expects one), this table
+    # holds the full set for an admin-created incident spanning multiple services.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS incident_services (
+            incident_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            PRIMARY KEY (incident_id, service_id),
+            FOREIGN KEY (incident_id) REFERENCES incidents (id) ON DELETE CASCADE,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS info_page (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -179,6 +209,25 @@ def init_db():
     _ensure_column(conn, "services", "startup_grace_seconds", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "retry_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "retry_interval_seconds", "INTEGER NOT NULL DEFAULT 5")
+    _ensure_column(conn, "services", "ignore_in_overall_status", "INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+    # One-time backfill (idempotent - re-running is a no-op once caught up): any
+    # maintenance window/incident created before multi-service support has no rows
+    # yet in the join tables above - seed one from its own existing single
+    # service_id (+ pre_status/pre_manual_override for windows) so every read can go
+    # through the join table uniformly, with no dual-path special-casing between
+    # "old single-service row" and "new multi-service row".
+    conn.execute("""
+        INSERT INTO maintenance_window_services (window_id, service_id, pre_status, pre_manual_override)
+        SELECT id, service_id, pre_status, pre_manual_override FROM maintenance_windows
+        WHERE id NOT IN (SELECT DISTINCT window_id FROM maintenance_window_services)
+    """)
+    conn.execute("""
+        INSERT INTO incident_services (incident_id, service_id)
+        SELECT id, service_id FROM incidents
+        WHERE service_id IS NOT NULL AND id NOT IN (SELECT DISTINCT incident_id FROM incident_services)
+    """)
     conn.commit()
 
     # Seed defaults if empty
@@ -327,6 +376,24 @@ def delete_announcement(aid):
 
 
 # ---------- Incidents ----------
+def _get_incident_services(incident_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT s.id, s.name FROM incident_services isv
+        JOIN services s ON s.id = isv.service_id
+        WHERE isv.incident_id=? ORDER BY s.sort_order, s.id
+    """, (incident_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _attach_incident_services(incidents):
+    for i in incidents:
+        i["services"] = _get_incident_services(i["id"])
+        i["service_names"] = ", ".join(s["name"] for s in i["services"])
+    return incidents
+
+
 def list_incidents(limit=None):
     conn = get_db()
     q = "SELECT * FROM incidents ORDER BY started_at DESC"
@@ -334,34 +401,70 @@ def list_incidents(limit=None):
         q += f" LIMIT {int(limit)}"
     rows = conn.execute(q).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return _attach_incident_services([dict(r) for r in rows])
 
 
 def get_incident(iid):
     conn = get_db()
     row = conn.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    incident = dict(row)
+    incident["services"] = _get_incident_services(iid)
+    incident["service_names"] = ", ".join(s["name"] for s in incident["services"])
+    return incident
 
 
-def create_incident(data):
+def _replace_incident_services(conn, incident_id, service_ids):
+    conn.execute("DELETE FROM incident_services WHERE incident_id=?", (incident_id,))
+    seen = []
+    for sid in service_ids:
+        sid = int(sid)
+        if sid not in seen:
+            seen.append(sid)
+    conn.executemany("INSERT INTO incident_services (incident_id, service_id) VALUES (?, ?)",
+                      [(incident_id, sid) for sid in seen])
+    return seen
+
+
+def create_incident(data, service_ids=None):
+    """service_ids: explicit list of service ids for a multi-service incident. Falls
+    back to the single data['service_id'] (or none) when omitted, so existing
+    single-service callers/tests keep working unchanged."""
+    if service_ids is None:
+        service_ids = [data["service_id"]] if data.get("service_id") else []
     conn = get_db()
-    conn.execute("""
+    primary_id = int(service_ids[0]) if service_ids else None
+    cur = conn.execute("""
         INSERT INTO incidents (service_id, title, description, status, started_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (data.get("service_id") or None, data["title"], data.get("description", ""),
+    """, (primary_id, data["title"], data.get("description", ""),
           data.get("status", "investigating"), now_iso()))
+    new_id = cur.lastrowid
+    if service_ids:
+        _replace_incident_services(conn, new_id, service_ids)
     conn.commit()
     conn.close()
+    return new_id
 
 
-def update_incident(iid, data):
+def update_incident(iid, data, service_ids=None):
+    """service_ids left as None (the default) means "leave the associated services
+    alone" - used by callers that only ever change status (posting a timeline
+    update, the auto-incident lifecycle marking something resolved), which have no
+    business touching which services an incident covers."""
     conn = get_db()
     resolved_at = now_iso() if data.get("status") == "resolved" else None
+    if service_ids is not None:
+        seen = _replace_incident_services(conn, iid, service_ids)
+        primary_id = seen[0] if seen else None
+    else:
+        primary_id = data.get("service_id") or None
     conn.execute("""
         UPDATE incidents SET service_id=?, title=?, description=?, status=?,
         resolved_at=COALESCE(?, resolved_at) WHERE id=?
-    """, (data.get("service_id") or None, data["title"], data.get("description", ""),
+    """, (primary_id, data["title"], data.get("description", ""),
           data.get("status", "investigating"), resolved_at, iid))
     conn.commit()
     conn.close()
@@ -376,14 +479,19 @@ def delete_incident(iid):
 
 def create_auto_incident(service_id, title, status):
     """Opens an incident from the health checker (not the admin form) — flagged
-    auto_created so the recovery path only ever auto-resolves incidents it opened itself."""
+    auto_created so the recovery path only ever auto-resolves incidents it opened itself.
+    Always exactly one service (the one whose check failed), unlike the admin-created,
+    optionally-multi-service incidents above - still populates incident_services so
+    every incident's service(s) can be read the same uniform way regardless of origin."""
     conn = get_db()
     cur = conn.execute("""
         INSERT INTO incidents (service_id, title, description, status, started_at, auto_created)
         VALUES (?, ?, '', ?, ?, 1)
     """, (service_id, title, status, now_iso()))
-    conn.commit()
     incident_id = cur.lastrowid
+    conn.execute("INSERT INTO incident_services (incident_id, service_id) VALUES (?, ?)",
+                 (incident_id, service_id))
+    conn.commit()
     conn.close()
     return incident_id
 
@@ -537,15 +645,29 @@ def delete_integration(iid):
 
 
 # ---------- Maintenance windows ----------
-def list_maintenance_windows():
+def _get_window_services(window_id):
     conn = get_db()
     rows = conn.execute("""
-        SELECT m.*, s.name AS service_name FROM maintenance_windows m
-        JOIN services s ON s.id = m.service_id
-        ORDER BY m.starts_at DESC
-    """).fetchall()
+        SELECT s.id, s.name FROM maintenance_window_services mws
+        JOIN services s ON s.id = mws.service_id
+        WHERE mws.window_id=? ORDER BY s.sort_order, s.id
+    """, (window_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def _attach_window_services(windows):
+    for w in windows:
+        w["services"] = _get_window_services(w["id"])
+        w["service_names"] = ", ".join(s["name"] for s in w["services"])
+    return windows
+
+
+def list_maintenance_windows():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM maintenance_windows ORDER BY starts_at DESC").fetchall()
+    conn.close()
+    return _attach_window_services([dict(r) for r in rows])
 
 
 def list_public_maintenance_windows():
@@ -553,53 +675,89 @@ def list_public_maintenance_windows():
     active - i.e. everything except ones that have already been restored."""
     conn = get_db()
     rows = conn.execute("""
-        SELECT m.*, s.name AS service_name FROM maintenance_windows m
-        JOIN services s ON s.id = m.service_id
-        WHERE m.ended = 0 ORDER BY m.starts_at ASC
+        SELECT * FROM maintenance_windows WHERE ended = 0 ORDER BY starts_at ASC
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return _attach_window_services([dict(r) for r in rows])
 
 
 def get_maintenance_window(mid):
     conn = get_db()
     row = conn.execute("SELECT * FROM maintenance_windows WHERE id=?", (mid,)).fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    window = dict(row)
+    window["services"] = _get_window_services(mid)
+    window["service_names"] = ", ".join(s["name"] for s in window["services"])
+    return window
 
 
-def create_maintenance_window(data):
+def create_maintenance_window(data, service_ids=None):
+    """service_ids: explicit list for a multi-service window. Falls back to the
+    single data['service_id'] when omitted, so existing single-service
+    callers/tests keep working unchanged - a window always needs at least one
+    service (unlike incidents, which may have none)."""
+    if service_ids is None:
+        service_ids = [data["service_id"]]
+    service_ids = [int(sid) for sid in service_ids]
     conn = get_db()
     cur = conn.execute("""
         INSERT INTO maintenance_windows (service_id, title, description, starts_at, ends_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (data["service_id"], data["title"], data.get("description", ""),
+    """, (service_ids[0], data["title"], data.get("description", ""),
           data["starts_at"], data["ends_at"], now_iso()))
-    conn.commit()
     new_id = cur.lastrowid
+    conn.executemany("INSERT INTO maintenance_window_services (window_id, service_id) VALUES (?, ?)",
+                      [(new_id, sid) for sid in dict.fromkeys(service_ids)])
+    conn.commit()
     conn.close()
     return new_id
 
 
+def update_maintenance_window(mid, data, service_ids=None):
+    """service_ids left as None means "leave the associated services alone" - the
+    admin route only ever passes an explicit list before a window has been
+    applied (see app.py), to avoid migrating an in-progress override's
+    pre_status/pre_manual_override snapshot to a different service mid-flight."""
+    conn = get_db()
+    conn.execute("""
+        UPDATE maintenance_windows SET title=?, description=?, starts_at=?, ends_at=? WHERE id=?
+    """, (data["title"], data.get("description", ""), data["starts_at"], data["ends_at"], mid))
+    if service_ids is not None:
+        service_ids = [int(sid) for sid in dict.fromkeys(int(sid) for sid in service_ids)]
+        conn.execute("DELETE FROM maintenance_window_services WHERE window_id=?", (mid,))
+        conn.executemany("INSERT INTO maintenance_window_services (window_id, service_id) VALUES (?, ?)",
+                          [(mid, sid) for sid in service_ids])
+        if service_ids:
+            conn.execute("UPDATE maintenance_windows SET service_id=? WHERE id=?", (service_ids[0], mid))
+    conn.commit()
+    conn.close()
+
+
 def delete_maintenance_window(mid):
-    """If the window is currently active (applied but not yet ended), restores the
-    service first - otherwise deleting an in-progress window would leave the service
-    stuck showing 'maintenance' forever."""
+    """If the window is currently active (applied but not yet ended), restores every
+    associated service first - otherwise deleting an in-progress window would leave
+    them stuck showing 'maintenance' forever."""
     window = get_maintenance_window(mid)
     if window and window["applied"] and not window["ended"]:
-        _restore_service_from_maintenance(window)
+        _restore_all_services_from_maintenance(mid)
     conn = get_db()
     conn.execute("DELETE FROM maintenance_windows WHERE id=?", (mid,))
     conn.commit()
     conn.close()
 
 
-def _restore_service_from_maintenance(window):
+def _restore_all_services_from_maintenance(window_id):
     conn = get_db()
-    conn.execute("""
-        UPDATE services SET status=?, manual_override=? WHERE id=?
-    """, (window["pre_status"] or "operational", window["pre_manual_override"] or 0, window["service_id"]))
-    conn.execute("UPDATE maintenance_windows SET ended=1 WHERE id=?", (window["id"],))
+    rows = conn.execute(
+        "SELECT * FROM maintenance_window_services WHERE window_id=?", (window_id,)
+    ).fetchall()
+    for row in rows:
+        conn.execute("""
+            UPDATE services SET status=?, manual_override=? WHERE id=?
+        """, (row["pre_status"] or "operational", row["pre_manual_override"] or 0, row["service_id"]))
+    conn.execute("UPDATE maintenance_windows SET ended=1 WHERE id=?", (window_id,))
     conn.commit()
     conn.close()
 
@@ -625,29 +783,52 @@ def process_maintenance_windows():
     """, (now,)).fetchall()
     for row in due_to_start:
         window = dict(row)
-        service = conn.execute("SELECT * FROM services WHERE id=?", (window["service_id"],)).fetchone()
-        if not service:
+        service_ids = [r["service_id"] for r in conn.execute(
+            "SELECT service_id FROM maintenance_window_services WHERE window_id=?", (window["id"],)
+        ).fetchall()]
+        if not service_ids:
             conn.execute("UPDATE maintenance_windows SET applied=1, ended=1 WHERE id=?", (window["id"],))
             continue
-        service = dict(service)
-        conn.execute("""
-            UPDATE maintenance_windows SET applied=1, pre_status=?, pre_manual_override=? WHERE id=?
-        """, (service["status"], service["manual_override"], window["id"]))
-        conn.execute("UPDATE services SET status='maintenance', manual_override=1 WHERE id=?", (service["id"],))
-        events.append({"event": "maintenance_started", "service": service, "window": window})
+        conn.execute("UPDATE maintenance_windows SET applied=1 WHERE id=?", (window["id"],))
+        for service_id in service_ids:
+            service = conn.execute("SELECT * FROM services WHERE id=?", (service_id,)).fetchone()
+            if not service:
+                conn.execute(
+                    "DELETE FROM maintenance_window_services WHERE window_id=? AND service_id=?",
+                    (window["id"], service_id))
+                continue
+            service = dict(service)
+            conn.execute("""
+                UPDATE maintenance_window_services SET pre_status=?, pre_manual_override=?
+                WHERE window_id=? AND service_id=?
+            """, (service["status"], service["manual_override"], window["id"], service_id))
+            if service_id == service_ids[0]:
+                # Also mirrored onto the legacy single-service columns for the
+                # *primary* service, so a plain read of the maintenance_windows row
+                # (no join needed) still shows a sensible pre_status/pre_manual_override,
+                # exactly as before multi-service support existed.
+                conn.execute("""
+                    UPDATE maintenance_windows SET pre_status=?, pre_manual_override=? WHERE id=?
+                """, (service["status"], service["manual_override"], window["id"]))
+            conn.execute("UPDATE services SET status='maintenance', manual_override=1 WHERE id=?", (service_id,))
+            events.append({"event": "maintenance_started", "service": service, "window": window})
 
     due_to_end = conn.execute("""
         SELECT * FROM maintenance_windows WHERE applied=1 AND ended=0 AND ends_at <= ?
     """, (now,)).fetchall()
     for row in due_to_end:
         window = dict(row)
-        service = conn.execute("SELECT * FROM services WHERE id=?", (window["service_id"],)).fetchone()
-        conn.execute("""
-            UPDATE services SET status=?, manual_override=? WHERE id=?
-        """, (window["pre_status"] or "operational", window["pre_manual_override"] or 0, window["service_id"]))
+        service_rows = conn.execute(
+            "SELECT * FROM maintenance_window_services WHERE window_id=?", (window["id"],)
+        ).fetchall()
         conn.execute("UPDATE maintenance_windows SET ended=1 WHERE id=?", (window["id"],))
-        if service:
-            events.append({"event": "maintenance_ended", "service": dict(service), "window": window})
+        for srow in service_rows:
+            service = conn.execute("SELECT * FROM services WHERE id=?", (srow["service_id"],)).fetchone()
+            conn.execute("""
+                UPDATE services SET status=?, manual_override=? WHERE id=?
+            """, (srow["pre_status"] or "operational", srow["pre_manual_override"] or 0, srow["service_id"]))
+            if service:
+                events.append({"event": "maintenance_ended", "service": dict(service), "window": window})
 
     conn.commit()
     conn.close()

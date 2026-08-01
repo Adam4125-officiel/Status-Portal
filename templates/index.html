@@ -116,7 +116,7 @@
       <div class="incident">
         <div class="incident__body">
           <div class="incident__head">
-            <span class="incident__title">{{ i.title }}</span>
+            <span class="incident__title">{{ i.title }}{% if i.service_names %} <span class="incident__services">— {{ i.service_names }}</span>{% endif %}</span>
             <span class="badge {{ i.status }}">{{ incident_label[i.status] }}</span>
           </div>
           {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
@@ -150,7 +150,7 @@
     <div class="incident">
       <div class="incident__body">
         <div class="incident__head">
-          <span class="incident__title">{{ w.service_name }} — {{ w.title }}</span>
+          <span class="incident__title">{{ w.service_names }} — {{ w.title }}</span>
           {% if w.applied %}<span class="badge investigating">In progress</span>
           {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
         </div>

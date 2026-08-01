@@ -403,11 +403,69 @@ def test_admin_maintenance_window_crud(client):
     assert resp.status_code == 302
     windows = db.list_maintenance_windows()
     assert len(windows) == 1
-    assert windows[0]["service_name"] == db.get_service(sid)["name"]
+    assert windows[0]["service_names"] == db.get_service(sid)["name"]
 
     resp = client.post(f"/admin/maintenance/{windows[0]['id']}/delete")
     assert resp.status_code == 302
     assert db.list_maintenance_windows() == []
+
+
+def test_admin_incident_new_accepts_multiple_services(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+
+    resp = client.post("/admin/incidents/new", data={
+        "title": "Storage outage", "status": "investigating", "service_id": [str(s1), str(s2)],
+    })
+    assert resp.status_code == 302
+    incident = db.list_incidents()[0]
+    assert {s["id"] for s in incident["services"]} == {s1, s2}
+
+
+def test_admin_maintenance_edit_route(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+
+    client.post("/admin/maintenance/new", data={
+        "service_id": s1, "title": "Upgrade", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    mid = db.list_maintenance_windows()[0]["id"]
+
+    resp = client.get(f"/admin/maintenance/{mid}/edit")
+    assert resp.status_code == 200
+
+    resp = client.post(f"/admin/maintenance/{mid}/edit", data={
+        "service_id": [str(s1), str(s2)], "title": "Upgrade (rescheduled)",
+        "starts_at": "2099-02-01T00:00", "ends_at": "2099-02-02T00:00",
+    })
+    assert resp.status_code == 302
+    window = db.get_maintenance_window(mid)
+    assert window["title"] == "Upgrade (rescheduled)"
+    assert {s["id"] for s in window["services"]} == {s1, s2}
+
+
+def test_admin_maintenance_edit_keeps_services_once_applied(client):
+    """Once a window is applied (currently forcing maintenance), its service
+    selector is disabled client-side and submits nothing - the route must treat a
+    missing service_id list as "leave services alone", not "clear them"."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+
+    client.post("/admin/maintenance/new", data={
+        "service_id": sid, "title": "Ongoing", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    mid = db.list_maintenance_windows()[0]["id"]
+    assert db.get_maintenance_window(mid)["applied"] == 1
+
+    resp = client.post(f"/admin/maintenance/{mid}/edit", data={
+        "title": "Ongoing (renamed)", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    })
+    assert resp.status_code == 302
+    window = db.get_maintenance_window(mid)
+    assert window["title"] == "Ongoing (renamed)"
+    assert [s["id"] for s in window["services"]] == [sid]
 
 
 def test_admin_maintenance_window_with_past_start_applies_immediately(client):

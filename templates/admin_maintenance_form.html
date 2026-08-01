@@ -1,31 +1,37 @@
 {% extends "admin_base.html" %}
-{% block title %}Schedule maintenance — Admin{% endblock %}
+{% block title %}{{ 'Edit' if window else 'Schedule' }} maintenance — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Schedule maintenance</h1>
+  <h1>{{ 'Edit maintenance window' if window else 'Schedule maintenance' }}</h1>
 </div>
 
 <form method="POST" class="form-panel">
   <div class="field">
-    <label for="service_id">Service</label>
-    <select id="service_id" name="service_id" required>
+    <label for="service_id">Service(s)</label>
+    {% set selected_ids = window.services|map(attribute='id')|list if window else [] %}
+    <select id="service_id" name="service_id" multiple size="6" required
+            {{ 'disabled' if window and window.applied }}>
       {% for s in services %}
-        <option value="{{ s.id }}">{{ s.name }}</option>
+        <option value="{{ s.id }}" {{ 'selected' if s.id in selected_ids or not window }}>{{ s.name }}</option>
       {% endfor %}
     </select>
+    <div class="field-hint">
+      Ctrl/Cmd-click (or shift-click) to select more than one — the window applies to all selected services.
+      {% if window and window.applied %}This window is already active, so its services can't be changed here anymore (only the title/description/times below).{% endif %}
+    </div>
   </div>
   <div class="field">
     <label for="title">Title</label>
-    <input type="text" id="title" name="title" required placeholder="e.g. Drive upgrade">
+    <input type="text" id="title" name="title" required placeholder="e.g. Drive upgrade" value="{{ window.title if window else '' }}">
   </div>
   <div class="field">
     <label for="description">Description (optional)</label>
-    <textarea id="description" name="description" placeholder="What's happening and why"></textarea>
+    <textarea id="description" name="description" placeholder="What's happening and why">{{ window.description if window else '' }}</textarea>
   </div>
   <div class="field">
     <label for="starts_at">Starts at (UTC)</label>
     <div style="display: flex; gap: 8px;">
-      <input type="datetime-local" id="starts_at" name="starts_at" required style="flex: 1;">
+      <input type="datetime-local" id="starts_at" name="starts_at" required style="flex: 1;" value="{{ window.starts_at[:16] if window else '' }}">
       <button type="button" id="starts_at_now" class="btn secondary" style="padding: 9px 12px;">Now</button>
     </div>
     <div class="field-hint">Can be in the past — useful if maintenance already started and you're only logging it now. It takes effect immediately on save.</div>
@@ -33,13 +39,13 @@
   <div class="field">
     <label for="ends_at">Ends at (UTC)</label>
     <div style="display: flex; gap: 8px;">
-      <input type="datetime-local" id="ends_at" name="ends_at" required style="flex: 1;">
+      <input type="datetime-local" id="ends_at" name="ends_at" required style="flex: 1;" value="{{ window.ends_at[:16] if window else '' }}">
       <button type="button" id="ends_at_now" class="btn secondary" style="padding: 9px 12px;">Now</button>
     </div>
-    <div class="field-hint">Both fields start pre-filled with the current UTC time — edit as needed. The server compares against UTC, not your browser's local time.</div>
+    <div class="field-hint">{{ 'Adjust as needed — ' if window else 'Both fields start pre-filled with the current UTC time — edit as needed. ' }}The server compares against UTC, not your browser's local time.</div>
   </div>
   <div class="form-actions">
-    <button type="submit" class="btn">Schedule</button>
+    <button type="submit" class="btn">{{ 'Save' if window else 'Schedule' }}</button>
     <a href="{{ url_for('admin_maintenance') }}" class="btn secondary">Cancel</a>
   </div>
 </form>

@@ -188,7 +188,7 @@ def build_status_data(include):
             lines = []
             for w in windows:
                 state = "in progress" if w["applied"] else "scheduled"
-                lines.append(f"🛠 **{w['service_name']}**: {w['title']} ({state}, "
+                lines.append(f"🛠 **{w['service_names']}**: {w['title']} ({state}, "
                               f"{w['starts_at'][:16]} → {w['ends_at'][:16]} UTC)")
             sections.append(("Scheduled maintenance", lines))
 

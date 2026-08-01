@@ -13,7 +13,7 @@
     {% for i in incidents %}
     <tr>
       <td>{{ i.title }}</td>
-      <td>{% for s in services %}{% if s.id == i.service_id %}{{ s.name }}{% endif %}{% endfor %}</td>
+      <td>{{ i.service_names or '—' }}</td>
       <td>{{ i.status }}</td>
       <td>{{ i.started_at[:16].replace('T', ' ') }}</td>
       <td class="actions">
