@@ -43,6 +43,11 @@ if config.BEHIND_PROXY:
 # can't skew it.
 _APP_START = time.monotonic()
 
+# Service ids currently mid-retry-loop in _check_service_status() (see below) - read
+# by index() so a public-page hit during that window can show "retrying" instead of
+# silently keeping the last-known status.
+_retry_in_progress = set()
+
 
 @app.after_request
 def set_security_headers(response):
@@ -136,6 +141,8 @@ def _enrich_services(services):
     for s in services:
         s["links"] = db.list_service_links(s["id"])
         s["uptime"] = db.get_uptime_percentage(s["id"])
+        s["in_grace_period"] = _within_grace_period(s)
+        s["retrying"] = s["id"] in _retry_in_progress
     return services
 
 
@@ -929,14 +936,24 @@ def _check_service_status(service):
     `retry_interval_seconds` apart; the first non-down result wins immediately, so a
     service that recovers seconds later never triggers a spurious incident. Runs
     inline in the background health-check thread - not a request handler, so
-    blocking here for the retry window is the intended tradeoff, not a bug."""
+    blocking here for the retry window is the intended tradeoff, not a bug.
+
+    While actually mid-retry (sleeping between attempts), the service's id is kept
+    in _retry_in_progress so a public-page hit during that window can show
+    "retrying" instead of silently keeping the last-known status - narrow (only
+    matters if a request lands in the same seconds-long window), but real, since
+    this loop can block for up to retry_count * retry_interval_seconds."""
     status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
     retries_left = service.get("retry_count") or 0
     interval = service.get("retry_interval_seconds") or 0
-    while status == "down" and retries_left > 0:
-        time.sleep(interval)
-        status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
-        retries_left -= 1
+    try:
+        while status == "down" and retries_left > 0:
+            _retry_in_progress.add(service.get("id"))
+            time.sleep(interval)
+            status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+            retries_left -= 1
+    finally:
+        _retry_in_progress.discard(service.get("id"))
     return status, elapsed_ms
 
 

@@ -340,6 +340,12 @@ a:hover { text-decoration: underline; }
 .status-bar.crit { background: var(--crit); }
 .status-bar.maint { background: var(--maint); }
 
+.service-card__note {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--warn);
+}
+
 .service-card__integration {
   display: flex;
   align-items: center;

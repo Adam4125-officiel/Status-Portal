@@ -52,6 +52,24 @@ def test_check_status_for_response_slow_threshold():
     assert app_module._check_status_for_response(_FakeResponse(500), 2500, 2000) == "degraded"
 
 
+def test_enrich_services_attaches_grace_and_retry_flags(isolated_db):
+    sid = db.list_services()[0]["id"]
+    db.update_service(sid, {**db.get_service(sid), "startup_grace_seconds": 999999})
+
+    services = app_module._enrich_services(db.list_services())
+    service = next(s for s in services if s["id"] == sid)
+    assert service["in_grace_period"] is True
+    assert service["retrying"] is False
+
+    app_module._retry_in_progress.add(sid)
+    try:
+        services = app_module._enrich_services(db.list_services())
+        service = next(s for s in services if s["id"] == sid)
+        assert service["retrying"] is True
+    finally:
+        app_module._retry_in_progress.discard(sid)
+
+
 def test_within_grace_period(monkeypatch):
     monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic())
     assert app_module._within_grace_period({"startup_grace_seconds": 60}) is True
@@ -107,6 +125,37 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
 
     assert status == "operational"
     assert sleeps == [10]  # stopped retrying the moment it recovered - not all 3 attempts
+
+
+def test_check_service_status_tracks_retry_in_progress(monkeypatch):
+    """While mid-retry (between attempts), the service's id must be visible in
+    _retry_in_progress - this is what index() reads to show a "retrying" badge -
+    and must be cleared again once the check finishes either way."""
+    responses = [
+        app_module.requests.RequestException("timeout"),
+        _FakeResponse(200),
+    ]
+
+    def fake_get(url, timeout):
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    seen_during_sleep = []
+
+    def fake_sleep(seconds):
+        seen_during_sleep.append(42 in app_module._retry_in_progress)
+
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+
+    service = {"id": 42, "check_url": "http://x", "slow_threshold_ms": None,
+               "retry_count": 3, "retry_interval_seconds": 10}
+    app_module._check_service_status(service)
+
+    assert seen_during_sleep == [True]
+    assert 42 not in app_module._retry_in_progress  # cleared once the check finished
 
 
 def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
