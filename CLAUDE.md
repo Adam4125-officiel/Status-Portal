@@ -178,6 +178,20 @@ DB-backed Settings pages, not a code edit.
   so *that* one route is fine to hit live in this Linux sandbox — `control_host()`
   has no such guard (host restart/shutdown applies on both platforms on
   purpose) and must never be POSTed to outside of a mocked test.
+- **`.incident-bubble` must fully match `.service-card`'s treatment, not just
+  look similar (tightened 2026-08-01).** The first version had the right
+  background/border/radius/padding but was missing `.service-card`'s
+  `display: flex; flex-direction: column; gap` and hover border-transition —
+  close enough in a diff review to seem fine, but the user reported it back
+  as "not reading as a card." If you touch either class, keep them in sync on
+  purpose (or add a shared class) rather than letting them drift apart again
+  from two independent-looking rulesets. The nested `.incident-updates`
+  status-update list also got a left border + per-row dot for the same
+  reason: a flat list under a card didn't read as "these updates belong to
+  this incident" without an explicit hierarchy cue. When a visual bug report
+  like this comes in again, render a quick Artifact preview using the app's
+  actual CSS tokens before shipping the fix — confirmed the fix looked right
+  before pushing it, rather than reasoning about CSS in the abstract.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
@@ -326,7 +340,20 @@ DB-backed Settings pages, not a code edit.
   too rather than re-inlining the checks. `_register_command()` guards against
   an admin naming their configurable command literally `snapshot` (falls back
   to `status`), since that would otherwise collide with the fixed command name
-  at registration time and crash bot startup.
+  at registration time and crash bot startup. **`build_snapshot_text()`
+  originally rendered the incident count only** ("3 open incident(s)") —
+  changed after user feedback that it was too vague to be useful, to full
+  per-incident detail (title, description, status, service(s), start time,
+  every update). Uses Discord's own markdown for readability rather than a
+  flat wall of text: a bold title line per incident, everything else
+  (start time/description/updates) as a `>` blockquote (consecutive `>`
+  lines render as one continuous left-barred block in every Discord
+  client — the same "nested detail under a title" hierarchy the public
+  page's `.incident-bubble`/`.incident-updates` gives visually), and a
+  blank line between separate incidents so multiple open ones don't run
+  together. If you touch this again, keep both the multi-incident
+  separation and the blockquote grouping — both were specifically
+  requested fixes, not incidental formatting.
 - **Channel whitelist (`discordbot_channel_whitelist`, added 2026-08-01)** is a
   *different kind* of control from the guild whitelist: it only refuses to
   reply in an unlisted channel (checked in `_check_command_authorized()`), it

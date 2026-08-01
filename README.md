@@ -6,16 +6,31 @@ touching the HTML.
 
 - Backend: **Python / Flask** (no need to know Flask, you manage everything from the browser)
 - Storage: **SQLite** (a single file, `instance/portal.db`, created automatically)
-- Public page auto-refreshes every 60s (configurable); light/dark theme toggle
+- Public page auto-refreshes every 60s (configurable); light/dark theme toggle;
+  the order of its content sections (services, incidents, resources, VMs...) is
+  reorderable from Settings
 - Optional automatic health checks per service, with auto-opened/resolved incidents
-  (also from a failing Jellyfin/*Arr/Jellyseerr status check, if linked)
-- Scheduled maintenance windows that flip a service to "maintenance" and back automatically
+  (also from a failing Jellyfin/*Arr/Jellyseerr status check, if linked), retries
+  before marking a blip as actually down, and a startup grace period so a
+  slow-booting service isn't flagged before it's had a chance to start
+- Incidents and scheduled maintenance windows can each cover **multiple services**
+  at once, not just one
+- A service can be excluded from the top-line overall-status banner, for something
+  non-critical that shouldn't make the whole page look down
+- Scheduled maintenance windows that flip a service to "maintenance" and back
+  automatically, editable after creation
 - Optional Discord/ntfy push notifications on incident and maintenance events
-- Optional Discord bot: presence/status updates and/or a self-editing status message
-  posted on command in any channel (separate from the webhook notifications above)
-- Per-service links (Tailscale, LAN, external domain...), per-incident update timelines,
-  30-day uptime history — all editable from `/admin`, no code involved
+- Optional Discord bot: presence/status updates, a self-editing status message
+  posted on command, and a short `/snapshot` command (just what's down and any
+  open incidents) — separate from the webhook notifications above
+- Optional **two-factor authentication** (TOTP, works with Google Authenticator/
+  Authy/1Password/etc.) for the admin login, off by default and never required
+- Host restart/shutdown and per-VM start/stop/restart controls (Windows/Hyper-V
+  for VMs), from the admin Resources page
+- Per-service links (Tailscale, LAN, external domain...), per-incident update
+  timelines, 30-day uptime tracking — all editable from `/admin`, no code involved
 - Embeddable SVG status badges and an RSS feed, for use outside the page itself
+- Crash/error logging to `instance/logs/app.log`, not just the console
 
 ---
 
@@ -114,16 +129,27 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   without opening a spurious incident (0 retries = mark it down on the first failed
   check, the original behavior). A service that goes down (outside its grace period,
   after any configured retries) automatically gets an incident opened for it, and
-  auto-resolved when it recovers.
+  auto-resolved when it recovers. A service can also be marked to **exclude it from
+  the overall status banner** — its own card still shows its real status, it just
+  won't make the top-line "All services are operating normally" summary report an
+  outage on its account. The public page shows a small badge on a service's card
+  while it's mid-retry or still inside its startup grace period, so a visitor can
+  tell the difference between "actually down" and "still figuring that out."
 - **Announcements**: banner at the top of the public portal. `**bold**`, auto-clickable links.
 - **Incidents**: history of outages/maintenance, with status
-  (investigating → identified → monitoring → resolved) and a per-incident timeline of
-  updates you (or the health checker) post over time. Each open/resolve/update can push
-  a Discord/ntfy notification if configured (see the config reference below).
-- **Maintenance**: schedule a start/end time for a service and it's automatically flipped
-  to "maintenance" and back — no need to remember to toggle it manually on either end.
-  The service's own health check is paused for the duration, so it won't falsely open
-  an incident while intentionally offline.
+  (investigating → identified → monitoring → resolved), an optional description, and
+  a per-incident timeline of updates you (or the health checker) post over time.
+  An incident can cover **more than one service** — select as many as apply, or none
+  for a general/site-wide notice. Each open/resolve/update can push a Discord/ntfy
+  notification if configured (see the config reference below).
+- **Maintenance**: schedule a start/end time for one or more services and they're
+  automatically flipped to "maintenance" and back — no need to remember to toggle it
+  manually on either end. Each service's own health check is paused for the duration,
+  so it won't falsely open an incident while intentionally offline, and each one
+  restores to its own pre-maintenance status independently. A scheduled window can be
+  edited afterward (title, description, times); once it's already active its service
+  list locks (to avoid orphaning the restore-state snapshot) but everything else stays
+  editable.
 - **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, and *Arr apps.
   Optionally link one to a service, opt it into public display to show that service's API
   health on its public card, and/or let a failing check auto-open an incident on that
@@ -136,7 +162,11 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   default; choose exactly which of these to also show on the public page from
   Settings. CPU/disk temperature are best-effort even on Windows — some hardware
   doesn't expose them through the APIs used here, in which case they're just omitted
-  rather than shown as zero.
+  rather than shown as zero. This page also has **Start/Restart/Stop buttons per
+  detected VM** and **Restart/Shut down buttons for the host machine itself** — the
+  host actions need a typed confirmation ("type RESTART/SHUTDOWN to confirm") given
+  how destructive they are, and both are behind a fresh 2FA code if you've enabled
+  two-factor authentication (see below), even if you're already logged in.
 - **High-load indicator**: a badge on the public page and (optionally) the Discord
   bot that lights up when CPU, disk I/O, or network exceed admin-configurable
   thresholds (Settings) — or, if a Jellyfin integration is configured, when Jellyfin
@@ -146,10 +176,12 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   toggle in Settings) regardless of whether the high-load thresholds are tripped.
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
 - **Settings**: site name, per-cell public resource-monitor visibility, high-load
-  thresholds, admin password, current health-check/refresh intervals, and whether
-  push notifications are configured.
+  thresholds, admin password, current health-check/refresh intervals, whether push
+  notifications are configured, and the **order the public page's sections appear
+  in** (up/down buttons — the top status banner and footer always stay fixed).
 - **Discord Bot**: a separate, optional real bot connection (not just a webhook) — see
   its own section below.
+- **Two-factor authentication**: `/admin/2fa` — see its own section below.
 
 Nothing to rebuild, nothing to redeploy: every change is in the database and visible
 immediately (or within 60s max, the time it takes for the public page to auto-refresh).
@@ -170,12 +202,19 @@ time with a "UTC" label instead of silently showing the wrong time.
   on a timer instead of posting a new one each time, to avoid spamming the channel.
   This survives an app restart: the tracked message id is stored in the database, not
   just in memory, so it keeps editing the same message rather than starting a new one.
-  Optionally restrict who can even use the command (a comma/newline-separated list of
-  Discord user IDs in the admin page) — leave it blank and anyone in the server can
-  use it; set it to stop randos from spamming the command.
+- Respond to a fixed **`/snapshot`** command — a much shorter, one-shot (never
+  tracked/edited) plain-text reply: just which services are down, if any, and the
+  full detail of every currently open incident (title, description, status,
+  affected service(s), start time, and every update posted so far).
 
-Both behaviors are independently toggleable, as is exactly what's included in the
-message: services (each shown with its status — including "Slow" — and any
+Both `/status` and `/snapshot` share the same authorization: optionally restrict who
+can use them (a comma/newline-separated list of Discord user IDs) — leave it blank
+and anyone in the server can; and optionally restrict which channels they'll respond
+in (a comma/newline-separated list of channel IDs, see "server/channel management"
+below) — leave it blank and they respond in any channel the bot can see.
+
+Everything else is independently toggleable, as is exactly what's included in the
+`/status` message: services (each shown with its status — including "Slow" — and any
 configured links), an always-visible **active incidents** section that stays until
 resolved (separate from the capped recent-incidents list, so a long-running incident
 can't scroll out of view), announcements, scheduled maintenance, an optional
@@ -184,15 +223,20 @@ temperature/I/O where available), network, GPU, and VM status are each individua
 checkable (all off by default, to keep the message short unless you opt specific
 ones in).
 
+**Server & channel management** (`/admin/discord-bot/guilds`, linked from the main
+Discord Bot page): lists every server (guild) the bot is currently in and its text
+channels, alongside the channel whitelist mentioned above — handy for grabbing the
+exact channel IDs to allow without leaving Discord's own UI open in another tab.
+
 **Server whitelist (security control, separate from the user allowlist above)**:
 `/admin/discord-bot` also has an optional comma/newline-separated list of Discord
 server (guild) IDs. If set, the bot automatically **leaves** any server it's in
 whose ID isn't on the list — checked the moment it's invited to a new server, and
 again on every reconnect, so removing a server from the list later still takes
 effect. Leave it blank (the default) and the bot stays in any server it's invited
-to. This is stronger than the user allowlist: an unwanted server could otherwise
-still see the bot's presence/status updates even if nobody there is authorized to
-run the slash command.
+to. This is stronger than the channel/user allowlists: an unwanted server could
+otherwise still see the bot's presence/status updates even if nobody there is
+authorized to run a slash command.
 
 Uses a slash command, not a legacy text/prefix command — Discord's own guidance is
 that reading plain message text requires the privileged **Message Content** intent,
@@ -217,18 +261,57 @@ To enable it:
 Leave `PORTAL_DISCORD_BOT_TOKEN` blank (the default) to disable this feature entirely —
 nothing related to it runs, and `discord.py` doesn't need to be installed at all.
 
-**Verification status**: the previous (now-replaced) plain-text `!status` version of
-this feature was confirmed working end-to-end by actually running it. This slash-command
-rewrite has not yet been re-confirmed against a real Discord server — the
-message-building/embed logic, the command handler's authorization, and the guild
-whitelist's leave behavior are all unit tested directly, and the connection handling was
-smoke-tested against Discord's real login endpoint (confirms it starts cleanly in a
-background thread and fails gracefully on a bad token, surfacing the error correctly on
-the admin page), but slash-command registration, the command handler itself, the
-restart-survives-message-editing behavior, and the guild whitelist's actual
-`guild.leave()` call haven't been exercised against a real bot/server yet. If something
-doesn't work as expected, check the server console first — every failure (bad token,
-sync error, a channel it can't access) is logged there.
+**Verification status**: the `/snapshot` command has been confirmed working against a
+real Discord server (the user tested it live and gave feedback that shaped its current
+formatting). Slash-command registration and the command handler are therefore confirmed
+working in practice, not just unit-tested. Still unconfirmed against a real server: the
+guild whitelist's actual `guild.leave()` call, the server/channel management page's
+gateway-cache snapshot, and the restart-survives-message-editing behavior for the
+tracked `/status` message — all unit tested directly (mocked Discord objects), just not
+yet exercised for real. If something doesn't work as expected, check the server console
+first — every failure (bad token, sync error, a channel it can't access) is logged
+there, and to `instance/logs/app.log`.
+
+### Two-factor authentication (optional, confirmed working)
+
+`/admin/2fa` adds TOTP-based two-factor authentication to the admin login — works
+with Google Authenticator, Authy, 1Password, or any standard authenticator app.
+**Off by default and never required** — strongly recommended in the UI, especially
+now that the admin panel can restart/shut down the host, but some people would
+rather not use it, and that's fine.
+
+To enable it:
+
+1. Go to `/admin/2fa` → **Enable 2FA**.
+2. Scan the QR code with your authenticator app (or enter the manual key shown
+   below it if you can't scan).
+3. Enter the 6-digit code it shows you, to confirm you scanned it correctly.
+
+Once enabled:
+
+- **Login becomes two steps**: password, then a code. A wrong password never even
+  reaches the code prompt; a wrong code doesn't get you in either. The same login
+  lockout (5 failed attempts, 5 minute cooldown) applies to wrong codes exactly
+  like wrong passwords.
+- **Restarting or shutting down the host asks for a fresh code**, even if you're
+  already logged in — a stolen or replayed session cookie alone isn't enough to
+  trigger the single most destructive thing this app can do.
+- **To disable it**, go back to `/admin/2fa` and enter a current code — this also
+  requires proving you still have your device, not just being logged in.
+
+**Lost your phone / it's broken and you can't produce a code at all?** 2FA has a
+recovery path that's deliberately *not* a web page: create an empty file named
+`RESET_2FA` inside this app's `instance/` folder (same folder as `portal.db`). The
+next time anyone loads the login page, 2FA is disabled and the file deletes itself
+— no restart needed, and it's a one-shot action, not a standing switch you could
+forget to turn back off. This is on purpose: a "reset 2FA" button reachable purely
+over the web would just be another secret to protect, whereas creating a file
+requires actually being able to reach the host's filesystem (SSH, a file manager
+over the network, physical/remote-desktop access) — a meaningfully different bar
+than knowing the admin password.
+
+Requires the `pyotp` and `qrcode` packages (both in `requirements.txt` — nothing
+extra to install if you already ran `pip install -r requirements.txt`).
 
 ### Outside the page itself
 
@@ -268,24 +351,45 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Covers the DB layer, the auto-incident lifecycle (service and integration-driven,
-including the startup grace period), maintenance-window scheduling, notification
-dispatch, badge/feed rendering, the Discord bot's message-building logic (including
-the guild whitelist's leave behavior) and login/lockout, service grouping, the
-slow-status/high-load logic, and the Jellyfin/*Arr/Jellyseerr status parsing
-(against mocked responses - there's no way to test against real instances of those,
-or the Windows-only temperature/per-disk-I/O code, from here). Not part of
-`requirements.txt` since nothing here needs `pytest` at runtime.
+Covers the DB layer (including multi-service incidents/maintenance), the
+auto-incident lifecycle (service and integration-driven, including the startup
+grace period and retries), maintenance-window scheduling and editing, notification
+dispatch, badge/feed rendering, two-factor authentication (enrollment, the two-step
+login, step-up on host control, the host-level reset file), CSRF protection, the
+Discord bot's message-building logic (`/status` and `/snapshot`, including the
+guild/channel whitelists' behavior) and login/lockout, service grouping, the
+slow-status/high-load logic, host/VM power controls (against a mocked
+`subprocess.run` - the real commands are never invoked by the test suite), and the
+Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way
+to test against real instances of those, or the Windows-only
+temperature/per-disk-I/O code, from here). Not part of `requirements.txt` since
+nothing here needs `pytest` at runtime.
 
 ## 6. Security notes
 
 A few things are already in place for running this on the open internet, not just a
 LAN/Tailscale: security response headers (CSP, `X-Frame-Options`, etc.) on every
-response, hardened session cookie flags, a login lockout after 5 failed admin-login
-attempts (5 min cooldown), generic error pages instead of default framework ones, and
-optional `ProxyFix` support (`PORTAL_BEHIND_PROXY`) for correct behavior behind a
-reverse proxy. None of this replaces putting a real reverse proxy/WAF/TLS in front if
-you expose this beyond a VPN - it just means the app itself isn't the weak link.
+response, hardened session cookie flags, CSRF protection on every admin action, a
+login lockout after 5 failed admin-login attempts (5 min cooldown, applies to 2FA
+codes too if enabled), optional two-factor authentication (see above), generic error
+pages instead of default framework ones, and optional `ProxyFix` support
+(`PORTAL_BEHIND_PROXY`) for correct behavior behind a reverse proxy. None of this
+replaces putting a real reverse proxy/WAF/TLS in front if you expose this beyond a
+VPN - it just means the app itself isn't the weak link.
+
+**If you're considering exposing this beyond a private network** (Tailscale/LAN),
+two things worth doing first:
+
+- **Put a TLS-terminating reverse proxy in front of it.** This app has no built-in
+  HTTPS - exposed raw, your admin password and session cookie would travel in
+  plaintext on login. [Caddy](https://caddyserver.com/) gets you automatic
+  Let's Encrypt certs with a few lines of config; then set `PORTAL_BEHIND_PROXY=true`
+  and `PORTAL_FORCE_HTTPS_COOKIES=true`.
+- **Keep the admin panel itself behind something like Tailscale or Cloudflare
+  Access**, even if the public status page is reachable by anyone. The admin panel
+  can now restart or shut down the host machine - that's exactly the kind of action
+  worth an extra gate beyond a single password, on top of (not instead of) enabling
+  two-factor authentication.
 
 These two intervals are independent — don't confuse them: the health checker polls each
 service's `check_url` on its own schedule, unrelated to how often a visitor's browser
@@ -300,15 +404,19 @@ status-portal/
   serve_waitress.py       # run this in production (instead of app.py)
   config.py               # all configuration, read from env vars / .env
   db.py                    # the entire SQLite layer
-  monitoring.py            # CPU/RAM/disk/GPU/VM snapshot for the resources page
+  monitoring.py            # CPU/RAM/disk/GPU/VM snapshot + host/VM power controls
   integrations.py          # read-only Jellyfin/*Arr/Jellyseerr status checks
   notifications.py         # optional Discord/ntfy push notifications
-  discord_bot.py           # optional Discord bot (presence + self-editing status message)
+  discord_bot.py           # optional Discord bot (presence, self-editing status message, /snapshot)
+  twofactor.py             # optional TOTP two-factor authentication
+  logging_setup.py         # crash/error logging to instance/logs/app.log
   requirements.txt, requirements-dev.txt
   Dockerfile, docker-compose.yml, .dockerignore, .env.example
   instance/portal.db      # created automatically on first launch
+  instance/logs/app.log   # created automatically once the app is actually run
   templates/               # HTML pages (Jinja2)
+  templates/sections/      # the public page's reorderable content blocks, one file each
   static/css/style.css     # all of the styling (dark + light theme)
-  static/js/               # public page auto-refresh, local-time conversion, admin link-row editor, theme toggle
+  static/js/               # public page auto-refresh, local-time conversion, admin link-row editor, theme toggle, CSRF token injection
   tests/                   # pytest suite (see "Running the tests" below)
 ```
