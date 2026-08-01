@@ -1,5 +1,38 @@
+import re
+
 import app as app_module
 import db
+
+
+def _extract_csrf_token(html):
+    match = re.search(r'name="csrf-token" content="([^"]+)"', html.decode())
+    assert match, "csrf-token meta tag not found in response"
+    return match.group(1)
+
+
+def test_csrf_protection_rejects_missing_or_wrong_token(isolated_db, monkeypatch):
+    """Dedicated test of the actual CSRF mechanism using a client that does NOT set
+    TESTING=True (unlike the shared `client` fixture, which deliberately bypasses
+    this check - see _check_csrf()'s docstring in app.py) - this is the one test
+    that exercises the real protection rather than relying on it being disabled."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    with app_module.app.test_client() as c:
+        get_resp = c.get("/admin/login")
+        token = _extract_csrf_token(get_resp.data)
+
+        # No token at all.
+        resp = c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+        assert resp.status_code == 400
+
+        # Wrong token.
+        resp = c.post("/admin/login", data={
+            "password": "testpass123", "confirm": "testpass123", "csrf_token": "wrong"})
+        assert resp.status_code == 400
+
+        # Correct token - request succeeds normally.
+        resp = c.post("/admin/login", data={
+            "password": "testpass123", "confirm": "testpass123", "csrf_token": token})
+        assert resp.status_code == 302
 
 
 def test_compute_overall_status():

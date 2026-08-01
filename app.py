@@ -6,6 +6,7 @@ Admin panel: /admin (password is set on first launch)
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -13,7 +14,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import Markup, escape
 import requests
@@ -76,10 +77,52 @@ def handle_not_found(e):
     return render_template("error.html", code=404, message="Page not found."), 404
 
 
+@app.errorhandler(400)
+def handle_bad_request(e):
+    return render_template("error.html", code=400, message="Invalid or expired form submission. "
+                            "Please reload the page and try again."), 400
+
+
 @app.errorhandler(500)
 def handle_server_error(e):
     _logger.exception("Unhandled exception in request %s %s", request.method, request.path)
     return render_template("error.html", code=500, message="Something went wrong."), 500
+
+
+# ---------------------------------------------------------------------------
+# CSRF protection
+# ---------------------------------------------------------------------------
+# Every state-changing route in this app is a POST under /admin/ (including
+# /admin/login itself), relying until now solely on SESSION_COOKIE_SAMESITE=Lax to
+# stop cross-site form submissions. This adds a second, independent layer: a
+# per-session token embedded in every form (via the csrf_token() Jinja global,
+# rendered into a <meta> tag in base.html and injected into every <form> by
+# static/js/csrf.js - not hand-added to each of the ~16 templates with a POST form,
+# to avoid the very real risk of missing one) and checked against the session on
+# every POST under /admin/. Bypassed when app.testing is set (the `client` fixture
+# in tests/conftest.py sets this) since the test client posts raw form dicts, never
+# simulating the browser-side JS that injects the token - see
+# test_csrf_protection_rejects_missing_or_wrong_token for a dedicated test of the
+# actual mechanism using a client that does NOT set TESTING.
+def _get_csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(32)
+        session["csrf_token"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = _get_csrf_token
+
+
+@app.before_request
+def _check_csrf():
+    if app.testing or request.method != "POST" or not request.path.startswith("/admin/"):
+        return
+    expected = session.get("csrf_token")
+    submitted = request.form.get("csrf_token")
+    if not expected or not submitted or not secrets.compare_digest(expected, submitted):
+        abort(400)
 
 
 _URL_RE = re.compile(r"(https?://[^\s<]+)")
