@@ -25,8 +25,8 @@
   {% if visible.network and snapshot.network %}
   <div class="resource-card">
     <div class="resource-card__label">Network</div>
-    <div class="resource-card__value" style="font-size: 16px;">↓ {{ snapshot.network.down_mb_s }} MB/s</div>
-    <div class="resource-card__sub">↑ {{ snapshot.network.up_mb_s }} MB/s up</div>
+    <div class="resource-card__value" style="font-size: 16px;">Down: {{ snapshot.network.down_mb_s }} MB/s</div>
+    <div class="resource-card__sub">Up: {{ snapshot.network.up_mb_s }} MB/s</div>
   </div>
   {% endif %}
   {% if visible.disks %}
@@ -37,7 +37,7 @@
     <div class="meter"><div class="meter__fill {{ disk.severity }}" style="width: {{ disk.percent }}%;"></div></div>
     <div class="resource-card__sub">{{ disk.used_gb }} GB used · {{ disk.free_gb }} GB free of {{ disk.total_gb }} GB</div>
     {% if disk.io %}
-    <div class="resource-card__sub">↓ {{ disk.io.read_mb_s }} MB/s · ↑ {{ disk.io.write_mb_s }} MB/s</div>
+    <div class="resource-card__sub">Read: {{ disk.io.read_mb_s }} MB/s · Write: {{ disk.io.write_mb_s }} MB/s</div>
     {% endif %}
   </div>
   {% endfor %}

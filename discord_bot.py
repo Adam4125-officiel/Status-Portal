@@ -147,10 +147,10 @@ def _resource_lines(toggles):
             if d.get("temp_c") is not None:
                 line += f", {d['temp_c']}°C"
             if d.get("io"):
-                line += f" (↓{d['io']['read_mb_s']} ↑{d['io']['write_mb_s']} MB/s)"
+                line += f" (Read: {d['io']['read_mb_s']} Write: {d['io']['write_mb_s']} MB/s)"
             lines.append(line)
     if toggles.get("network") and snap["network"]:
-        lines.append(f"Network: ↓{snap['network']['down_mb_s']} MB/s ↑{snap['network']['up_mb_s']} MB/s")
+        lines.append(f"Network: Down {snap['network']['down_mb_s']} MB/s, Up {snap['network']['up_mb_s']} MB/s")
     if toggles.get("gpu"):
         for g in snap["gpus"]:
             line = f"🎮 {g['name']}: {g['util_percent']}%, {g['mem_used_gb']}/{g['mem_total_gb']} GB"
