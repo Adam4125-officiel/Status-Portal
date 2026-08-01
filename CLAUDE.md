@@ -404,12 +404,84 @@ DB-backed Settings pages, not a code edit.
   `admin_maintenance_form.js`, etc.). Don't introduce a drag-and-drop library
   for this without discussing it first.
 
+## Two-factor authentication (`twofactor.py`) — added 2026-08-01
+
+- TOTP-based (Google Authenticator/Authy/1Password, etc.), off by default,
+  never required — a single admin can opt in from `/admin/2fa`, and the page
+  strongly recommends it (especially given the host power controls exist
+  now) without forcing it, since some people explicitly don't want it. `pyotp`
+  and `qrcode` are **required** dependencies (`requirements.txt`), not the
+  lazy-imported-optional pattern used for `nvidia-ml-py`/`discord.py` — both
+  are small pure-Python packages with no compiled extensions, and 2FA is a
+  core always-available feature, not a rare/heavy integration.
+- **The QR code is generated fully server-side as inline SVG** via `qrcode`'s
+  `SvgPathImage` factory — deliberately avoids a Pillow/image-library
+  dependency and avoids any third-party JS QR-rendering library (which would
+  need loosening the CSP's `script-src` or vendoring a file — this app has no
+  external JS dependencies anywhere else and that convention held here too).
+- **Enrollment secret lives in the session, not the DB, until confirmed.**
+  `GET /admin/2fa/enable` puts a freshly generated secret in
+  `session["pending_totp_secret"]` and shows its QR/manual key; only a
+  `POST` with a *verified* code from that same pending secret writes it to
+  `db` (`admin_totp_secret`/`admin_totp_enabled`) — this stops an admin from
+  ending up locked out by a secret they never actually got safely into their
+  authenticator app. **Caught by live testing, not the unit tests**: the
+  route used to crash with a bare `KeyError` if a `POST` ever arrived with no
+  pending secret in the session (e.g. it expired between GET and POST, or a
+  direct POST) — fixed by unconditionally ensuring a pending secret exists
+  before rendering, instead of only doing so in the GET branch. If you touch
+  this route again, keep a regression test for that specific "POST with
+  nothing pending" case, not just the happy path.
+- **Login becomes two steps when 2FA is enabled, still one step when it
+  isn't.** `session["awaiting_totp"]` is set (server-side only, can't be
+  forged by a client without the signed session's `SECRET_KEY`) once the
+  password step succeeds; the *next* `POST` to `/admin/login` is read as a
+  code instead of a password, without re-checking the password. The global
+  login-lockout counter (`_login_state`) applies to wrong codes exactly like
+  wrong passwords — deliberately **not** reset just for getting the password
+  right, only once the whole two-step login actually succeeds, so a correct
+  password doesn't buy an attacker unlimited unthrottled code guesses.
+- **Step-up re-authentication for host restart/shutdown, added alongside
+  this.** Even with an already-logged-in session, `/admin/resources/host-control`
+  demands a *fresh* code when 2FA is enabled (checked in the route itself,
+  same shared `twofactor.verify_code()`) — the reasoning: a stolen/replayed
+  session cookie alone must not be enough to trigger the single most
+  destructive action this app can take. Scoped deliberately narrow (host
+  restart/shutdown only, not VM control, not other admin actions) — that's
+  what was actually asked for; don't creep this onto other routes without
+  discussing it first.
+- **Resetting 2FA is a host-level action, not a web one, on purpose.**
+  `twofactor.check_and_process_reset_flag()` looks for an empty file at
+  `instance/RESET_2FA` on every hit of `/admin/login` (cheap
+  `os.path.exists()`, no restart needed — takes effect on the very next page
+  load) and, if found, wipes `admin_totp_secret`/sets `admin_totp_enabled=0`,
+  then deletes the file itself (self-cleaning, one-shot — not a standing
+  toggle someone could forget to unset). This is deliberately **not** a web
+  UI button or an emergency backup code — either would just be another secret
+  reachable purely over the web to protect. Creating a file requires actual
+  filesystem access to the host, a meaningfully different trust boundary from
+  knowing the admin password or holding a stolen session cookie. Routine
+  self-service disabling (the admin still has their device, just wants it
+  off) stays in the web UI at `/admin/2fa`, itself gated behind entering a
+  current code — a hijacked session alone can't turn 2FA off either.
+
 ## Testing/verification habits (established over many sessions — keep following them)
 
 - Run the full `pytest` suite *and* a live `python app.py` + `curl` smoke test of
   whatever routes actually changed before calling something done. Several real bugs
-  (the integration-blocking page load, the maintenance-window timing bug) were only
-  ever caught by actually running the server, never by unit tests alone.
+  (the integration-blocking page load, the maintenance-window timing bug, the 2FA
+  enrollment `KeyError`) were only ever caught by actually running the server,
+  never by unit tests alone.
+- **When curl-smoke-testing a multi-request flow that depends on session state
+  (login steps, flash messages, anything the server writes back via
+  `Set-Cookie`), every request that should see or contribute to that state
+  needs *both* `-b cookiejar` (send) *and* `-c cookiejar` (save the response's
+  possibly-updated cookie) — `-b` alone silently reads a stale cookie and looks
+  exactly like a real bug (a missing flash message, a "lost" session value)
+  when it's actually just the session update from the previous request never
+  having been saved.** Bit this exact session while testing 2FA enrollment
+  2026-08-01 — the first symptom was indistinguishable from an actual
+  server-side bug until re-checked with `-c` added.
 - This sandbox is Linux. Hyper-V VM detection, Windows volume labels, CPU/disk
   temperature and per-disk I/O (all Windows-only, PowerShell/CIM-backed), real
   Jellyfin/*Arr/Jellyseerr instances (including the newer `/Sessions` and

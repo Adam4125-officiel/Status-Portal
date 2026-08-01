@@ -26,6 +26,7 @@ import integrations
 import logging_setup
 import monitoring
 import notifications
+import twofactor
 
 _logger = logging.getLogger(__name__)
 
@@ -492,11 +493,34 @@ def feed():
 # ---------------------------------------------------------------------------
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
+    # Cheap check (a single os.path.exists()) on every hit, so a host-level 2FA
+    # reset (see twofactor.py) takes effect the moment someone next loads this
+    # page - no app restart needed.
+    twofactor.check_and_process_reset_flag()
     first_run = is_first_run()
+    awaiting_totp = session.get("awaiting_totp", False)
+
     if request.method == "POST":
         if not first_run and _login_locked():
             flash("Too many failed attempts. Try again in a few minutes.", "error")
-            return render_template("login.html", first_run=first_run)
+            return render_template("login.html", first_run=first_run, awaiting_totp=awaiting_totp)
+
+        # Second step of a 2FA login: the password was already verified to get
+        # here (this flag can only be set below, server-side, in this same
+        # session) - only the code is checked now, not the password again.
+        if awaiting_totp:
+            code = request.form.get("totp_code", "")
+            secret = db.get_setting("admin_totp_secret")
+            if secret and twofactor.verify_code(secret, code):
+                _register_login_success()
+                session.pop("awaiting_totp", None)
+                session["logged_in"] = True
+                nxt = session.pop("login_next", None) or url_for("admin_dashboard")
+                return redirect(nxt)
+            _register_login_failure()
+            flash("Incorrect code.", "error")
+            return render_template("login.html", first_run=False, awaiting_totp=True)
+
         password = request.form.get("password", "")
         if first_run:
             confirm = request.form.get("confirm", "")
@@ -511,13 +535,19 @@ def admin_login():
         else:
             stored = db.get_setting("admin_password_hash")
             if stored and check_password_hash(stored, password):
+                if twofactor.is_enabled():
+                    # Login isn't complete yet - don't reset the failure counter
+                    # or set logged_in until the code step also succeeds.
+                    session["awaiting_totp"] = True
+                    session["login_next"] = request.args.get("next") or url_for("admin_dashboard")
+                    return render_template("login.html", first_run=False, awaiting_totp=True)
                 _register_login_success()
                 session["logged_in"] = True
                 nxt = request.args.get("next") or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect password.", "error")
-    return render_template("login.html", first_run=first_run)
+    return render_template("login.html", first_run=first_run, awaiting_totp=awaiting_totp)
 
 
 @app.route("/admin/logout")
@@ -780,7 +810,8 @@ def admin_resources():
     snapshot = monitoring.get_resource_snapshot()
     vms = monitoring.get_cached_vm_snapshot()
     return render_template("admin_resources.html", snapshot=snapshot, vms=vms, visible=ADMIN_RESOURCE_VISIBLE,
-                            refresh_seconds=config.RESOURCE_REFRESH_SECONDS, active="resources")
+                            refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
+                            totp_enabled=twofactor.is_enabled(), active="resources")
 
 
 @app.route("/admin/resources/host-control", methods=["POST"])
@@ -791,11 +822,21 @@ def admin_host_control():
     exactly two fixed actions). The blast radius comes entirely from what the
     action *does*, not from anything an attacker could smuggle into it - login +
     CSRF (already required on every admin POST) plus the typed client-side
-    confirmation in admin_resources.html are the mitigations for that."""
+    confirmation in admin_resources.html are the mitigations for that.
+
+    Step-up authentication: if 2FA is enabled, a fresh code is required here even
+    though the session is already logged in - a stolen/replayed session cookie
+    alone must not be enough to trigger this specific action, given what it does."""
     action = request.form.get("action", "")
     if action not in ("restart", "shutdown"):
         flash("Unknown host action.", "error")
         return redirect(url_for("admin_resources"))
+    if twofactor.is_enabled():
+        code = request.form.get("totp_code", "")
+        secret = db.get_setting("admin_totp_secret")
+        if not twofactor.verify_code(secret, code):
+            flash("Incorrect or missing 2FA code - host action cancelled.", "error")
+            return redirect(url_for("admin_resources"))
     success, message = monitoring.control_host(action)
     flash(message, "success" if success else "error")
     return redirect(url_for("admin_resources"))
@@ -961,6 +1002,57 @@ def admin_settings_general():
         db.set_setting("public_layout_order", layout_order)
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
+
+
+# ---- Two-factor authentication ----
+@app.route("/admin/2fa")
+@login_required
+def admin_2fa():
+    return render_template("admin_2fa.html", totp_enabled=twofactor.is_enabled(), active="2fa")
+
+
+@app.route("/admin/2fa/enable", methods=["GET", "POST"])
+@login_required
+def admin_2fa_enable():
+    if request.method == "POST":
+        secret = session.get("pending_totp_secret")
+        code = request.form.get("totp_code", "")
+        if secret and twofactor.verify_code(secret, code):
+            db.set_setting("admin_totp_secret", secret)
+            db.set_setting("admin_totp_enabled", "1")
+            session.pop("pending_totp_secret", None)
+            flash("Two-factor authentication enabled.", "success")
+            return redirect(url_for("admin_2fa"))
+        flash("Incorrect code - scan the QR code again (or re-enter the manual "
+              "key) and try once more.", "error")
+
+    if request.method == "GET" and request.args.get("new"):
+        session.pop("pending_totp_secret", None)
+    if not session.get("pending_totp_secret"):
+        # Covers the first visit, an explicit "generate a different code", and the
+        # defensive case of a POST arriving with no pending secret at all (session
+        # expired between GET and POST, or a direct POST) - generate a fresh one
+        # rather than crashing on a missing key.
+        session["pending_totp_secret"] = twofactor.generate_secret()
+
+    secret = session["pending_totp_secret"]
+    uri = twofactor.provisioning_uri(secret, account_name=db.get_setting("site_name", "admin"))
+    return render_template("admin_2fa_enable.html", secret=secret,
+                            qr_svg=twofactor.qr_code_svg(uri), active="2fa")
+
+
+@app.route("/admin/2fa/disable", methods=["POST"])
+@login_required
+def admin_2fa_disable():
+    code = request.form.get("totp_code", "")
+    secret = db.get_setting("admin_totp_secret")
+    if secret and twofactor.verify_code(secret, code):
+        db.set_setting("admin_totp_secret", "")
+        db.set_setting("admin_totp_enabled", "0")
+        flash("Two-factor authentication disabled.", "success")
+    else:
+        flash("Incorrect code - 2FA was not disabled.", "error")
+    return redirect(url_for("admin_2fa"))
 
 
 # ---- Discord bot (separate from the simple webhook notifications above) ----

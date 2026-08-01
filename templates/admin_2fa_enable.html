@@ -1,0 +1,33 @@
+{% extends "admin_base.html" %}
+{% block title %}Enable two-factor authentication — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Enable two-factor authentication</h1>
+</div>
+
+<div class="form-panel" style="max-width: 480px;">
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Scan this with Google Authenticator (or any TOTP app - Authy, 1Password,
+    etc.), then enter the 6-digit code it shows below to confirm.
+  </p>
+  <div style="background: #fff; padding: 12px; border-radius: var(--radius-sm); display: inline-block; line-height: 0;">
+    {{ qr_svg|safe }}
+  </div>
+  <p style="font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); margin-top: 10px; word-break: break-all;">
+    Can't scan? Enter this key manually: {{ secret }}
+  </p>
+  <a href="{{ url_for('admin_2fa_enable', new=1) }}" style="font-size: 12px;">Generate a different code</a>
+</div>
+
+<form method="POST" class="form-panel" style="max-width: 480px; margin-top: 16px;">
+  <div class="field">
+    <label for="totp_code">Code from your app</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+           maxlength="6" required autofocus autocomplete="one-time-code">
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Confirm and enable</button>
+    <a href="{{ url_for('admin_2fa') }}" class="btn secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

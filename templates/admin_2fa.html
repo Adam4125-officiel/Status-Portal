@@ -1,0 +1,45 @@
+{% extends "admin_base.html" %}
+{% block title %}Two-factor authentication — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Two-factor authentication</h1>
+</div>
+
+<div class="form-panel" style="margin-bottom: 16px; max-width: 560px;">
+  {% if totp_enabled %}
+    <div class="service-card__status ok"><span class="led ok"></span>Enabled</div>
+    <p style="font-size: 13px; color: var(--text-dim); margin: 10px 0 0;">
+      Logging in, and restarting or shutting down the host, both now ask for a fresh code from your authenticator app.
+    </p>
+  {% else %}
+    <div class="service-card__status crit"><span class="led crit"></span>Disabled</div>
+    <p style="font-size: 13px; color: var(--text-dim); margin: 10px 0 0;">
+      <strong>Strongly recommended</strong> — especially now that the admin panel can restart or shut down the host, a leaked or guessed password alone won't be enough to log in or trigger those actions once this is on. Not required though; some people would rather not use it.
+    </p>
+  {% endif %}
+</div>
+
+{% if totp_enabled %}
+<form method="POST" action="{{ url_for('admin_2fa_disable') }}" class="form-panel" style="max-width: 560px;">
+  <div class="field">
+    <label for="totp_code">Enter a current code to disable 2FA</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+           maxlength="6" required autocomplete="one-time-code">
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn danger">Disable 2FA</button>
+  </div>
+</form>
+<p style="color: var(--text-faint); font-size: 12px; margin-top: 16px; line-height: 1.6;">
+  Lost your device and can't produce a code at all? 2FA can also be reset directly
+  on the host itself — deliberately not through this web admin. Create an empty
+  file named <code>RESET_2FA</code> inside this app's <code>instance/</code>
+  folder; it's disabled the moment you next load the login page, and the file
+  deletes itself once processed.
+</p>
+{% else %}
+<div class="form-panel" style="max-width: 560px;">
+  <a href="{{ url_for('admin_2fa_enable') }}" class="btn">Enable 2FA</a>
+</div>
+{% endif %}
+{% endblock %}

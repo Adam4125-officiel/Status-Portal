@@ -42,11 +42,18 @@
 
 <div id="host-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
   <p id="host-control-confirm-text" style="font-size: 13px;"></p>
-  <div class="field">
-    <input type="text" id="host-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-  </div>
   <form id="host-control-form" method="POST" action="{{ url_for('admin_host_control') }}">
     <input type="hidden" name="action" id="host-control-action">
+    <div class="field">
+      <input type="text" id="host-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
+    </div>
+    {% if totp_enabled %}
+    <div class="field">
+      <label for="host-control-totp">2FA code</label>
+      <input type="text" id="host-control-totp" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+             maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+    </div>
+    {% endif %}
     <div class="form-actions">
       <button type="submit" id="host-control-submit" class="btn danger" disabled>Confirm</button>
       <button type="button" id="host-control-cancel" class="btn secondary">Cancel</button>

@@ -11,6 +11,7 @@
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
     <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
+    <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
     <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord Bot</a>
     <div class="back-link">
       <a href="{{ url_for('index') }}">← View portal</a><br>

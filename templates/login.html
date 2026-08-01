@@ -3,7 +3,10 @@
 {% block body %}
 <div class="login-shell">
   <div class="login-card">
-    {% if first_run %}
+    {% if awaiting_totp %}
+      <h1>Two-factor code</h1>
+      <p class="sub">Enter the 6-digit code from your authenticator app.</p>
+    {% elif first_run %}
       <h1>First launch</h1>
       <p class="sub">Choose the admin password. No one else has set it for you, so write it down.</p>
     {% else %}
@@ -17,6 +20,18 @@
       {% endfor %}
     {% endwith %}
 
+    {% if awaiting_totp %}
+    <form method="POST">
+      <div class="field">
+        <label for="totp_code">Authentication code</label>
+        <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+               maxlength="6" required autofocus autocomplete="one-time-code">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit">Verify</button>
+      </div>
+    </form>
+    {% else %}
     <form method="POST">
       <div class="field">
         <label for="password">Password</label>
@@ -32,6 +47,7 @@
         <button class="btn" type="submit">{{ 'Create and log in' if first_run else 'Log in' }}</button>
       </div>
     </form>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

@@ -1,7 +1,10 @@
 import re
 
+import pyotp
+
 import app as app_module
 import db
+import twofactor
 
 
 def _extract_csrf_token(html):
@@ -249,6 +252,151 @@ def test_admin_requires_login(client):
     resp = client.get("/admin/services")
     assert resp.status_code == 302
     assert "/admin/login" in resp.headers["Location"]
+
+
+def _enable_totp_directly(secret=None):
+    secret = secret or twofactor.generate_secret()
+    db.set_setting("admin_totp_secret", secret)
+    db.set_setting("admin_totp_enabled", "1")
+    return secret
+
+
+def test_login_with_2fa_requires_second_step(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.get("/admin/logout")
+
+    # Correct password alone must not log in yet - a second, code-entry step follows.
+    resp = client.post("/admin/login", data={"password": "testpass123"}, follow_redirects=True)
+    assert b"Two-factor code" in resp.data
+    resp = client.get("/admin/services")
+    assert resp.status_code == 302  # still not logged in
+
+    resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    resp = client.get("/admin/services")
+    assert resp.status_code == 200  # now actually logged in
+
+
+def test_login_with_2fa_wrong_code_does_not_grant_access(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+    client.get("/admin/logout")
+    client.post("/admin/login", data={"password": "testpass123"})
+
+    resp = client.post("/admin/login", data={"totp_code": "000000"}, follow_redirects=True)
+    assert b"Incorrect code" in resp.data
+    resp = client.get("/admin/services")
+    assert resp.status_code == 302  # still not logged in
+
+
+def test_login_without_2fa_stays_single_step(client):
+    """Regression guard: 2FA must remain fully optional - a fresh install with it
+    never touched logs in from the password step alone, same as before it existed."""
+    resp = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    assert resp.status_code == 302
+    resp = client.get("/admin/services")
+    assert resp.status_code == 200
+
+
+def test_admin_2fa_page_shows_disabled_by_default(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/2fa")
+    assert b"Disabled" in resp.data
+    assert b"Strongly recommended" in resp.data
+
+
+def test_admin_2fa_enroll_and_enable_flow(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/2fa/enable")
+    assert resp.status_code == 200
+    assert b"<svg" in resp.data
+
+    with client.session_transaction() as sess:
+        secret = sess["pending_totp_secret"]
+
+    resp = client.post("/admin/2fa/enable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert twofactor.is_enabled() is True
+
+    resp = client.get("/admin/2fa")
+    assert b"Enabled" in resp.data
+
+
+def test_admin_2fa_enroll_wrong_code_does_not_enable(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/2fa/enable")
+    resp = client.post("/admin/2fa/enable", data={"totp_code": "000000"}, follow_redirects=True)
+    assert b"Incorrect code" in resp.data
+    assert twofactor.is_enabled() is False
+
+
+def test_admin_2fa_enroll_post_without_a_prior_get_does_not_crash(client):
+    """Regression test for a real 500 caught by live testing: a POST to this route
+    with no pending secret in the session at all (e.g. it expired between GET and
+    POST, or a direct POST) used to raise a bare KeyError instead of recovering."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/2fa/enable", data={"totp_code": "000000"}, follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Incorrect code" in resp.data
+    assert twofactor.is_enabled() is False
+
+
+def test_admin_2fa_disable_requires_correct_code(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/2fa/disable", data={"totp_code": "000000"}, follow_redirects=True)
+    assert b"was not disabled" in resp.data
+    assert twofactor.is_enabled() is True
+
+    resp = client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert twofactor.is_enabled() is False
+
+
+def test_admin_host_control_step_up_2fa_blocks_without_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+
+    resp = client.post("/admin/resources/host-control", data={"action": "restart"}, follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []  # control_host must never have been called
+
+
+def test_admin_host_control_step_up_2fa_allows_with_correct_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/resources/host-control",
+                        data={"action": "restart", "totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_admin_2fa_reset_flag_file(client, monkeypatch, tmp_path):
+    flag_path = tmp_path / "RESET_2FA"
+    monkeypatch.setattr(twofactor, "RESET_FLAG_PATH", str(flag_path))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+    client.get("/admin/logout")
+
+    flag_path.write_text("")
+    client.get("/admin/login")  # the reset check runs on every hit of this route
+    assert twofactor.is_enabled() is False
+    assert not flag_path.exists()
+
+    # Login now works in a single step again, password alone.
+    resp = client.post("/admin/login", data={"password": "testpass123"})
+    assert resp.status_code == 302
+    resp = client.get("/admin/services")
+    assert resp.status_code == 200
 
 
 def test_auto_incident_lifecycle_opens_and_resolves(isolated_db):
