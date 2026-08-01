@@ -18,6 +18,7 @@ installed, start() is a clean no-op and logs why. Nothing else in this app is
 affected either way - app.py imports this module unconditionally, so it must never
 raise merely from being imported.
 """
+import logging
 import re
 import threading
 
@@ -25,6 +26,8 @@ import config
 import db
 import integrations
 import monitoring
+
+_logger = logging.getLogger(__name__)
 
 _state = {"connected": False, "user": None, "last_error": None}
 
@@ -290,8 +293,8 @@ def _make_client_class(discord, app_commands, tasks):
                     return
                 allowed = allowed_user_ids()
                 if allowed and str(interaction.user.id) not in allowed:
-                    print(f"[discord-bot] rejected /{command_name} from unauthorized user "
-                          f"{interaction.user} ({interaction.user.id})")
+                    _logger.warning("rejected /%s from unauthorized user %s (%s)",
+                                    command_name, interaction.user, interaction.user.id)
                     await interaction.response.send_message(
                         "You're not authorized to use this command.", ephemeral=True)
                     return
@@ -309,12 +312,12 @@ def _make_client_class(discord, app_commands, tasks):
                 guild = discord.Object(id=int(guild_id))
                 self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
-                print(f"[discord-bot] slash command synced to guild {guild_id}")
+                _logger.info("slash command synced to guild %s", guild_id)
             else:
                 await self.tree.sync()
-                print("[discord-bot] slash command synced globally "
-                      "(can take up to an hour to first appear - set PORTAL_DISCORD_BOT_GUILD_ID "
-                      "for instant registration on a single server)")
+                _logger.info("slash command synced globally (can take up to an hour to first "
+                             "appear - set PORTAL_DISCORD_BOT_GUILD_ID for instant registration "
+                             "on a single server)")
 
         async def _enforce_guild_whitelist(self, guild):
             """Leaves `guild` immediately if a server whitelist is configured and
@@ -325,12 +328,12 @@ def _make_client_class(discord, app_commands, tasks):
             convention as the user allowlist. Returns True if it left."""
             whitelist = allowed_guild_ids()
             if whitelist and str(guild.id) not in whitelist:
-                print(f"[discord-bot] leaving server '{guild.name}' ({guild.id}) - "
-                      f"not in the configured server whitelist")
+                _logger.info("leaving server '%s' (%s) - not in the configured server whitelist",
+                             guild.name, guild.id)
                 try:
                     await guild.leave()
-                except Exception as e:
-                    print(f"[discord-bot] failed to leave server {guild.id}: {e}")
+                except Exception:
+                    _logger.exception("failed to leave server %s", guild.id)
                 return True
             return False
 
@@ -344,7 +347,7 @@ def _make_client_class(discord, app_commands, tasks):
             _state["connected"] = True
             _state["user"] = str(self.user)
             _state["last_error"] = None
-            print(f"[discord-bot] connected as {self.user}")
+            _logger.info("connected as %s", self.user)
             # Also re-checked on every (re)connect, not just on_guild_join - covers
             # a server the bot was already in before the whitelist was configured
             # or edited, so tightening it later actually takes effect.
@@ -380,8 +383,8 @@ def _make_client_class(discord, app_commands, tasks):
                             await msg.edit(embed=embed)
                         except Exception:
                             db.delete_discord_status_message(row["channel_id"])
-            except Exception as e:
-                print(f"[discord-bot] refresh loop error: {e}")
+            except Exception:
+                _logger.exception("refresh loop error")
 
     return StatusBot
 
@@ -394,8 +397,8 @@ def start():
         return
     discord, app_commands, tasks = _try_import_discord()
     if discord is None:
-        print("[discord-bot] PORTAL_DISCORD_BOT_TOKEN is set but discord.py isn't installed - "
-              "run `pip install discord.py` to enable this optional feature.")
+        _logger.warning("PORTAL_DISCORD_BOT_TOKEN is set but discord.py isn't installed - "
+                        "run `pip install discord.py` to enable this optional feature.")
         return
 
     def _run():
@@ -407,6 +410,6 @@ def start():
         except Exception as e:
             _state["connected"] = False
             _state["last_error"] = str(e)
-            print(f"[discord-bot] failed to start: {e}")
+            _logger.exception("failed to start")
 
     threading.Thread(target=_run, daemon=True, name="discord-bot").start()

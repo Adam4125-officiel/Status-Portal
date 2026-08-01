@@ -213,12 +213,12 @@ def test_start_is_noop_when_token_blank(monkeypatch):
     assert calls == []  # must return before even attempting the import
 
 
-def test_start_logs_clearly_when_discord_py_missing(monkeypatch, capsys):
+def test_start_logs_clearly_when_discord_py_missing(monkeypatch, caplog):
     monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
     monkeypatch.setattr(discord_bot, "_try_import_discord", lambda: (None, None, None))
-    discord_bot.start()  # must not raise
-    out = capsys.readouterr().out
-    assert "discord.py isn't installed" in out
+    with caplog.at_level("WARNING"):
+        discord_bot.start()  # must not raise
+    assert "discord.py isn't installed" in caplog.text
 
 
 def test_discord_status_message_db_roundtrip(isolated_db):
@@ -312,16 +312,17 @@ def test_normalize_guild_ids():
     assert discord_bot.normalize_guild_ids(None) == ""
 
 
-def test_enforce_guild_whitelist_leaves_unlisted_server(isolated_db, capsys):
+def test_enforce_guild_whitelist_leaves_unlisted_server(isolated_db, caplog):
     db.set_setting("discordbot_guild_whitelist", "111")
     bot = _build_bot()
     guild = _make_guild(222, name="Unwanted Server")
 
-    left = asyncio.run(bot._enforce_guild_whitelist(guild))
+    with caplog.at_level("INFO"):
+        left = asyncio.run(bot._enforce_guild_whitelist(guild))
 
     assert left is True
     guild.leave.assert_awaited_once()
-    assert "Unwanted Server" in capsys.readouterr().out
+    assert "Unwanted Server" in caplog.text
 
 
 def test_enforce_guild_whitelist_keeps_listed_server(isolated_db):

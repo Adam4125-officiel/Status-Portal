@@ -3,6 +3,7 @@ app.py — Personal server status portal.
 Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
+import logging
 import os
 import re
 import threading
@@ -21,8 +22,11 @@ import config
 import db
 import discord_bot
 import integrations
+import logging_setup
 import monitoring
 import notifications
+
+_logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -74,6 +78,7 @@ def handle_not_found(e):
 
 @app.errorhandler(500)
 def handle_server_error(e):
+    _logger.exception("Unhandled exception in request %s %s", request.method, request.path)
     return render_template("error.html", code=500, message="Something went wrong."), 500
 
 
@@ -207,8 +212,8 @@ def _refresh_integration_cache():
     if jellyfin:
         try:
             integrations.refresh_jellyfin_activity_cache(jellyfin["base_url"], jellyfin["api_key"])
-        except Exception as e:
-            print(f"[health-check] Jellyfin activity refresh failed: {e}")
+        except Exception:
+            _logger.exception("Jellyfin activity refresh failed")
 
 
 def _attach_integration_status(services):
@@ -979,8 +984,8 @@ def run_health_checks():
                 if s["auto_incident"] and not _within_grace_period(s):
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
-        except Exception as e:
-            print(f"[health-check] error: {e}")
+        except Exception:
+            _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)
 
 
@@ -1068,6 +1073,7 @@ def start_background_checker():
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    logging_setup.init_logging()
     db.init_db()
     start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)

@@ -66,17 +66,18 @@ def test_vm_snapshot_handles_single_vm_as_dict(monkeypatch):
     assert len(vms) == 1 and vms[0]["name"] == "web01"
 
 
-def test_vm_snapshot_logs_stderr_on_failure(monkeypatch, capsys):
+def test_vm_snapshot_logs_stderr_on_failure(monkeypatch, caplog):
     """Regression guard: a failing query must not be silently indistinguishable from
     'no VMs' - the actual PowerShell error (e.g. an elevation/permissions failure)
-    must reach the console so it's diagnosable."""
+    must reach the log so it's diagnosable."""
     monkeypatch.setattr(monitoring.os, "name", "nt")
     monkeypatch.setattr(monitoring.subprocess, "run",
                          lambda *a, **k: SimpleNamespace(
                              returncode=1, stdout="", stderr="Get-VM : requires elevation"))
-    vms = monitoring.get_vm_snapshot()
+    with caplog.at_level("ERROR"):
+        vms = monitoring.get_vm_snapshot()
     assert vms == []
-    assert "requires elevation" in capsys.readouterr().out
+    assert "requires elevation" in caplog.text
 
 
 def test_vm_snapshot_falls_back_to_pwsh(monkeypatch):
@@ -96,15 +97,16 @@ def test_vm_snapshot_falls_back_to_pwsh(monkeypatch):
     assert vms[0]["name"] == "vm1"
 
 
-def test_vm_snapshot_returns_empty_when_no_shell_found(monkeypatch, capsys):
+def test_vm_snapshot_returns_empty_when_no_shell_found(monkeypatch, caplog):
     monkeypatch.setattr(monitoring.os, "name", "nt")
 
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError()
 
     monkeypatch.setattr(monitoring.subprocess, "run", fake_run)
-    assert monitoring.get_vm_snapshot() == []
-    assert "neither" in capsys.readouterr().out
+    with caplog.at_level("ERROR"):
+        assert monitoring.get_vm_snapshot() == []
+    assert "neither" in caplog.text
 
 
 def test_query_cpu_temp_converts_tenths_kelvin_to_celsius(monkeypatch):

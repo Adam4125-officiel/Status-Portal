@@ -4,12 +4,15 @@ monitoring.py — Live CPU/RAM/disk/GPU/VM snapshot for the resource panel
 tracking, just a fresh reading each time the page loads/auto-refreshes.
 """
 import json
+import logging
 import os
 import subprocess
 import threading
 import time
 
 import psutil
+
+_logger = logging.getLogger(__name__)
 
 # Pseudo/virtual filesystems to skip when listing disks - psutil.disk_partitions(all=False)
 # already filters most of these, but this is extra insurance across platforms/setups.
@@ -289,15 +292,15 @@ def _run_powershell(command, timeout=10):
             )
         except FileNotFoundError:
             continue  # this shell isn't installed - try the next candidate
-        except Exception as e:
-            print(f"[monitoring] PowerShell query via {shell} failed to run: {e}")
+        except Exception:
+            _logger.exception("PowerShell query via %s failed to run", shell)
             return None
         if result.returncode != 0:
-            print(f"[monitoring] PowerShell query via {shell} exited {result.returncode}: "
-                  f"{result.stderr.strip() or '(no stderr output)'}")
+            _logger.error("PowerShell query via %s exited %s: %s", shell, result.returncode,
+                          result.stderr.strip() or "(no stderr output)")
             return None
         return result.stdout
-    print("[monitoring] PowerShell query failed: neither 'powershell' nor 'pwsh' found on PATH")
+    _logger.error("PowerShell query failed: neither 'powershell' nor 'pwsh' found on PATH")
     return None
 
 
@@ -326,8 +329,8 @@ def get_vm_snapshot():
         return []  # either the query failed (already logged) or no VMs are defined
     try:
         data = json.loads(stdout)
-    except ValueError as e:
-        print(f"[monitoring] Hyper-V VM query returned unparseable output: {e}")
+    except ValueError:
+        _logger.exception("Hyper-V VM query returned unparseable output")
         return []
     if isinstance(data, dict):
         data = [data]
@@ -402,8 +405,8 @@ def _query_windows_disk_details():
         return {}
     try:
         data = json.loads(stdout)
-    except ValueError as e:
-        print(f"[monitoring] Windows disk-detail query returned unparseable output: {e}")
+    except ValueError:
+        _logger.exception("Windows disk-detail query returned unparseable output")
         return {}
     if isinstance(data, dict):
         data = [data]
@@ -434,8 +437,8 @@ def _background_refresh_loop(interval_seconds):
     while True:
         try:
             _refresh_windows_cache()
-        except Exception as e:
-            print(f"[monitoring] background refresh error: {e}")
+        except Exception:
+            _logger.exception("background refresh error")
         time.sleep(interval_seconds)
 
 

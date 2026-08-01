@@ -13,10 +13,12 @@ from waitress import serve
 import config
 import db
 import discord_bot
+import logging_setup
 import monitoring
 from app import app, start_background_checker
 
 if __name__ == "__main__":
+    logging_setup.init_logging()
     db.init_db()
     start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
