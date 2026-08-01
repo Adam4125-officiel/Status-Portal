@@ -287,6 +287,20 @@ Once the trigger fires: this is standing, pre-authorized (per the same blanket
 authorization covering commit/push/shell commands for this project, granted
 2026-07-22) — don't ask for confirmation again each time, just run the steps below.
 
+**Mid-session checkpoint, not just end-of-session (added 2026-08-01)**: don't
+wait only for the full "session's done, everything works" trigger above.
+Whenever a *complete chunk of requested work* finishes — a whole batch of
+asks handed over together, even if more requests come later in the same
+session — proactively tell the user specifically what to test and how, and
+cut a **pre-release** (`-rc.N`, marked prerelease on GitHub) covering that
+chunk, rather than staying silent until the literal end of the session. This
+is deliberately coarser than "after every individual step": a batch of many
+related asks worked in one pass is one chunk, not one release per item —
+confirmed with the user 2026-08-01 on a 16-item batch, where the agreed
+cadence was one pre-release at the end of the whole batch, not per-item. The
+stable-release trigger phrase above still governs promoting a pre-release (or
+cutting a fresh full release) once the user actually confirms it works.
+
 1. **Versioning**: `vMAJOR.MINOR.PATCH`, with an optional `-rc.N` suffix for anything
    not yet user-verified end-to-end (mark the GitHub release as a pre-release too).
    First tagged release is `v1.0.0` (2026-07-22). Bump MINOR for new features, PATCH
