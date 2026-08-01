@@ -322,22 +322,37 @@ def test_normalize_user_ids():
 def test_build_snapshot_data_all_clear(isolated_db):
     db.update_service(db.list_services()[0]["id"], {**db.list_services()[0], "status": "operational"})
     data = discord_bot.build_snapshot_data()
-    assert data == {"down": [], "incident_count": 0, "maintenance_count": 0}
+    assert data == {"down": [], "incidents": [], "maintenance_count": 0}
     assert discord_bot.build_snapshot_text(data) == "✅ All services up. No open incidents or maintenance."
 
 
-def test_build_snapshot_data_reports_down_services_and_open_incident(isolated_db):
+def test_build_snapshot_data_reports_down_services_and_open_incident_detail(isolated_db):
     service = db.list_services()[0]
     db.update_service(service["id"], {**service, "status": "down"})
-    db.create_incident({"title": "Test outage", "status": "investigating"})
+    db.create_incident({"title": "Test outage", "description": "Root cause unknown so far.",
+                         "status": "investigating"}, service_ids=[service["id"]])
+    incident = db.list_incidents()[0]
+    db.create_incident_update(incident["id"], "Looking into it.", "identified")
 
     data = discord_bot.build_snapshot_data()
     assert data["down"] == [service["name"]]
-    assert data["incident_count"] == 1
     assert data["maintenance_count"] == 0
+    assert len(data["incidents"]) == 1
+    detail = data["incidents"][0]
+    assert detail["title"] == "Test outage"
+    assert detail["description"] == "Root cause unknown so far."
+    assert detail["status"] == "investigating"
+    assert detail["service_names"] == service["name"]
+    assert len(detail["updates"]) == 1
+    assert detail["updates"][0]["message"] == "Looking into it."
+
     text = discord_bot.build_snapshot_text(data)
     assert service["name"] in text
-    assert "1 open incident(s)" in text
+    assert "Test outage" in text
+    assert "Root cause unknown so far." in text
+    assert "Looking into it." in text
+    assert "[identified]" in text
+    assert "[investigating]" in text
 
 
 def test_build_snapshot_data_counts_only_in_progress_maintenance(isolated_db):

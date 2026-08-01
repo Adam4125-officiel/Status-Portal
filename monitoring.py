@@ -408,10 +408,20 @@ def control_host(action):
     if not command:
         return False, f"Unknown host action: {action}"
     try:
-        subprocess.run(command, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
     except Exception as e:
         _logger.exception("Failed to %s the host", action)
         return False, f"Failed to {action} the host: {e}"
+    if result.returncode != 0:
+        # The OS command ran but refused (e.g. insufficient privileges) - this is
+        # not a Python exception, so without checking returncode explicitly this
+        # would otherwise be silently reported as success even though nothing
+        # actually happened. Logged as an error deliberately: this is the one
+        # signal an admin has to notice a shutdown/restart request didn't work.
+        stderr = result.stderr.strip() or "(no stderr output)"
+        _logger.error("Host %s command exited %s: %s", action, result.returncode, stderr)
+        return False, f"Host {action} command failed (see server log): {stderr}"
+    _logger.info("Host %s command accepted by the OS.", action)
     return True, f"Host {action} command sent."
 
 

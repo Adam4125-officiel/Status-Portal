@@ -253,28 +253,48 @@ def build_status_data(include):
 def build_snapshot_data():
     """Pure/side-effect-free like build_status_data(), but deliberately minimal - just
     enough for a short, instantaneous reply: which services are currently down, and
-    whether any incident or maintenance window is currently open. Unlike /status,
-    this is a one-shot reply, never tracked/edited afterward."""
+    the full detail (title, description, status, service(s), started-at, and every
+    update posted so far) of each currently open incident, plus whether any
+    maintenance window is in progress. Unlike /status, this is a one-shot reply,
+    never tracked/edited afterward."""
     down = [s["name"] for s in db.list_services() if s["status"] == "down"]
     open_incidents = [i for i in db.list_incidents(limit=20) if i["status"] != "resolved"]
+    incidents = [
+        {
+            "title": i["title"],
+            "description": i["description"],
+            "status": i["status"],
+            "service_names": i.get("service_names") or "",
+            "started_at": i["started_at"],
+            "updates": db.list_incident_updates(i["id"]),
+        }
+        for i in open_incidents
+    ]
     # list_public_maintenance_windows() already excludes ended ones, but a window
     # that's merely scheduled (not yet applied) isn't happening right now.
     active_maintenance = [w for w in db.list_public_maintenance_windows() if w["applied"]]
-    return {"down": down, "incident_count": len(open_incidents),
-            "maintenance_count": len(active_maintenance)}
+    return {"down": down, "incidents": incidents, "maintenance_count": len(active_maintenance)}
 
 
 def build_snapshot_text(data):
-    if not data["down"] and not data["incident_count"] and not data["maintenance_count"]:
+    if not data["down"] and not data["incidents"] and not data["maintenance_count"]:
         return "✅ All services up. No open incidents or maintenance."
     parts = []
     if data["down"]:
         parts.append("🔴 Down: " + ", ".join(data["down"]))
-    if data["incident_count"]:
-        parts.append(f"🚨 {data['incident_count']} open incident(s)")
+    for i in data["incidents"]:
+        header = f"🚨 [{i['status']}] {i['title']}"
+        if i["service_names"]:
+            header += f" — {i['service_names']}"
+        header += f" (started {i['started_at'][:16].replace('T', ' ')} UTC)"
+        parts.append(header)
+        if i["description"]:
+            parts.append(f"↳ {i['description']}")
+        for u in i["updates"]:
+            parts.append(f"↳ [{u['status']}] {u['message']} ({u['created_at'][:16].replace('T', ' ')} UTC)")
     if data["maintenance_count"]:
         parts.append(f"🛠 {data['maintenance_count']} maintenance window(s) in progress")
-    return "\n".join(parts)
+    return _truncate("\n".join(parts), 1900)
 
 
 def _truncate(text, limit):

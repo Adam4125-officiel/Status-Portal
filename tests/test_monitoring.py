@@ -319,6 +319,35 @@ def test_control_host_rejects_unknown_action():
     assert "Unknown" in message
 
 
+def test_control_host_treats_nonzero_returncode_as_failure(monkeypatch, caplog):
+    """Regression test: the OS command can run without raising a Python exception
+    and still refuse (e.g. insufficient privileges reported via exit code/stderr,
+    not an exception) - this must not be silently reported as success."""
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda cmd, **k: SimpleNamespace(
+                             returncode=1, stdout="", stderr="shutdown: Need to be root"))
+
+    with caplog.at_level("ERROR"):
+        success, message = monitoring.control_host("shutdown")
+
+    assert success is False
+    assert "Need to be root" in message
+    assert "Need to be root" in caplog.text
+
+
+def test_control_host_logs_info_on_success(monkeypatch, caplog):
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    monkeypatch.setattr(monitoring.subprocess, "run",
+                         lambda cmd, **k: SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    with caplog.at_level("INFO"):
+        success, message = monitoring.control_host("restart")
+
+    assert success is True
+    assert "accepted" in caplog.text
+
+
 def test_control_host_handles_subprocess_failure(monkeypatch):
     monkeypatch.setattr(monitoring.os, "name", "posix")
 
