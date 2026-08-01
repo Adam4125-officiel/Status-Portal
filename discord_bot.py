@@ -29,7 +29,7 @@ import monitoring
 
 _logger = logging.getLogger(__name__)
 
-_state = {"connected": False, "user": None, "last_error": None}
+_state = {"connected": False, "user": None, "last_error": None, "guilds": []}
 
 STATUS_ICON = {"operational": "🟢", "slow": "🐢", "degraded": "🟡", "maintenance": "🟣", "down": "🔴"}
 STATUS_LABEL = {"operational": "Operational", "slow": "Slow", "degraded": "Degraded",
@@ -100,6 +100,20 @@ def allowed_guild_ids():
 
 
 def normalize_guild_ids(raw):
+    return ", ".join(_parse_id_list(raw))
+
+
+def allowed_channel_ids():
+    """Discord channel IDs (as strings) the slash commands are allowed to respond in
+    - parsed the same way as allowed_user_ids()/allowed_guild_ids(). An empty result
+    means unrestricted (any channel the bot can see), same default-open convention.
+    Unlike the guild whitelist, this only refuses the command reply - it has no
+    "leave" behavior, since a channel isn't something the bot can be a member of
+    independently of its server."""
+    return set(_parse_id_list(db.get_setting("discordbot_channel_whitelist", "")))
+
+
+def normalize_channel_ids(raw):
     return ", ".join(_parse_id_list(raw))
 
 
@@ -312,12 +326,20 @@ def _make_client_class(discord, app_commands, tasks):
         async def _check_command_authorized(self, interaction, command_name):
             """Shared authorization gate for every slash command this bot registers
             (currently /<command_name> and /snapshot) - one place for the
-            enabled-toggle/user-allowlist checks rather than duplicated per command.
-            Sends the appropriate ephemeral reply itself and returns False if not
-            authorized; returns True (sending nothing) if the command should proceed."""
+            enabled-toggle/user-allowlist/channel-whitelist checks rather than
+            duplicated per command. Sends the appropriate ephemeral reply itself and
+            returns False if not authorized; returns True (sending nothing) if the
+            command should proceed."""
             if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
                 await interaction.response.send_message(
                     "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
+                return False
+            allowed_channels = allowed_channel_ids()
+            if allowed_channels and str(interaction.channel_id) not in allowed_channels:
+                _logger.warning("rejected /%s in unauthorized channel %s", command_name,
+                                interaction.channel_id)
+                await interaction.response.send_message(
+                    "This command isn't allowed in this channel.", ephemeral=True)
                 return False
             allowed = allowed_user_ids()
             if allowed and str(interaction.user.id) not in allowed:
@@ -386,11 +408,31 @@ def _make_client_class(discord, app_commands, tasks):
                 return True
             return False
 
+        def _snapshot_guilds(self):
+            """Read-only snapshot of every server/channel the bot is currently in,
+            straight from the gateway cache (self.guilds/guild.text_channels) - no
+            extra API calls, so this is cheap enough to call on every lifecycle event
+            and each _refresh() tick. Populates _state["guilds"] for the admin
+            "manage servers" page to read, same read-the-cache pattern get_status()
+            already uses for connection state."""
+            _state["guilds"] = [
+                {"id": str(guild.id), "name": guild.name,
+                 "channels": [{"id": str(c.id), "name": c.name} for c in guild.text_channels]}
+                for guild in self.guilds
+            ]
+
         async def on_guild_join(self, guild):
             # Catches the whitelist at the moment the bot is invited to a new
             # server - the earliest point it can act, before anyone there gets a
             # chance to use the slash command.
             await self._enforce_guild_whitelist(guild)
+            self._snapshot_guilds()
+
+        async def on_guild_remove(self, guild):
+            # Fires whether the bot left on its own (the whitelist above) or was
+            # kicked/the server deleted the bot's access - either way, the admin page
+            # shouldn't keep showing a server the bot is no longer actually in.
+            self._snapshot_guilds()
 
         async def on_ready(self):
             _state["connected"] = True
@@ -402,6 +444,7 @@ def _make_client_class(discord, app_commands, tasks):
             # or edited, so tightening it later actually takes effect.
             for guild in list(self.guilds):
                 await self._enforce_guild_whitelist(guild)
+            self._snapshot_guilds()
             if not self.refresh_loop.is_running():
                 self.refresh_loop.start()
 
@@ -418,6 +461,7 @@ def _make_client_class(discord, app_commands, tasks):
 
         async def _refresh(self):
             try:
+                self._snapshot_guilds()
                 data = build_status_data(include_settings())
                 if db.get_setting("discordbot_update_presence", "0") == "1":
                     await self.change_presence(activity=discord.Activity(

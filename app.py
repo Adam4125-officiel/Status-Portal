@@ -887,6 +887,22 @@ def admin_discord_bot():
                             active="discord-bot")
 
 
+@app.route("/admin/discord-bot/guilds", methods=["GET", "POST"])
+@login_required
+def admin_discord_bot_guilds():
+    if request.method == "POST":
+        db.set_setting("discordbot_channel_whitelist",
+                        discord_bot.normalize_channel_ids(request.form.get("channel_whitelist", "")))
+        flash("Channel whitelist saved.", "success")
+        return redirect(url_for("admin_discord_bot_guilds"))
+    status = discord_bot.get_status()
+    return render_template("admin_discord_bot_guilds.html",
+                            token_configured=bool(config.DISCORD_BOT_TOKEN),
+                            connected=status["connected"], guilds=status["guilds"],
+                            channel_whitelist=db.get_setting("discordbot_channel_whitelist", ""),
+                            active="discord-bot")
+
+
 # ---------------------------------------------------------------------------
 # Background health check
 # ---------------------------------------------------------------------------

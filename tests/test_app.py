@@ -672,6 +672,26 @@ def test_admin_discord_bot_settings_persist(client):
     assert db.get_setting("discordbot_allowed_user_ids") == "123, 456, 789"  # normalized on save
 
 
+def test_admin_discord_bot_guilds_page(client, monkeypatch):
+    import config
+    import discord_bot
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setattr(discord_bot, "_state", {
+        "connected": True, "user": "TestBot#0001", "last_error": None,
+        "guilds": [{"id": "111", "name": "Home Lab", "channels": [{"id": "555", "name": "general"}]}],
+    })
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/discord-bot/guilds")
+    assert resp.status_code == 200
+    assert b"Home Lab" in resp.data
+    assert b"general" in resp.data
+
+    resp = client.post("/admin/discord-bot/guilds", data={"channel_whitelist": "555,666"})
+    assert resp.status_code == 302
+    assert db.get_setting("discordbot_channel_whitelist") == "555, 666"
+
+
 def test_public_page_shows_active_maintenance_window(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({

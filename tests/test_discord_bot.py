@@ -40,12 +40,79 @@ def _build_snapshot_command():
     return client.tree.get_command("snapshot")
 
 
-def _make_guild(guild_id, name="Test Server"):
+def _make_guild(guild_id, name="Test Server", channels=None):
     guild = MagicMock()
     guild.id = guild_id
     guild.name = name
     guild.leave = AsyncMock()
+    guild.text_channels = channels or []
     return guild
+
+
+def _make_channel(channel_id, name="general"):
+    channel = MagicMock()
+    channel.id = channel_id
+    channel.name = name
+    return channel
+
+
+def test_channel_ids_parsing_and_normalization(isolated_db):
+    assert discord_bot.allowed_channel_ids() == set()  # unset -> unrestricted
+    db.set_setting("discordbot_channel_whitelist", "111, 222\n333")
+    assert discord_bot.allowed_channel_ids() == {"111", "222", "333"}
+    assert discord_bot.normalize_channel_ids("111,222\n333") == "111, 222, 333"
+
+
+def test_snapshot_guilds_populates_state_from_gateway_cache(isolated_db, monkeypatch):
+    bot = _build_bot()
+    guild = _make_guild(111, name="Home Lab", channels=[_make_channel(555, "general")])
+    # discord.Client.guilds is a read-only property backed by internal connection
+    # state - patched at the (per-test, freshly-built) class level rather than set
+    # directly on the instance.
+    monkeypatch.setattr(type(bot), "guilds", property(lambda self: [guild]), raising=False)
+
+    bot._snapshot_guilds()
+
+    assert discord_bot.get_status()["guilds"] == [
+        {"id": "111", "name": "Home Lab", "channels": [{"id": "555", "name": "general"}]}
+    ]
+
+
+def test_on_guild_remove_refreshes_guild_snapshot(isolated_db, monkeypatch):
+    bot = _build_bot()
+    current_guilds = [_make_guild(111, name="Home Lab")]
+    monkeypatch.setattr(type(bot), "guilds", property(lambda self: current_guilds), raising=False)
+    bot._snapshot_guilds()
+    assert len(discord_bot.get_status()["guilds"]) == 1
+
+    current_guilds.clear()  # discord.py has already updated the cache by the time this fires
+    asyncio.run(bot.on_guild_remove(_make_guild(111, name="Home Lab")))
+    assert discord_bot.get_status()["guilds"] == []
+
+
+def test_snapshot_command_rejects_unauthorized_channel(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    db.set_setting("discordbot_channel_whitelist", "999")
+    command = _build_snapshot_command()
+
+    interaction = _make_interaction(user_id=1, channel_id=555)  # not in the whitelist
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "allowed in this channel" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+def test_slash_command_allows_whitelisted_channel(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    db.set_setting("discordbot_channel_whitelist", "555")
+    command = _build_test_client()
+
+    interaction = _make_interaction(user_id=1, channel_id=555)
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "embed" in kwargs
 
 
 def test_overall_status_ranks_slow_between_operational_and_degraded():

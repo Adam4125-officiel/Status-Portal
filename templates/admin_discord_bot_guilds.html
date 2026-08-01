@@ -1,0 +1,54 @@
+{% extends "admin_base.html" %}
+{% block title %}Discord Bot — Servers — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Discord Bot — Servers</h1>
+  <a class="btn secondary" href="{{ url_for('admin_discord_bot') }}">← Back to Discord Bot</a>
+</div>
+
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Every server (guild) the bot is currently in, and its text channels — for copying
+  IDs into the channel whitelist below. This list reflects whatever the bot last
+  reported; it only updates while the bot is connected.
+</p>
+
+{% if not token_configured %}
+<div class="empty-state">Discord bot not configured — see the main Discord Bot page.</div>
+{% elif not connected %}
+<div class="empty-state">Not currently connected — this list may be empty or stale.</div>
+{% elif not guilds %}
+<div class="empty-state">Not currently in any server. Invite the bot to see it here.</div>
+{% else %}
+{% for guild in guilds %}
+<div class="form-panel" style="margin-bottom: 14px;">
+  <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
+    <strong>{{ guild.name }}</strong>
+    <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">{{ guild.id }}</span>
+  </div>
+  {% if guild.channels %}
+  <table class="admin-table">
+    <thead><tr><th>Channel</th><th>ID</th></tr></thead>
+    <tbody>
+      {% for c in guild.channels %}
+      <tr><td>#{{ c.name }}</td><td style="font-family: var(--font-mono);">{{ c.id }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">No text channels visible to the bot here.</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+<form method="POST" class="form-panel" style="margin-top: 20px;">
+  <div class="field">
+    <label for="channel_whitelist">Allowed channels (optional)</label>
+    <textarea id="channel_whitelist" name="channel_whitelist" placeholder="123456789012345678, 234567890123456789">{{ channel_whitelist }}</textarea>
+    <div class="field-hint">Comma or newline separated channel IDs, copied from the tables above. Applies to every slash command this bot registers. <strong>Leave blank and the bot responds in any channel it can see</strong> (still subject to the user allow-list on the main Discord Bot page) — set this to restrict responses to specific channels only.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save</button>
+  </div>
+</form>
+{% endblock %}
