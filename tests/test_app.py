@@ -725,6 +725,28 @@ def test_admin_discord_bot_guilds_page(client, monkeypatch):
     assert db.get_setting("discordbot_channel_whitelist") == "555, 666"
 
 
+def test_admin_resources_vm_table_does_not_use_inline_onsubmit_with_vm_name(client, monkeypatch):
+    """Regression test for a real XSS finding from this session's security review:
+    a Hyper-V VM name (not necessarily set by the portal's own admin - anyone able
+    to create/rename a VM on the host) used to be interpolated directly into an
+    inline onsubmit="confirm('...')" handler. Jinja's HTML-attribute escaping
+    doesn't protect a value that's re-parsed as JS after the browser HTML-decodes
+    the attribute, so a name containing a quote could break out and inject script.
+    Confirmation must be wired up from a plain data-* attribute + a JS listener
+    instead, never string-built into an executable JS context server-side."""
+    monkeypatch.setattr(app_module.monitoring, "get_cached_vm_snapshot", lambda: [
+        {"name": "evil'); alert(1); //", "state": "Running", "uptime": "1h"},
+    ])
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/resources")
+
+    assert resp.status_code == 200
+    assert b"onsubmit" not in resp.data
+    assert b'class="vm-control-form"' in resp.data
+    assert b'data-vm-name="evil' in resp.data
+
+
 def test_admin_host_control_route_rejects_unknown_action(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/resources/host-control", data={"action": "format-drive"})
