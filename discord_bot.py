@@ -236,6 +236,33 @@ def build_status_data(include):
     return {"site_name": site_name, "overall": overall, "sections": sections}
 
 
+def build_snapshot_data():
+    """Pure/side-effect-free like build_status_data(), but deliberately minimal - just
+    enough for a short, instantaneous reply: which services are currently down, and
+    whether any incident or maintenance window is currently open. Unlike /status,
+    this is a one-shot reply, never tracked/edited afterward."""
+    down = [s["name"] for s in db.list_services() if s["status"] == "down"]
+    open_incidents = [i for i in db.list_incidents(limit=20) if i["status"] != "resolved"]
+    # list_public_maintenance_windows() already excludes ended ones, but a window
+    # that's merely scheduled (not yet applied) isn't happening right now.
+    active_maintenance = [w for w in db.list_public_maintenance_windows() if w["applied"]]
+    return {"down": down, "incident_count": len(open_incidents),
+            "maintenance_count": len(active_maintenance)}
+
+
+def build_snapshot_text(data):
+    if not data["down"] and not data["incident_count"] and not data["maintenance_count"]:
+        return "✅ All services up. No open incidents or maintenance."
+    parts = []
+    if data["down"]:
+        parts.append("🔴 Down: " + ", ".join(data["down"]))
+    if data["incident_count"]:
+        parts.append(f"🚨 {data['incident_count']} open incident(s)")
+    if data["maintenance_count"]:
+        parts.append(f"🛠 {data['maintenance_count']} maintenance window(s) in progress")
+    return "\n".join(parts)
+
+
 def _truncate(text, limit):
     if len(text) <= limit:
         return text
@@ -282,26 +309,48 @@ def _make_client_class(discord, app_commands, tasks):
             self.refresh_loop = tasks.loop(seconds=config.DISCORD_BOT_REFRESH_SECONDS)(self._refresh)
             self._register_command()
 
+        async def _check_command_authorized(self, interaction, command_name):
+            """Shared authorization gate for every slash command this bot registers
+            (currently /<command_name> and /snapshot) - one place for the
+            enabled-toggle/user-allowlist checks rather than duplicated per command.
+            Sends the appropriate ephemeral reply itself and returns False if not
+            authorized; returns True (sending nothing) if the command should proceed."""
+            if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
+                await interaction.response.send_message(
+                    "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
+                return False
+            allowed = allowed_user_ids()
+            if allowed and str(interaction.user.id) not in allowed:
+                _logger.warning("rejected /%s from unauthorized user %s (%s)",
+                                command_name, interaction.user, interaction.user.id)
+                await interaction.response.send_message(
+                    "You're not authorized to use this command.", ephemeral=True)
+                return False
+            return True
+
         def _register_command(self):
             command_name = sanitize_command_name(db.get_setting("discordbot_command_name", "status"))
+            if command_name == "snapshot":
+                # "snapshot" is reserved for the fixed second command below - an admin
+                # who typed it as their custom main-command name would otherwise crash
+                # registration with a duplicate-command error.
+                command_name = "status"
 
             @self.tree.command(name=command_name, description="Show the current status page summary")
             async def status_command(interaction):
-                if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
-                    await interaction.response.send_message(
-                        "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
-                    return
-                allowed = allowed_user_ids()
-                if allowed and str(interaction.user.id) not in allowed:
-                    _logger.warning("rejected /%s from unauthorized user %s (%s)",
-                                    command_name, interaction.user, interaction.user.id)
-                    await interaction.response.send_message(
-                        "You're not authorized to use this command.", ephemeral=True)
+                if not await self._check_command_authorized(interaction, command_name):
                     return
                 embed = build_embed(discord, build_status_data(include_settings()))
                 await interaction.response.send_message(embed=embed)
                 sent = await interaction.original_response()
                 db.set_discord_status_message(interaction.channel_id, sent.id)
+
+            @self.tree.command(name="snapshot",
+                                description="Quick snapshot: down services and open incidents/maintenance")
+            async def snapshot_command(interaction):
+                if not await self._check_command_authorized(interaction, "snapshot"):
+                    return
+                await interaction.response.send_message(build_snapshot_text(build_snapshot_data()))
 
         async def setup_hook(self):
             # Command registration is only picked up on (re)connect - changing the

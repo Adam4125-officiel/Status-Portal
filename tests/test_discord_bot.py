@@ -35,6 +35,11 @@ def _build_test_client():
     return client.tree.get_command(command_name)
 
 
+def _build_snapshot_command():
+    client = _build_bot()
+    return client.tree.get_command("snapshot")
+
+
 def _make_guild(guild_id, name="Test Server"):
     guild = MagicMock()
     guild.id = guild_id
@@ -245,6 +250,78 @@ def test_normalize_user_ids():
     assert discord_bot.normalize_user_ids("123,456\n789") == "123, 456, 789"
     assert discord_bot.normalize_user_ids("  ") == ""
     assert discord_bot.normalize_user_ids(None) == ""
+
+
+def test_build_snapshot_data_all_clear(isolated_db):
+    db.update_service(db.list_services()[0]["id"], {**db.list_services()[0], "status": "operational"})
+    data = discord_bot.build_snapshot_data()
+    assert data == {"down": [], "incident_count": 0, "maintenance_count": 0}
+    assert discord_bot.build_snapshot_text(data) == "✅ All services up. No open incidents or maintenance."
+
+
+def test_build_snapshot_data_reports_down_services_and_open_incident(isolated_db):
+    service = db.list_services()[0]
+    db.update_service(service["id"], {**service, "status": "down"})
+    db.create_incident({"title": "Test outage", "status": "investigating"})
+
+    data = discord_bot.build_snapshot_data()
+    assert data["down"] == [service["name"]]
+    assert data["incident_count"] == 1
+    assert data["maintenance_count"] == 0
+    text = discord_bot.build_snapshot_text(data)
+    assert service["name"] in text
+    assert "1 open incident(s)" in text
+
+
+def test_build_snapshot_data_counts_only_in_progress_maintenance(isolated_db):
+    sid = db.list_services()[0]["id"]
+    # Scheduled but not yet started - must not count as "in progress".
+    db.create_maintenance_window({
+        "title": "Future", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    }, service_ids=[sid])
+    assert discord_bot.build_snapshot_data()["maintenance_count"] == 0
+
+    db.create_maintenance_window({
+        "title": "Ongoing", "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+    }, service_ids=[sid])
+    db.process_maintenance_windows()
+    assert discord_bot.build_snapshot_data()["maintenance_count"] == 1
+
+
+def test_registering_both_commands_does_not_collide_when_named_snapshot(isolated_db):
+    """An admin who names their main command "snapshot" would otherwise collide with
+    the fixed /snapshot command at registration time - must fall back cleanly."""
+    db.set_setting("discordbot_command_name", "snapshot")
+    client = _build_bot()
+    assert client.tree.get_command("status") is not None
+    assert client.tree.get_command("snapshot") is not None
+
+
+def test_snapshot_command_rejects_unauthorized_user(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    db.set_setting("discordbot_allowed_user_ids", "111")
+    command = _build_snapshot_command()
+
+    interaction = _make_interaction(user_id=222)
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "not authorized" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+def test_snapshot_command_replies_with_plain_text_snapshot(isolated_db):
+    db.set_setting("discordbot_channel_command_enabled", "1")
+    service = db.list_services()[0]
+    db.update_service(service["id"], {**service, "status": "down"})
+    command = _build_snapshot_command()
+
+    interaction = _make_interaction(user_id=1)
+    asyncio.run(command.callback(interaction))
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert service["name"] in args[0]
+    assert "embed" not in kwargs  # a plain one-shot reply, not an embed
 
 
 def test_slash_command_rejects_unauthorized_user(isolated_db):
