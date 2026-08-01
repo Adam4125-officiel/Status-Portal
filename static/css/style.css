@@ -388,6 +388,20 @@ a:hover { text-decoration: underline; }
 }
 
 /* ---------------- Incidents / changelog ---------------- */
+/* Each incident/maintenance window on the public page is its own standalone
+   bubble/card (same visual language as .announcement), not grouped into one
+   shared bordered container with separators between them. */
+.incident-bubble {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.incident-bubble .incident__body { flex: 1; min-width: 0; }
+
+/* Used within admin_incident_form.html's timeline (updates list inside a
+   form-panel) - a different, denser context, kept as border-separated rows. */
 .incident {
   display: flex;
   gap: 14px;
