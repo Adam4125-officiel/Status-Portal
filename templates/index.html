@@ -8,7 +8,14 @@
 <div class="wrap">
 
   <div class="topbar">
-    <div class="brand"><span class="dot-server"></span> {{ site_name }}</div>
+    <div class="brand">
+      {% if site_logo_filename %}
+        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
+      {% else %}
+        <span class="dot-server"></span>
+      {% endif %}
+      {{ site_name }}
+    </div>
     <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
       next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
     </div>
@@ -40,9 +47,10 @@
     {% include 'sections/' ~ key ~ '.html' %}
   {% endfor %}
 
-  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a></footer>
+  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a></footer>
 </div>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 <script src="{{ url_for('static', filename='js/local_time.js') }}"></script>
+<script src="{{ url_for('static', filename='js/public_history.js') }}"></script>
 {% endblock %}

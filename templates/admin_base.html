@@ -8,8 +8,10 @@
     <a href="{{ url_for('admin_incidents') }}" class="{{ 'active' if active == 'incidents' }}">Incidents</a>
     <a href="{{ url_for('admin_maintenance') }}" class="{{ 'active' if active == 'maintenance' }}">Maintenance</a>
     <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations</a>
+    <a href="{{ url_for('admin_reports') }}" class="{{ 'active' if active == 'reports' }}">Reports{% if unread_reports_count %} <span class="nav-badge">{{ unread_reports_count }}</span>{% endif %}</a>
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
     <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources</a>
+    <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
     <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord Bot</a>

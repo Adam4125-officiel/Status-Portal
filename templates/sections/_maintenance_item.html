@@ -1,0 +1,15 @@
+<div class="incident-bubble">
+  <div class="incident__body">
+    <div class="incident__head">
+      <span class="incident__title">{{ w.service_names }} — {{ w.title }}</span>
+      {% if history %}<span class="badge resolved">Ended</span>
+      {% elif w.applied %}<span class="badge investigating">In progress</span>
+      {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
+    </div>
+    {% if w.description %}<div class="incident__desc">{{ w.description|richtext }}</div>{% endif %}
+    <div class="incident__time">
+      <span class="local-time" data-utc="{{ w.starts_at }}">{{ w.starts_at[:16].replace('T', ' ') }} UTC</span> →
+      <span class="local-time" data-utc="{{ w.ends_at }}">{{ w.ends_at[:16].replace('T', ' ') }} UTC</span>
+    </div>
+  </div>
+</div>

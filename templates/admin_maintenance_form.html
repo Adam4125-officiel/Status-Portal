@@ -7,16 +7,20 @@
 
 <form method="POST" class="form-panel">
   <div class="field">
-    <label for="service_id">Service(s)</label>
+    <label id="service_id_label">Service(s)</label>
     {% set selected_ids = window.services|map(attribute='id')|list if window else [] %}
-    <select id="service_id" name="service_id" multiple size="6" required
-            {{ 'disabled' if window and window.applied }}>
+    <div class="checkbox-list" role="group" aria-labelledby="service_id_label">
       {% for s in services %}
-        <option value="{{ s.id }}" {{ 'selected' if s.id in selected_ids or not window }}>{{ s.name }}</option>
+      <label class="field-check">
+        <input type="checkbox" name="service_id" value="{{ s.id }}"
+               {{ 'checked' if s.id in selected_ids }}
+               {{ 'disabled' if window and window.applied }}>
+        {{ s.name }}
+      </label>
       {% endfor %}
-    </select>
+    </div>
     <div class="field-hint">
-      Ctrl/Cmd-click (or shift-click) to select more than one — the window applies to all selected services.
+      Check as many as apply — the window applies to every service you select.
       {% if window and window.applied %}This window is already active, so its services can't be changed here anymore (only the title/description/times below).{% endif %}
     </div>
   </div>

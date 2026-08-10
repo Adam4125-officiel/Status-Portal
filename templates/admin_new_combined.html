@@ -36,12 +36,15 @@
       <option value="arr">*Arr app (Sonarr/Radarr/Prowlarr/Lidarr/Readarr)</option>
       <option value="jellyfin">Jellyfin</option>
       <option value="jellyseerr">Jellyseerr / Overseerr</option>
+      <option value="bazarr">Bazarr</option>
+      <option value="tdarr">Tdarr</option>
+      <option value="byparr">Byparr</option>
     </select>
   </div>
   <div class="field">
-    <label for="api_key">API key</label>
-    <input type="password" id="api_key" name="api_key" required>
-    <div class="field-hint">Found in each app's Settings → General/API page.</div>
+    <label for="api_key">API key (not needed for Tdarr or Byparr)</label>
+    <input type="password" id="api_key" name="api_key">
+    <div class="field-hint">Found in each app's Settings → General/API page. Leave blank for Tdarr/Byparr, neither of which has an API key of its own.</div>
   </div>
   <div class="field">
     <label class="field-check">

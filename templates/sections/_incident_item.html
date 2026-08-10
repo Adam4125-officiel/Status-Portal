@@ -1,0 +1,25 @@
+{% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
+<div class="incident-bubble">
+  <div class="incident__body">
+    <div class="incident__head">
+      <span class="incident__title">{{ i.title }}{% if i.service_names %} <span class="incident__services">— {{ i.service_names }}</span>{% endif %}</span>
+      <span class="badge {{ i.status }}">{{ incident_label[i.status] }}</span>
+    </div>
+    {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
+    <div class="incident__time">
+      started <span class="local-time" data-utc="{{ i.started_at }}">{{ i.started_at[:16].replace('T', ' ') }} UTC</span>
+      {% if i.resolved_at %}· resolved <span class="local-time" data-utc="{{ i.resolved_at }}">{{ i.resolved_at[:16].replace('T', ' ') }} UTC</span>{% endif %}
+    </div>
+    {% if i.updates %}
+    <div class="incident-updates">
+      {% for u in i.updates %}
+        <div class="incident-updates__row">
+          <span class="badge {{ u.status }}">{{ incident_label[u.status] }}</span>
+          <span class="incident-updates__msg">{{ u.message }}</span>
+          <span class="incident-updates__time local-time" data-utc="{{ u.created_at }}">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</div>

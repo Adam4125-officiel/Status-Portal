@@ -122,6 +122,65 @@ def test_incident_lifecycle_and_updates(isolated_db):
     assert resolved["resolved_at"] is not None
 
 
+def test_list_incidents_max_age_days_hides_only_old_resolved(isolated_db):
+    sid = db.list_services()[0]["id"]
+    old_resolved = db.create_incident({"service_id": sid, "title": "Old resolved", "status": "resolved"})
+    still_open = db.create_incident({"service_id": sid, "title": "Still open", "status": "investigating"})
+    recent_resolved = db.create_incident({"service_id": sid, "title": "Recent resolved", "status": "resolved"})
+
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (old_resolved,))
+    conn.commit()
+    conn.close()
+
+    ids = {i["id"] for i in db.list_incidents(max_age_days=30)}
+    assert old_resolved not in ids
+    assert still_open in ids
+    assert recent_resolved in ids
+
+    # Without a cutoff, everything (including the old resolved one) still shows.
+    assert old_resolved in {i["id"] for i in db.list_incidents()}
+
+
+def test_list_incidents_offset_skips_the_first_page(isolated_db):
+    sid = db.list_services()[0]["id"]
+    ids = [db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"}) for n in range(5)]
+    first_page = db.list_incidents(limit=2, offset=0)
+    second_page = db.list_incidents(limit=2, offset=2)
+    assert [i["id"] for i in first_page] == list(reversed(ids))[:2]
+    assert [i["id"] for i in second_page] == list(reversed(ids))[2:4]
+
+
+def test_list_ended_maintenance_windows_only_returns_ended(isolated_db):
+    sid = db.list_services()[0]["id"]
+    ended_id = db.create_maintenance_window({
+        "service_id": sid, "title": "Past", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Upcoming", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+    assert db.get_maintenance_window(ended_id)["ended"] == 1
+
+    history = db.list_ended_maintenance_windows()
+    assert [w["id"] for w in history] == [ended_id]
+    # The still-upcoming window must never appear in history, and the
+    # still-relevant public list must never include the ended one.
+    assert ended_id not in {w["id"] for w in db.list_public_maintenance_windows()}
+
+
+def test_list_ended_maintenance_windows_respects_max_age_days(isolated_db):
+    sid = db.list_services()[0]["id"]
+    mid = db.create_maintenance_window({
+        "service_id": sid, "title": "Long ago", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+    assert db.get_maintenance_window(mid)["ended"] == 1
+
+    assert db.list_ended_maintenance_windows(max_age_days=30) == []
+    assert len(db.list_ended_maintenance_windows()) == 1
+
+
 def test_auto_incident_helpers(isolated_db):
     sid = db.list_services()[0]["id"]
     assert db.get_open_auto_incident_for_service(sid) is None

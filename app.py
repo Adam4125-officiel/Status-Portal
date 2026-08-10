@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -16,6 +17,7 @@ from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
 import requests
 
@@ -84,6 +86,12 @@ def handle_bad_request(e):
                             "Please reload the page and try again."), 400
 
 
+@app.errorhandler(413)
+def handle_too_large(e):
+    return render_template("error.html", code=413, message="That file is too large "
+                            f"(max {app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB)."), 413
+
+
 @app.errorhandler(500)
 def handle_server_error(e):
     _logger.exception("Unhandled exception in request %s %s", request.method, request.path)
@@ -114,6 +122,45 @@ def _get_csrf_token():
 
 
 app.jinja_env.globals["csrf_token"] = _get_csrf_token
+
+
+# ---------------------------------------------------------------------------
+# Custom logo
+# ---------------------------------------------------------------------------
+# This app's first (and only) file upload - kept deliberately narrow: a fixed
+# filename per upload ("logo.<ext>", never the visitor/admin-supplied original
+# name) under a dedicated directory, so there's no path-traversal surface and at
+# most one logo file ever exists on disk at a time. static/uploads/ is gitignored
+# the same way instance/ is - it's runtime-created state, not tracked content.
+LOGO_ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "svg", "webp", "ico"}
+LOGO_UPLOAD_DIR = os.path.join(app.root_path, "static", "uploads")
+
+
+@app.context_processor
+def _inject_branding():
+    """Exposes the current logo filename/cache-busting version to every template
+    (admin included, for the favicon) without every route threading it through
+    manually - same idea as csrf_token() being a Jinja global rather than
+    hand-passed everywhere. A stale setting pointing at a since-deleted file
+    silently falls back to "no logo" rather than a broken <img>/broken favicon."""
+    filename = db.get_setting("site_logo_filename", "")
+    version = None
+    if filename:
+        try:
+            version = int(os.path.getmtime(os.path.join(LOGO_UPLOAD_DIR, filename)))
+        except OSError:
+            filename = ""
+    return {"site_logo_filename": filename, "site_logo_version": version}
+
+
+@app.context_processor
+def _inject_admin_badges():
+    """Unread problem-report count for the admin nav's "Reports" badge - scoped to
+    admin pages only (not computed on every public page load) since it's only ever
+    displayed there."""
+    if not request.path.startswith("/admin/"):
+        return {}
+    return {"unread_reports_count": db.count_unread_problem_reports()}
 
 
 @app.before_request
@@ -183,6 +230,30 @@ def _register_login_success():
     _login_state["locked_until"] = 0.0
 
 
+# Global (not per-IP, same reasoning as _login_state above) rate limit on the
+# public "report a problem" form (see the /report route) - this is the app's first
+# public-facing POST route besides /admin/login, so it needs its own light
+# anti-abuse rather than relying on the /admin/-scoped CSRF hook, which doesn't
+# apply here. No external rate-limiting library is pulled in just for this one
+# route - a hand-rolled counter is enough for a personal single-server app.
+_report_state = {"count": 0, "window_start": 0.0}
+REPORT_RATE_LIMIT = 10
+REPORT_RATE_WINDOW_SECONDS = 3600
+REPORT_MIN_SECONDS_TO_FILL = 3
+
+
+def _report_rate_limited():
+    now = time.time()
+    if now - _report_state["window_start"] > REPORT_RATE_WINDOW_SECONDS:
+        _report_state["window_start"] = now
+        _report_state["count"] = 0
+    return _report_state["count"] >= REPORT_RATE_LIMIT
+
+
+def _register_report_submission():
+    _report_state["count"] += 1
+
+
 # ---------------------------------------------------------------------------
 # Public pages
 # ---------------------------------------------------------------------------
@@ -211,6 +282,34 @@ _PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_d
 
 def _public_resource_visibility():
     return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
+
+
+def _public_history_days():
+    """Blank/unset (the default) means "show everything", unchanged from before this
+    setting existed - an admin has to opt into hiding old resolved incidents, same
+    "off by default" convention as every other opt-in behavior toggle in this app."""
+    raw = db.get_setting("public_history_days", "")
+    return int(raw) if raw.isdigit() else None
+
+
+HISTORY_PAGE_SIZE = 10
+
+
+# Pre-fill-only defaults for the "New service" form (Settings -> Service defaults) -
+# deliberately not a live-cascading override: once a service is created its stored
+# column values are normal per-service values like any other, changing these later
+# never retroactively affects services that already exist. See ROADMAP.md.
+SERVICE_DEFAULT_FIELDS = ["slow_threshold_ms", "startup_grace_seconds", "retry_count", "retry_interval_seconds"]
+
+
+def _service_defaults():
+    defaults = {key: db.get_setting(f"service_default_{key}", "") for key in SERVICE_DEFAULT_FIELDS}
+    defaults["retry_interval_seconds"] = defaults["retry_interval_seconds"] or "5"
+    defaults["auto_incident"] = db.get_setting("service_default_auto_incident", "1") == "1"
+    defaults["api_health_mode"] = db.get_setting("service_default_api_health_mode", "off")
+    if defaults["api_health_mode"] not in db.API_HEALTH_MODES:
+        defaults["api_health_mode"] = "off"
+    return defaults
 
 
 # The public page's reorderable content blocks - the topbar/status-hero/footer stay
@@ -322,7 +421,7 @@ def index():
     services = _attach_integration_status(_enrich_services(db.list_services()))
     groups = _group_services(services)
     announcements = db.list_announcements(limit=10)
-    incidents = _enrich_incidents(db.list_incidents(limit=8))
+    incidents = _enrich_incidents(db.list_incidents(limit=8, max_age_days=_public_history_days()))
     maintenance_windows = db.list_public_maintenance_windows()
     info = db.get_info_page()
     overall = compute_overall_status(services)
@@ -348,7 +447,7 @@ def index():
 @app.route("/api/status")
 def api_status():
     services = _enrich_services(db.list_services())
-    incidents = _enrich_incidents(db.list_incidents(limit=8))
+    incidents = _enrich_incidents(db.list_incidents(limit=8, max_age_days=_public_history_days()))
     announcements = db.list_announcements(limit=10)
     return jsonify({
         "site_name": db.get_setting("site_name", "Server"),
@@ -358,6 +457,31 @@ def api_status():
         "incidents": incidents,
         "maintenance_windows": db.list_public_maintenance_windows(),
     })
+
+
+@app.route("/api/incidents/more")
+def api_incidents_more():
+    """HTML-fragment endpoint (not JSON, unlike /api/status above) backing the
+    public page's "Load more incidents" button - this app has no client-side
+    templating anywhere, so returning a ready-to-insert fragment matches that
+    convention instead of introducing one just for this. Same age filter as the
+    initial page load, so "load more" never resurfaces something the admin
+    configured to be hidden."""
+    offset = request.args.get("offset", type=int, default=0)
+    incidents = _enrich_incidents(
+        db.list_incidents(limit=HISTORY_PAGE_SIZE, offset=offset, max_age_days=_public_history_days()))
+    return render_template("sections/_incidents_fragment.html", incidents=incidents)
+
+
+@app.route("/api/maintenance/history")
+def api_maintenance_history():
+    """HTML-fragment endpoint backing the public page's maintenance history list -
+    ended windows are never shown on the initial page load at all (see
+    db.list_ended_maintenance_windows), only ever paged in here on request."""
+    offset = request.args.get("offset", type=int, default=0)
+    windows = db.list_ended_maintenance_windows(
+        limit=HISTORY_PAGE_SIZE, offset=offset, max_age_days=_public_history_days())
+    return render_template("sections/_maintenance_fragment.html", windows=windows, history=True)
 
 
 def compute_overall_status(services):
@@ -488,6 +612,92 @@ def feed():
     return Response(xml_bytes, mimetype="application/rss+xml")
 
 
+@app.route("/report", methods=["GET", "POST"])
+def report_problem():
+    """Public "report a problem" form - deliberately separate from the admin-authored
+    incident/maintenance system (this is a visitor telling the admin something looks
+    wrong, not the admin recording a known outage). The app's first public POST route
+    besides /admin/login, so it isn't covered by the /admin/-scoped CSRF hook - CSRF
+    doesn't meaningfully apply here anyway (there's no authenticated session/privilege
+    being exercised, so a cross-site submission achieves nothing an attacker couldn't
+    already do by POSTing directly), but it does need its own light anti-abuse:
+    a honeypot field, a minimum-time-to-fill check, and a global rate limit
+    (see _report_rate_limited above)."""
+    services = db.list_services()
+    preselect_service_id = request.args.get("service_id", type=int)
+    site_name = db.get_setting("site_name", "Server")
+    if request.method == "POST":
+        # A real visitor never fills this field - it's hidden from sighted users via
+        # CSS, not display:none/hidden (which some bots skip). Silently "succeed"
+        # without writing a row, so a bot gets no signal it was caught.
+        if request.form.get("website"):
+            flash("Thanks — your report has been submitted.", "success")
+            return redirect(url_for("report_problem"))
+        rendered_at = session.get("report_form_rendered_at", 0)
+        if time.time() - rendered_at < REPORT_MIN_SECONDS_TO_FILL:
+            flash("That was fast — please wait a moment and try again.", "error")
+            return redirect(url_for("report_problem"))
+        if _report_rate_limited():
+            flash("Too many reports submitted recently — please try again later.", "error")
+            return redirect(url_for("report_problem"))
+        message = request.form.get("message", "").strip()
+        if not message:
+            flash("Please describe the problem.", "error")
+            return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
+                                    site_name=site_name)
+        contact = request.form.get("contact", "").strip()[:200]
+        service_id = request.form.get("service_id", type=int)
+        service = db.get_service(service_id) if service_id else None
+        db.create_problem_report(message[:2000], contact, service["id"] if service else None)
+        _register_report_submission()
+        prefix = f"{service['name']}: " if service else ""
+        notifications.notify("Problem reported", f"{prefix}{message[:200]}")
+        flash("Thanks — your report has been submitted.", "success")
+        return redirect(url_for("report_problem"))
+    session["report_form_rendered_at"] = time.time()
+    return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
+                            site_name=site_name)
+
+
+@app.route("/admin/reports")
+@login_required
+def admin_reports():
+    return render_template("admin_reports.html", reports=db.list_problem_reports(), active="reports")
+
+
+@app.route("/admin/reports/<int:rid>/status", methods=["POST"])
+@login_required
+def admin_report_status(rid):
+    status = request.form.get("status", "reviewed")
+    db.update_problem_report_status(rid, status if status in ("new", "reviewed", "resolved") else "reviewed")
+    flash("Report updated.", "success")
+    return redirect(url_for("admin_reports"))
+
+
+@app.route("/admin/reports/<int:rid>/delete", methods=["POST"])
+@login_required
+def admin_report_delete(rid):
+    db.delete_problem_report(rid)
+    flash("Report deleted.", "success")
+    return redirect(url_for("admin_reports"))
+
+
+@app.route("/admin/reports/<int:rid>/create-incident", methods=["POST"])
+@login_required
+def admin_report_create_incident(rid):
+    report = db.get_problem_report(rid)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("admin_reports"))
+    service_ids = [report["service_id"]] if report["service_id"] else []
+    title = report["message"][:80] + ("…" if len(report["message"]) > 80 else "")
+    description = f'Reported via the public "Report a problem" form.\n\n{report["message"]}'
+    iid = db.create_incident({"title": title, "description": description, "status": "investigating"}, service_ids)
+    db.update_problem_report_status(rid, "resolved")
+    flash("Incident created from report.", "success")
+    return redirect(url_for("admin_incident_edit", iid=iid))
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
@@ -585,7 +795,7 @@ def admin_service_new():
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_service_form.html", service=None, active="services")
+    return render_template("admin_service_form.html", service=None, defaults=_service_defaults(), active="services")
 
 
 @app.route("/admin/services/<int:service_id>/edit", methods=["GET", "POST"])
@@ -750,6 +960,9 @@ def admin_maintenance_new():
     services = db.list_services()
     if request.method == "POST":
         service_ids = request.form.getlist("service_id")
+        if not service_ids:
+            flash("Check at least one service.", "error")
+            return render_template("admin_maintenance_form.html", services=services, active="maintenance")
         db.create_maintenance_window(request.form, service_ids)
         # Applies immediately rather than waiting for the next health-check cycle (up
         # to PORTAL_CHECK_INTERVAL_SECONDS later) - matters most for a window whose
@@ -776,6 +989,9 @@ def admin_maintenance_edit(mid):
         # nothing at all, so pass service_ids=None (leave associated services alone)
         # rather than reading an empty list and wiping every association.
         service_ids = request.form.getlist("service_id") if not window["applied"] else None
+        if service_ids is not None and not service_ids:
+            flash("Check at least one service.", "error")
+            return render_template("admin_maintenance_form.html", services=services, window=window, active="maintenance")
         db.update_maintenance_window(mid, request.form, service_ids)
         _process_maintenance_and_notify()
         flash("Maintenance window updated.", "success")
@@ -853,6 +1069,61 @@ def admin_vm_control():
     success, message = monitoring.control_vm(name, action)
     flash(message, "success" if success else "error")
     return redirect(url_for("admin_resources"))
+
+
+# ---- System (this app's own process/components - separate from Resources above,
+# which is about the host machine's hardware) ----
+def _restart_process():
+    """Replaces the running process image in place via os.execv - same PID, works
+    identically whether launched as `python app.py`, `python serve_waitress.py`, or
+    either wrapped in a systemd unit/Task Scheduler entry, and needs no supervisor
+    process (unlike a fork+exit approach). Delayed briefly on a background thread so
+    the triggering HTTP response has a moment to actually reach the browser first -
+    same shape as monitoring.control_host(), but restarting this Python process
+    instead of shelling out to the OS to restart the whole machine."""
+    def _do():
+        time.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=_do, daemon=True).start()
+
+
+@app.route("/admin/system")
+@login_required
+def admin_system():
+    return render_template("admin_system.html", discord_status=discord_bot.get_status(),
+                            discord_configured=bool(config.DISCORD_BOT_TOKEN),
+                            totp_enabled=twofactor.is_enabled(), active="system")
+
+
+@app.route("/admin/system/restart", methods=["POST"])
+@login_required
+def admin_system_restart():
+    """Restarts either the whole app process or just the Discord bot connection -
+    see _restart_process()/discord_bot.restart() for what each actually does.
+    Same step-up 2FA reasoning as admin_host_control(): a stolen/replayed session
+    cookie alone must not be enough to trigger this, given a full-app restart
+    briefly takes the whole portal offline and a bot restart interrupts anyone
+    mid-conversation with it."""
+    component = request.form.get("component", "")
+    if component not in ("app", "discord-bot"):
+        flash("Unknown restart target.", "error")
+        return redirect(url_for("admin_system"))
+    if twofactor.is_enabled():
+        code = request.form.get("totp_code", "")
+        secret = db.get_setting("admin_totp_secret")
+        if not twofactor.verify_code(secret, code):
+            flash("Incorrect or missing 2FA code - restart cancelled.", "error")
+            return redirect(url_for("admin_system"))
+    if component == "app":
+        _restart_process()
+        flash("Restarting the app now - this page will be briefly unreachable.", "success")
+    else:
+        if not config.DISCORD_BOT_TOKEN:
+            flash("Discord bot isn't configured (PORTAL_DISCORD_BOT_TOKEN not set).", "error")
+            return redirect(url_for("admin_system"))
+        discord_bot.restart()
+        flash("Discord bot restarted.", "success")
+    return redirect(url_for("admin_system"))
 
 
 # ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----
@@ -985,6 +1256,8 @@ def admin_settings():
                             discord_configured=bool(config.DISCORD_WEBHOOK_URL),
                             ntfy_configured=bool(config.NTFY_URL),
                             section_order=section_order, section_labels=section_labels,
+                            service_defaults=_service_defaults(),
+                            public_history_days=db.get_setting("public_history_days", ""),
                             active="settings")
 
 
@@ -1000,7 +1273,57 @@ def admin_settings_general():
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
+    history_days = request.form.get("public_history_days", "").strip()
+    db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
+    for key in SERVICE_DEFAULT_FIELDS:
+        raw = request.form.get(f"service_default_{key}", "").strip()
+        db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
+    db.set_setting("service_default_auto_incident", "1" if request.form.get("service_default_auto_incident") else "0")
+    api_mode = request.form.get("service_default_api_health_mode", "off")
+    db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
     flash("Settings updated.", "success")
+    return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/logo", methods=["POST"])
+@login_required
+def admin_settings_logo():
+    file = request.files.get("logo")
+    if not file or not file.filename:
+        flash("Choose a file to upload.", "error")
+        return redirect(url_for("admin_settings"))
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in LOGO_ALLOWED_EXTENSIONS:
+        flash("Unsupported file type - use PNG, JPG, SVG, WEBP, or ICO.", "error")
+        return redirect(url_for("admin_settings"))
+    os.makedirs(LOGO_UPLOAD_DIR, exist_ok=True)
+    filename = secure_filename(f"logo.{ext}")
+    # A re-upload in a different format (e.g. .png replacing an old .svg) would
+    # otherwise leave the old file orphaned on disk alongside the new one, since
+    # the filename itself (and therefore the on-disk path) changes with it.
+    old = db.get_setting("site_logo_filename", "")
+    if old and old != filename:
+        try:
+            os.remove(os.path.join(LOGO_UPLOAD_DIR, old))
+        except OSError:
+            pass
+    file.save(os.path.join(LOGO_UPLOAD_DIR, filename))
+    db.set_setting("site_logo_filename", filename)
+    flash("Logo updated.", "success")
+    return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/logo/remove", methods=["POST"])
+@login_required
+def admin_settings_logo_remove():
+    filename = db.get_setting("site_logo_filename", "")
+    if filename:
+        try:
+            os.remove(os.path.join(LOGO_UPLOAD_DIR, filename))
+        except OSError:
+            pass
+        db.set_setting("site_logo_filename", "")
+    flash("Logo removed.", "success")
     return redirect(url_for("admin_settings"))
 
 
@@ -1122,10 +1445,17 @@ def _process_maintenance_and_notify():
 
 def _check_status_for_response(r, elapsed_ms, slow_threshold_ms):
     """A response was received at all, so the service is reachable - only a 5xx
-    (actual server-side error) counts as degraded. Anything else the server sends
+    (actual server-side error) counts against it. Anything else the server sends
     back, including a 401/403 auth challenge (e.g. Bazarr's login prompt) or a 404,
     means it answered and is up. 'Slow' is purely a latency observation layered on
-    top of an otherwise-healthy response, never on top of a 5xx."""
+    top of an otherwise-healthy response, never on top of a 5xx.
+
+    502 specifically means "down", not "degraded": unlike a 500/503/504 (the
+    service itself is up but erroring/overloaded), a 502 means whatever's in
+    front of it (reverse proxy, gateway) couldn't even reach it - functionally
+    equivalent to a connection failure from the visitor's perspective."""
+    if r.status_code == 502:
+        return "down"
     if r.status_code >= 500:
         return "degraded"
     if slow_threshold_ms and elapsed_ms > slow_threshold_ms:
@@ -1182,6 +1512,45 @@ def _check_service_status(service):
     return status, elapsed_ms
 
 
+def _merge_api_health(status, api_health_mode, integration_reachable):
+    """Folds a linked integration's cached API reachability into a service's own
+    web-check status, producing the single final status used for both the public
+    display and _handle_incident_lifecycle below - deliberately not two separate
+    decisions, to preserve the "one status feeds both" invariant documented on
+    _handle_incident_lifecycle (a past bug here already came from letting a status
+    write and an incident-lifecycle decision drift apart).
+
+    integration_reachable is None when there's nothing to act on (api_health_mode
+    is "off", or this service has no enabled+publicly-shown linked integration) -
+    the web-check status passes through unchanged. "down" mode always wins outright
+    once the integration is unreachable; "degrade" only ever raises operational/slow
+    up to degraded, never overrides an already-worse status like "down"."""
+    if api_health_mode == "off" or integration_reachable is None or integration_reachable:
+        return status
+    if api_health_mode == "down":
+        return "down"
+    if api_health_mode == "degrade" and status in ("operational", "slow"):
+        return "degraded"
+    return status
+
+
+def _linked_integration_reachable(service_id):
+    """None = nothing to act on (no enabled+publicly-shown integration linked to
+    this service, or it hasn't been checked yet); True/False = that integration's
+    last cached reachability. Reuses the same enabled+show_on_public integrations
+    already surfaced on this service's own public card (db.list_integrations_for_service)
+    on purpose - api_health_mode only makes sense in relation to an integration a
+    visitor can actually see the sub-badge for, not a hidden one, so a status bump
+    never appears to come from nowhere."""
+    linked = db.list_integrations_for_service(service_id)
+    if not linked:
+        return None
+    cached = _integration_status_cache.get(linked[0]["id"])
+    if not cached:
+        return None
+    return cached["status"]["reachable"]
+
+
 def run_health_checks():
     while True:
         try:
@@ -1196,6 +1565,8 @@ def run_health_checks():
                     continue
                 previous_status = s["status"]
                 status, elapsed_ms = _check_service_status(s)
+                status = _merge_api_health(status, s.get("api_health_mode", "off"),
+                                            _linked_integration_reachable(s["id"]))
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
                 # Status/response time are recorded above regardless - only the

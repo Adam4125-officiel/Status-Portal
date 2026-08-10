@@ -1,4 +1,7 @@
+import io
+import os
 import re
+import time
 
 import pyotp
 
@@ -71,13 +74,20 @@ class _FakeResponse:
 
 def test_check_status_for_response_only_5xx_is_degraded():
     # A 401/403 login prompt (e.g. Bazarr's Basic Auth) or a 404 still means the
-    # server answered - only an actual server-side (5xx) error counts as degraded.
+    # server answered - only an actual server-side (5xx) error counts against it.
     assert app_module._check_status_for_response(_FakeResponse(200), 50, None) == "operational"
     assert app_module._check_status_for_response(_FakeResponse(401), 50, None) == "operational"
     assert app_module._check_status_for_response(_FakeResponse(403), 50, None) == "operational"
     assert app_module._check_status_for_response(_FakeResponse(404), 50, None) == "operational"
     assert app_module._check_status_for_response(_FakeResponse(500), 50, None) == "degraded"
     assert app_module._check_status_for_response(_FakeResponse(503), 50, None) == "degraded"
+
+
+def test_check_status_for_response_502_is_down():
+    # 502 means whatever's in front of the service (reverse proxy/gateway)
+    # couldn't reach it - treated as "down", not "degraded", unlike other 5xx.
+    assert app_module._check_status_for_response(_FakeResponse(502), 50, None) == "down"
+    assert app_module._check_status_for_response(_FakeResponse(502), 5000, 2000) == "down"
 
 
 def test_check_status_for_response_slow_threshold():
@@ -639,6 +649,208 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
+def test_merge_api_health_off_passes_through_unchanged():
+    assert app_module._merge_api_health("operational", "off", False) == "operational"
+    assert app_module._merge_api_health("operational", "degrade", None) == "operational"
+
+
+def test_merge_api_health_ignored_while_integration_reachable():
+    assert app_module._merge_api_health("operational", "down", True) == "operational"
+
+
+def test_merge_api_health_degrade_mode_raises_operational_and_slow():
+    assert app_module._merge_api_health("operational", "degrade", False) == "degraded"
+    assert app_module._merge_api_health("slow", "degrade", False) == "degraded"
+
+
+def test_merge_api_health_degrade_mode_never_overrides_down():
+    assert app_module._merge_api_health("down", "degrade", False) == "down"
+
+
+def test_merge_api_health_down_mode_always_wins():
+    assert app_module._merge_api_health("operational", "down", False) == "down"
+    assert app_module._merge_api_health("degraded", "down", False) == "down"
+
+
+def test_linked_integration_reachable_none_when_no_integration(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    assert app_module._linked_integration_reachable(sid) is None
+
+
+def test_linked_integration_reachable_none_when_not_yet_checked(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                            "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
+    assert app_module._linked_integration_reachable(sid) is None
+
+
+def test_linked_integration_reachable_reads_cached_status(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                                  "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
+    app_module._integration_status_cache[iid] = {
+        "status": {"reachable": False, "version": None, "issues": [], "error": "down"},
+        "checked_at": "2026-01-01T00:00:00",
+    }
+    assert app_module._linked_integration_reachable(sid) is False
+
+
+def test_linked_integration_reachable_ignores_hidden_integration(isolated_db):
+    """api_health_mode only reacts to an integration a visitor can actually see the
+    sub-badge for (enabled + show_on_public) - a hidden one is ignored, same as
+    list_integrations_for_service already filters for the public card itself."""
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
+                                  "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 0})
+    app_module._integration_status_cache[iid] = {
+        "status": {"reachable": False, "version": None, "issues": [], "error": "down"},
+        "checked_at": "2026-01-01T00:00:00",
+    }
+    assert app_module._linked_integration_reachable(sid) is None
+
+
+def test_admin_service_form_saves_api_health_mode(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/services/new", data={
+        "name": "Sonarr", "status": "operational", "api_health_mode": "down",
+    })
+    assert resp.status_code == 302
+    service = [s for s in db.list_services() if s["name"] == "Sonarr"][0]
+    assert service["api_health_mode"] == "down"
+
+
+def test_service_api_health_mode_defaults_to_off_for_invalid_value(isolated_db):
+    sid = db.create_service({"name": "Sonarr", "url": "x", "api_health_mode": "bogus"})
+    assert db.get_service(sid)["api_health_mode"] == "off"
+
+
+def test_report_problem_get_renders_form(client):
+    resp = client.get("/report")
+    assert resp.status_code == 200
+    assert b'name="message"' in resp.data
+    assert b'name="website"' in resp.data  # honeypot
+
+
+def test_report_problem_page_shows_site_name(client):
+    """Regression test: the initial version of this route forgot to pass site_name
+    to the template at all, leaving the topbar brand text and page title silently
+    blank - caught by live-testing in a real browser, not by the route-level tests
+    above (which only checked for the presence of form fields, not branding)."""
+    db.set_setting("site_name", "My Home Server")
+    resp = client.get("/report")
+    html = resp.data.decode()
+    assert "My Home Server" in html
+    assert "<title>Report a problem — My Home Server</title>" in html
+
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    resp = client.post("/report", data={"message": ""})  # re-renders the form inline
+    assert b"My Home Server" in resp.data
+
+
+def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
+    notified = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: notified.append((title, msg)))
+    sid = db.list_services()[0]["id"]
+
+    client.get(f"/report?service_id={sid}")  # sets the anti-spam timing session value
+    app_module._report_state["window_start"] = 0.0
+    app_module._report_state["count"] = 0
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+
+    resp = client.post("/report", data={
+        "message": "The Jellyfin card shows the wrong icon.", "service_id": str(sid), "contact": "me@example.com",
+    })
+    assert resp.status_code == 302
+    reports = db.list_problem_reports()
+    assert len(reports) == 1
+    assert reports[0]["message"] == "The Jellyfin card shows the wrong icon."
+    assert reports[0]["service_id"] == sid
+    assert reports[0]["status"] == "new"
+    assert notified and "Jellyfin card" in notified[0][1]
+
+
+def test_report_problem_honeypot_silently_discards(client):
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    resp = client.post("/report", data={"message": "spam", "website": "http://spam.example"})
+    assert resp.status_code == 302
+    assert db.list_problem_reports() == []
+
+
+def test_report_problem_rejects_too_fast_submission(client):
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time()  # submitted instantly
+    resp = client.post("/report", data={"message": "too fast"})
+    assert resp.status_code == 302
+    assert db.list_problem_reports() == []
+
+
+def test_report_problem_rate_limit(client, monkeypatch):
+    monkeypatch.setattr(app_module, "_report_state", {"count": 0, "window_start": time.time()})
+    monkeypatch.setattr(app_module, "REPORT_RATE_LIMIT", 2)
+    for n in range(2):
+        with client.session_transaction() as sess:
+            sess["report_form_rendered_at"] = time.time() - 10
+        client.post("/report", data={"message": f"report {n}"})
+    assert len(db.list_problem_reports()) == 2
+
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    client.post("/report", data={"message": "one too many"})
+    assert len(db.list_problem_reports()) == 2
+
+
+def test_admin_reports_page_lists_and_updates_status(client):
+    db.create_problem_report("Something broke", "", None)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/reports")
+    assert resp.status_code == 200
+    assert b"Something broke" in resp.data
+
+    rid = db.list_problem_reports()[0]["id"]
+    resp = client.post(f"/admin/reports/{rid}/status", data={"status": "resolved"})
+    assert resp.status_code == 302
+    assert db.get_problem_report(rid)["status"] == "resolved"
+
+
+def test_admin_reports_unread_badge_shows_in_nav(client):
+    db.create_problem_report("Unread one", "", None)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    html = client.get("/admin/services").data.decode()
+    assert 'class="nav-badge"' in html
+    assert ">1<" in html
+
+
+def test_admin_report_create_incident(client):
+    sid = db.list_services()[0]["id"]
+    rid = db.create_problem_report("Jellyfin login is broken", "", sid)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post(f"/admin/reports/{rid}/create-incident")
+    assert resp.status_code == 302
+    incidents = db.list_incidents()
+    assert len(incidents) == 1
+    assert "Jellyfin login is broken" in incidents[0]["title"]
+    assert {s["id"] for s in incidents[0]["services"]} == {sid}
+    assert db.get_problem_report(rid)["status"] == "resolved"
+
+
+def test_admin_report_delete(client):
+    rid = db.create_problem_report("To delete", "", None)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post(f"/admin/reports/{rid}/delete")
+    assert resp.status_code == 302
+    assert db.get_problem_report(rid) is None
+
+
+def test_public_service_card_links_to_report_form(client):
+    sid = db.list_services()[0]["id"]
+    html = client.get("/").data.decode()
+    assert f"/report?service_id={sid}" in html
+
+
 def test_admin_maintenance_window_crud(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     sid = db.list_services()[0]["id"]
@@ -654,6 +866,52 @@ def test_admin_maintenance_window_crud(client):
 
     resp = client.post(f"/admin/maintenance/{windows[0]['id']}/delete")
     assert resp.status_code == 302
+    assert db.list_maintenance_windows() == []
+
+
+def _checked_service_checkbox_values(html):
+    """Every <input type="checkbox" name="service_id" value="N" ...> tag's value,
+    keyed to whether that specific tag carries the "checked" attribute - avoids
+    false positives from unrelated "checked" substrings elsewhere on the page
+    (e.g. field-hint prose)."""
+    checked = set()
+    for m in re.finditer(r'<input type="checkbox" name="service_id" value="(\d+)"([^>]*)>', html):
+        if re.search(r'(?<![\w-])checked(?![\w-])', m.group(2)):
+            checked.add(int(m.group(1)))
+    return checked
+
+
+def test_admin_maintenance_new_form_has_no_services_preselected(client):
+    """Regression test for the operator-precedence bug where the "new" form's
+    checkbox/option list defaulted every service to selected/checked regardless
+    of what the admin actually wanted (see admin_maintenance_form.html)."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/maintenance/new")
+    assert resp.status_code == 200
+    assert _checked_service_checkbox_values(resp.data.decode()) == set()
+
+
+def test_admin_maintenance_edit_form_preselects_only_its_own_services(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    services = db.list_services()
+    s1, s2 = services[0]["id"], services[1]["id"]
+
+    client.post("/admin/maintenance/new", data={
+        "service_id": [str(s1)], "title": "Upgrade",
+        "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    mid = db.list_maintenance_windows()[0]["id"]
+
+    resp = client.get(f"/admin/maintenance/{mid}/edit")
+    assert _checked_service_checkbox_values(resp.data.decode()) == {s1}
+
+
+def test_admin_maintenance_new_rejects_zero_services(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/maintenance/new", data={
+        "title": "Upgrade", "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00",
+    })
+    assert resp.status_code == 200
     assert db.list_maintenance_windows() == []
 
 
@@ -926,6 +1184,87 @@ def test_admin_host_control_requires_login(client):
     assert "/admin/login" in resp.headers["Location"]
 
 
+def test_admin_system_page_renders(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/system")
+    assert resp.status_code == 200
+    assert b"Restart app" in resp.data
+    assert b"Restart Discord bot" in resp.data
+
+
+def test_admin_system_restart_app_calls_restart_process(client, monkeypatch):
+    """Only ever exercises this through a mocked _restart_process() - never the
+    real function, which would actually os.execv the running test-suite process."""
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "app"})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_admin_system_restart_discord_bot_calls_discord_bot_restart(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.config, "DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setattr(app_module.discord_bot, "restart", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "discord-bot"})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_admin_system_restart_discord_bot_requires_configured_token(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.config, "DISCORD_BOT_TOKEN", "")
+    monkeypatch.setattr(app_module.discord_bot, "restart", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "discord-bot"}, follow_redirects=True)
+    assert b"not configured" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_rejects_unknown_component(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "bogus"}, follow_redirects=True)
+    assert b"Unknown restart target" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_requires_login(client):
+    resp = client.post("/admin/system/restart", data={"component": "app"})
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_system_restart_step_up_2fa_blocks_without_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+
+    resp = client.post("/admin/system/restart", data={"component": "app"}, follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_step_up_2fa_allows_with_correct_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/system/restart",
+                        data={"component": "app", "totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
 def test_admin_vm_control_route_calls_monitoring_and_flashes_result(client, monkeypatch):
     calls = []
     monkeypatch.setattr(app_module.monitoring, "control_vm",
@@ -974,6 +1313,180 @@ def test_admin_settings_general_saves_layout_order(client):
     assert resp.status_code == 302
     assert db.get_setting("public_layout_order") == "vms,services,incidents,announcements,info,resources,jellyfin_activity"
     assert app_module._public_section_order()[0] == "vms"
+
+
+def test_admin_settings_general_saves_service_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={
+        "service_default_slow_threshold_ms": "1500",
+        "service_default_startup_grace_seconds": "30",
+        "service_default_retry_count": "2",
+        "service_default_retry_interval_seconds": "10",
+        # service_default_auto_incident intentionally omitted (unchecked)
+    })
+    assert resp.status_code == 302
+    defaults = app_module._service_defaults()
+    assert defaults == {
+        "slow_threshold_ms": "1500", "startup_grace_seconds": "30",
+        "retry_count": "2", "retry_interval_seconds": "10", "auto_incident": False,
+        "api_health_mode": "off",
+    }
+
+
+def test_admin_service_new_form_prefills_from_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={"service_default_slow_threshold_ms": "1500"})
+    resp = client.get("/admin/services/new")
+    assert b'id="slow_threshold_ms"' in resp.data
+    assert b'value="1500"' in resp.data
+
+
+def test_admin_service_new_defaults_do_not_affect_existing_services(client):
+    """Pre-fill only, never live-cascading - changing defaults after a service
+    already exists must not retroactively change that service's own values."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.list_services()[0]["id"]
+    before = db.get_service(sid)["slow_threshold_ms"]
+    client.post("/admin/settings/general", data={"service_default_slow_threshold_ms": "9999"})
+    assert db.get_service(sid)["slow_threshold_ms"] == before
+
+
+def test_admin_settings_logo_upload_and_render(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "LOGO_UPLOAD_DIR", str(tmp_path / "uploads"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/settings/logo", data={
+        "logo": (io.BytesIO(b"fake-png-bytes"), "mylogo.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 302
+    assert db.get_setting("site_logo_filename") == "logo.png"
+    assert os.path.exists(os.path.join(str(tmp_path / "uploads"), "logo.png"))
+
+    # Both the public page and an admin page should render the logo <img>/favicon.
+    public_html = client.get("/").data.decode()
+    assert 'class="brand-logo"' in public_html
+    assert "uploads/logo.png" in public_html
+    admin_html = client.get("/admin/settings").data.decode()
+    assert 'rel="icon"' in admin_html
+    assert "uploads/logo.png" in admin_html
+
+
+def test_admin_settings_logo_rejects_bad_extension(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "LOGO_UPLOAD_DIR", str(tmp_path / "uploads"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/logo", data={
+        "logo": (io.BytesIO(b"#!/bin/sh\n"), "evil.sh"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 302
+    assert db.get_setting("site_logo_filename", "") == ""
+
+
+def test_admin_settings_logo_remove(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "LOGO_UPLOAD_DIR", str(tmp_path / "uploads"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/logo", data={
+        "logo": (io.BytesIO(b"fake-png-bytes"), "mylogo.png"),
+    }, content_type="multipart/form-data")
+    logo_path = os.path.join(str(tmp_path / "uploads"), "logo.png")
+    assert os.path.exists(logo_path)
+
+    resp = client.post("/admin/settings/logo/remove")
+    assert resp.status_code == 302
+    assert db.get_setting("site_logo_filename", "") == ""
+    assert not os.path.exists(logo_path)
+
+    public_html = client.get("/").data.decode()
+    assert 'class="brand-logo"' not in public_html
+    assert '<span class="dot-server">' in public_html
+
+
+def test_admin_settings_logo_reupload_different_extension_removes_old_file(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "LOGO_UPLOAD_DIR", str(tmp_path / "uploads"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/logo", data={
+        "logo": (io.BytesIO(b"fake-png-bytes"), "mylogo.png"),
+    }, content_type="multipart/form-data")
+    png_path = os.path.join(str(tmp_path / "uploads"), "logo.png")
+    assert os.path.exists(png_path)
+
+    client.post("/admin/settings/logo", data={
+        "logo": (io.BytesIO(b"<svg></svg>"), "mylogo.svg"),
+    }, content_type="multipart/form-data")
+    assert not os.path.exists(png_path)
+    assert os.path.exists(os.path.join(str(tmp_path / "uploads"), "logo.svg"))
+    assert db.get_setting("site_logo_filename") == "logo.svg"
+
+
+def test_api_incidents_more_returns_html_fragment(client):
+    sid = db.list_services()[0]["id"]
+    for n in range(3):
+        db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
+
+    resp = client.get("/api/incidents/more?offset=0")
+    assert resp.status_code == 200
+    assert resp.content_type.startswith("text/html")
+    html = resp.data.decode()
+    assert "Incident 0" in html
+    assert "Incident 2" in html
+    # Not a full page - no <html>/<head>, just the item markup.
+    assert "<html" not in html
+
+
+def test_api_incidents_more_empty_past_the_end(client):
+    resp = client.get("/api/incidents/more?offset=999")
+    assert resp.status_code == 200
+    assert resp.data.decode().strip() == ""
+
+
+def test_api_incidents_more_respects_history_days_setting(client):
+    sid = db.list_services()[0]["id"]
+    iid = db.create_incident({"service_id": sid, "title": "Old one", "status": "resolved"})
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (iid,))
+    conn.commit()
+    conn.close()
+    db.set_setting("public_history_days", "30")
+
+    resp = client.get("/api/incidents/more?offset=0")
+    assert "Old one" not in resp.data.decode()
+
+
+def test_api_maintenance_history_returns_ended_windows_only(client):
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Past window", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+
+    resp = client.get("/api/maintenance/history?offset=0")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "Past window" in html
+    assert "Ended" in html
+
+
+def test_public_index_never_shows_ended_maintenance_by_default(client):
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Past window", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+
+    html = client.get("/").data.decode()
+    assert "Past window" not in html
+    assert "Maintenance history" in html
+
+
+def test_admin_settings_general_saves_public_history_days(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={"public_history_days": "45"})
+    assert resp.status_code == 302
+    assert db.get_setting("public_history_days") == "45"
+    assert app_module._public_history_days() == 45
+
+
+def test_public_history_days_blank_means_unlimited(client):
+    assert app_module._public_history_days() is None
 
 
 def test_public_page_renders_sections_in_configured_order(client):

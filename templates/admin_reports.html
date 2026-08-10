@@ -1,0 +1,46 @@
+{% extends "admin_base.html" %}
+{% block title %}Reports — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Problem reports</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Visitor-submitted reports from the public "Report a problem" form — separate from the incident/maintenance system.
+</p>
+
+{% if reports %}
+<table class="admin-table">
+  <thead><tr><th>Message</th><th>Service</th><th>Contact</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+  <tbody>
+    {% for r in reports %}
+    <tr>
+      <td style="max-width: 320px;">{{ r.message }}</td>
+      <td>{{ r.service_name or '—' }}</td>
+      <td>{{ r.contact or '—' }}</td>
+      <td>
+        <form action="{{ url_for('admin_report_status', rid=r.id) }}" method="POST" style="display:inline">
+          <select name="status" onchange="this.form.submit()">
+            <option value="new" {{ 'selected' if r.status == 'new' }}>New</option>
+            <option value="reviewed" {{ 'selected' if r.status == 'reviewed' }}>Reviewed</option>
+            <option value="resolved" {{ 'selected' if r.status == 'resolved' }}>Resolved</option>
+          </select>
+        </form>
+      </td>
+      <td>{{ r.created_at[:16].replace('T', ' ') }}</td>
+      <td class="actions">
+        <form action="{{ url_for('admin_report_create_incident', rid=r.id) }}" method="POST" style="display:inline">
+          <button type="submit" class="btn secondary" style="padding:4px 10px;">Create incident</button>
+        </form>
+        <form action="{{ url_for('admin_report_delete', rid=r.id) }}" method="POST" style="display:inline"
+              onsubmit="return confirm('Delete this report?');">
+          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">No reports yet.</div>
+{% endif %}
+{% endblock %}

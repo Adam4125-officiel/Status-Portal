@@ -1,51 +1,21 @@
 <div class="section-title">Incidents &amp; maintenance</div>
 {% if incidents %}
-  {% for i in incidents %}
-    <div class="incident-bubble">
-      <div class="incident__body">
-        <div class="incident__head">
-          <span class="incident__title">{{ i.title }}{% if i.service_names %} <span class="incident__services">— {{ i.service_names }}</span>{% endif %}</span>
-          <span class="badge {{ i.status }}">{{ incident_label[i.status] }}</span>
-        </div>
-        {% if i.description %}<div class="incident__desc">{{ i.description|richtext }}</div>{% endif %}
-        <div class="incident__time">
-          started <span class="local-time" data-utc="{{ i.started_at }}">{{ i.started_at[:16].replace('T', ' ') }} UTC</span>
-          {% if i.resolved_at %}· resolved <span class="local-time" data-utc="{{ i.resolved_at }}">{{ i.resolved_at[:16].replace('T', ' ') }} UTC</span>{% endif %}
-        </div>
-        {% if i.updates %}
-        <div class="incident-updates">
-          {% for u in i.updates %}
-            <div class="incident-updates__row">
-              <span class="badge {{ u.status }}">{{ incident_label[u.status] }}</span>
-              <span class="incident-updates__msg">{{ u.message }}</span>
-              <span class="incident-updates__time local-time" data-utc="{{ u.created_at }}">{{ u.created_at[:16].replace('T', ' ') }} UTC</span>
-            </div>
-          {% endfor %}
-        </div>
-        {% endif %}
-      </div>
-    </div>
-  {% endfor %}
+  {% for i in incidents %}{% include 'sections/_incident_item.html' %}{% endfor %}
+  <button type="button" class="btn secondary load-more-btn" id="incidents-load-more"
+          data-url="{{ url_for('api_incidents_more') }}" data-offset="{{ incidents|length }}">
+    Load more incidents
+  </button>
 {% else %}
   <div class="empty-state">No incidents recorded. All clear.</div>
 {% endif %}
 
 {% if maintenance_windows %}
 <div class="section-title">Scheduled maintenance</div>
-{% for w in maintenance_windows %}
-  <div class="incident-bubble">
-    <div class="incident__body">
-      <div class="incident__head">
-        <span class="incident__title">{{ w.service_names }} — {{ w.title }}</span>
-        {% if w.applied %}<span class="badge investigating">In progress</span>
-        {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
-      </div>
-      {% if w.description %}<div class="incident__desc">{{ w.description|richtext }}</div>{% endif %}
-      <div class="incident__time">
-        <span class="local-time" data-utc="{{ w.starts_at }}">{{ w.starts_at[:16].replace('T', ' ') }} UTC</span> →
-        <span class="local-time" data-utc="{{ w.ends_at }}">{{ w.ends_at[:16].replace('T', ' ') }} UTC</span>
-      </div>
-    </div>
-  </div>
-{% endfor %}
+{% for w in maintenance_windows %}{% include 'sections/_maintenance_item.html' %}{% endfor %}
 {% endif %}
+
+<div class="section-title">Maintenance history</div>
+<button type="button" class="btn secondary load-more-btn" id="maintenance-history-load-more"
+        data-url="{{ url_for('api_maintenance_history') }}" data-offset="0">
+  Show maintenance history
+</button>

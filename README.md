@@ -10,15 +10,29 @@ touching the HTML.
   the order of its content sections (services, incidents, resources, VMs...) is
   reorderable from Settings
 - Optional automatic health checks per service, with auto-opened/resolved incidents
-  (also from a failing Jellyfin/*Arr/Jellyseerr status check, if linked), retries
-  before marking a blip as actually down, and a startup grace period so a
-  slow-booting service isn't flagged before it's had a chance to start
+  (also from a failing Jellyfin/*Arr/Jellyseerr/Bazarr/Tdarr/Byparr status check, if
+  linked), retries before marking a blip as actually down, a startup grace period so
+  a slow-booting service isn't flagged before it's had a chance to start, and an
+  optional per-service **API health check mode** that folds a linked integration's
+  API reachability into that service's own displayed status (not just a separate
+  sub-badge) — e.g. show "Down" if the web UI responds but the API doesn't
+- A 502 response is treated as **down**, not degraded — unlike a 500/503/504, it
+  means whatever's in front of the service (reverse proxy, gateway) couldn't reach
+  it at all
 - Incidents and scheduled maintenance windows can each cover **multiple services**
-  at once, not just one
+  at once, not just one, picked from a checkbox list
 - A service can be excluded from the top-line overall-status banner, for something
   non-critical that shouldn't make the whole page look down
 - Scheduled maintenance windows that flip a service to "maintenance" and back
   automatically, editable after creation
+- Old resolved incidents can be **auto-hidden** from the public page after an
+  admin-configurable number of days (a still-open incident is never hidden), with a
+  "Load more" button to page through full history — plus a "maintenance history"
+  section (ended windows, never shown publicly before) with the same paging
+- A public **"Report a problem" form**, separate from the incident/maintenance
+  system — visitors can flag something wrong (optionally tied to a specific
+  service), landing in an admin Reports page with an unread-count badge and a
+  one-click "create an incident from this report" action
 - Optional Discord/ntfy push notifications on incident and maintenance events
 - Optional Discord bot: presence/status updates, a self-editing status message
   posted on command, and a short `/snapshot` command (just what's down and any
@@ -26,9 +40,14 @@ touching the HTML.
 - Optional **two-factor authentication** (TOTP, works with Google Authenticator/
   Authy/1Password/etc.) for the admin login, off by default and never required
 - Host restart/shutdown and per-VM start/stop/restart controls (Windows/Hyper-V
-  for VMs), from the admin Resources page
+  for VMs), from the admin Resources page — plus a separate **System** page to
+  restart the portal's own process or just its Discord bot connection, each behind
+  a typed confirmation and a fresh 2FA code if enabled
+- A custom **logo** (Settings → Branding), also used as the browser-tab favicon
 - Per-service links (Tailscale, LAN, external domain...), per-incident update
-  timelines, 30-day uptime tracking — all editable from `/admin`, no code involved
+  timelines, 30-day uptime tracking, and admin-configurable **defaults** so a new
+  service's slow-threshold/retry/grace/API-health fields start pre-filled — all
+  editable from `/admin`, no code involved
 - Embeddable SVG status badges and an RSS feed, for use outside the page itself
 - Crash/error logging to `instance/logs/app.log`, not just the console
 
@@ -135,25 +154,49 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   outage on its account. The public page shows a small badge on a service's card
   while it's mid-retry or still inside its startup grace period, so a visitor can
   tell the difference between "actually down" and "still figuring that out."
+  Optionally set an **API health check mode** (Off / Degrade / Down) — if this
+  service has an enabled Integration linked to it (see Integrations below) with
+  "Show on public" turned on, that integration's own API reachability gets folded
+  into this service's displayed status too, not just shown as a separate sub-badge:
+  e.g. "Down" if the web UI responds but the linked app's API doesn't. A new
+  service's slow-threshold/grace/retry/auto-incident/API-health-mode fields start
+  pre-filled from admin-configured defaults (Settings → Service defaults) instead of
+  hardcoded values — pre-fill only, changing the defaults later never affects a
+  service that already exists.
 - **Announcements**: banner at the top of the public portal. `**bold**`, auto-clickable links.
 - **Incidents**: history of outages/maintenance, with status
   (investigating → identified → monitoring → resolved), an optional description, and
   a per-incident timeline of updates you (or the health checker) post over time.
-  An incident can cover **more than one service** — select as many as apply, or none
+  An incident can cover **more than one service** — check as many as apply, or none
   for a general/site-wide notice. Each open/resolve/update can push a Discord/ntfy
-  notification if configured (see the config reference below).
-- **Maintenance**: schedule a start/end time for one or more services and they're
-  automatically flipped to "maintenance" and back — no need to remember to toggle it
-  manually on either end. Each service's own health check is paused for the duration,
-  so it won't falsely open an incident while intentionally offline, and each one
-  restores to its own pre-maintenance status independently. A scheduled window can be
-  edited afterward (title, description, times); once it's already active its service
-  list locks (to avoid orphaning the restore-state snapshot) but everything else stays
-  editable.
-- **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, and *Arr apps.
-  Optionally link one to a service, opt it into public display to show that service's API
-  health on its public card, and/or let a failing check auto-open an incident on that
-  service (off by default, to avoid noise from a flaky check).
+  notification if configured (see the config reference below). Old *resolved*
+  incidents can be auto-hidden from the public page's initial view after a
+  configurable number of days (Settings) — a still-open incident is never hidden
+  regardless of age — with a "Load more incidents" button to page through full
+  history.
+- **Maintenance**: schedule a start/end time for one or more services (checked from
+  a list) and they're automatically flipped to "maintenance" and back — no need to
+  remember to toggle it manually on either end. Each service's own health check is
+  paused for the duration, so it won't falsely open an incident while intentionally
+  offline, and each one restores to its own pre-maintenance status independently. A
+  scheduled window can be edited afterward (title, description, times); once it's
+  already active its service list locks (to avoid orphaning the restore-state
+  snapshot) but everything else stays editable. Ended maintenance windows are never
+  shown on the initial public page load, but are reachable via a "Show maintenance
+  history" button (also respects the auto-hide age setting above).
+- **Reports**: a public **"Report a problem"** link (in the footer, and on each
+  service card to reference that specific service) lets a visitor flag something
+  wrong, separate entirely from the incident/maintenance system above — an optional
+  contact field, light anti-spam (no account/login needed to submit). Landed reports
+  show up here with an unread-count badge in the nav, can be marked reviewed/resolved
+  or deleted, and a "Create incident" button turns one into a proper incident
+  (pre-filled title/description) in one click.
+- **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, *Arr apps,
+  Bazarr, Tdarr, and Byparr. Optionally link one to a service, opt it into public
+  display to show that service's API health on its public card, and/or let a failing
+  check auto-open an incident on that service (off by default, to avoid noise from a
+  flaky check). Tdarr and Byparr don't use an API key at all — leave that field blank
+  for those two.
 - **Resources**: CPU (with per-core breakdown and temperature, Windows only), memory,
   disks (auto-detected, with volume labels where available, and — Windows only —
   per-disk temperature and per-disk read/write throughput, replacing the old
@@ -167,6 +210,11 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   host actions need a typed confirmation ("type RESTART/SHUTDOWN to confirm") given
   how destructive they are, and both are behind a fresh 2FA code if you've enabled
   two-factor authentication (see below), even if you're already logged in.
+- **System**: separate from Resources above (that's the host machine's hardware,
+  this is the portal's own process) — restart the whole app in place, or just the
+  Discord bot's connection, without needing shell/SSH access to the machine. Same
+  typed-confirmation and fresh-2FA-code protections as the host controls, since a
+  full-app restart briefly takes the portal offline for everyone.
 - **High-load indicator**: a badge on the public page and (optionally) the Discord
   bot that lights up when CPU, disk I/O, or network exceed admin-configurable
   thresholds (Settings) — or, if a Jellyfin integration is configured, when Jellyfin
@@ -175,10 +223,13 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   background tasks are currently running (its own "Jellyfin activity" section,
   toggle in Settings) regardless of whether the high-load thresholds are tripped.
 - **Info page**: free text at the bottom of the page (SMB access, VPN, contact...).
-- **Settings**: site name, per-cell public resource-monitor visibility, high-load
-  thresholds, admin password, current health-check/refresh intervals, whether push
-  notifications are configured, and the **order the public page's sections appear
-  in** (up/down buttons — the top status banner and footer always stay fixed).
+- **Settings**: site name, a custom **logo** (also used as the browser-tab favicon),
+  per-cell public resource-monitor visibility, high-load thresholds, an auto-hide
+  age threshold for old incidents/maintenance history, per-service defaults for the
+  "New service" form, admin password, current health-check/refresh intervals,
+  whether push notifications are configured, and the **order the public page's
+  sections appear in** (up/down buttons — the top status banner and footer always
+  stay fixed).
 - **Discord Bot**: a separate, optional real bot connection (not just a webhook) — see
   its own section below.
 - **Two-factor authentication**: `/admin/2fa` — see its own section below.
@@ -353,17 +404,22 @@ pytest
 
 Covers the DB layer (including multi-service incidents/maintenance), the
 auto-incident lifecycle (service and integration-driven, including the startup
-grace period and retries), maintenance-window scheduling and editing, notification
-dispatch, badge/feed rendering, two-factor authentication (enrollment, the two-step
-login, step-up on host control, the host-level reset file), CSRF protection, the
-Discord bot's message-building logic (`/status` and `/snapshot`, including the
-guild/channel whitelists' behavior) and login/lockout, service grouping, the
-slow-status/high-load logic, host/VM power controls (against a mocked
-`subprocess.run` - the real commands are never invoked by the test suite), and the
-Jellyfin/*Arr/Jellyseerr status parsing (against mocked responses - there's no way
-to test against real instances of those, or the Windows-only
-temperature/per-disk-I/O code, from here). Not part of `requirements.txt` since
-nothing here needs `pytest` at runtime.
+grace period, retries, and the per-service API health check merge logic),
+maintenance-window scheduling and editing (including the checkbox-list service
+picker), notification dispatch, badge/feed rendering, two-factor authentication
+(enrollment, the two-step login, step-up on host/system control, the host-level
+reset file), CSRF protection, the public report-a-problem form (anti-spam
+honeypot/timing/rate-limit, admin review flow), the incident/maintenance-history
+auto-hide and "load more" pagination, the Discord bot's message-building logic
+(`/status` and `/snapshot`, including the guild/channel whitelists' behavior),
+login/lockout, and its `stop()`/`restart()` connection lifecycle, service grouping,
+the slow-status/high-load logic, host/VM/app/Discord-bot restart controls (against
+a mocked `subprocess.run`/`os.execv`/fake event loop - the real commands and a real
+Discord gateway connection are never invoked by the test suite), and the
+Jellyfin/*Arr/Jellyseerr/Bazarr/Tdarr/Byparr status parsing (against mocked
+responses - there's no way to test against real instances of those, or the
+Windows-only temperature/per-disk-I/O code, from here). Not part of
+`requirements.txt` since nothing here needs `pytest` at runtime.
 
 ## 6. Security notes
 
@@ -405,7 +461,7 @@ status-portal/
   config.py               # all configuration, read from env vars / .env
   db.py                    # the entire SQLite layer
   monitoring.py            # CPU/RAM/disk/GPU/VM snapshot + host/VM power controls
-  integrations.py          # read-only Jellyfin/*Arr/Jellyseerr status checks
+  integrations.py          # read-only Jellyfin/*Arr/Jellyseerr/Bazarr/Tdarr/Byparr status checks
   notifications.py         # optional Discord/ntfy push notifications
   discord_bot.py           # optional Discord bot (presence, self-editing status message, /snapshot)
   twofactor.py             # optional TOTP two-factor authentication
@@ -417,6 +473,7 @@ status-portal/
   templates/               # HTML pages (Jinja2)
   templates/sections/      # the public page's reorderable content blocks, one file each
   static/css/style.css     # all of the styling (dark + light theme)
-  static/js/               # public page auto-refresh, local-time conversion, admin link-row editor, theme toggle, CSRF token injection
+  static/js/               # public page auto-refresh, local-time conversion, admin link-row editor, theme toggle, CSRF token injection, "load more" pagination
+  static/uploads/          # the uploaded custom logo, if any - created automatically, not tracked in git
   tests/                   # pytest suite (see "Running the tests" below)
 ```

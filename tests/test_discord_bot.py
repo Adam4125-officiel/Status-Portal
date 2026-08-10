@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import db
@@ -291,6 +293,81 @@ def test_start_logs_clearly_when_discord_py_missing(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         discord_bot.start()  # must not raise
     assert "discord.py isn't installed" in caplog.text
+
+
+def test_start_is_noop_when_already_running(monkeypatch):
+    """restart() relies on this: if _runtime still has a live client (e.g. a stray
+    double call), start() must not spin up a second concurrent connection."""
+    calls = []
+    monkeypatch.setattr(discord_bot, "_try_import_discord", lambda: calls.append("called") or (None, None, None))
+    monkeypatch.setitem(discord_bot._runtime, "client", object())
+    discord_bot.start()
+    assert calls == []
+
+
+def _start_fake_bot_runtime():
+    """Spins up a tiny real event loop in a background thread standing in for
+    start()'s _run() - no real discord.py networking involved - so stop() can be
+    tested against a genuinely running loop/thread, the same contract the real
+    implementation relies on (asyncio.run_coroutine_threadsafe needs an actually
+    running loop to schedule callbacks onto). Mirrors _run()'s own shape: the loop
+    stops (and the thread exits) once the fake client's close() coroutine runs,
+    same as the real loop.run_until_complete(runner()) returning once
+    client.close() resolves inside the "async with client" block."""
+    loop = asyncio.new_event_loop()
+    closed = []
+
+    class FakeClient:
+        async def close(self):
+            closed.append(True)
+            loop.call_soon_threadsafe(loop.stop)
+
+    client = FakeClient()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+            discord_bot._runtime["client"] = None
+            discord_bot._runtime["loop"] = None
+            discord_bot._runtime["thread"] = None
+
+    thread = threading.Thread(target=_run, daemon=True)
+    discord_bot._runtime["client"] = client
+    discord_bot._runtime["loop"] = loop
+    discord_bot._runtime["thread"] = thread
+    thread.start()
+    deadline = time.time() + 2
+    while not loop.is_running() and time.time() < deadline:
+        time.sleep(0.01)
+    return client, closed
+
+
+def test_stop_closes_client_and_waits_for_thread_to_finish():
+    client, closed = _start_fake_bot_runtime()
+    discord_bot.stop(timeout=5)
+    assert closed == [True]
+    assert discord_bot._runtime["client"] is None
+    assert discord_bot._runtime["loop"] is None
+    assert discord_bot._runtime["thread"] is None
+
+
+def test_stop_is_noop_when_never_started():
+    discord_bot._runtime["client"] = None
+    discord_bot._runtime["loop"] = None
+    discord_bot._runtime["thread"] = None
+    discord_bot.stop()  # must not raise
+
+
+def test_restart_stops_existing_connection_then_starts_a_new_one(monkeypatch):
+    client, closed = _start_fake_bot_runtime()
+    start_calls = []
+    monkeypatch.setattr(discord_bot, "start", lambda: start_calls.append("started"))
+    discord_bot.restart()
+    assert closed == [True]  # the old connection was actually closed first
+    assert start_calls == ["started"]
 
 
 def test_discord_status_message_db_roundtrip(isolated_db):
