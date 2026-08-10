@@ -408,20 +408,44 @@ DB-backed Settings pages, not a code edit.
   `twofactor.RESET_2FA` being a host-level file. It defaults to **enabled** (the
   button was explicitly asked for), and the route checks it, not just the template
   — verified live that a valid 2FA code still gets refused when it's off.
-- **Verification status (2026-08-10)**: a real end-to-end update was run against
-  the actual GitHub API and the real v1.4.0 release zip, in a throwaway install —
-  real SHA-256 verification, 83 files replaced, `instance/portal.db`/`.env`/
-  `static/uploads/` confirmed byte-identical afterwards, then a real rollback and a
-  real `--emergency` rollback back to the starting state. The About page, the
-  channel form, "Check now", the step-up-2FA refusal and the kill-switch refusal
-  were all exercised live against a running server. **Not verified**: the in-app
-  button actually completing an update *and restarting* (never triggered for real
-  per the standing rule — the route is tested with `perform_update`/
-  `_restart_process` mocked); anything on Windows (file locking, `os.replace`
-  contention, Task Scheduler relaunch after `os.execv`) since this sandbox is
-  Linux; and the browser-side typed-confirmation JS, since no Playwright/Chromium
-  was available in this session — only the JS syntax, the rendered element ids and
-  the cache-busted asset URL were checked.
+- **Verification status (2026-08-10)** — in the Linux sandbox: real end-to-end
+  updates against the actual GitHub API and real release zips, in throwaway
+  installs (real SHA-256 verification, 83/90 files replaced,
+  `instance/portal.db`/`.env`/`static/uploads/` confirmed byte-identical
+  afterwards, a real rollback, a real `--emergency` rollback, and a re-run
+  correctly no-opping as "up to date"). The About page, the channel form, "Check
+  now", the step-up-2FA refusal and the kill-switch refusal were all exercised
+  live against a running server.
+- **Confirmed on the user's real Windows machine (2026-08-10), which is what
+  closed out most of the list above.** They updated an installed `v1.5.0-rc.2`
+  to `v1.5.0-rc.3` **entirely through the admin panel's button**, with waitress
+  serving and the Discord bot connected at the time, then rolled back with the
+  CLI. What that confirms, specifically:
+  - **`os.execv` in-place restart works on Windows.** The process came back ~2s
+    later, re-bound port 5000, and the Discord bot reconnected on its own. This
+    was the single biggest unknown in the whole feature.
+  - **`write_pending_marker()`/`check_pending_marker()` work end to end**: the
+    restarted process logged "Update to 1.5.0-rc.3 completed - the app restarted
+    successfully on the new version" and cleared the marker, which is the entire
+    (limited) thing that mechanism was built to do.
+  - **No Windows file-locking failure occurred** replacing 90 files while the
+    server was live. Note the corollary: `REPLACE_RETRY_ATTEMPTS`/the
+    retry-then-roll-back path therefore remains **unexercised in the wild** — it
+    didn't need to fire, which is not the same as it having been proven to work.
+  - **The browser-side typed-confirmation JS works** — reaching the update at all
+    required typing `UPDATE` to enable the submit button.
+  - `python update.py rollback` restored all 90 files on Windows.
+- **Still not verified**: relaunch under Task Scheduler after `os.execv` (they ran
+  `python serve_waitress.py` from PowerShell directly, so a supervisor's reaction
+  to the in-place restart is still unknown); the Windows file-lock retry/rollback
+  path (see above); and `pip install` actually running during an update, since no
+  release so far has changed `requirements.txt`.
+- **Cosmetic wart, deliberately left**: backup folder names are UTC
+  (`20260810-171829-...`) while the console/app log shows local time, so on a
+  UTC+2 machine the same update reads as 19:18 in the log and 17:18 in the folder
+  name. Consistent with everything else in this app storing UTC, and the CLI's
+  `list-backups`/`rollback` never require reading the timestamp by eye - but it
+  does look like a mismatch if you're picking a backup by hand.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 

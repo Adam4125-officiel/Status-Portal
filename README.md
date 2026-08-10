@@ -176,6 +176,17 @@ that's a job for whatever already supervises the portal (a systemd unit with a
 health check, a wrapper script) — deliberately not something this app ships,
 because it would change how everyone launches it.
 
+#### Verification status
+
+The in-app button has been confirmed working end to end on real Windows: an
+installed `v1.5.0-rc.2` was updated to `v1.5.0-rc.3` from the admin panel, with the
+portal serving and the Discord bot connected at the time — 90 files replaced, the
+process restarted itself in place and came back on its own, and the database,
+`.env` and uploaded logo were untouched. Rollback was then confirmed too. Not yet
+confirmed: how a Task Scheduler entry reacts to the in-place restart, and the
+Windows file-locking retry path (no file was ever locked during the real run, so
+that code path simply hasn't had to fire yet).
+
 #### Security note
 
 Auto-update is the biggest security surface this app has: it means someone who gets
