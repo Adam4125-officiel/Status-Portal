@@ -823,6 +823,44 @@ def test_admin_reports_unread_badge_shows_in_nav(client):
     assert ">1<" in html
 
 
+def test_public_service_card_shows_open_reports_count(client):
+    sid = db.list_services()[0]["id"]
+    other_sid = db.list_services()[1]["id"]
+    db.create_problem_report("First issue", "", sid)
+    db.create_problem_report("Second issue", "", sid)
+    db.create_problem_report("General, no service", "", None)
+    resolved_rid = db.create_problem_report("Old, already handled", "", sid)
+    db.update_problem_report_status(resolved_rid, "resolved")
+
+    html = client.get("/").data.decode()
+    assert "2 open reports" in html  # resolved one excluded, general one not counted here
+
+    other_html_section = html[html.index(f'href="/report?service_id={other_sid}"') - 400:
+                               html.index(f'href="/report?service_id={other_sid}"')]
+    assert "open report" not in other_html_section
+
+
+def test_public_service_card_singular_report_wording(client):
+    sid = db.list_services()[0]["id"]
+    db.create_problem_report("Just one issue", "", sid)
+    html = client.get("/").data.decode()
+    assert "1 open report" in html
+    assert "1 open reports" not in html
+
+
+def test_public_service_card_no_indicator_with_zero_open_reports(client):
+    html = client.get("/").data.decode()
+    assert "open report" not in html
+
+
+def test_api_status_includes_open_reports_count(client):
+    sid = db.list_services()[0]["id"]
+    db.create_problem_report("Issue", "", sid)
+    data = client.get("/api/status").get_json()
+    service = next(s for s in data["services"] if s["id"] == sid)
+    assert service["open_reports_count"] == 1
+
+
 def test_admin_report_create_incident(client):
     sid = db.list_services()[0]["id"]
     rid = db.create_problem_report("Jellyfin login is broken", "", sid)
@@ -1422,7 +1460,7 @@ def test_api_incidents_more_returns_html_fragment(client):
     for n in range(3):
         db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
 
-    resp = client.get("/api/incidents/more?offset=0")
+    resp = client.get("/api/incidents/more")
     assert resp.status_code == 200
     assert resp.content_type.startswith("text/html")
     html = resp.data.decode()
@@ -1433,22 +1471,35 @@ def test_api_incidents_more_returns_html_fragment(client):
 
 
 def test_api_incidents_more_empty_past_the_end(client):
-    resp = client.get("/api/incidents/more?offset=999")
+    sid = db.list_services()[0]["id"]
+    iid = db.create_incident({"service_id": sid, "title": "Only one", "status": "resolved"})
+    resp = client.get(f"/api/incidents/more?before_id={iid}")
     assert resp.status_code == 200
     assert resp.data.decode().strip() == ""
 
 
-def test_api_incidents_more_respects_history_days_setting(client):
+def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
+    """Regression test for a real bug (2026-08-10): "load more" used to re-apply
+    the same max_age_days filter as the initial view, so an incident older than
+    the cutoff was hidden by the initial page AND by "load more" - permanently
+    unreachable, defeating the entire point of the history feature. Reported by
+    the user testing a 3-day cutoff with 2 old + 1 recent incident: only the
+    recent one ever showed, "load more" always came back empty."""
     sid = db.list_services()[0]["id"]
-    iid = db.create_incident({"service_id": sid, "title": "Old one", "status": "resolved"})
+    old = db.create_incident({"service_id": sid, "title": "Old one", "status": "resolved"})
+    recent = db.create_incident({"service_id": sid, "title": "Recent one", "status": "resolved"})
     conn = db.get_db()
-    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (iid,))
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (old,))
     conn.commit()
     conn.close()
     db.set_setting("public_history_days", "30")
 
-    resp = client.get("/api/incidents/more?offset=0")
-    assert "Old one" not in resp.data.decode()
+    index_html = client.get("/").data.decode()
+    assert "Recent one" in index_html
+    assert "Old one" not in index_html  # correctly hidden from the initial view
+
+    resp = client.get(f"/api/incidents/more?before_id={recent}")
+    assert "Old one" in resp.data.decode()  # but reachable via "load more"
 
 
 def test_api_maintenance_history_returns_ended_windows_only(client):
@@ -1463,6 +1514,21 @@ def test_api_maintenance_history_returns_ended_windows_only(client):
     html = resp.data.decode()
     assert "Past window" in html
     assert "Ended" in html
+
+
+def test_api_maintenance_history_ignores_history_days_setting(client):
+    """Same fix as api_incidents_more() above: maintenance history must not be
+    filtered by public_history_days either, or an old ended window would become
+    permanently unreachable through "Show maintenance history"."""
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Long ago", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+    db.set_setting("public_history_days", "1")
+
+    resp = client.get("/api/maintenance/history?offset=0")
+    assert "Long ago" in resp.data.decode()
 
 
 def test_public_index_never_shows_ended_maintenance_by_default(client):

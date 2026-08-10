@@ -370,6 +370,100 @@ def test_restart_stops_existing_connection_then_starts_a_new_one(monkeypatch):
     assert start_calls == ["started"]
 
 
+def _discord_error(cls, status=404, reason="Not Found"):
+    response = MagicMock(status=status, reason=reason)
+    return cls(response, {"message": reason, "code": 0})
+
+
+def test_edit_tracked_status_message_succeeds_without_retry(isolated_db, monkeypatch):
+    bot = _build_bot()
+    channel = MagicMock()
+    message = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    message.edit = AsyncMock()
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    deleted = []
+    monkeypatch.setattr(db, "delete_discord_status_message", lambda cid: deleted.append(cid))
+
+    asyncio.run(bot._edit_tracked_status_message(123, 456, MagicMock()))
+    message.edit.assert_awaited_once()
+    channel.fetch_message.assert_awaited_once()  # no retries needed
+    assert deleted == []
+
+
+def test_edit_tracked_status_message_deletes_tracking_on_not_found(isolated_db, monkeypatch):
+    import discord
+    bot = _build_bot()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(side_effect=_discord_error(discord.NotFound))
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    deleted = []
+    monkeypatch.setattr(db, "delete_discord_status_message", lambda cid: deleted.append(cid))
+
+    asyncio.run(bot._edit_tracked_status_message(123, 456, MagicMock()))
+    assert deleted == [123]
+    channel.fetch_message.assert_awaited_once()  # a genuine 404 is never retried
+
+
+def test_edit_tracked_status_message_deletes_tracking_on_forbidden(isolated_db, monkeypatch):
+    import discord
+    bot = _build_bot()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(side_effect=_discord_error(discord.Forbidden, status=403, reason="Forbidden"))
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    deleted = []
+    monkeypatch.setattr(db, "delete_discord_status_message", lambda cid: deleted.append(cid))
+
+    asyncio.run(bot._edit_tracked_status_message(123, 456, MagicMock()))
+    assert deleted == [123]
+
+
+def test_edit_tracked_status_message_retries_transient_failure_then_succeeds(isolated_db, monkeypatch):
+    """Regression test for a real reliability bug reported by the user: a single
+    transient failure (a slow/timed-out Discord API call) used to be treated
+    exactly like the message being deleted, immediately forgetting it and
+    forcing a brand new /status run. Must now retry before giving up."""
+    bot = _build_bot()
+    channel = MagicMock()
+    message = MagicMock()
+    message.edit = AsyncMock()
+    calls = {"n": 0}
+
+    async def fetch_message_side_effect(mid):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise TimeoutError("slow API response")
+        return message
+    channel.fetch_message = AsyncMock(side_effect=fetch_message_side_effect)
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())  # skip the real retry delay
+    deleted = []
+    monkeypatch.setattr(db, "delete_discord_status_message", lambda cid: deleted.append(cid))
+
+    asyncio.run(bot._edit_tracked_status_message(123, 456, MagicMock()))
+    assert calls["n"] == 2
+    message.edit.assert_awaited_once()
+    assert deleted == []
+
+
+def test_edit_tracked_status_message_gives_up_after_repeated_transient_failures(isolated_db, monkeypatch, caplog):
+    bot = _build_bot()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(side_effect=TimeoutError("still slow"))
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    deleted = []
+    monkeypatch.setattr(db, "delete_discord_status_message", lambda cid: deleted.append(cid))
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(bot._edit_tracked_status_message(123, 456, MagicMock()))
+    # Tracking is preserved - the next scheduled refresh_loop tick will retry on
+    # its own, rather than forcing a brand new /status run.
+    assert deleted == []
+    assert channel.fetch_message.await_count == discord_bot.REFRESH_RETRY_ATTEMPTS
+    assert "could not update tracked status message" in caplog.text
+
+
 def test_discord_status_message_db_roundtrip(isolated_db):
     assert db.get_discord_status_message(123) is None
     db.set_discord_status_message(123, 456)

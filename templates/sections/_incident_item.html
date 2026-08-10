@@ -1,5 +1,5 @@
 {% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
-<div class="incident-bubble">
+<div class="incident-bubble" data-id="{{ i.id }}">
   <div class="incident__body">
     <div class="incident__head">
       <span class="incident__title">{{ i.title }}{% if i.service_names %} <span class="incident__services">— {{ i.service_names }}</span>{% endif %}</span>

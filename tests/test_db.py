@@ -142,13 +142,73 @@ def test_list_incidents_max_age_days_hides_only_old_resolved(isolated_db):
     assert old_resolved in {i["id"] for i in db.list_incidents()}
 
 
-def test_list_incidents_offset_skips_the_first_page(isolated_db):
+def test_list_incidents_before_id_continues_from_cursor(isolated_db):
     sid = db.list_services()[0]["id"]
     ids = [db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"}) for n in range(5)]
-    first_page = db.list_incidents(limit=2, offset=0)
-    second_page = db.list_incidents(limit=2, offset=2)
+    first_page = db.list_incidents(limit=2)
+    second_page = db.list_incidents(limit=2, before_id=first_page[-1]["id"])
     assert [i["id"] for i in first_page] == list(reversed(ids))[:2]
     assert [i["id"] for i in second_page] == list(reversed(ids))[2:4]
+
+
+def test_list_incidents_before_id_ignores_max_age_days_filter(isolated_db):
+    """Regression test for a real bug (2026-08-10): the "load more" endpoint used
+    to re-apply the same max_age_days filter as the initial view, so anything
+    older than the cutoff was permanently unreachable - the initial page hid it,
+    and "load more" hid it again forever, defeating the point of the history
+    feature entirely. before_id must page through the FULL unfiltered timeline
+    regardless of max_age_days (max_age_days is only ever passed for the
+    *initial* view, never alongside before_id in real app.py callers - this test
+    confirms before_id-based calls surface old items even if the caller mistakenly
+    passed a filter too, that path shouldn't behave the old broken way anyway)."""
+    sid = db.list_services()[0]["id"]
+    old1 = db.create_incident({"service_id": sid, "title": "Old 1", "status": "resolved"})
+    old2 = db.create_incident({"service_id": sid, "title": "Old 2", "status": "resolved"})
+    recent = db.create_incident({"service_id": sid, "title": "Recent", "status": "resolved"})
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id IN (?, ?)", (old1, old2))
+    conn.commit()
+    conn.close()
+
+    # Initial (age-filtered) view only shows the recent one.
+    initial = db.list_incidents(limit=8, max_age_days=30)
+    assert [i["id"] for i in initial] == [recent]
+
+    # "Load more" (as app.py's api_incidents_more() actually calls it: no
+    # max_age_days) must reveal both older incidents, not return empty.
+    more = db.list_incidents(limit=10, before_id=initial[-1]["id"])
+    assert {i["id"] for i in more} == {old1, old2}
+
+
+def test_list_incidents_before_id_reaches_items_hidden_in_an_id_space_gap(isolated_db):
+    """Regression test for a second, subtler version of the same 2026-08-10 bug: a
+    still-open incident (never hidden, any age) can sit at a LOWER id than a
+    newer incident that got resolved and aged out of the initial view - a gap in
+    id-space between what's shown. Cursoring "load more" from the smallest shown
+    id (the first fix attempt) skips straight over anything filtered out inside
+    that gap, same missing-data bug one page later. app.py's template now seeds
+    the cursor from the largest (newest) shown id instead, which this test
+    exercises directly at the db layer."""
+    sid = db.list_services()[0]["id"]
+    old_open = db.create_incident({"service_id": sid, "title": "Old but still open", "status": "investigating"})
+    hidden = db.create_incident({"service_id": sid, "title": "Newer but resolved+hidden", "status": "resolved"})
+    recent = db.create_incident({"service_id": sid, "title": "Recent", "status": "investigating"})
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (hidden,))
+    conn.commit()
+    conn.close()
+
+    # Initial (age-filtered) view: hidden's id sits *between* old_open and recent,
+    # but only old_open and recent actually show - a gap.
+    initial = db.list_incidents(limit=8, max_age_days=30)
+    shown_ids = [i["id"] for i in initial]
+    assert shown_ids == [recent, old_open]
+    assert hidden not in shown_ids
+
+    # Cursoring from the newest shown id (recent) must still reach the item
+    # filtered out inside the gap.
+    more = db.list_incidents(limit=10, before_id=initial[0]["id"])
+    assert hidden in {i["id"] for i in more}
 
 
 def test_list_ended_maintenance_windows_only_returns_ended(isolated_db):
@@ -438,3 +498,21 @@ def test_maintenance_window_not_yet_due_is_left_alone(isolated_db):
     })
     assert db.process_maintenance_windows() == []
     assert db.get_service(sid)["status"] == "operational"
+
+
+def test_count_open_reports_by_service_excludes_resolved_and_general(isolated_db):
+    services = db.list_services()
+    sid, other_sid = services[0]["id"], services[1]["id"]
+    db.create_problem_report("Open 1", "", sid)
+    db.create_problem_report("Open 2", "", sid)
+    reviewed = db.create_problem_report("Reviewed but still open", "", sid)
+    db.update_problem_report_status(reviewed, "reviewed")
+    resolved = db.create_problem_report("Resolved", "", sid)
+    db.update_problem_report_status(resolved, "resolved")
+    db.create_problem_report("General, no service", "", None)
+    db.create_problem_report("For a different service", "", other_sid)
+
+    counts = db.count_open_reports_by_service()
+    assert counts[sid] == 3  # "new" + "new" + "reviewed", not the resolved one
+    assert counts[other_sid] == 1
+    assert len(counts) == 2  # no entry for the general (service_id=None) report

@@ -258,11 +258,13 @@ def _register_report_submission():
 # Public pages
 # ---------------------------------------------------------------------------
 def _enrich_services(services):
+    open_reports = db.count_open_reports_by_service()
     for s in services:
         s["links"] = db.list_service_links(s["id"])
         s["uptime"] = db.get_uptime_percentage(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
+        s["open_reports_count"] = open_reports.get(s["id"], 0)
     return services
 
 
@@ -464,12 +466,33 @@ def api_incidents_more():
     """HTML-fragment endpoint (not JSON, unlike /api/status above) backing the
     public page's "Load more incidents" button - this app has no client-side
     templating anywhere, so returning a ready-to-insert fragment matches that
-    convention instead of introducing one just for this. Same age filter as the
-    initial page load, so "load more" never resurfaces something the admin
-    configured to be hidden."""
-    offset = request.args.get("offset", type=int, default=0)
-    incidents = _enrich_incidents(
-        db.list_incidents(limit=HISTORY_PAGE_SIZE, offset=offset, max_age_days=_public_history_days()))
+    convention instead of introducing one just for this.
+
+    Deliberately does NOT apply the max_age_days filter the initial page load
+    uses - "load more" exists specifically to reveal incidents the initial view
+    hid for being old, so re-applying the same filter here would make anything
+    past the age cutoff permanently unreachable (a real bug, caught 2026-08-10 -
+    the button just returned empty forever past the first page for anyone with
+    an age cutoff configured, reported by the user testing a 3-day cutoff with
+    2 old + 1 recent incident: the 2 old ones never appeared, "load more" always
+    came back empty).
+
+    Paginated by an id cursor (before_id) rather than a numeric offset, and the
+    template deliberately seeds that cursor from the NEWEST shown incident's id
+    (incidents[0]), not the oldest (incidents[-1]) - a first attempt at this fix
+    used the oldest and was still broken: the initial (filtered) view can have a
+    gap in id-space between shown items (e.g. a still-open old incident sitting
+    at a lower id than a newer, already-resolved-and-hidden one), and cursoring
+    from the oldest shown id skips straight past anything filtered out in that
+    gap, same bug as before just one page later. Cursoring from the newest shown
+    id instead guarantees nothing filtered out of the initial view is ever
+    unreachable, at the cost of possibly re-showing one already-visible item
+    once on the very first "load more" click if that gap exists - a fully
+    unfiltered continuation from every click after that has no such gap and
+    never duplicates. Accepted as the right tradeoff (a rare, harmless, one-time
+    duplicate vs. permanently missing data)."""
+    before_id = request.args.get("before_id", type=int)
+    incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, before_id=before_id))
     return render_template("sections/_incidents_fragment.html", incidents=incidents)
 
 
@@ -477,10 +500,17 @@ def api_incidents_more():
 def api_maintenance_history():
     """HTML-fragment endpoint backing the public page's maintenance history list -
     ended windows are never shown on the initial page load at all (see
-    db.list_ended_maintenance_windows), only ever paged in here on request."""
+    db.list_ended_maintenance_windows), only ever paged in here on request.
+
+    Deliberately does NOT apply the max_age_days filter, same reasoning as
+    api_incidents_more() above - the whole point of this list is to reveal
+    history an admin-configured age cutoff would otherwise hide, so filtering it
+    here too would make old windows permanently unreachable. Plain numeric
+    offset pagination is safe here (unlike incidents) because every call into
+    this endpoint uses the exact same unfiltered query - there's no
+    filtered-vs-unfiltered mismatch to cause the offset to drift."""
     offset = request.args.get("offset", type=int, default=0)
-    windows = db.list_ended_maintenance_windows(
-        limit=HISTORY_PAGE_SIZE, offset=offset, max_age_days=_public_history_days())
+    windows = db.list_ended_maintenance_windows(limit=HISTORY_PAGE_SIZE, offset=offset)
     return render_template("sections/_maintenance_fragment.html", windows=windows, history=True)
 
 
