@@ -715,6 +715,40 @@ footer.foot {
 .admin-table td.actions { white-space: nowrap; text-align: right; }
 .admin-table td.actions a, .admin-table td.actions button { margin-left: 8px; }
 
+/* Label/value pairs inside a .form-panel (the About page's version, paths and
+   project metadata) - unlike .admin-table this sits *within* a panel that already
+   draws the border/background, so it deliberately has neither of its own. */
+.info-table { width: 100%; border-collapse: collapse; }
+.info-table th, .info-table td {
+  text-align: left;
+  padding: 7px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+}
+.info-table tr:last-child th, .info-table tr:last-child td { border-bottom: none; }
+.info-table th {
+  color: var(--text-faint);
+  font-weight: 500;
+  width: 34%;
+  padding-right: 12px;
+}
+.info-table code { font-size: 12px; word-break: break-all; }
+
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  vertical-align: middle;
+}
+.pill.warn { border-color: var(--warn); color: var(--warn); }
+
 .form-panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);

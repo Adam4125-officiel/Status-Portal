@@ -5,6 +5,7 @@ Admin panel: /admin (password is set on first launch)
 """
 import logging
 import os
+import platform
 import re
 import secrets
 import sys
@@ -29,6 +30,7 @@ import logging_setup
 import monitoring
 import notifications
 import twofactor
+import updater
 
 _logger = logging.getLogger(__name__)
 
@@ -186,7 +188,13 @@ def _inject_admin_badges():
     displayed there."""
     if not request.path.startswith("/admin/"):
         return {}
-    return {"unread_reports_count": db.count_unread_problem_reports()}
+    # Reads the update cache only (never checks GitHub here) - a miss or a failed
+    # check simply means no badge, exactly like "no unread reports".
+    cached = updater.get_cached_update_status()
+    return {
+        "unread_reports_count": db.count_unread_problem_reports(),
+        "update_available": bool(cached and cached.get("update_available")),
+    }
 
 
 @app.before_request
@@ -1187,6 +1195,141 @@ def admin_system_restart():
     return redirect(url_for("admin_system"))
 
 
+# ---- About / self-update (see updater.py for everything that actually happens) ----
+@app.route("/admin/about")
+@login_required
+def admin_about():
+    """Reads the update-check cache only - never checks GitHub inline. The cache is
+    refreshed by the background health-check loop (see run_health_checks) on its own
+    much longer TTL, same pattern as _integration_status_cache. A cache miss (nothing
+    checked yet this process, or checking disabled) renders as "not checked yet"
+    rather than blocking the page on an outbound call."""
+    return render_template(
+        "admin_about.html",
+        version=config.VERSION,
+        version_display=config.VERSION_DISPLAY,
+        is_git_checkout=config.IS_GIT_CHECKOUT,
+        update_status=updater.get_cached_update_status(),
+        channel=updater.get_channel(),
+        channels=updater.CHANNELS,
+        check_enabled=updater.update_check_enabled(),
+        check_interval_hours=round(config.UPDATE_CHECK_INTERVAL_SECONDS / 3600, 1),
+        inapp_update_enabled=config.ENABLE_INAPP_UPDATE,
+        repo_url=updater.REPO_URL,
+        releases_url=updater.RELEASES_PAGE_URL,
+        backups=list(reversed(updater.list_backups()))[:5],
+        python_version=sys.version.split()[0],
+        platform_name=f"{platform.system()} {platform.release()}".strip(),
+        db_path=db.DB_PATH,
+        log_path=os.path.join(config.APP_ROOT, "instance", "logs", "app.log"),
+        app_root=config.APP_ROOT,
+        totp_enabled=twofactor.is_enabled(),
+        active="about",
+    )
+
+
+@app.route("/admin/about/check", methods=["POST"])
+@login_required
+def admin_about_check():
+    """The sanctioned exception to the no-slow-I/O-in-a-request-handler rule: an
+    explicit one-shot admin action the admin knows will take a moment, exactly like
+    the integrations "Check now" button. Never fires automatically."""
+    result = updater.refresh_update_cache_if_stale(force=True)
+    if result and result["ok"]:
+        if result["update_available"]:
+            flash(f"Update available: {result['current']} → {result['latest']}.", "success")
+        elif result["ahead"]:
+            flash(f"You're running {result['current']}, newer than the latest "
+                  f"{result['channel']} release ({result['latest']}).", "success")
+        else:
+            flash(f"Up to date ({result['current']}).", "success")
+    else:
+        flash(f"Couldn't check for updates: {result['error'] if result else 'unknown error'}", "error")
+    return redirect(url_for("admin_about"))
+
+
+@app.route("/admin/about/settings", methods=["POST"])
+@login_required
+def admin_about_settings():
+    channel = request.form.get("update_channel", "")
+    if channel not in updater.CHANNELS:
+        flash("Unknown update channel.", "error")
+        return redirect(url_for("admin_about"))
+    db.set_setting("update_channel", channel)
+    db.set_setting("update_check_enabled", "1" if request.form.get("update_check_enabled") else "0")
+    # The cached result belongs to the old channel - drop it so the page doesn't show
+    # a stale "latest stable" reading next to a freshly-selected unstable channel.
+    updater._update_cache["result"] = None
+    updater._update_cache["refreshed_monotonic"] = None
+    flash("Update preferences saved.", "success")
+    return redirect(url_for("admin_about"))
+
+
+@app.route("/admin/about/update", methods=["POST"])
+@login_required
+def admin_update():
+    """Installs the latest release and restarts the app into it.
+
+    This is the most powerful button in the app - it installs and then executes new
+    code - so it is gated at least as heavily as the host restart/shutdown control:
+    login + CSRF (both automatic for any POST under /admin/), a typed confirmation
+    client-side, and step-up 2FA requiring a fresh code even on an already
+    authenticated session. It additionally honours config.ENABLE_INAPP_UPDATE, which
+    lives in an env var rather than a DB setting precisely so an attacker who owns
+    the admin panel can't just switch it back on.
+
+    Runs updater.perform_update() synchronously: a deliberate, documented instance
+    of the "explicit one-shot admin action the user knows will be slow" exception,
+    same as the integration Check-now button, not an automatic background path.
+    Restarting reuses _restart_process() rather than inventing a second mechanism."""
+    if not config.ENABLE_INAPP_UPDATE:
+        flash("In-app updates are disabled (PORTAL_ENABLE_INAPP_UPDATE=false). "
+              "Use the update.py script over SSH instead.", "error")
+        return redirect(url_for("admin_about"))
+    if config.IS_GIT_CHECKOUT:
+        flash("This is a git checkout, not an installed release - updating would overwrite "
+              "tracked files. Use `git pull` instead.", "error")
+        return redirect(url_for("admin_about"))
+    if twofactor.is_enabled():
+        code = request.form.get("totp_code", "")
+        secret = db.get_setting("admin_totp_secret")
+        if not twofactor.verify_code(secret, code):
+            flash("Incorrect or missing 2FA code - update cancelled.", "error")
+            return redirect(url_for("admin_about"))
+
+    lines = []
+
+    def progress(message):
+        lines.append(message)
+        _logger.info("[update] %s", message)
+
+    try:
+        result = updater.perform_update(progress=progress)
+    except updater.UpdateError as e:
+        _logger.error("In-app update failed: %s", e)
+        flash(f"Update failed: {e}", "error")
+        return redirect(url_for("admin_about"))
+    except Exception as e:
+        _logger.exception("In-app update crashed")
+        flash(f"Update failed unexpectedly: {e} (see instance/logs/app.log)", "error")
+        return redirect(url_for("admin_about"))
+
+    if not result["applied"]:
+        flash(f"Nothing to update - {result['reason']}.", "success")
+        return redirect(url_for("admin_about"))
+
+    # Written before the restart so the next successful start can confirm it came up
+    # on the new version - and so `python update.py rollback` knows which backup to
+    # use if it doesn't. See updater.write_pending_marker() for what this can and
+    # cannot detect.
+    updater.write_pending_marker(result["backup"], result["latest"])
+    flash(f"Updated {result['current']} → {result['latest']}. Restarting now - this page will be "
+          f"briefly unreachable. If it doesn't come back, run "
+          f"`python update.py rollback` on the server.", "success")
+    _restart_process()
+    return redirect(url_for("admin_about"))
+
+
 # ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----
 @app.route("/admin/integrations")
 @login_required
@@ -1636,6 +1779,11 @@ def run_health_checks():
                 if s["auto_incident"] and not _within_grace_period(s):
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
+            # Reuses this existing background thread rather than starting another one:
+            # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
+            # -check interval doesn't turn into a GitHub API call every 120s. The
+            # About page only ever reads the cache this populates.
+            updater.refresh_update_cache_if_stale()
         except Exception:
             _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)
@@ -1727,6 +1875,9 @@ def start_background_checker():
 if __name__ == "__main__":
     logging_setup.init_logging()
     db.init_db()
+    # If the previous shutdown was an in-app update restarting into a new version,
+    # this is where that gets confirmed (or reported as not having taken effect).
+    updater.check_pending_marker()
     start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
     discord_bot.start()

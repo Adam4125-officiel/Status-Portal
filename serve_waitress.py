@@ -15,11 +15,15 @@ import db
 import discord_bot
 import logging_setup
 import monitoring
+import updater
 from app import app, start_background_checker
 
 if __name__ == "__main__":
     logging_setup.init_logging()
     db.init_db()
+    # If the previous shutdown was an in-app update restarting into a new version,
+    # this is where that gets confirmed (or reported as not having taken effect).
+    updater.check_pending_marker()
     start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
     discord_bot.start()

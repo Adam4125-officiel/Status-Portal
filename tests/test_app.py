@@ -4,6 +4,7 @@ import re
 import time
 
 import pyotp
+import pytest
 
 import app as app_module
 import db
@@ -1307,6 +1308,240 @@ def test_admin_system_restart_step_up_2fa_allows_with_correct_code(client, monke
                         data={"component": "app", "totp_code": pyotp.TOTP(secret).now()})
     assert resp.status_code == 302
     assert calls == ["restart"]
+
+
+# ---------------------------------------------------------------------------
+# About page / in-app update
+# ---------------------------------------------------------------------------
+# Every test here mocks updater.perform_update() and app._restart_process(). A real
+# update is never downloaded and the test-suite process is never os.execv'd - same
+# standing rule as monitoring.control_host().
+def _login(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+
+def _fake_update_available(latest="9.9.9"):
+    app_module.updater._update_cache["result"] = {
+        "ok": True, "error": None, "channel": "stable", "current": app_module.config.VERSION,
+        "current_display": app_module.config.VERSION_DISPLAY, "latest": latest,
+        "latest_url": "https://example.invalid/release", "latest_name": f"v{latest}",
+        "published_at": "2026-08-10T12:00:00Z", "prerelease": False,
+        "update_available": True, "ahead": False, "checked_at": "2026-08-10T12:00:00+00:00",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _update_test_environment(monkeypatch):
+    """Two module-level globals that would otherwise leak between tests:
+
+    * the update cache - one test's fake result must not show up in the next (or in
+      the admin nav's "update available" badge);
+    * config.IS_GIT_CHECKOUT, which is genuinely True while running the suite from
+      this repo. Every update route and the About page's button correctly refuse in
+      that state, so tests exercising them have to stand in for a normal install
+      (an extracted release zip, no .git). The dedicated
+      test_update_route_refuses_on_a_git_checkout sets it back to True.
+    """
+    monkeypatch.setattr(app_module.config, "IS_GIT_CHECKOUT", False)
+    app_module.updater._update_cache["result"] = None
+    app_module.updater._update_cache["refreshed_monotonic"] = None
+    yield
+    app_module.updater._update_cache["result"] = None
+    app_module.updater._update_cache["refreshed_monotonic"] = None
+
+
+def test_about_page_renders_version_and_paths(client):
+    _login(client)
+    resp = client.get("/admin/about")
+    assert resp.status_code == 200
+    assert app_module.config.VERSION_DISPLAY.encode() in resp.data
+    assert b"AGPL" in resp.data
+    assert b"portal.db" in resp.data
+
+
+def test_about_page_requires_login(client):
+    resp = client.get("/admin/about")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_about_page_does_not_check_github_inline(client, monkeypatch):
+    """The standing no-slow-I/O-in-a-request-handler rule: rendering the page must
+    never make an outbound call, only read the cache the background loop fills."""
+    def boom(*a, **k):
+        raise AssertionError("the About page made an outbound HTTP call")
+    monkeypatch.setattr(app_module.updater.requests, "get", boom)
+    _login(client)
+    resp = client.get("/admin/about")
+    assert resp.status_code == 200
+    assert b"Not checked yet" in resp.data
+
+
+def test_about_page_degrades_gracefully_when_the_check_failed(client):
+    app_module.updater._update_cache["result"] = {
+        "ok": False, "error": "Could not reach GitHub: timed out", "channel": "stable",
+        "current": "1.0.0", "current_display": "1.0.0", "latest": None,
+        "latest_url": "", "published_at": None, "prerelease": None,
+        "update_available": False, "ahead": False, "checked_at": "2026-08-10T12:00:00+00:00",
+    }
+    _login(client)
+    resp = client.get("/admin/about")
+    assert resp.status_code == 200
+    assert "Couldn’t check".encode() in resp.data
+    assert b"timed out" in resp.data
+
+
+def test_about_check_now_refreshes_the_cache(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.updater, "refresh_update_cache_if_stale",
+                        lambda **k: calls.append(k) or {"ok": True, "update_available": False,
+                                                        "ahead": False, "current": "1.0.0",
+                                                        "channel": "stable", "latest": "1.0.0"})
+    _login(client)
+    resp = client.post("/admin/about/check", follow_redirects=True)
+    assert b"Up to date" in resp.data
+    assert calls == [{"force": True}]
+
+
+def test_about_settings_saves_channel_and_clears_the_stale_cache(client):
+    _fake_update_available()
+    _login(client)
+    resp = client.post("/admin/about/settings",
+                        data={"update_channel": "unstable", "update_check_enabled": "on"},
+                        follow_redirects=True)
+    assert b"Update preferences saved" in resp.data
+    assert db.get_setting("update_channel") == "unstable"
+    assert db.get_setting("update_check_enabled") == "1"
+    # The cached "latest" belonged to the old channel.
+    assert app_module.updater.get_cached_update_status() is None
+
+
+def test_about_settings_rejects_an_unknown_channel(client):
+    _login(client)
+    resp = client.post("/admin/about/settings", data={"update_channel": "nightly"},
+                        follow_redirects=True)
+    assert b"Unknown update channel" in resp.data
+
+
+def test_update_route_runs_the_update_and_restarts(client, monkeypatch):
+    updates, restarts, markers = [], [], []
+    monkeypatch.setattr(app_module.updater, "perform_update",
+                        lambda **k: updates.append(k) or {"applied": True, "current": "1.0.0",
+                                                          "latest": "9.9.9", "backup": "bk1"})
+    monkeypatch.setattr(app_module.updater, "write_pending_marker",
+                        lambda backup, version: markers.append((backup, version)))
+    monkeypatch.setattr(app_module, "_restart_process", lambda: restarts.append("restart"))
+    _login(client)
+
+    resp = client.post("/admin/about/update")
+    assert resp.status_code == 302
+    assert len(updates) == 1
+    assert restarts == ["restart"]
+    # The marker is written BEFORE the restart, so the next start can confirm it.
+    assert markers == [("bk1", "9.9.9")]
+
+
+def test_update_route_does_not_restart_when_there_was_nothing_to_do(client, monkeypatch):
+    restarts = []
+    monkeypatch.setattr(app_module.updater, "perform_update",
+                        lambda **k: {"applied": False, "reason": "already up to date"})
+    monkeypatch.setattr(app_module, "_restart_process", lambda: restarts.append("restart"))
+    _login(client)
+
+    resp = client.post("/admin/about/update", follow_redirects=True)
+    assert b"Nothing to update" in resp.data
+    assert restarts == []
+
+
+def test_update_route_reports_a_failure_without_restarting(client, monkeypatch):
+    restarts = []
+
+    def boom(**k):
+        raise app_module.updater.UpdateError("SHA-256 mismatch against the release metadata.")
+    monkeypatch.setattr(app_module.updater, "perform_update", boom)
+    monkeypatch.setattr(app_module, "_restart_process", lambda: restarts.append("restart"))
+    _login(client)
+
+    resp = client.post("/admin/about/update", follow_redirects=True)
+    assert b"SHA-256 mismatch" in resp.data
+    assert restarts == []
+
+
+def test_update_route_requires_login(client):
+    resp = client.post("/admin/about/update")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_update_route_step_up_2fa_blocks_without_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.updater, "perform_update", lambda **k: calls.append(k))
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    _login(client)
+    _enable_totp_directly()
+
+    resp = client.post("/admin/about/update", follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []
+
+
+def test_update_route_step_up_2fa_allows_with_correct_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.updater, "perform_update",
+                        lambda **k: {"applied": True, "current": "1.0.0", "latest": "9.9.9",
+                                     "backup": "bk1"})
+    monkeypatch.setattr(app_module.updater, "write_pending_marker", lambda *a: None)
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    _login(client)
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/about/update", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_update_route_honours_the_env_kill_switch(client, monkeypatch):
+    """PORTAL_ENABLE_INAPP_UPDATE=false must block the button even for a fully
+    authenticated admin - the whole point is that it isn't flippable from the panel."""
+    calls = []
+    monkeypatch.setattr(app_module.config, "ENABLE_INAPP_UPDATE", False)
+    monkeypatch.setattr(app_module.updater, "perform_update", lambda **k: calls.append(k))
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    _login(client)
+
+    resp = client.post("/admin/about/update", follow_redirects=True)
+    assert b"In-app updates are disabled" in resp.data
+    assert calls == []
+
+
+def test_update_route_refuses_on_a_git_checkout(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.config, "IS_GIT_CHECKOUT", True)
+    monkeypatch.setattr(app_module.updater, "perform_update", lambda **k: calls.append(k))
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    _login(client)
+
+    resp = client.post("/admin/about/update", follow_redirects=True)
+    assert b"git checkout" in resp.data
+    assert calls == []
+
+
+def test_admin_nav_shows_a_badge_only_when_an_update_is_available(client):
+    _login(client)
+    assert b'href="/admin/about"' in client.get("/admin/services").data
+
+    _fake_update_available()
+    data = client.get("/admin/services").data
+    about_link = data.split(b'href="/admin/about"')[1][:120]
+    assert b"nav-badge" in about_link
+
+
+def test_admin_update_button_is_disabled_until_a_check_finds_something(client):
+    _login(client)
+    resp = client.get("/admin/about")
+    assert b'id="update-trigger"' in resp.data
+    button = resp.data.split(b'id="update-trigger"')[1][:200]
+    assert b"disabled" in button
 
 
 def test_admin_vm_control_route_calls_monitoring_and_flashes_result(client, monkeypatch):

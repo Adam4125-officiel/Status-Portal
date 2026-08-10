@@ -307,6 +307,122 @@ DB-backed Settings pages, not a code edit.
   completely unaffected by this setting, it only ever influences what a brand
   new "New service" form starts pre-filled with.
 
+## Self-update (`updater.py`, `update.py`, `/admin/about`) — added 2026-08-10
+
+- **`VERSION` (a tracked file at the repo root) is the single source of truth, and
+  bumping it is a required step of cutting a release** (see Release process below).
+  It has to be a file rather than a literal in `config.py` because `updater.py`
+  reads the *incoming* release's version straight out of an extracted zip without
+  importing the new, not-yet-installed code. It has to be a tracked file rather
+  than anything git-derived because `git archive` strips `.git` — a shipped zip has
+  no git metadata at all, which is exactly why nothing in this project carried a
+  version before now. `config.IS_GIT_CHECKOUT` (one `os.path.isdir(".git")` at
+  import, no git subprocess) distinguishes a working tree from an extracted
+  release; `config.VERSION_DISPLAY` appends `+dev` for the former. **`+dev` is a
+  label only — never compare against it**, every version comparison uses
+  `config.VERSION`.
+- **`updater.py` is the one implementation; `update.py` and the admin route are
+  both thin wrappers.** This was an explicit requirement, and it's what stops the
+  CLI and the button drifting apart. `updater.py` imports only `config` and `db` —
+  never `app.py` (which imports it) and never Flask, so the CLI works on a portal
+  that won't start.
+- **The repo URL is a module constant and must never become configurable** — not a
+  DB setting, not an env var, not a CLI flag. A configurable update source is a
+  "point this server at my code" primitive for anyone who can write a setting.
+  There's a test asserting the constants and that certificate verification is never
+  disabled; keep it.
+- **`browser_download_url` is untrusted input, not a constant** — it arrives over
+  the network from the API response, so `_validate_download_url()` checks scheme
+  and host against `ALLOWED_DOWNLOAD_HOSTS` both before the request *and* on
+  `response.url` after redirects have been followed.
+- **Integrity verification protects the transfer, not the publisher.** The size and
+  SHA-256 are checked against what the releases API declares, which comes from the
+  same origin as the bytes — so this catches truncation/corruption/a mangling proxy
+  and (via TLS) an in-transit substitution, but not a malicious release. Real
+  publisher authenticity would need a detached signature against a key shipped with
+  the app. Say this plainly whenever documenting the feature rather than letting
+  "checksum verified" imply more. (Confirmed live 2026-08-10: GitHub *does* publish
+  a `digest` field on release assets, so the SHA-256 path is the one that actually
+  runs, not the size-only fallback.)
+- **Which files get replaced comes from the release archive's own member list** —
+  a whitelist by construction, and structurally incapable of containing
+  `instance/`, `.env` or `static/uploads/` since all three are gitignored and
+  releases are built with `git archive`. `PROTECTED_PREFIXES`/`PROTECTED_FILES`
+  are a second, redundant check that **aborts the entire update** if one ever shows
+  up, rather than skipping that entry — an archive containing one means the release
+  was built wrong, which is not a condition to proceed through quietly.
+- **Channel = GitHub release channel (stable/unstable), deliberately not a git
+  branch.** A branch head has no version identity, so "are you behind", "what am I
+  installing" and "roll back to what" all become unanswerable; a branch is also
+  arbitrary mid-work code rather than something that was cut and tested. Stable =
+  non-prerelease releases only; unstable = prereleases (`-rc.N`) too. The latest is
+  picked by **parsed version, not publish date**, so republishing an old release
+  can't look like an update. Channel is a DB setting (routine admin toggle); the
+  check *interval* is an env var (`PORTAL_UPDATE_CHECK_INTERVAL_SECONDS`) — the
+  standard config split, applied.
+- **The About page reads a cache and never checks GitHub inline.** Same rule and
+  same shape as `_integration_status_cache`. `refresh_update_cache_if_stale()` is
+  called from the existing health-check loop rather than starting a second thread,
+  and no-ops until its own (6h) TTL elapses so a 120s health-check interval doesn't
+  become a GitHub call every 120s. "Check now" (`/admin/about/check`) is the
+  sanctioned explicit-slow-action exception, like the integrations Check-now button.
+  A failed check renders as "couldn't check" and affects nothing else on the page.
+- **`perform_update()` runs synchronously inside the admin route.** That is the
+  same sanctioned exception — an explicit one-shot action the admin knowingly
+  triggered — not a violation of the no-slow-I/O rule. Don't "fix" it by moving it
+  to a background thread; the admin needs the success/failure in the response.
+- **What rollback can and cannot do — don't overstate this.** Every failure
+  *before* the restart (download, verification, a file that won't replace part way
+  through, a failed `pip install`) is rolled back automatically and in-process, and
+  the portal keeps running what it already had. The failure *after* the restart
+  cannot be: once `os.execv` replaces the process image nothing from the old
+  version exists to detect a bad start. `write_pending_marker()` therefore only
+  buys two things — the next *successful* start confirms and clears it, and a
+  failed one leaves a record naming the exact backup to restore. Genuine automatic
+  post-restart rollback needs a supervisor outside the process (systemd + a health
+  check, or a wrapper), which this project deliberately doesn't ship because it
+  would change how everyone launches the portal.
+- **`update.py rollback --emergency` exists because of a bug found by live
+  testing, not by review.** The first version imported `updater` at module level;
+  a real end-to-end test (updating a throwaway install to an actual release whose
+  `config.py` predated `APP_ROOT`) left a tree where `updater.py` no longer
+  imported — so the designated recovery tool was itself broken by the update it
+  was meant to undo. Fixed by making every `update.py` import lazy and adding a
+  self-contained emergency path that reads only the `manifest.json` updater.py
+  already wrote. That is **not** a second update implementation and must not grow
+  into one — it only restores an existing backup.
+- **`pip install` runs only when `requirements.txt` actually changed, and a failure
+  rolls the update back** — restarting into code whose dependencies aren't
+  installed just fails to start, and this is the last moment where something is
+  still running that can undo it.
+- **Windows file locking**: every file is written to a sibling temp file then
+  `os.replace()`d (atomic; a crash mid-write leaves the old file intact). The
+  rename can still fail on Windows while another process holds the destination
+  open, hence `REPLACE_RETRY_ATTEMPTS` with backoff, and a whole-update rollback if
+  it still fails. If even the rollback can't write, the error names the backup
+  folder to restore by hand rather than claiming it was handled — there's a test
+  for that specific case.
+- **`config.ENABLE_INAPP_UPDATE` is an env var on purpose.** The risk it addresses
+  is "someone compromised the admin panel"; a DB toggle that same attacker could
+  flip from that same panel would address nothing. Same reasoning as
+  `twofactor.RESET_2FA` being a host-level file. It defaults to **enabled** (the
+  button was explicitly asked for), and the route checks it, not just the template
+  — verified live that a valid 2FA code still gets refused when it's off.
+- **Verification status (2026-08-10)**: a real end-to-end update was run against
+  the actual GitHub API and the real v1.4.0 release zip, in a throwaway install —
+  real SHA-256 verification, 83 files replaced, `instance/portal.db`/`.env`/
+  `static/uploads/` confirmed byte-identical afterwards, then a real rollback and a
+  real `--emergency` rollback back to the starting state. The About page, the
+  channel form, "Check now", the step-up-2FA refusal and the kill-switch refusal
+  were all exercised live against a running server. **Not verified**: the in-app
+  button actually completing an update *and restarting* (never triggered for real
+  per the standing rule — the route is tested with `perform_update`/
+  `_restart_process` mocked); anything on Windows (file locking, `os.replace`
+  contention, Task Scheduler relaunch after `os.execv`) since this sandbox is
+  Linux; and the browser-side typed-confirmation JS, since no Playwright/Chromium
+  was available in this session — only the JS syntax, the rendered element ids and
+  the cache-busted asset URL were checked.
+
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
 - The Windows-only, PowerShell/CIM-backed queries (Hyper-V VM list, CPU
@@ -843,6 +959,16 @@ cadence was one pre-release at the end of the whole batch, not per-item. The
 stable-release trigger phrase above still governs promoting a pre-release (or
 cutting a fresh full release) once the user actually confirms it works.
 
+0. **Bump `VERSION` first — this is now a required step, not a formality.** The
+   `VERSION` file at the repo root must contain the exact version being released,
+   *without* the leading `v` (`1.5.0`, `1.5.0-rc.1`), and must be committed before
+   the tag is created, so the tagged commit — and therefore the `git archive` zip
+   built from it — carries the right number. Nothing derives this automatically.
+   Getting it wrong is not cosmetic now that self-update exists: `updater.py`
+   compares the running `VERSION` against release tags, so a zip shipping a stale
+   value makes an installed portal either believe it's already up to date (and
+   refuse to install a real update) or offer an update it already has. Sanity check
+   after tagging: `git show vX.Y.Z:VERSION` must equal `X.Y.Z`.
 1. **Versioning**: `vMAJOR.MINOR.PATCH`, with an optional `-rc.N` suffix for anything
    not yet user-verified end-to-end (mark the GitHub release as a pre-release too).
    First tagged release is `v1.0.0` (2026-07-22). Bump MINOR for new features, PATCH
@@ -863,7 +989,11 @@ cutting a fresh full release) once the user actually confirms it works.
 3. **Asset**: `git archive --format=zip -o status-portal-vX.Y.Z.zip HEAD` (or the new
    tag once created). `git archive` only includes tracked files, so it's already
    clean — no `.git`, no `instance/portal.db`, no `.env`, no `__pycache__` — without
-   any manual exclusion list to maintain.
+   any manual exclusion list to maintain. **The zip must always be attached to the
+   release**: `updater.py` prefers a `.zip` asset and only falls back to GitHub's
+   auto-generated zipball, which publishes neither a size nor a digest, so a
+   release without the asset silently downgrades every updater's integrity check to
+   TLS-plus-tag-pinning alone.
 4. **Publish**:
    ```
    git tag vX.Y.Z
