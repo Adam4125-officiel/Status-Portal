@@ -1167,6 +1167,87 @@ def test_admin_host_control_requires_login(client):
     assert "/admin/login" in resp.headers["Location"]
 
 
+def test_admin_system_page_renders(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/system")
+    assert resp.status_code == 200
+    assert b"Restart app" in resp.data
+    assert b"Restart Discord bot" in resp.data
+
+
+def test_admin_system_restart_app_calls_restart_process(client, monkeypatch):
+    """Only ever exercises this through a mocked _restart_process() - never the
+    real function, which would actually os.execv the running test-suite process."""
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "app"})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_admin_system_restart_discord_bot_calls_discord_bot_restart(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.config, "DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setattr(app_module.discord_bot, "restart", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "discord-bot"})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
+def test_admin_system_restart_discord_bot_requires_configured_token(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.config, "DISCORD_BOT_TOKEN", "")
+    monkeypatch.setattr(app_module.discord_bot, "restart", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "discord-bot"}, follow_redirects=True)
+    assert b"not configured" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_rejects_unknown_component(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.post("/admin/system/restart", data={"component": "bogus"}, follow_redirects=True)
+    assert b"Unknown restart target" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_requires_login(client):
+    resp = client.post("/admin/system/restart", data={"component": "app"})
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_system_restart_step_up_2fa_blocks_without_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+
+    resp = client.post("/admin/system/restart", data={"component": "app"}, follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []
+
+
+def test_admin_system_restart_step_up_2fa_allows_with_correct_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module, "_restart_process", lambda: calls.append("restart"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/system/restart",
+                        data={"component": "app", "totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert calls == ["restart"]
+
+
 def test_admin_vm_control_route_calls_monitoring_and_flashes_result(client, monkeypatch):
     calls = []
     monkeypatch.setattr(app_module.monitoring, "control_vm",

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -1065,6 +1066,61 @@ def admin_vm_control():
     success, message = monitoring.control_vm(name, action)
     flash(message, "success" if success else "error")
     return redirect(url_for("admin_resources"))
+
+
+# ---- System (this app's own process/components - separate from Resources above,
+# which is about the host machine's hardware) ----
+def _restart_process():
+    """Replaces the running process image in place via os.execv - same PID, works
+    identically whether launched as `python app.py`, `python serve_waitress.py`, or
+    either wrapped in a systemd unit/Task Scheduler entry, and needs no supervisor
+    process (unlike a fork+exit approach). Delayed briefly on a background thread so
+    the triggering HTTP response has a moment to actually reach the browser first -
+    same shape as monitoring.control_host(), but restarting this Python process
+    instead of shelling out to the OS to restart the whole machine."""
+    def _do():
+        time.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=_do, daemon=True).start()
+
+
+@app.route("/admin/system")
+@login_required
+def admin_system():
+    return render_template("admin_system.html", discord_status=discord_bot.get_status(),
+                            discord_configured=bool(config.DISCORD_BOT_TOKEN),
+                            totp_enabled=twofactor.is_enabled(), active="system")
+
+
+@app.route("/admin/system/restart", methods=["POST"])
+@login_required
+def admin_system_restart():
+    """Restarts either the whole app process or just the Discord bot connection -
+    see _restart_process()/discord_bot.restart() for what each actually does.
+    Same step-up 2FA reasoning as admin_host_control(): a stolen/replayed session
+    cookie alone must not be enough to trigger this, given a full-app restart
+    briefly takes the whole portal offline and a bot restart interrupts anyone
+    mid-conversation with it."""
+    component = request.form.get("component", "")
+    if component not in ("app", "discord-bot"):
+        flash("Unknown restart target.", "error")
+        return redirect(url_for("admin_system"))
+    if twofactor.is_enabled():
+        code = request.form.get("totp_code", "")
+        secret = db.get_setting("admin_totp_secret")
+        if not twofactor.verify_code(secret, code):
+            flash("Incorrect or missing 2FA code - restart cancelled.", "error")
+            return redirect(url_for("admin_system"))
+    if component == "app":
+        _restart_process()
+        flash("Restarting the app now - this page will be briefly unreachable.", "success")
+    else:
+        if not config.DISCORD_BOT_TOKEN:
+            flash("Discord bot isn't configured (PORTAL_DISCORD_BOT_TOKEN not set).", "error")
+            return redirect(url_for("admin_system"))
+        discord_bot.restart()
+        flash("Discord bot restarted.", "success")
+    return redirect(url_for("admin_system"))
 
 
 # ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----

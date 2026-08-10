@@ -1,0 +1,52 @@
+{% extends "admin_base.html" %}
+{% block title %}System — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>System</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Restart this app's own process or its Discord bot connection — separate from the
+  Resources page's host machine restart/shutdown controls.
+</p>
+
+<div class="form-panel" style="max-width: 520px;">
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Restarts the whole portal process in place (same effect as stopping and
+    re-running <code>python app.py</code> / <code>python serve_waitress.py</code>)
+    — briefly takes the portal offline for everyone while it comes back up.
+  </p>
+  <button type="button" class="btn secondary system-control-trigger" data-component="app" data-label="Restart the whole app">Restart app</button>
+</div>
+
+<div class="form-panel" style="max-width: 520px; margin-top: 16px;">
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Discord bot: {{ 'connected as ' ~ discord_status.user if discord_status.connected else ('configured, not connected' if discord_configured else 'not configured') }}.
+    Restarting only the bot's connection doesn't affect the public status page or
+    anything else in the app.
+  </p>
+  <button type="button" class="btn secondary system-control-trigger" data-component="discord-bot" data-label="Restart the Discord bot"
+          {{ 'disabled' if not discord_configured }}>Restart Discord bot</button>
+</div>
+
+<div id="system-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
+  <p id="system-control-confirm-text" style="font-size: 13px;"></p>
+  <form id="system-control-form" method="POST" action="{{ url_for('admin_system_restart') }}">
+    <input type="hidden" name="component" id="system-control-component">
+    <div class="field">
+      <input type="text" id="system-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
+    </div>
+    {% if totp_enabled %}
+    <div class="field">
+      <label for="system-control-totp">2FA code</label>
+      <input type="text" id="system-control-totp" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+             maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+    </div>
+    {% endif %}
+    <div class="form-actions">
+      <button type="submit" id="system-control-submit" class="btn danger" disabled>Confirm</button>
+      <button type="button" id="system-control-cancel" class="btn secondary">Cancel</button>
+    </div>
+  </form>
+</div>
+<script src="{{ url_for('static', filename='js/admin_system_control.js') }}"></script>
+{% endblock %}

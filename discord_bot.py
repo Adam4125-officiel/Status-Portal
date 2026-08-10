@@ -18,6 +18,7 @@ installed, start() is a clean no-op and logs why. Nothing else in this app is
 affected either way - app.py imports this module unconditionally, so it must never
 raise merely from being imported.
 """
+import asyncio
 import logging
 import re
 import threading
@@ -30,6 +31,13 @@ import monitoring
 _logger = logging.getLogger(__name__)
 
 _state = {"connected": False, "user": None, "last_error": None, "guilds": []}
+
+# The running bot's client/event-loop/thread, if any - set by start(), cleared by
+# stop(). Unlike _state above (a read-only snapshot for the admin page), this is
+# what actually lets stop()/restart() below command the running connection to shut
+# down from a different thread (the request-handling thread an admin's "restart"
+# click runs on), something the original fire-and-forget start() had no way to do.
+_runtime = {"client": None, "loop": None, "thread": None}
 
 STATUS_ICON = {"operational": "🟢", "slow": "🐢", "degraded": "🟡", "maintenance": "🟣", "down": "🔴"}
 STATUS_LABEL = {"operational": "Operational", "slow": "Slow", "degraded": "Degraded",
@@ -514,7 +522,18 @@ def _make_client_class(discord, app_commands, tasks):
 def start():
     """Starts the bot in a background daemon thread, if configured. Safe no-op
     otherwise - called unconditionally from app.py/serve_waitress.py, same as
-    start_background_checker()."""
+    start_background_checker(). Also a no-op if the bot is already running (e.g. a
+    stray extra call) rather than starting a second concurrent connection -
+    restart() below relies on this by calling stop() first, which clears _runtime
+    back to its "not running" state.
+
+    Manages its own asyncio event loop explicitly (loop.run_until_complete(...))
+    rather than the simpler client.run(...) convenience wrapper, specifically so
+    the loop is captured in _runtime *before* the client starts connecting - that
+    reference is what lets stop() below schedule client.close() onto this exact
+    loop from a different thread."""
+    if _runtime["client"] is not None:
+        return
     if not config.DISCORD_BOT_TOKEN:
         return
     discord, app_commands, tasks = _try_import_discord()
@@ -524,14 +543,61 @@ def start():
         return
 
     def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        intents = discord.Intents.default()  # slash commands need no privileged intents
+        client_cls = _make_client_class(discord, app_commands, tasks)
+        client = client_cls(intents=intents)
+        _runtime["client"] = client
+        _runtime["loop"] = loop
+
+        async def runner():
+            async with client:
+                await client.start(config.DISCORD_BOT_TOKEN)
+
         try:
-            intents = discord.Intents.default()  # slash commands need no privileged intents
-            client_cls = _make_client_class(discord, app_commands, tasks)
-            client = client_cls(intents=intents)
-            client.run(config.DISCORD_BOT_TOKEN)
+            loop.run_until_complete(runner())
         except Exception as e:
             _state["connected"] = False
             _state["last_error"] = str(e)
             _logger.exception("failed to start")
+        finally:
+            loop.close()
+            _runtime["client"] = None
+            _runtime["loop"] = None
+            _runtime["thread"] = None
 
-    threading.Thread(target=_run, daemon=True, name="discord-bot").start()
+    thread = threading.Thread(target=_run, daemon=True, name="discord-bot")
+    _runtime["thread"] = thread
+    thread.start()
+
+
+def stop(timeout=10):
+    """Cleanly stops the running bot connection, if any - safe no-op if the bot was
+    never started. Schedules client.close() onto the bot's own event loop from
+    whatever thread calls this (an admin route's request-handling thread, not the
+    bot's own thread) via asyncio.run_coroutine_threadsafe, then waits for the
+    bot's background thread to actually finish - so by the time this returns, the
+    connection is genuinely closed, not just "asked nicely", and a following
+    start() (see restart() below) can't race with the old one still shutting
+    down."""
+    client = _runtime["client"]
+    loop = _runtime["loop"]
+    thread = _runtime["thread"]
+    if client is None or loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=timeout)
+    except Exception:
+        _logger.exception("error stopping discord bot")
+    if thread is not None:
+        thread.join(timeout)
+    _state["connected"] = False
+
+
+def restart():
+    """Stops the current connection (if any) and starts a fresh one - e.g. after
+    changing the bot token or another startup-time setting without restarting the
+    whole app process."""
+    stop()
+    start()
