@@ -136,6 +136,32 @@ LOGO_ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "svg", "webp", "ico"}
 LOGO_UPLOAD_DIR = os.path.join(app.root_path, "static", "uploads")
 
 
+@app.template_global()
+def asset_url(filename):
+    """url_for('static', ...) plus a ?v=<mtime> cache-buster - use this for every
+    CSS/JS reference in a template, never bare url_for('static', ...).
+
+    Added 2026-08-10 after a real, user-hit bug that this app's "unzip over the
+    old folder" update process makes very easy to reproduce: a released JS change
+    (public_history.js switching its pagination from ?offset= to ?before_id=)
+    was silently shadowed by the browser's cached copy of the *previous*
+    release's file at the identical URL. The stale script kept calling the new
+    endpoint with the old parameter, which the server ignored - so every click
+    re-returned the newest page and appended the same incidents forever. The
+    filename never changes between releases, so the URL has to.
+
+    mtime is a local stat (same class of call as reading a DB row, not the kind
+    of slow I/O the no-blocking-in-a-request-handler rule is about), and it
+    changes exactly when an updated file is extracted over the old one - which
+    is precisely when a cached copy must be invalidated."""
+    path = os.path.join(app.root_path, "static", filename)
+    try:
+        version = int(os.path.getmtime(path))
+    except OSError:
+        return url_for("static", filename=filename)
+    return f"{url_for('static', filename=filename)}?v={version}"
+
+
 @app.context_processor
 def _inject_branding():
     """Exposes the current logo filename/cache-busting version to every template
@@ -295,6 +321,10 @@ def _public_history_days():
 
 
 HISTORY_PAGE_SIZE = 10
+
+# Upper bound on how many already-displayed incident ids /api/incidents/more will
+# accept in one request, purely to keep the URL a sane length - see that route.
+SEEN_IDS_LIMIT = 500
 
 
 # Pre-fill-only defaults for the "New service" form (Settings -> Service defaults) -
@@ -471,28 +501,29 @@ def api_incidents_more():
     Deliberately does NOT apply the max_age_days filter the initial page load
     uses - "load more" exists specifically to reveal incidents the initial view
     hid for being old, so re-applying the same filter here would make anything
-    past the age cutoff permanently unreachable (a real bug, caught 2026-08-10 -
-    the button just returned empty forever past the first page for anyone with
-    an age cutoff configured, reported by the user testing a 3-day cutoff with
-    2 old + 1 recent incident: the 2 old ones never appeared, "load more" always
-    came back empty).
+    past the age cutoff permanently unreachable (a real bug, caught 2026-08-10:
+    reported by the user testing a 3-day cutoff with 2 old + 1 recent incident,
+    where the 2 old ones never appeared and "load more" always came back empty).
 
-    Paginated by an id cursor (before_id) rather than a numeric offset, and the
-    template deliberately seeds that cursor from the NEWEST shown incident's id
-    (incidents[0]), not the oldest (incidents[-1]) - a first attempt at this fix
-    used the oldest and was still broken: the initial (filtered) view can have a
-    gap in id-space between shown items (e.g. a still-open old incident sitting
-    at a lower id than a newer, already-resolved-and-hidden one), and cursoring
-    from the oldest shown id skips straight past anything filtered out in that
-    gap, same bug as before just one page later. Cursoring from the newest shown
-    id instead guarantees nothing filtered out of the initial view is ever
-    unreachable, at the cost of possibly re-showing one already-visible item
-    once on the very first "load more" click if that gap exists - a fully
-    unfiltered continuation from every click after that has no such gap and
-    never duplicates. Accepted as the right tradeoff (a rare, harmless, one-time
-    duplicate vs. permanently missing data)."""
-    before_id = request.args.get("before_id", type=int)
-    incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, before_id=before_id))
+    Pagination is by the `seen` list - the ids the client is already displaying -
+    rather than an offset or an id cursor; see db.list_incidents() for why both
+    of those lost or duplicated data here. `seen` is capped at SEEN_IDS_LIMIT
+    purely to bound the URL length; a personal status portal is never going to
+    have a page rendering more incidents than that, and the cap failing closed
+    (below) is safe rather than silently wrong.
+
+    Missing/empty `seen` fails closed with an empty response rather than
+    returning "page 1". That case is never a real "load more" click - the button
+    always sends its list - it's a stale cached copy of an older
+    public_history.js still sending the previous release's ?offset= parameter,
+    which the server would otherwise answer with the newest page over and over,
+    appending the same incidents forever (exactly the runaway duplication a user
+    hit after updating). An empty response makes such a button remove itself."""
+    raw = request.args.get("seen", "")
+    seen = [int(part) for part in raw.split(",") if part.strip().isdigit()]
+    if not seen or len(seen) > SEEN_IDS_LIMIT:
+        return ""
+    incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, exclude_ids=seen))
     return render_template("sections/_incidents_fragment.html", incidents=incidents)
 
 

@@ -243,30 +243,46 @@ DB-backed Settings pages, not a code edit.
   re-run (see `static/js/local_time.js`, which now exposes this instead of only
   running once as an unnamed IIFE) since they arrive after the page's own load
   event already fired.
-- **`/api/incidents/more` must never re-apply the initial view's `max_age_days`
-  filter, and its pagination cursor must be seeded from the newest shown id,
-  not the oldest — both caught live by the user, not by the original test
-  suite (fixed 2026-08-10, see the two docstrings on `app.api_incidents_more()`
-  and the id-cursor design in `db.list_incidents()` for the full reasoning).**
-  Two distinct bugs, found one after the other: (1) re-applying `max_age_days`
-  on "load more" makes anything past the cutoff permanently unreachable — the
-  whole point of the button is to reveal what the initial view hid, so
-  filtering it *again* defeats that entirely; `api_maintenance_history()` has
-  the same fix (drop the filter) for the same reason. (2) even after fixing
-  that, seeding the id cursor from `incidents[-1]` (the oldest *shown* item)
-  still lost data: the age-filtered initial view can have a gap in id-space
-  between shown items — a still-open incident (never hidden, any age) can sit
-  at a *lower* id than a newer incident that got resolved and aged out — and
-  cursoring `id < oldest_shown_id` skips straight over anything filtered out
-  inside that gap. Fixed by seeding from `incidents[0]` (the *newest* shown
-  id) instead, so `id < newest_shown_id` is guaranteed to include everything
-  the initial view filtered out. Trade-off, accepted on purpose: the very
-  first "load more" click can re-show one already-visible open incident if
-  that gap existed (harmless, rare, one-time) — every click after that is a
-  fully unfiltered continuation with no gap and no duplicates. If you touch
-  this pagination again, keep both the age-filter-free reasoning and the
-  newest-id cursor seed — a superficially "simpler" version of either one
-  reintroduces a real, user-hit data-loss bug, not just a style nitpick.
+- **`/api/incidents/more` paginates by the ids the client already has
+  (`?seen=`), never by an offset or an id cursor, and never re-applies the
+  initial view's `max_age_days` filter. All three of these were shipped broken
+  in sequence on 2026-08-10, each caught live by the user rather than by the
+  test suite — read this before "simplifying" it back.**
+  1. **Re-applying `max_age_days` on "load more"** makes anything past the
+     cutoff permanently unreachable: the initial page hides it, and the button
+     hides it again. The whole point of the button is to reveal what the
+     initial view hid. `api_maintenance_history()` drops the filter for the
+     same reason.
+  2. **A positional `OFFSET`** counted against the *age-filtered* initial query
+     doesn't line up with an *unfiltered* continuation of it, so it skips past
+     exactly the items being revealed.
+  3. **An `id < cursor` cursor** cannot express "everything I'm not already
+     showing" against a filtered view. Seeding from the oldest shown id skips
+     anything hidden in an id-space *gap* (a still-open old incident can sit at
+     a lower id than a newer resolved-and-hidden one); seeding from the newest
+     shown id instead re-returned every already-visible item below it — which
+     made the button re-append the entire visible list on every click, the
+     symptom the user reported as "completely broken, it loads the same
+     indefinitely."
+  Excluding the shown ids is the only formulation that is simultaneously
+  gap-free and duplicate-free, because it states the intent directly instead of
+  approximating it with a position. The endpoint **fails closed** (empty
+  response) when `seen` is missing/empty/oversized — that request is never a
+  real click, it's a stale cached script (see the `asset_url()` bullet below),
+  and answering it with "page 1" is what turned that stale script into an
+  infinite duplicator.
+- **Every CSS/JS reference in a template must go through `asset_url()`
+  (`app.py`), never a bare `url_for('static', ...)`** — it appends a
+  `?v=<mtime>` cache-buster. Added 2026-08-10 after a real user-hit bug: this
+  app's documented update process is "extract the release zip over your existing
+  folder", which changes a JS file's *contents* but never its *URL*, so the
+  browser kept serving the previous release's cached copy. A shipped
+  `public_history.js` change (pagination switching parameters) was silently
+  shadowed that way, leaving an old script talking to a new endpoint — the
+  server ignored the obsolete parameter and re-returned the same page forever.
+  Any future JS/CSS change has exactly the same exposure, so this is a
+  project-wide rule, not a one-off patch. (`static/uploads/` logo URLs already
+  carried their own `?v=`, which is where the pattern came from.)
 
 - **New integration kinds are just a new entry in `integrations.py`'s
   `fetch_integration_status()` dispatch dict plus a matching fetcher function —

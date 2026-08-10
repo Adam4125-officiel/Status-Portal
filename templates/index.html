@@ -50,7 +50,7 @@
   <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a></footer>
 </div>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
-<script src="{{ url_for('static', filename='js/main.js') }}"></script>
-<script src="{{ url_for('static', filename='js/local_time.js') }}"></script>
-<script src="{{ url_for('static', filename='js/public_history.js') }}"></script>
+<script src="{{ asset_url('js/main.js') }}"></script>
+<script src="{{ asset_url('js/local_time.js') }}"></script>
+<script src="{{ asset_url('js/public_history.js') }}"></script>
 {% endblock %}

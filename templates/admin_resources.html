@@ -65,7 +65,7 @@
   Live snapshot, auto-refreshing every {{ refresh_seconds }}s (set via <code>PORTAL_RESOURCE_REFRESH_SECONDS</code>) — no history is kept for these.
 </p>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
-<script src="{{ url_for('static', filename='js/main.js') }}"></script>
-<script src="{{ url_for('static', filename='js/admin_host_control.js') }}"></script>
-<script src="{{ url_for('static', filename='js/admin_vm_control.js') }}"></script>
+<script src="{{ asset_url('js/main.js') }}"></script>
+<script src="{{ asset_url('js/admin_host_control.js') }}"></script>
+<script src="{{ asset_url('js/admin_vm_control.js') }}"></script>
 {% endblock %}

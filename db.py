@@ -423,23 +423,36 @@ def _attach_incident_services(incidents):
     return incidents
 
 
-def list_incidents(limit=None, before_id=None, max_age_days=None):
+def list_incidents(limit=None, exclude_ids=None, max_age_days=None):
     """max_age_days never hides a still-open incident (resolved_at IS NULL)
     regardless of how long it's been going on - only a *resolved* incident's own
     age counts toward the cutoff, since an ongoing problem shouldn't disappear
     from the public page just because it started a while ago.
 
-    before_id is an id-based pagination cursor ("give me the next page after the
-    incident with this id"), not a numeric offset - deliberately, so a caller
-    paginating past the initial max_age_days-filtered page (see app.py's
-    api_incidents_more()) can page through the *unfiltered* remainder without the
-    filtered/unfiltered offset mismatch a plain OFFSET would have (an OFFSET
-    counted against the filtered query would silently skip past - or re-hide -
-    exactly the older items "load more" exists to reveal; this was a real bug,
-    caught 2026-08-10). Ordering by id DESC is equivalent to started_at DESC here
-    and avoids any timestamp-string-comparison ambiguity - safe because
-    create_incident() always stamps started_at with now_iso() at insert time,
-    never backdated (unlike maintenance windows, which can be)."""
+    exclude_ids drives "load more" pagination (see app.py's api_incidents_more()):
+    the client sends the ids it is already displaying, and this returns the next
+    page of whatever is left, newest-first, with no age filter applied. That is
+    deliberately NOT a positional OFFSET and NOT an id cursor, both of which were
+    tried first and both of which lost or duplicated data (2026-08-10):
+
+    - An OFFSET counted against the *age-filtered* initial query doesn't line up
+      with an *unfiltered* continuation of it, so it skipped straight past the
+      very items "load more" exists to reveal.
+    - An `id < cursor` cursor can't express "everything not already shown" when
+      the initial view is filtered: the shown ids can have gaps in id-space (a
+      still-open old incident sits at a lower id than a newer resolved-and-hidden
+      one), so seeding from the oldest shown id silently skipped anything hidden
+      inside that gap, while seeding from the newest shown id re-returned every
+      already-visible item below it - which is what made "Load more" append the
+      whole list again on every click.
+
+    Excluding the ids the client already has is the only one of the three that is
+    simultaneously gap-free and duplicate-free, because it states the real intent
+    directly ("give me what I'm not already showing") instead of approximating it
+    with a position. Ordering by id DESC is equivalent to started_at DESC here and
+    avoids timestamp-string-comparison ambiguity - safe because create_incident()
+    always stamps started_at with now_iso() at insert time, never backdated
+    (unlike maintenance windows, which can be)."""
     conn = get_db()
     q = "SELECT * FROM incidents"
     conditions = []
@@ -447,9 +460,10 @@ def list_incidents(limit=None, before_id=None, max_age_days=None):
     if max_age_days:
         conditions.append("(resolved_at IS NULL OR resolved_at >= datetime('now', ?))")
         params.append(f"-{int(max_age_days)} days")
-    if before_id:
-        conditions.append("id < ?")
-        params.append(int(before_id))
+    if exclude_ids:
+        ids = [int(i) for i in exclude_ids]
+        conditions.append(f"id NOT IN ({','.join('?' * len(ids))})")
+        params.extend(ids)
     if conditions:
         q += " WHERE " + " AND ".join(conditions)
     q += " ORDER BY id DESC"

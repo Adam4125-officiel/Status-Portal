@@ -128,5 +128,5 @@
     <a href="{{ url_for('admin_services') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
-{% if service %}<script src="{{ url_for('static', filename='js/admin_service_links.js') }}"></script>{% endif %}
+{% if service %}<script src="{{ asset_url('js/admin_service_links.js') }}"></script>{% endif %}
 {% endblock %}

@@ -7,22 +7,33 @@
   // the button removes itself instead of staying around to produce empty clicks.
   //
   // Two pagination styles, picked per-button by which data attribute is present:
-  // - data-before-id (incidents): an id cursor - "give me the next page after
-  //   this id" - server-side never re-applies the initial view's age filter, so
-  //   older/hidden incidents stay reachable. Advanced after each fetch to the
-  //   last inserted item's own data-id.
-  // - data-offset (maintenance history): a plain numeric offset - safe here
+  // - data-seen-selector (incidents): sends the ids already rendered on the page
+  //   (?seen=5,4,3) and gets back whatever is left. NOT an offset and NOT an id
+  //   cursor - the initial incident list is age-filtered, and neither of those
+  //   can express "everything I'm not already showing" against a filtered view
+  //   without skipping hidden items or re-appending visible ones (both shipped
+  //   and both were real bugs; see db.list_incidents()).
+  // - data-offset (maintenance history): a plain numeric offset, safe here
   //   because every call into that endpoint uses the same unfiltered query, so
   //   there's no filtered/unfiltered mismatch for an offset to drift against.
   var PAGE_SIZE = 10;
 
+  function seenIds(selector) {
+    return Array.prototype.map.call(
+      document.querySelectorAll(selector),
+      function (el) { return el.getAttribute('data-id'); }
+    ).filter(Boolean);
+  }
+
   function wire(button) {
     button.addEventListener('click', function () {
-      var cursorMode = button.hasAttribute('data-before-id');
+      var seenSelector = button.getAttribute('data-seen-selector');
       var url = button.getAttribute('data-url');
-      if (cursorMode) {
-        var beforeId = button.getAttribute('data-before-id');
-        url += '?before_id=' + beforeId;
+      var seenBefore = 0;
+      if (seenSelector) {
+        var ids = seenIds(seenSelector);
+        seenBefore = ids.length;
+        url += '?seen=' + ids.join(',');
       } else {
         var offset = parseInt(button.getAttribute('data-offset'), 10) || 0;
         url += '?offset=' + offset;
@@ -40,16 +51,11 @@
           // timestamps) and avoids fragile DOM traversal to scope it to just
           // what was inserted.
           if (window.applyLocalTimes) window.applyLocalTimes(document);
-          if (cursorMode) {
-            // The last item inserted is the one immediately before the button
-            // now (insertAdjacentHTML keeps fragment order) - it carries the
-            // smallest id of this batch, exactly the right cursor to continue
-            // further back in time on the next click.
-            var lastItem = button.previousElementSibling;
-            var lastId = lastItem ? lastItem.getAttribute('data-id') : null;
-            if (lastId) {
-              button.setAttribute('data-before-id', lastId);
-            } else {
+          if (seenSelector) {
+            // If the page didn't actually gain anything, stop rather than let
+            // further clicks re-append the same batch forever - the failure mode
+            // a stale cached copy of this file caused against a newer server.
+            if (seenIds(seenSelector).length <= seenBefore) {
               button.remove();
               return;
             }
