@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
   <link rel="alternate" type="application/rss+xml" title="Status feed" href="{{ url_for('feed') }}">
   {% if site_logo_filename %}
   <link rel="icon" href="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}">
@@ -26,7 +26,7 @@
   <button id="theme-toggle" class="theme-toggle" style="position: fixed; top: 16px; right: 16px; z-index: 10;"
           title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
   {% block body %}{% endblock %}
-  <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/csrf.js') }}"></script>
+  <script src="{{ asset_url('js/theme.js') }}"></script>
+  <script src="{{ asset_url('js/csrf.js') }}"></script>
 </body>
 </html>

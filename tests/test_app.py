@@ -10,6 +10,12 @@ import db
 import twofactor
 
 
+def db_all_incident_ids():
+    """Every incident id currently in the DB, newest first - stands in for "the
+    ids the page is currently displaying" in the /api/incidents/more tests."""
+    return [i["id"] for i in db.list_incidents()]
+
+
 def _extract_csrf_token(html):
     match = re.search(r'name="csrf-token" content="([^"]+)"', html.decode())
     assert match, "csrf-token meta tag not found in response"
@@ -1457,25 +1463,60 @@ def test_admin_settings_logo_reupload_different_extension_removes_old_file(clien
 
 def test_api_incidents_more_returns_html_fragment(client):
     sid = db.list_services()[0]["id"]
-    for n in range(3):
-        db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
+    ids = [db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
+           for n in range(3)]
 
-    resp = client.get("/api/incidents/more")
+    resp = client.get(f"/api/incidents/more?seen={ids[2]}")
     assert resp.status_code == 200
     assert resp.content_type.startswith("text/html")
     html = resp.data.decode()
     assert "Incident 0" in html
-    assert "Incident 2" in html
+    assert "Incident 1" in html
+    assert "Incident 2" not in html  # already shown, must not come back
     # Not a full page - no <html>/<head>, just the item markup.
     assert "<html" not in html
 
 
 def test_api_incidents_more_empty_past_the_end(client):
     sid = db.list_services()[0]["id"]
-    iid = db.create_incident({"service_id": sid, "title": "Only one", "status": "resolved"})
-    resp = client.get(f"/api/incidents/more?before_id={iid}")
+    ids = [db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
+           for n in range(2)]
+    all_seen = ",".join(str(i) for i in db_all_incident_ids())
+    resp = client.get(f"/api/incidents/more?seen={all_seen}")
     assert resp.status_code == 200
     assert resp.data.decode().strip() == ""
+
+
+def test_api_incidents_more_never_repeats_a_visible_incident(client):
+    """Regression test for the user-reported symptom that made "Load more" look
+    completely broken: with nothing hidden, it re-appended the whole visible
+    list on every click, indefinitely."""
+    sid = db.list_services()[0]["id"]
+    for n in range(3):
+        db.create_incident({"service_id": sid, "title": f"Visible {n}", "status": "resolved"})
+
+    visible = ",".join(str(i) for i in db_all_incident_ids())
+    resp = client.get(f"/api/incidents/more?seen={visible}")
+    assert resp.data.decode().strip() == ""
+
+
+def test_api_incidents_more_fails_closed_without_seen_list(client):
+    """A request with no `seen` list is never a real "load more" click - it's a
+    stale cached copy of an older public_history.js still sending the previous
+    release's ?offset= parameter. Answering it with the newest page is what made
+    such a client append the same incidents forever, so it must return nothing."""
+    sid = db.list_services()[0]["id"]
+    db.create_incident({"service_id": sid, "title": "Should not leak", "status": "resolved"})
+
+    assert client.get("/api/incidents/more").data.decode().strip() == ""
+    assert client.get("/api/incidents/more?offset=0").data.decode().strip() == ""
+    assert client.get("/api/incidents/more?offset=10").data.decode().strip() == ""
+    assert client.get("/api/incidents/more?seen=").data.decode().strip() == ""
+
+
+def test_api_incidents_more_rejects_an_oversized_seen_list(client):
+    too_many = ",".join(str(n) for n in range(app_module.SEEN_IDS_LIMIT + 1))
+    assert client.get(f"/api/incidents/more?seen={too_many}").data.decode().strip() == ""
 
 
 def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
@@ -1498,7 +1539,7 @@ def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
     assert "Recent one" in index_html
     assert "Old one" not in index_html  # correctly hidden from the initial view
 
-    resp = client.get(f"/api/incidents/more?before_id={recent}")
+    resp = client.get(f"/api/incidents/more?seen={recent}")
     assert "Old one" in resp.data.decode()  # but reachable via "load more"
 
 
