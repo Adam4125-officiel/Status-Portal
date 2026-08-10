@@ -64,7 +64,14 @@ DB-backed Settings pages, not a code edit.
   answered. This was a deliberate fix (2026-07-23) for services that gate their
   whole UI behind HTTP Basic Auth (e.g. Bazarr): pinging their `check_url` used to
   come back non-2xx and get misread as "degraded" even though the service was
-  completely healthy.
+  completely healthy. **502 is a carve-out within that 5xx bucket (added
+  2026-08-10):** `_check_status_for_response()` classifies a 502 as `down`, not
+  `degraded` — unlike a 500/503/504 (the service itself is up but erroring/
+  overloaded), a 502 means whatever's in front of it (reverse proxy, gateway)
+  couldn't even reach it, functionally equivalent to a connection failure from a
+  visitor's perspective. This composes for free with `retry_count`/
+  `_handle_incident_lifecycle` since both are already keyed off `status == "down"`
+  regardless of *why* — no separate code path was needed.
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
   `app._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —
@@ -192,6 +199,73 @@ DB-backed Settings pages, not a code edit.
   like this comes in again, render a quick Artifact preview using the app's
   actual CSS tokens before shipping the fix — confirmed the fix looked right
   before pushing it, rather than reasoning about CSS in the abstract.
+
+- **A native `<select multiple>` service picker is a latent bug generator — added
+  2026-08-10, replace it with a checkbox list instead of patching around it.**
+  `admin_maintenance_form.html`'s multi-service `<select>` had
+  `'selected' if s.id in selected_ids or not window` — normal operator precedence
+  makes that `(s.id in selected_ids) or (not window)`, so on the "new" form
+  (`window` is `None`) *every* option rendered pre-selected regardless of
+  `selected_ids`. Combined with the field-hint's "ctrl/cmd-click to select more
+  than one," an admin who ctrl-clicked the one service they actually wanted
+  *deselected* it while leaving every other service selected — submitting
+  "everything except" the intended service, exactly the bug report that led here.
+  Fixed by replacing the `<select multiple>` in both the maintenance and incident
+  forms with a checkbox list (`.checkbox-list`/`.field-check` in
+  `static/css/style.css`) — `request.form.getlist("service_id")` reads identically
+  from repeated checkboxes as from a multi-select, so this needed zero `app.py`
+  changes, and a checkbox's `checked` state can't have this class of bug at all
+  (no `or not window`-style fallback expression is needed). If another multi-select
+  service/entity picker gets added later, use the checkbox-list pattern from the
+  start rather than a native multi-select.
+- **A "merge two status sources into one" feature (per-service `api_health_mode`,
+  added 2026-08-10) must still produce a single final status that feeds both the
+  public display and `_handle_incident_lifecycle`, never two independent
+  decisions.** `app._merge_api_health(status, api_health_mode, integration_reachable)`
+  folds a linked integration's cached reachability into the web-check's own
+  `status` *before* `db.update_service_status_from_check`/
+  `_handle_incident_lifecycle` are called in `run_health_checks()` — this
+  preserves the level-triggered invariant documented below (the
+  `_handle_incident_lifecycle` bullet), which already broke once from letting a
+  status write and an incident-lifecycle decision see different values. Don't add
+  a second "does the API health affect this?" branch anywhere else; extend the
+  merge function instead.
+- **An internal "load more" / pagination endpoint returns a server-rendered HTML
+  fragment, not JSON (added 2026-08-10, `/api/incidents/more`,
+  `/api/maintenance/history`).** This app's only actual JSON API is `/api/status`,
+  meant for external consumption; there's no client-side templating anywhere else
+  in the app, so an HTML-fragment endpoint (`render_template` on a partial like
+  `sections/_incidents_fragment.html`, inserted via
+  `insertAdjacentHTML('beforebegin', ...)` in `static/js/public_history.js`)
+  matches the existing "server renders everything, small vanilla JS wires it up"
+  convention instead of introducing a second, JSON-based rendering path just for
+  this. Newly-inserted timestamps need `window.applyLocalTimes(document)`
+  re-run (see `static/js/local_time.js`, which now exposes this instead of only
+  running once as an unnamed IIFE) since they arrive after the page's own load
+  event already fired.
+
+- **New integration kinds are just a new entry in `integrations.py`'s
+  `fetch_integration_status()` dispatch dict plus a matching fetcher function —
+  no architectural change needed.** Bazarr/Tdarr/Byparr (added 2026-08-10)
+  followed this exactly: `fetch_bazarr_status()`/`fetch_tdarr_status()`/
+  `fetch_byparr_status()` each return the same `{"reachable", "version",
+  "issues", "error"}` shape every other fetcher does. Bazarr differs from the
+  Servarr-family pattern in one notable way — it expects its API key as a
+  `?apikey=` query param, not an `X-Api-Key` header — confirmed against
+  Bazarr's own source, not a real instance (see ROADMAP.md). Tdarr and Byparr
+  have no API key concept of their own at all, so the shared `api_key` form
+  field is simply unused by those two fetchers (left present on the form only
+  for a consistent UI across all kinds).
+- **`service_default_*` settings (Settings → "Service defaults", added
+  2026-08-10) are pre-fill-only, never live-cascading** — `app._service_defaults()`
+  reads them and `admin_service_new`'s `GET` handler passes the result as an
+  optional `defaults` context var to `admin_service_form.html` (already
+  rendering every one of these fields for editing; `service is None` on the
+  "new" form is what triggers using `defaults` instead of hardcoded
+  fallbacks). Changing a default later never retroactively touches a service
+  that already exists — `run_health_checks()` and the rest of the schema are
+  completely unaffected by this setting, it only ever influences what a brand
+  new "New service" form starts pre-filled with.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
@@ -373,6 +447,25 @@ DB-backed Settings pages, not a code edit.
   behavior, the actual gateway-cache correctness is unverified against a real
   server as of 2026-08-01 — only unit-tested via mocked `discord.Guild`/
   `discord.TextChannel` objects.
+- **`stop()`/`restart()` (added 2026-08-10)** — the module was fully
+  fire-and-forget before this: `start()`'s `_run()` closure discarded both the
+  `threading.Thread` and the `discord.Client` instance, so nothing outside the
+  module could ever command a running connection to shut down. Fixed by having
+  `_run()` manage its own `asyncio` event loop explicitly
+  (`loop.run_until_complete(runner())`, not the `client.run(...)` convenience
+  wrapper) and stashing `client`/`loop`/`thread` in a module-level `_runtime`
+  dict *before* the client starts connecting — that's what lets `stop()` call
+  `asyncio.run_coroutine_threadsafe(client.close(), loop)` from a *different*
+  thread (an admin route's request-handling thread, via `/admin/system`) and
+  then `thread.join(timeout)` to know the connection is genuinely closed, not
+  just "asked nicely." `restart()` is just `stop(); start()` — relies on
+  `start()`'s new already-running guard (`if _runtime["client"] is not None:
+  return`) so a `restart()` call can't race with the old connection still
+  shutting down. Verification: unit-tested with a fake in-thread event loop
+  standing in for a real discord.py connection (`_start_fake_bot_runtime()` in
+  `tests/test_discord_bot.py`) — genuinely exercises the
+  threading/asyncio wiring `stop()` depends on, but still never a real
+  gateway connection; see ROADMAP.md's verification-against-real-instances note.
 
 ## Crash logging (`logging_setup.py`) — added 2026-08-01
 
@@ -492,6 +585,110 @@ DB-backed Settings pages, not a code edit.
   off) stays in the web UI at `/admin/2fa`, itself gated behind entering a
   current code — a hijacked session alone can't turn 2FA off either.
 
+## Public "report a problem" form (`app.py` — added 2026-08-10)
+
+- **`GET/POST /report` is this app's first public POST route besides
+  `/admin/login`** — deliberately separate from the admin-authored
+  incident/maintenance system (a visitor telling the admin something looks
+  wrong, not the admin recording a known outage). Because it's outside
+  `/admin/`, it is **not** covered by the CSRF `before_request` hook — this is
+  fine here (there's no authenticated session/privilege being exercised, so a
+  cross-site submission achieves nothing an attacker couldn't already do by
+  POSTing directly), but it does mean this route needs its *own* anti-abuse,
+  not "just add CSRF."
+- **Three independent anti-abuse layers, all process-global (not per-IP), same
+  reasoning as `_login_state`**: a honeypot field (`website`, hidden via CSS
+  positioning, not `display:none`/`type=hidden` which some bots skip — a
+  filled honeypot silently "succeeds" without writing a row, so a bot gets no
+  signal it was caught), a minimum-time-to-fill check
+  (`session["report_form_rendered_at"]`, set on the `GET`, checked against
+  `REPORT_MIN_SECONDS_TO_FILL` on `POST`), and a rate limit
+  (`_report_state`/`_report_rate_limited()`/`REPORT_RATE_LIMIT` per
+  `REPORT_RATE_WINDOW_SECONDS`, mirroring `_login_state`'s shape exactly). No
+  external rate-limiting library was added just for this one route.
+- **`problem_reports` is a brand-new table** (plain `CREATE TABLE IF NOT
+  EXISTS` is fine per the schema-change convention above — nothing to
+  retrofit). `service_id` is optional (a report can reference a specific
+  service's card via `?service_id=N` pre-filling the form, or be general) and
+  `ON DELETE SET NULL` so deleting a service later detaches rather than
+  cascade-deletes any reports about it.
+- **The admin nav's unread-count badge (`unread_reports_count`) comes from a
+  `context_processor`** (`app._inject_admin_badges()`), not threaded through
+  every admin route's `render_template` call by hand — same reasoning as
+  `csrf_token()` being a Jinja global. Scoped to `request.path.startswith("/admin/")`
+  so the `COUNT(*)` query never runs on a public page load.
+- **"Create incident from this report"** (`/admin/reports/<id>/create-incident`)
+  pre-fills a new incident's title/description from the report and marks the
+  report resolved, then redirects to the incident's edit page rather than
+  silently doing everything with no further admin input — the admin still
+  gets a chance to adjust title/description/services before it goes live.
+
+## Component restart controls (`app.py`, `discord_bot.py` — added 2026-08-10)
+
+- **`/admin/system` is a new page, deliberately separate from
+  `/admin/resources`** — Resources is about the host machine's hardware,
+  System is about this app's own process/components. Two restart targets:
+  the whole app process, or just the Discord bot's connection.
+- **Whole-app restart (`app._restart_process()`) uses `os.execv(sys.executable,
+  [sys.executable] + sys.argv)`** — replaces the running process image in
+  place (same PID), which works identically whether launched as `python
+  app.py`, `python serve_waitress.py`, or either wrapped in a systemd
+  unit/Task Scheduler entry, and needs **no supervisor process** unlike a
+  fork+exit approach. Delayed by 1s on a background thread first (same shape
+  as `monitoring.control_host()`) so the triggering HTTP response has a
+  moment to actually reach the browser before the process image swaps out
+  from under it.
+- **Same step-up 2FA pattern as `admin_host_control()`** applies to both
+  restart targets in `admin_system_restart()` — a stolen/replayed session
+  cookie alone must not be enough to trigger either, given a full-app restart
+  briefly takes the whole portal offline for everyone and a bot restart
+  interrupts anyone mid-conversation with it. Same typed-confirmation UI
+  pattern too (`static/js/admin_system_control.js`, mirrors
+  `admin_host_control.js` almost exactly — one confirm panel driving both
+  trigger buttons via a `data-component` attribute instead of `data-action`).
+- **Never live-invoke `_restart_process()` for real in this sandbox or any
+  shared environment** — same rule as `monitoring.control_host()`. Verify
+  exclusively by mocking `app._restart_process()`/`discord_bot.restart()` in
+  pytest and asserting the route called them; a live smoke test should exit
+  the confirm-panel flow right before actually submitting, not click
+  through it.
+- See the Discord bot section above for `discord_bot.stop()`/`restart()`
+  themselves — the restart route here is just the thin admin-facing wrapper
+  around them (plus the equivalent whole-app path).
+
+## Custom logo / branding (`app.py`, `static/uploads/` — added 2026-08-10)
+
+- **This app's first file upload, ever** — confirmed zero prior upload code
+  anywhere in the repo before this. Kept deliberately narrow to avoid
+  needing to reason about a broad upload surface: the saved file is always
+  named exactly `logo.<ext>` (never the visitor/admin-supplied original
+  filename) under a dedicated `static/uploads/` directory, extension
+  whitelisted (`png`/`jpg`/`jpeg`/`svg`/`webp`/`ico`) against
+  `LOGO_ALLOWED_EXTENSIONS`, and `MAX_CONTENT_LENGTH` (already 2MB app-wide)
+  caps the upload size — there's no path-traversal surface and at most one
+  logo file ever exists on disk at a time. `static/uploads/` is gitignored
+  the same way `instance/` is — it's runtime-created state, not tracked
+  content.
+- **`app._inject_branding()` (a `context_processor`) exposes
+  `site_logo_filename`/`site_logo_version` to every template**, admin
+  included, so both the public topbar (`index.html`, `report.html`) and
+  `base.html`'s `<head>` (for the favicon `<link>`) can use it without every
+  route threading it through by hand. `site_logo_version` is a cache-busting
+  `?v=<mtime>` query param from a local `os.path.getmtime()` stat — not the
+  kind of slow I/O the request-handler rule above is about, it's a local
+  filesystem call same class as reading a DB row.
+- **A re-upload in a different format removes the old file first**
+  (`admin_settings_logo()` diffs the new filename against the stored
+  `site_logo_filename` setting before saving) — otherwise switching from
+  e.g. a `.png` to a `.svg` logo would leave the old file orphaned on disk
+  forever, since the filename (and therefore the path) changes with the
+  extension.
+- Added a new `@app.errorhandler(413)` at the same time (this app had
+  `MAX_CONTENT_LENGTH` set app-wide already, but nothing had ever hit it
+  before file uploads existed) — without it, an oversized upload fell
+  through to Flask's default unstyled error page instead of this app's own
+  `error.html`.
+
 ## Testing/verification habits (established over many sessions — keep following them)
 
 - Run the full `pytest` suite *and* a live `python app.py` + `curl` smoke test of
@@ -499,6 +696,20 @@ DB-backed Settings pages, not a code edit.
   (the integration-blocking page load, the maintenance-window timing bug, the 2FA
   enrollment `KeyError`) were only ever caught by actually running the server,
   never by unit tests alone.
+- **For anything that depends on client-side JS (AJAX "load more" buttons, the
+  favicon/logo actually rendering, console errors), `curl` alone isn't enough —
+  use the pre-installed Playwright/Chromium browser** (see the environment
+  notes on `PLAYWRIGHT_BROWSERS_PATH`/`executablePath` — don't run `playwright
+  install`) to actually click through the flow and check for console errors.
+  This caught a real bug 2026-08-10: `report_problem()` never passed
+  `site_name` to `report.html` at all, silently leaving the topbar brand text
+  and page title blank — every route-level `pytest` test for that route only
+  checked for form-field presence, never branding, and `curl` output looked
+  fine since the HTML was syntactically valid, just missing content. A real
+  browser screenshot caught it immediately. (One red herring encountered
+  along the way: an `ERR_CONNECTION_RESET` console error from the sandbox
+  having no egress to `fonts.googleapis.com` — unrelated to app code, don't
+  chase it as if it were.)
 - **When curl-smoke-testing a multi-request flow that depends on session state
   (login steps, flash messages, anything the server writes back via
   `Set-Cookie`), every request that should see or contribute to that state
