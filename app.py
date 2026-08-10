@@ -625,6 +625,7 @@ def report_problem():
     (see _report_rate_limited above)."""
     services = db.list_services()
     preselect_service_id = request.args.get("service_id", type=int)
+    site_name = db.get_setting("site_name", "Server")
     if request.method == "POST":
         # A real visitor never fills this field - it's hidden from sighted users via
         # CSS, not display:none/hidden (which some bots skip). Silently "succeed"
@@ -642,7 +643,8 @@ def report_problem():
         message = request.form.get("message", "").strip()
         if not message:
             flash("Please describe the problem.", "error")
-            return render_template("report.html", services=services, preselect_service_id=preselect_service_id)
+            return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
+                                    site_name=site_name)
         contact = request.form.get("contact", "").strip()[:200]
         service_id = request.form.get("service_id", type=int)
         service = db.get_service(service_id) if service_id else None
@@ -653,7 +655,8 @@ def report_problem():
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
-    return render_template("report.html", services=services, preselect_service_id=preselect_service_id)
+    return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
+                            site_name=site_name)
 
 
 @app.route("/admin/reports")

@@ -731,6 +731,23 @@ def test_report_problem_get_renders_form(client):
     assert b'name="website"' in resp.data  # honeypot
 
 
+def test_report_problem_page_shows_site_name(client):
+    """Regression test: the initial version of this route forgot to pass site_name
+    to the template at all, leaving the topbar brand text and page title silently
+    blank - caught by live-testing in a real browser, not by the route-level tests
+    above (which only checked for the presence of form fields, not branding)."""
+    db.set_setting("site_name", "My Home Server")
+    resp = client.get("/report")
+    html = resp.data.decode()
+    assert "My Home Server" in html
+    assert "<title>Report a problem — My Home Server</title>" in html
+
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    resp = client.post("/report", data={"message": ""})  # re-renders the form inline
+    assert b"My Home Server" in resp.data
+
+
 def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     notified = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: notified.append((title, msg)))
