@@ -50,6 +50,12 @@ touching the HTML.
   editable from `/admin`, no code involved
 - Embeddable SVG status badges and an RSS feed, for use outside the page itself
 - Crash/error logging to `instance/logs/app.log`, not just the console
+- **Self-updating**: an `/admin/about` page showing your version vs. the latest
+  available one, a one-click update-and-restart button, and a standalone
+  `update.py` script that does the same thing over SSH when the web UI is broken —
+  with a stable/unstable channel choice, integrity-checked downloads, automatic
+  backups and rollback, and a hard guarantee that your database, `.env` and
+  uploaded logo are never touched
 
 ---
 
@@ -92,20 +98,105 @@ None of that is this project's concern — point whatever you use at
 
 ### Updating to a new release
 
-1. Stop the running process (`Ctrl+C`, or stop the service/task if it runs in the
-   background).
-2. Download the new release zip and extract it directly over your existing
-   `status-portal` folder, overwriting the `.py`/template/static files.
-3. Leave `instance/` alone — don't delete it, don't extract over it manually.
-   There's nothing to do here: the release zip is built with `git archive`, which
-   only ever includes files tracked in git, and `instance/portal.db` never has
-   been one. Extracting the zip can't touch it — your services, incidents,
-   announcements, and admin password all survive untouched.
-4. `pip install -r requirements.txt` again, in case a dependency changed.
-5. Start it back up (`python serve_waitress.py`).
+Three ways, in order of how little work they are. All three do the same thing and
+**none of them ever touch `instance/` (your database and logs), `.env`, or
+`static/uploads/` (your uploaded logo)**.
 
-No database migration step, no export/import — the "unzip and replace" you were
-already doing is the whole process.
+#### a) The update script (recommended)
+
+```bash
+python update.py            # what am I running, is there something newer?
+python update.py apply      # download, verify, back up, install
+```
+
+Then restart the portal. It works over SSH with no web UI involved, which is the
+point — it's the tool for when something has gone wrong. It prints every step.
+
+#### b) The admin panel
+
+`/admin/about` shows your version, the latest available one, and an **Update now**
+button that does the same thing and then restarts the portal for you. It asks you
+to type `UPDATE` to confirm, and for a fresh 2FA code if you have 2FA enabled —
+the same protection as the host restart/shutdown controls, because installing new
+code is at least as powerful.
+
+#### c) By hand, the way it always worked
+
+1. Stop the running process (`Ctrl+C`, or stop the service/task).
+2. Extract the new release zip over your existing `status-portal` folder.
+3. Leave `instance/` alone. The release zip is built with `git archive`, which only
+   includes files tracked in git, and `instance/portal.db` never has been one —
+   extracting the zip simply cannot touch it.
+4. `pip install -r requirements.txt` again, in case a dependency changed.
+5. Start it back up.
+
+No database migration step, no export/import, whichever route you take.
+
+#### Stable vs unstable
+
+| Channel | What it offers |
+|---|---|
+| **stable** (default) | Final releases only. |
+| unstable | Prereleases (`-rc.N`) too — cut for testing and **not yet confirmed working**. |
+
+Change it at `/admin/about`, or `python update.py channel unstable`. It's a
+release channel, not a git branch, on purpose: every release has a version number,
+so the updater can tell whether you're behind, say what it's installing, and roll
+back to a known point. A branch head has none of that.
+
+#### What's never overwritten
+
+The list of files an update replaces comes from the release zip's own contents —
+so it's a whitelist by construction, and it can only ever contain files that are
+tracked in git. `instance/`, `.env` and `static/uploads/` are none of those. On top
+of that, the updater explicitly refuses to run at all if a release archive is ever
+found to contain one of those paths, rather than skipping it quietly.
+
+#### If an update goes wrong
+
+Every update backs up each file it replaces, into
+`instance/update_backups/<timestamp>/`.
+
+```bash
+python update.py list-backups
+python update.py rollback                 # undo the last update
+python update.py rollback --emergency     # same, but works when the app's own code won't even import
+```
+
+Failures **before** the restart — a bad download, a checksum mismatch, a file that
+can't be replaced, a failed `pip install` — are rolled back automatically, on the
+spot, and the portal keeps running the version it was already on.
+
+Failures **after** the restart are on you to trigger the rollback, and that is a
+real limitation rather than an oversight: once the process has restarted into the
+new code, nothing from the old version is left running to notice that it didn't
+come back. That's what `python update.py rollback` is for, and why the update
+script exists independently of the web UI at all. If you want this automated,
+that's a job for whatever already supervises the portal (a systemd unit with a
+health check, a wrapper script) — deliberately not something this app ships,
+because it would change how everyone launches it.
+
+#### Security note
+
+Auto-update is the biggest security surface this app has: it means someone who gets
+into your admin panel can install and run arbitrary code on the host, permanently.
+What's in place:
+
+- The GitHub repository it downloads from is **hardcoded** and cannot be changed
+  from the admin panel, an env var, or a CLI flag.
+- HTTPS with certificate verification, always; the download URL's host is checked
+  against a fixed allow-list both before the request and after redirects.
+- The downloaded archive is checked against the size and SHA-256 that GitHub
+  publishes for the release before a single file is replaced. Note what this is:
+  an integrity check on the *transfer*, not proof of who published it — the bytes
+  and the checksum come from the same place.
+- The in-app button needs login + CSRF + a typed confirmation + a fresh 2FA code.
+
+If you'd rather the admin panel could not do this at all, set
+`PORTAL_ENABLE_INAPP_UPDATE=false`. That disables the button (`update.py` still
+works over SSH). It's an env var, not a settings toggle, specifically so that
+someone who has compromised the admin panel can't just switch it back on —
+changing it needs filesystem access to the host and a restart.
 
 ## 2. Run it with Docker (optional alternative)
 
@@ -218,6 +309,13 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   Discord bot's connection, without needing shell/SSH access to the machine. Same
   typed-confirmation and fresh-2FA-code protections as the host controls, since a
   full-app restart briefly takes the portal offline for everyone.
+- **About**: which version you're running, which one is available on your chosen
+  channel, and a one-click **Update now** button (see "Updating to a new release"
+  above for how updates work, what's never overwritten, and how to roll one back).
+  Also: where your database and logs actually live, your Python/OS version, and
+  links to the repo, release notes and license. The update check runs in the
+  background every 6 hours and can be turned off entirely; a failed check just
+  says "couldn't check" and never affects the page.
 - **High-load indicator**: a badge on the public page and (optionally) the Discord
   bot that lights up when CPU, disk I/O, or network exceed admin-configurable
   thresholds (Settings) — or, if a Jellyfin integration is configured, when Jellyfin
@@ -397,6 +495,8 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_DISCORD_BOT_TOKEN` | *(blank = disabled)* | Enables the optional Discord bot (see its own section above) — requires `pip install discord.py` |
 | `PORTAL_DISCORD_BOT_REFRESH_SECONDS` | `300` | How often the bot updates its presence / edits its tracked status messages |
 | `PORTAL_DISCORD_BOT_GUILD_ID` | *(blank = global sync)* | Set to your server's ID for instant slash-command registration on a single-server bot |
+| `PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` | `21600` (6h) | How often the background thread asks GitHub whether there's a new release |
+| `PORTAL_ENABLE_INAPP_UPDATE` | `true` | Set `false` to remove the admin panel's "Update now" button entirely (`update.py` over SSH still works) |
 
 ## 5. Running the tests
 
@@ -415,7 +515,11 @@ reset file), CSRF protection, the public report-a-problem form (anti-spam
 honeypot/timing/rate-limit, admin review flow), the incident/maintenance-history
 auto-hide and "load more" pagination, the Discord bot's message-building logic
 (`/status` and `/snapshot`, including the guild/channel whitelists' behavior),
-login/lockout, and its `stop()`/`restart()` connection lifecycle, service grouping,
+login/lockout, and its `stop()`/`restart()` connection lifecycle, the self-updater
+(version comparison, channel filtering, download integrity/size/checksum checks,
+archive path validation, the file-replacement and automatic-rollback paths, and the
+emergency rollback - all against in-memory zips and a mocked `requests`, never a
+real download and never a real restart), service grouping,
 the slow-status/high-load logic, host/VM/app/Discord-bot restart controls (against
 a mocked `subprocess.run`/`os.execv`/fake event loop - the real commands and a real
 Discord gateway connection are never invoked by the test suite), and the
@@ -459,8 +563,11 @@ reloads the public page.
 ```
 status-portal/
   CLAUDE.md                # notes for future AI coding sessions on this repo
+  VERSION                  # the single source of truth for the running version
   app.py                  # Flask routes (public + admin)
   serve_waitress.py       # run this in production (instead of app.py)
+  update.py                # standalone updater CLI - works without the web UI
+  updater.py               # the shared update logic (used by update.py AND the admin button)
   config.py               # all configuration, read from env vars / .env
   db.py                    # the entire SQLite layer
   monitoring.py            # CPU/RAM/disk/GPU/VM snapshot + host/VM power controls
