@@ -402,6 +402,53 @@ DB-backed Settings pages, not a code edit.
   it still fails. If even the rollback can't write, the error names the backup
   folder to restore by hand rather than claiming it was handled — there's a test
   for that specific case.
+- **An update never deletes a file that a later release removed.** Only files
+  present in the incoming archive are written; anything the old version shipped
+  that the new one dropped just stays on disk. This is identical to the
+  extract-the-zip-over-the-folder process that predates the updater, and it's
+  harmless (Python only imports what's referenced, Flask only serves what's
+  routed), but don't assume a post-update tree is byte-identical to a fresh
+  extraction — it's a superset. Deleting the difference would mean trusting a
+  computed file list to remove things, which is a much worse failure mode than
+  leaving a stale file behind.
+- **Nothing in `updater.py` may read a DB setting without going through
+  `_read_setting()`.** `sqlite3.connect()` *creates* an empty file for a path
+  that doesn't exist, so a bare `db.get_setting()` from the CLI would leave a
+  zero-table `instance/portal.db` behind on a fresh install — which `init_db()`
+  then has to cope with, and which looks exactly like a corrupted database.
+  `_read_setting()` checks `os.path.isfile(db.DB_PATH)` first and falls back to
+  the default. It also swallows read errors, because the CLI is the tool you
+  reach for when things are broken, up to and including the database.
+- **`update.py`'s output must stay pure ASCII.** An em dash in the header line
+  raised `UnicodeEncodeError` on a Windows console using codepage 437 (found
+  while writing the user's test instructions, before it ever shipped). This is
+  the recovery tool — it must not be able to fail on a decorative character.
+  `updater.py`'s `progress()` messages are subject to the same rule since the
+  CLI prints them. There's a check for this in `tests/test_updater.py`.
+- **Backups are pruned to `KEEP_BACKUPS` (5) after each successful update.**
+  `_prune_backups()` reads the module constant *inside* the function rather than
+  as a default argument value — a default arg binds at def time, which silently
+  ignores a monkeypatched constant and made the pruning test pass for the wrong
+  reason until it was fixed.
+- **The About page's `list_backups()` is a local `os.listdir` + small JSON
+  reads** — the same class of call as `asset_url()`'s `getmtime`, not the kind of
+  slow outbound I/O the no-blocking-in-a-request-handler rule is about. Don't
+  "fix" it into another cache.
+- **Changing the channel must clear the update cache** (`admin_about_settings`
+  does). Otherwise the page renders a "latest available" that was fetched for the
+  *previous* channel right next to the newly-selected one — e.g. still showing
+  the newest stable release seconds after switching to unstable.
+- **`_inject_admin_badges()` also exposes `update_available`** for the nav's
+  About badge. It reads the cache only (never triggers a check), so a miss or a
+  failed check simply means no badge — exactly like having no unread reports.
+- **Test-suite gotcha: `config.IS_GIT_CHECKOUT` is genuinely `True` when pytest
+  runs from this repo**, so every update route and the About page's button
+  correctly refuse. `tests/test_app.py` has an autouse fixture
+  (`_update_test_environment`) that patches it to `False` and clears the update
+  cache, so those tests stand in for a normal install. Without it a test can
+  "pass" by hitting the git-checkout refusal rather than the behavior it meant to
+  assert — if you add an update-route test, make sure it's actually reaching the
+  code you think it is.
 - **`config.ENABLE_INAPP_UPDATE` is an env var on purpose.** The risk it addresses
   is "someone compromised the admin panel"; a DB toggle that same attacker could
   flip from that same panel would address nothing. Same reasoning as
