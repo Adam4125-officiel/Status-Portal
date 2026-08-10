@@ -423,20 +423,38 @@ def _attach_incident_services(incidents):
     return incidents
 
 
-def list_incidents(limit=None, offset=0, max_age_days=None):
+def list_incidents(limit=None, before_id=None, max_age_days=None):
     """max_age_days never hides a still-open incident (resolved_at IS NULL)
     regardless of how long it's been going on - only a *resolved* incident's own
     age counts toward the cutoff, since an ongoing problem shouldn't disappear
-    from the public page just because it started a while ago."""
+    from the public page just because it started a while ago.
+
+    before_id is an id-based pagination cursor ("give me the next page after the
+    incident with this id"), not a numeric offset - deliberately, so a caller
+    paginating past the initial max_age_days-filtered page (see app.py's
+    api_incidents_more()) can page through the *unfiltered* remainder without the
+    filtered/unfiltered offset mismatch a plain OFFSET would have (an OFFSET
+    counted against the filtered query would silently skip past - or re-hide -
+    exactly the older items "load more" exists to reveal; this was a real bug,
+    caught 2026-08-10). Ordering by id DESC is equivalent to started_at DESC here
+    and avoids any timestamp-string-comparison ambiguity - safe because
+    create_incident() always stamps started_at with now_iso() at insert time,
+    never backdated (unlike maintenance windows, which can be)."""
     conn = get_db()
     q = "SELECT * FROM incidents"
+    conditions = []
     params = []
     if max_age_days:
-        q += " WHERE resolved_at IS NULL OR resolved_at >= datetime('now', ?)"
+        conditions.append("(resolved_at IS NULL OR resolved_at >= datetime('now', ?))")
         params.append(f"-{int(max_age_days)} days")
-    q += " ORDER BY started_at DESC"
+    if before_id:
+        conditions.append("id < ?")
+        params.append(int(before_id))
+    if conditions:
+        q += " WHERE " + " AND ".join(conditions)
+    q += " ORDER BY id DESC"
     if limit:
-        q += f" LIMIT {int(limit)} OFFSET {int(offset)}"
+        q += f" LIMIT {int(limit)}"
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return _attach_incident_services([dict(r) for r in rows])
@@ -1002,6 +1020,23 @@ def count_unread_problem_reports():
     count = conn.execute("SELECT COUNT(*) FROM problem_reports WHERE status='new'").fetchone()[0]
     conn.close()
     return count
+
+
+def count_open_reports_by_service():
+    """{service_id: count} of open (not yet resolved - "new" or "reviewed") reports
+    per service, for the public page's per-service "N report(s)" indicator - same
+    "open" meaning as an incident (unresolved), not the narrower "new/unread"
+    meaning count_unread_problem_reports() above uses for the admin nav badge.
+    General reports (service_id IS NULL) aren't attributable to any one card, so
+    they're excluded here rather than counted against every service."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT service_id, COUNT(*) as cnt FROM problem_reports
+        WHERE status != 'resolved' AND service_id IS NOT NULL
+        GROUP BY service_id
+    """).fetchall()
+    conn.close()
+    return {r["service_id"]: r["cnt"] for r in rows}
 
 
 def update_problem_report_status(rid, status):

@@ -190,7 +190,10 @@ created together (the common case for Jellyfin/*Arr/Jellyseerr).
   contact field, light anti-spam (no account/login needed to submit). Landed reports
   show up here with an unread-count badge in the nav, can be marked reviewed/resolved
   or deleted, and a "Create incident" button turns one into a proper incident
-  (pre-filled title/description) in one click.
+  (pre-filled title/description) in one click. Any service with an open (not yet
+  resolved) report also shows a small "N open report(s)" indicator right on its
+  public card, so it's visible at a glance which service has something pending —
+  only a count, never the report's own text/contact info.
 - **Integrations**: read-only status/log checks for Jellyfin, Jellyseerr, *Arr apps,
   Bazarr, Tdarr, and Byparr. Optionally link one to a service, opt it into public
   display to show that service's API health on its public card, and/or let a failing

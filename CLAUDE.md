@@ -243,6 +243,30 @@ DB-backed Settings pages, not a code edit.
   re-run (see `static/js/local_time.js`, which now exposes this instead of only
   running once as an unnamed IIFE) since they arrive after the page's own load
   event already fired.
+- **`/api/incidents/more` must never re-apply the initial view's `max_age_days`
+  filter, and its pagination cursor must be seeded from the newest shown id,
+  not the oldest — both caught live by the user, not by the original test
+  suite (fixed 2026-08-10, see the two docstrings on `app.api_incidents_more()`
+  and the id-cursor design in `db.list_incidents()` for the full reasoning).**
+  Two distinct bugs, found one after the other: (1) re-applying `max_age_days`
+  on "load more" makes anything past the cutoff permanently unreachable — the
+  whole point of the button is to reveal what the initial view hid, so
+  filtering it *again* defeats that entirely; `api_maintenance_history()` has
+  the same fix (drop the filter) for the same reason. (2) even after fixing
+  that, seeding the id cursor from `incidents[-1]` (the oldest *shown* item)
+  still lost data: the age-filtered initial view can have a gap in id-space
+  between shown items — a still-open incident (never hidden, any age) can sit
+  at a *lower* id than a newer incident that got resolved and aged out — and
+  cursoring `id < oldest_shown_id` skips straight over anything filtered out
+  inside that gap. Fixed by seeding from `incidents[0]` (the *newest* shown
+  id) instead, so `id < newest_shown_id` is guaranteed to include everything
+  the initial view filtered out. Trade-off, accepted on purpose: the very
+  first "load more" click can re-show one already-visible open incident if
+  that gap existed (harmless, rare, one-time) — every click after that is a
+  fully unfiltered continuation with no gap and no duplicates. If you touch
+  this pagination again, keep both the age-filter-free reasoning and the
+  newest-id cursor seed — a superficially "simpler" version of either one
+  reintroduces a real, user-hit data-loss bug, not just a style nitpick.
 
 - **New integration kinds are just a new entry in `integrations.py`'s
   `fetch_integration_status()` dispatch dict plus a matching fetcher function —
@@ -466,6 +490,22 @@ DB-backed Settings pages, not a code edit.
   `tests/test_discord_bot.py`) — genuinely exercises the
   threading/asyncio wiring `stop()` depends on, but still never a real
   gateway connection; see ROADMAP.md's verification-against-real-instances note.
+- **`_edit_tracked_status_message()` (added 2026-08-10, fixing a real
+  reliability bug the user hit)** — `_refresh()`'s loop over tracked `/status`
+  messages used to wrap `fetch_message()`/`msg.edit()` in a bare `except
+  Exception: db.delete_discord_status_message(...)`. That treated *any*
+  failure — a timed-out API call, a momentary network blip, anything — exactly
+  like "the message was deleted by someone," immediately forgetting it and
+  forcing a brand-new `/status` run to get it back, even though the message
+  was still perfectly fine. Fixed by extracting the edit into its own method
+  that only forgets the tracked row on `discord.NotFound` (genuinely gone) or
+  `discord.Forbidden` (access revoked) — every other exception retries up to
+  `REFRESH_RETRY_ATTEMPTS` times (`REFRESH_RETRY_DELAY_SECONDS` apart) and, if
+  still failing, is logged and left alone: the row stays tracked, and the next
+  scheduled `refresh_loop` tick tries again on its own. Don't collapse the
+  `except (NotFound, Forbidden)` / `except Exception` branches back into one —
+  that distinction *is* the fix; a bare catch-all forgetting the message on
+  any failure is the exact bug this replaced.
 
 ## Crash logging (`logging_setup.py`) — added 2026-08-01
 
@@ -622,6 +662,20 @@ DB-backed Settings pages, not a code edit.
   report resolved, then redirects to the incident's edit page rather than
   silently doing everything with no further admin input — the admin still
   gets a chance to adjust title/description/services before it goes live.
+- **Open reports show directly on the public page's service cards, not just
+  in `/admin/reports` (added 2026-08-10, requested after the first version
+  shipped admin-only).** `db.count_open_reports_by_service()` returns a
+  `{service_id: count}` map in one grouped query (not N+1 per-card queries),
+  wired into `_enrich_services()` (shared by `index()` and `api_status()`) as
+  `s["open_reports_count"]`. "Open" here means the same thing an incident's
+  "open" does — anything not yet `resolved` (`new` or `reviewed`), a
+  deliberately *broader* definition than the admin nav badge's unread-only
+  (`new`) count from `count_unread_problem_reports()` — don't conflate the
+  two or reuse one function for both. **Only a count is shown publicly, never
+  the report's message/contact text** — a visitor-submitted free-text field
+  is not something to echo back onto the public page. General reports
+  (`service_id IS NULL`) aren't attributable to any one card and are excluded
+  from the counts entirely, not folded into every service's total.
 
 ## Component restart controls (`app.py`, `discord_bot.py` — added 2026-08-10)
 
@@ -800,3 +854,24 @@ cutting a fresh full release) once the user actually confirms it works.
    git push origin vX.Y.Z
    gh release create vX.Y.Z status-portal-vX.Y.Z.zip --title "vX.Y.Z" --notes "<changelog>" [--prerelease]
    ```
+   **If this step fails outright — no `gh` CLI, no direct GitHub API access, or
+   `git push origin vX.Y.Z` itself rejected (added 2026-08-10, confirmed in a
+   cloud/remote execution session):** this is normal for a session running in
+   Anthropic's cloud infrastructure rather than directly on the user's own
+   machine — those sessions' git credentials are scoped to push *branches*
+   (confirmed: pushing a brand-new branch name succeeds) but not to create new
+   *tags* (confirmed: `git push origin vX.Y.Z` gets a `403`, tags apparently
+   sit outside the allowed ref pattern), and the GitHub MCP toolset available
+   in that context may have no release-creation tool at all (only read tools
+   like `list_releases`/`get_latest_release`/`get_tag` — checked via
+   `ToolSearch` before concluding this, don't assume it's missing without
+   checking). Don't just report failure and stop — fall back to: build the zip
+   anyway (`git archive` still works locally, no push needed), push a **new
+   branch** off the current one (this *does* work), and hand the user
+   everything they'd need to finish the last step themselves: the exact tag
+   name, target commit/branch, title, changelog body, prerelease flag, and the
+   zip itself (e.g. via `SendUserFile`) — see this exact exchange for the
+   template of what to hand back. A locally-run session (the user's own
+   machine, not this cloud environment) usually has full `git`/`gh` access and
+   can just complete every step directly — this fallback is specifically for
+   when it can't, not a replacement for trying the real steps first.

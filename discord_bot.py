@@ -62,6 +62,12 @@ INCLUDE_KEYS = ("services", "incidents", "announcements", "maintenance", "highlo
 _INCLUDE_DEFAULTS = {"services": "1", "incidents": "1", "announcements": "1", "maintenance": "1",
                      "highload": "0"}  # opt-in, like resources - costs a live resource snapshot
 
+# How many times _edit_tracked_status_message() retries a transient failure (e.g. a
+# timed-out Discord API call) before giving up for this refresh cycle - see its
+# docstring. Module-level so tests can shrink the delay instead of actually sleeping.
+REFRESH_RETRY_ATTEMPTS = 3
+REFRESH_RETRY_DELAY_SECONDS = 2
+
 
 def get_status():
     """Read-only snapshot for the admin page - never raises, reflects whatever the
@@ -491,10 +497,40 @@ def _make_client_class(discord, app_commands, tasks):
         async def _fetch_channel(self, channel_id):
             # get_channel() is a cache lookup only - right after a restart the cache
             # may not be warm yet even though the channel is perfectly reachable, so
-            # fetch_channel() (a real API call) is tried before giving up on it. Only
-            # an actual failure here (channel deleted, access revoked) should drop
-            # the tracked message - not a cold cache.
+            # fetch_channel() (a real API call) is tried before giving up on it. A
+            # cold cache alone must never look like "channel deleted" to the caller -
+            # see _edit_tracked_status_message() below for what actually decides that.
             return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+        async def _edit_tracked_status_message(self, channel_id, message_id, embed):
+            """Edits one tracked /status message, retrying a couple of times on a
+            transient failure before giving up for this cycle - added 2026-08-10
+            after a real reliability bug: any exception at all (a slow/timed-out
+            Discord API call, a momentary network blip) used to be treated exactly
+            like "the message was deleted", immediately forgetting it and forcing a
+            brand new /status run to get it back. Only discord.NotFound (the
+            channel or message genuinely doesn't exist anymore - HTTP 404) or
+            discord.Forbidden (access permanently revoked) actually mean that;
+            every other exception is retried a few times, and if still failing,
+            logged and left alone - the tracked row stays, and the next scheduled
+            refresh_loop tick (every DISCORD_BOT_REFRESH_SECONDS) naturally tries
+            again on its own, without needing its own special-cased retry path."""
+            last_error = None
+            for attempt in range(REFRESH_RETRY_ATTEMPTS):
+                try:
+                    channel = await self._fetch_channel(channel_id)
+                    msg = await channel.fetch_message(message_id)
+                    await msg.edit(embed=embed)
+                    return
+                except (discord.NotFound, discord.Forbidden):
+                    db.delete_discord_status_message(channel_id)
+                    return
+                except Exception as e:
+                    last_error = e
+                    if attempt < REFRESH_RETRY_ATTEMPTS - 1:
+                        await asyncio.sleep(REFRESH_RETRY_DELAY_SECONDS)
+            _logger.warning("could not update tracked status message in channel %s after %d attempt(s): %s",
+                             channel_id, REFRESH_RETRY_ATTEMPTS, last_error)
 
         async def _refresh(self):
             try:
@@ -507,12 +543,8 @@ def _make_client_class(discord, app_commands, tasks):
                 if db.get_setting("discordbot_channel_command_enabled", "0") == "1":
                     embed = build_embed(discord, data)
                     for row in db.list_discord_status_messages():
-                        try:
-                            channel = await self._fetch_channel(int(row["channel_id"]))
-                            msg = await channel.fetch_message(int(row["message_id"]))
-                            await msg.edit(embed=embed)
-                        except Exception:
-                            db.delete_discord_status_message(row["channel_id"])
+                        await self._edit_tracked_status_message(
+                            int(row["channel_id"]), int(row["message_id"]), embed)
             except Exception:
                 _logger.exception("refresh loop error")
 

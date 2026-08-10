@@ -20,6 +20,9 @@
         {% elif s.in_grace_period %}
         <div class="service-card__note" title="Auto-incidents are suppressed for this service until its startup grace period elapses">🕐 startup grace period</div>
         {% endif %}
+        {% if s.open_reports_count %}
+        <div class="service-card__note" title="Visitor-submitted report(s) about this service, awaiting admin review">⚑ {{ s.open_reports_count }} open report{{ 's' if s.open_reports_count != 1 else '' }}</div>
+        {% endif %}
         {% if s.uptime is not none %}
         <div class="status-bar {{ status_css[s.status] }}" title="{{ s.uptime }}% uptime over the last 30 days"></div>
         {% endif %}

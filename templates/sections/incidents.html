@@ -1,8 +1,17 @@
 <div class="section-title">Incidents &amp; maintenance</div>
 {% if incidents %}
   {% for i in incidents %}{% include 'sections/_incident_item.html' %}{% endfor %}
+  {# The cursor starts at the NEWEST shown id (incidents[0]), not the oldest -
+     since the initial view is age-filtered, an id-space gap can exist between
+     shown items (a still-open incident can sit at a lower id than a newer,
+     already-resolved-and-hidden one). Starting from the newest id guarantees
+     "load more" is never missing anything filtered out of the initial view, at
+     the cost of possibly re-showing an already-visible open incident once on
+     the very first click (see api_incidents_more()'s docstring) - a fully
+     unfiltered continuation from every click after that has no such gap and
+     never duplicates. #}
   <button type="button" class="btn secondary load-more-btn" id="incidents-load-more"
-          data-url="{{ url_for('api_incidents_more') }}" data-offset="{{ incidents|length }}">
+          data-url="{{ url_for('api_incidents_more') }}" data-before-id="{{ incidents[0].id }}">
     Load more incidents
   </button>
 {% else %}
