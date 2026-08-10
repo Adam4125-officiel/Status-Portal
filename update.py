@@ -284,7 +284,10 @@ def main(argv=None):
         # Bare `python update.py` is the thing you type when you just want to know
         # where you stand, so it reads rather than writes.
         args = parser.parse_args(["check"])
-    print(f"status-portal updater — app directory: {APP_ROOT}\n", flush=True)
+    # ASCII only, deliberately: this script has to run in whatever console the
+    # machine has, including an old Windows cmd.exe on codepage 437 where a stray
+    # em dash raises UnicodeEncodeError. A recovery tool must not fail on cosmetics.
+    print(f"status-portal updater - app directory: {APP_ROOT}\n", flush=True)
     return args.func(args)
 
 

@@ -663,6 +663,24 @@ def test_emergency_rollback_with_no_backups_exits_nonzero(monkeypatch, fake_app_
     assert update._emergency_rollback() == 1
 
 
+def test_cli_output_stays_ascii_only():
+    """An em dash in update.py's header raised UnicodeEncodeError on a Windows
+    console using codepage 437. This is the tool you run when the portal is already
+    broken - it must not be able to fail on a decorative character. Covers
+    updater.py's progress()/error messages too, since the CLI prints those."""
+    root = os.path.join(os.path.dirname(__file__), "..")
+    offenders = []
+    for filename in ("update.py", "updater.py"):
+        with open(os.path.join(root, filename), encoding="utf-8") as f:
+            for number, line in enumerate(f, 1):
+                if not any(k in line for k in ("print(", "progress(", "UpdateError(")):
+                    continue
+                non_ascii = [c for c in line if ord(c) > 127]
+                if non_ascii:
+                    offenders.append(f"{filename}:{number}: {''.join(non_ascii)!r}")
+    assert not offenders, "non-ASCII in CLI output: " + "; ".join(offenders)
+
+
 def test_the_update_source_is_hardcoded_to_this_repository():
     """Guards the single most important property of this whole feature: nothing an
     admin (or anyone who compromises the admin panel) can set redirects where code

@@ -402,26 +402,97 @@ DB-backed Settings pages, not a code edit.
   it still fails. If even the rollback can't write, the error names the backup
   folder to restore by hand rather than claiming it was handled — there's a test
   for that specific case.
+- **An update never deletes a file that a later release removed.** Only files
+  present in the incoming archive are written; anything the old version shipped
+  that the new one dropped just stays on disk. This is identical to the
+  extract-the-zip-over-the-folder process that predates the updater, and it's
+  harmless (Python only imports what's referenced, Flask only serves what's
+  routed), but don't assume a post-update tree is byte-identical to a fresh
+  extraction — it's a superset. Deleting the difference would mean trusting a
+  computed file list to remove things, which is a much worse failure mode than
+  leaving a stale file behind.
+- **Nothing in `updater.py` may read a DB setting without going through
+  `_read_setting()`.** `sqlite3.connect()` *creates* an empty file for a path
+  that doesn't exist, so a bare `db.get_setting()` from the CLI would leave a
+  zero-table `instance/portal.db` behind on a fresh install — which `init_db()`
+  then has to cope with, and which looks exactly like a corrupted database.
+  `_read_setting()` checks `os.path.isfile(db.DB_PATH)` first and falls back to
+  the default. It also swallows read errors, because the CLI is the tool you
+  reach for when things are broken, up to and including the database.
+- **`update.py`'s output must stay pure ASCII.** An em dash in the header line
+  raised `UnicodeEncodeError` on a Windows console using codepage 437 (found
+  while writing the user's test instructions, before it ever shipped). This is
+  the recovery tool — it must not be able to fail on a decorative character.
+  `updater.py`'s `progress()` messages are subject to the same rule since the
+  CLI prints them. There's a check for this in `tests/test_updater.py`.
+- **Backups are pruned to `KEEP_BACKUPS` (5) after each successful update.**
+  `_prune_backups()` reads the module constant *inside* the function rather than
+  as a default argument value — a default arg binds at def time, which silently
+  ignores a monkeypatched constant and made the pruning test pass for the wrong
+  reason until it was fixed.
+- **The About page's `list_backups()` is a local `os.listdir` + small JSON
+  reads** — the same class of call as `asset_url()`'s `getmtime`, not the kind of
+  slow outbound I/O the no-blocking-in-a-request-handler rule is about. Don't
+  "fix" it into another cache.
+- **Changing the channel must clear the update cache** (`admin_about_settings`
+  does). Otherwise the page renders a "latest available" that was fetched for the
+  *previous* channel right next to the newly-selected one — e.g. still showing
+  the newest stable release seconds after switching to unstable.
+- **`_inject_admin_badges()` also exposes `update_available`** for the nav's
+  About badge. It reads the cache only (never triggers a check), so a miss or a
+  failed check simply means no badge — exactly like having no unread reports.
+- **Test-suite gotcha: `config.IS_GIT_CHECKOUT` is genuinely `True` when pytest
+  runs from this repo**, so every update route and the About page's button
+  correctly refuse. `tests/test_app.py` has an autouse fixture
+  (`_update_test_environment`) that patches it to `False` and clears the update
+  cache, so those tests stand in for a normal install. Without it a test can
+  "pass" by hitting the git-checkout refusal rather than the behavior it meant to
+  assert — if you add an update-route test, make sure it's actually reaching the
+  code you think it is.
 - **`config.ENABLE_INAPP_UPDATE` is an env var on purpose.** The risk it addresses
   is "someone compromised the admin panel"; a DB toggle that same attacker could
   flip from that same panel would address nothing. Same reasoning as
   `twofactor.RESET_2FA` being a host-level file. It defaults to **enabled** (the
   button was explicitly asked for), and the route checks it, not just the template
   — verified live that a valid 2FA code still gets refused when it's off.
-- **Verification status (2026-08-10)**: a real end-to-end update was run against
-  the actual GitHub API and the real v1.4.0 release zip, in a throwaway install —
-  real SHA-256 verification, 83 files replaced, `instance/portal.db`/`.env`/
-  `static/uploads/` confirmed byte-identical afterwards, then a real rollback and a
-  real `--emergency` rollback back to the starting state. The About page, the
-  channel form, "Check now", the step-up-2FA refusal and the kill-switch refusal
-  were all exercised live against a running server. **Not verified**: the in-app
-  button actually completing an update *and restarting* (never triggered for real
-  per the standing rule — the route is tested with `perform_update`/
-  `_restart_process` mocked); anything on Windows (file locking, `os.replace`
-  contention, Task Scheduler relaunch after `os.execv`) since this sandbox is
-  Linux; and the browser-side typed-confirmation JS, since no Playwright/Chromium
-  was available in this session — only the JS syntax, the rendered element ids and
-  the cache-busted asset URL were checked.
+- **Verification status (2026-08-10)** — in the Linux sandbox: real end-to-end
+  updates against the actual GitHub API and real release zips, in throwaway
+  installs (real SHA-256 verification, 83/90 files replaced,
+  `instance/portal.db`/`.env`/`static/uploads/` confirmed byte-identical
+  afterwards, a real rollback, a real `--emergency` rollback, and a re-run
+  correctly no-opping as "up to date"). The About page, the channel form, "Check
+  now", the step-up-2FA refusal and the kill-switch refusal were all exercised
+  live against a running server.
+- **Confirmed on the user's real Windows machine (2026-08-10), which is what
+  closed out most of the list above.** They updated an installed `v1.5.0-rc.2`
+  to `v1.5.0-rc.3` **entirely through the admin panel's button**, with waitress
+  serving and the Discord bot connected at the time, then rolled back with the
+  CLI. What that confirms, specifically:
+  - **`os.execv` in-place restart works on Windows.** The process came back ~2s
+    later, re-bound port 5000, and the Discord bot reconnected on its own. This
+    was the single biggest unknown in the whole feature.
+  - **`write_pending_marker()`/`check_pending_marker()` work end to end**: the
+    restarted process logged "Update to 1.5.0-rc.3 completed - the app restarted
+    successfully on the new version" and cleared the marker, which is the entire
+    (limited) thing that mechanism was built to do.
+  - **No Windows file-locking failure occurred** replacing 90 files while the
+    server was live. Note the corollary: `REPLACE_RETRY_ATTEMPTS`/the
+    retry-then-roll-back path therefore remains **unexercised in the wild** — it
+    didn't need to fire, which is not the same as it having been proven to work.
+  - **The browser-side typed-confirmation JS works** — reaching the update at all
+    required typing `UPDATE` to enable the submit button.
+  - `python update.py rollback` restored all 90 files on Windows.
+- **Still not verified**: relaunch under Task Scheduler after `os.execv` (they ran
+  `python serve_waitress.py` from PowerShell directly, so a supervisor's reaction
+  to the in-place restart is still unknown); the Windows file-lock retry/rollback
+  path (see above); and `pip install` actually running during an update, since no
+  release so far has changed `requirements.txt`.
+- **Cosmetic wart, deliberately left**: backup folder names are UTC
+  (`20260810-171829-...`) while the console/app log shows local time, so on a
+  UTC+2 machine the same update reads as 19:18 in the log and 17:18 in the folder
+  name. Consistent with everything else in this app storing UTC, and the CLI's
+  `list-backups`/`rollback` never require reading the timestamp by eye - but it
+  does look like a mismatch if you're picking a backup by hand.
 
 ## Monitoring architecture (`monitoring.py`) — background refresh added 2026-07-23
 
