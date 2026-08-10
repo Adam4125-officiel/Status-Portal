@@ -46,6 +46,7 @@
               check pending
             {% else %}&nbsp;{% endif %}
           </span>
+          <a class="service-card__link" href="{{ url_for('report_problem', service_id=s.id) }}" title="Report a problem with {{ s.name }}">Report ⚑</a>
           {% if s.url %}<a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>{% endif %}
         </div>
       </div>

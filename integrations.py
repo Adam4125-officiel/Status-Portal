@@ -1,10 +1,11 @@
 """
 integrations.py — Read-only status/log checks against other self-hosted apps
-(Jellyfin, Jellyseerr/Overseerr, and Servarr-family apps: Sonarr, Radarr,
-Prowlarr, Lidarr, Readarr). Nothing here writes to or controls those
-services - it only reads health/logs to surface warnings in the admin
-section. Every fetcher returns the same shape so the template doesn't need
-to care which kind of service it's showing:
+(Jellyfin, Jellyseerr/Overseerr, Servarr-family apps: Sonarr, Radarr,
+Prowlarr, Lidarr, Readarr, Bazarr, and the media-processing/anti-bot tools
+Tdarr and Byparr). Nothing here writes to or controls those services - it
+only reads health/logs to surface warnings in the admin section. Every
+fetcher returns the same shape so the template doesn't need to care which
+kind of service it's showing:
 
     {"reachable": bool, "version": str|None, "issues": [{"level", "message"}], "error": str|None}
 """
@@ -21,6 +22,9 @@ def fetch_integration_status(integration):
         "arr": fetch_arr_status,
         "jellyfin": fetch_jellyfin_status,
         "jellyseerr": fetch_jellyseerr_status,
+        "bazarr": fetch_bazarr_status,
+        "tdarr": fetch_tdarr_status,
+        "byparr": fetch_byparr_status,
     }
     fn = fetchers.get(integration["kind"])
     if not fn:
@@ -54,6 +58,85 @@ def fetch_arr_status(base_url, api_key):
         except ValueError:
             last_error = "Unexpected (non-JSON) response"
     return {"reachable": False, "version": None, "issues": [], "error": last_error}
+
+
+def fetch_bazarr_status(base_url, api_key):
+    """Bazarr, unlike the Servarr apps above, expects its API key as a query
+    param (?apikey=...) rather than an X-Api-Key header - confirmed against
+    Bazarr's own source (bazarr/api/system/status.py) and community docs, not
+    against a real running instance (unverified, same caveat as every other
+    integration here). The health endpoint's exact issue-list shape is a
+    best-effort guess modeled on the Servarr apps' /health shape (a list of
+    {"type", "text"/"message"} objects) - if a real instance's response
+    differs, this degrades to an empty issues list rather than raising,
+    since parsing errors are swallowed the same way as the other fetchers'
+    bonus/secondary calls."""
+    base_url = base_url.rstrip("/")
+    params = {"apikey": api_key}
+    try:
+        status = requests.get(f"{base_url}/api/system/status", params=params, timeout=TIMEOUT)
+        status.raise_for_status()
+        version = (status.json().get("data") or {}).get("bazarr_version")
+    except requests.RequestException as e:
+        return {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    except ValueError:
+        return {"reachable": False, "version": None, "issues": [], "error": "Unexpected (non-JSON) response"}
+
+    issues = []
+    try:
+        health = requests.get(f"{base_url}/api/system/health", params=params, timeout=TIMEOUT)
+        if health.ok:
+            payload = health.json()
+            items = payload.get("data", payload) if isinstance(payload, dict) else payload
+            for item in items if isinstance(items, list) else []:
+                level = "error" if (item.get("type") or "").lower() == "error" else "warning"
+                issues.append({"level": level, "message": item.get("text") or item.get("issue") or item.get("message", "")})
+    except (requests.RequestException, ValueError):
+        pass  # the health check is a bonus - failing to fetch it shouldn't fail the whole check
+
+    return {"reachable": True, "version": version, "issues": issues, "error": None}
+
+
+def fetch_tdarr_status(base_url, api_key):
+    """Tdarr has no built-in API key concept (api_key is accepted on the
+    integration form for consistency with every other kind, but unused here -
+    left for a reverse-proxy-enforced auth layer, if any, to handle
+    transparently). /api/v2/status returns {"status", "isProduction", "os",
+    "version", "uptime"} - confirmed shape via Tdarr's own docs, not against a
+    real instance."""
+    base_url = base_url.rstrip("/")
+    try:
+        r = requests.get(f"{base_url}/api/v2/status", timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        return {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    except ValueError:
+        return {"reachable": False, "version": None, "issues": [], "error": "Unexpected (non-JSON) response"}
+
+    issues = []
+    status = (data.get("status") or "").lower()
+    if status and status != "good":
+        issues.append({"level": "warning", "message": f"Server status: {data.get('status')}"})
+    return {"reachable": True, "version": data.get("version"), "issues": issues, "error": None}
+
+
+def fetch_byparr_status(base_url, api_key):
+    """Byparr (a FlareSolverr-compatible Cloudflare-challenge-solving proxy) has
+    no API key of its own - GET /health makes it actually solve a real
+    challenge against google.com internally and returns 200 on success, 500
+    on failure, with no version field exposed anywhere. Confirmed against
+    Byparr's own source (src/endpoints.py), not against a real instance."""
+    base_url = base_url.rstrip("/")
+    try:
+        r = requests.get(f"{base_url}/health", timeout=TIMEOUT)
+    except requests.RequestException as e:
+        return {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    if r.status_code >= 500:
+        return {"reachable": False, "version": None, "issues": [], "error": "Health check failed (couldn't solve a test challenge)"}
+    if not r.ok:
+        return {"reachable": False, "version": None, "issues": [], "error": f"Unexpected status {r.status_code}"}
+    return {"reachable": True, "version": None, "issues": [], "error": None}
 
 
 def fetch_jellyfin_status(base_url, api_key):

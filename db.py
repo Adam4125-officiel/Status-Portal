@@ -194,6 +194,23 @@ def init_db():
         )
     """)
 
+    # A visitor-submitted "report a problem" - separate from incidents/maintenance,
+    # which are admin-authored. service_id is optional (a report can reference a
+    # specific service's card, or be general) and ON DELETE SET NULL so deleting a
+    # service later doesn't cascade-delete reports about it, just detaches them.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS problem_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT NOT NULL,
+            contact TEXT DEFAULT '',
+            service_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'new',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE SET NULL
+        )
+    """)
+
     conn.commit()
 
     # Retrofit columns added after a table already existed in some earlier version of
@@ -210,6 +227,7 @@ def init_db():
     _ensure_column(conn, "services", "retry_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "retry_interval_seconds", "INTEGER NOT NULL DEFAULT 5")
     _ensure_column(conn, "services", "ignore_in_overall_status", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "services", "api_health_mode", "TEXT NOT NULL DEFAULT 'off'")
     conn.commit()
 
     # One-time backfill (idempotent - re-running is a no-op once caught up): any
@@ -274,18 +292,26 @@ def _slow_threshold_ms(data):
     return int(raw) if raw else None
 
 
+API_HEALTH_MODES = ("off", "degrade", "down")
+
+
+def _api_health_mode(data):
+    mode = data.get("api_health_mode", "off")
+    return mode if mode in API_HEALTH_MODES else "off"
+
+
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
           data.get("group_name", "").strip(), int(data.get("auto_incident", 1)),
           _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0),
           int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
-          int(data.get("ignore_in_overall_status", 0))))
+          int(data.get("ignore_in_overall_status", 0)), _api_health_mode(data)))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -298,7 +324,7 @@ def update_service(service_id, data):
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
         auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
         slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=?,
-        ignore_in_overall_status=? WHERE id=?
+        ignore_in_overall_status=?, api_health_mode=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
@@ -306,7 +332,7 @@ def update_service(service_id, data):
           int(data.get("auto_incident", 1)), _slow_threshold_ms(data),
           int(data.get("startup_grace_seconds") or 0), int(data.get("retry_count") or 0),
           int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),
-          service_id))
+          _api_health_mode(data), service_id))
     conn.commit()
     conn.close()
 
@@ -397,12 +423,21 @@ def _attach_incident_services(incidents):
     return incidents
 
 
-def list_incidents(limit=None):
+def list_incidents(limit=None, offset=0, max_age_days=None):
+    """max_age_days never hides a still-open incident (resolved_at IS NULL)
+    regardless of how long it's been going on - only a *resolved* incident's own
+    age counts toward the cutoff, since an ongoing problem shouldn't disappear
+    from the public page just because it started a while ago."""
     conn = get_db()
-    q = "SELECT * FROM incidents ORDER BY started_at DESC"
+    q = "SELECT * FROM incidents"
+    params = []
+    if max_age_days:
+        q += " WHERE resolved_at IS NULL OR resolved_at >= datetime('now', ?)"
+        params.append(f"-{int(max_age_days)} days")
+    q += " ORDER BY started_at DESC"
     if limit:
-        q += f" LIMIT {int(limit)}"
-    rows = conn.execute(q).fetchall()
+        q += f" LIMIT {int(limit)} OFFSET {int(offset)}"
+    rows = conn.execute(q, params).fetchall()
     conn.close()
     return _attach_incident_services([dict(r) for r in rows])
 
@@ -684,6 +719,24 @@ def list_public_maintenance_windows():
     return _attach_window_services([dict(r) for r in rows])
 
 
+def list_ended_maintenance_windows(limit=10, offset=0, max_age_days=None):
+    """The public "maintenance history" list - windows already restored (ended=1),
+    newest-first. Unlike list_public_maintenance_windows() above, always paginated
+    (limit is never optional here) since this is only ever consumed by the
+    "load more" history endpoint, never the initial page render."""
+    conn = get_db()
+    q = "SELECT * FROM maintenance_windows WHERE ended = 1"
+    params = []
+    if max_age_days:
+        q += " AND ends_at >= datetime('now', ?)"
+        params.append(f"-{int(max_age_days)} days")
+    q += " ORDER BY ends_at DESC LIMIT ? OFFSET ?"
+    params.extend([int(limit), int(offset)])
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return _attach_window_services([dict(r) for r in rows])
+
+
 def get_maintenance_window(mid):
     conn = get_db()
     row = conn.execute("SELECT * FROM maintenance_windows WHERE id=?", (mid,)).fetchone()
@@ -902,5 +955,64 @@ def set_discord_status_message(channel_id, message_id):
 def delete_discord_status_message(channel_id):
     conn = get_db()
     conn.execute("DELETE FROM discord_status_messages WHERE channel_id=?", (str(channel_id),))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Problem reports ----------
+# A visitor-submitted bug/issue report, separate from the admin-authored
+# incidents/maintenance system entirely - see app.py's public /report route.
+def create_problem_report(message, contact="", service_id=None):
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO problem_reports (message, contact, service_id, status, created_at)
+        VALUES (?, ?, ?, 'new', ?)
+    """, (message, contact, service_id, now_iso()))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def _attach_report_service(report):
+    if report["service_id"]:
+        service = get_service(report["service_id"])
+        report["service_name"] = service["name"] if service else None
+    else:
+        report["service_name"] = None
+    return report
+
+
+def list_problem_reports():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM problem_reports ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [_attach_report_service(dict(r)) for r in rows]
+
+
+def get_problem_report(rid):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM problem_reports WHERE id=?", (rid,)).fetchone()
+    conn.close()
+    return _attach_report_service(dict(row)) if row else None
+
+
+def count_unread_problem_reports():
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM problem_reports WHERE status='new'").fetchone()[0]
+    conn.close()
+    return count
+
+
+def update_problem_report_status(rid, status):
+    conn = get_db()
+    conn.execute("UPDATE problem_reports SET status=?, reviewed_at=? WHERE id=?", (status, now_iso(), rid))
+    conn.commit()
+    conn.close()
+
+
+def delete_problem_report(rid):
+    conn = get_db()
+    conn.execute("DELETE FROM problem_reports WHERE id=?", (rid,))
     conn.commit()
     conn.close()

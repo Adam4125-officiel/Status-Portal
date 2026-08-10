@@ -42,6 +42,11 @@
     <input type="hidden" name="layout_order" id="layout_order_input" value="{{ section_order|join(',') }}">
   </div>
   <div class="field">
+    <label for="public_history_days">Auto-hide old incidents/maintenance after (days)</label>
+    <input type="number" id="public_history_days" name="public_history_days" min="0" value="{{ public_history_days }}" placeholder="blank = show everything">
+    <div class="field-hint">Hides a *resolved* incident from the initial public page once it's older than this — a still-open incident is never hidden regardless of age. Hidden items (and the maintenance history list, which is never shown by default at all) stay reachable via the "Load more" / "Show maintenance history" buttons. Leave blank to show full history with no cutoff, like before this setting existed.</div>
+  </div>
+  <div class="field">
     <label>High-load thresholds</label>
     <div class="field-hint" style="margin-bottom: 8px;">The high-load indicator lights up if any of these is exceeded (or if Jellyfin reports an active transcode or a running background task like trickplay generation, when a Jellyfin integration is configured).</div>
   </div>
@@ -57,8 +62,61 @@
     <label for="highload_network_mbs">Network (MB/s, summed up+down)</label>
     <input type="number" id="highload_network_mbs" name="highload_network_mbs" min="0" value="{{ highload_thresholds.network_mbs }}">
   </div>
+  <div class="field">
+    <label>Service defaults</label>
+    <div class="field-hint" style="margin-bottom: 8px;">Pre-fills these fields on the "New service" form so you don't have to retype your usual values every time. Purely a form pre-fill — changing these later never affects services that already exist.</div>
+  </div>
+  <div class="field">
+    <label for="service_default_slow_threshold_ms">Slow threshold (ms)</label>
+    <input type="number" id="service_default_slow_threshold_ms" name="service_default_slow_threshold_ms" min="0" value="{{ service_defaults.slow_threshold_ms }}" placeholder="e.g. 2000">
+  </div>
+  <div class="field">
+    <label for="service_default_startup_grace_seconds">Startup grace period (seconds)</label>
+    <input type="number" id="service_default_startup_grace_seconds" name="service_default_startup_grace_seconds" min="0" value="{{ service_defaults.startup_grace_seconds }}">
+  </div>
+  <div class="field">
+    <label for="service_default_retry_count">Retry attempts before marking down</label>
+    <input type="number" id="service_default_retry_count" name="service_default_retry_count" min="0" value="{{ service_defaults.retry_count }}">
+  </div>
+  <div class="field">
+    <label for="service_default_retry_interval_seconds">Seconds between retries</label>
+    <input type="number" id="service_default_retry_interval_seconds" name="service_default_retry_interval_seconds" min="1" value="{{ service_defaults.retry_interval_seconds }}">
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="service_default_auto_incident" {{ 'checked' if service_defaults.auto_incident }}>
+      Automatically open an incident when a new service goes down, by default
+    </label>
+  </div>
+  <div class="field">
+    <label for="service_default_api_health_mode">API health check, by default</label>
+    <select id="service_default_api_health_mode" name="service_default_api_health_mode">
+      <option value="off" {{ 'selected' if service_defaults.api_health_mode == 'off' }}>Off</option>
+      <option value="degrade" {{ 'selected' if service_defaults.api_health_mode == 'degrade' }}>Degrade</option>
+      <option value="down" {{ 'selected' if service_defaults.api_health_mode == 'down' }}>Down</option>
+    </select>
+  </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save</button>
+  </div>
+</form>
+
+<form method="POST" action="{{ url_for('admin_settings_logo') }}" enctype="multipart/form-data" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label>{{ 'Logo' if site_logo_filename else 'Logo (none set — showing the default dot)' }}</label>
+    {% if site_logo_filename %}
+    <div style="margin-bottom: 10px;">
+      <img src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="Current logo" style="height: 36px; width: auto; max-width: 200px; object-fit: contain;">
+    </div>
+    {% endif %}
+    <input type="file" id="logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.ico">
+    <div class="field-hint">PNG, JPG, SVG, WEBP, or ICO — max 2 MB. Replaces the dot next to the site name in the topbar, and the browser-tab favicon.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Upload</button>
+    {% if site_logo_filename %}
+    <button type="submit" formaction="{{ url_for('admin_settings_logo_remove') }}" class="btn secondary">Remove logo</button>
+    {% endif %}
   </div>
 </form>
 

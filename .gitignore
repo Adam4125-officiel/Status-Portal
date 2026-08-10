@@ -3,3 +3,4 @@ __pycache__/
 instance/
 .env
 .pytest_cache/
+static/uploads/

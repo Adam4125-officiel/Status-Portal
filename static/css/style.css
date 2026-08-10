@@ -125,6 +125,12 @@ a:hover { text-decoration: underline; }
   background: var(--brand);
   box-shadow: 0 0 8px var(--brand);
 }
+.brand .brand-logo {
+  height: 24px;
+  width: auto;
+  max-width: 160px;
+  object-fit: contain;
+}
 
 .status-hero {
   background: var(--bg-panel);
@@ -561,6 +567,18 @@ footer.foot {
 }
 .admin-nav a:hover { background: var(--bg-panel-raised); text-decoration: none; color: var(--text-primary); }
 .admin-nav a.active { background: var(--brand-dim); color: var(--brand); }
+.nav-badge {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--crit);
+  color: #0b0d12;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.5;
+}
 .admin-nav .back-link {
   margin-top: 18px;
   padding-top: 14px;
@@ -600,6 +618,7 @@ footer.foot {
 .btn:hover { text-decoration: none; opacity: 0.9; }
 .btn.secondary { background: var(--bg-panel-raised); color: var(--text-primary); border: 1px solid var(--border); }
 .btn.danger { background: var(--crit-dim); color: var(--crit); border: 1px solid var(--crit-dim); }
+.load-more-btn { margin-top: 8px; margin-bottom: 20px; }
 
 .resource-grid {
   display: grid;
@@ -731,6 +750,16 @@ footer.foot {
   color: var(--text-dim);
 }
 .field-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; }
+.checkbox-list {
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.checkbox-list .field-check { padding: 4px 0; }
+.checkbox-list .field-check:has(input:disabled) { opacity: 0.55; }
 .form-actions { display: flex; gap: 10px; margin-top: 20px; }
 
 .flash {

@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch
 
+import requests
+
 import integrations
 
 
@@ -59,6 +61,84 @@ def test_fetch_integration_status_dispatch():
 
     result = integrations.fetch_integration_status({"kind": "unknown", "base_url": "x", "api_key": "y"})
     assert "Unknown integration kind" in result["error"]
+
+
+def test_fetch_bazarr_status_unreachable():
+    result = integrations.fetch_bazarr_status("http://localhost:1", "fake-key")
+    assert result["reachable"] is False
+    assert result["error"]
+
+
+def test_fetch_bazarr_status_parses_version_and_health():
+    status_resp = Mock(status_code=200)
+    status_resp.raise_for_status = Mock()
+    status_resp.json = Mock(return_value={"data": {"bazarr_version": "1.4.3"}})
+    health_resp = Mock(ok=True)
+    health_resp.json = Mock(return_value=[{"type": "warning", "text": "Sonarr sync failed"}])
+    with patch("requests.get", side_effect=[status_resp, health_resp]) as mock_get:
+        result = integrations.fetch_bazarr_status("http://bazarr:6767", "key")
+    assert result["reachable"] is True
+    assert result["version"] == "1.4.3"
+    assert result["issues"] == [{"level": "warning", "message": "Sonarr sync failed"}]
+    # Bazarr expects its key as a query param, not a header.
+    assert mock_get.call_args_list[0].kwargs["params"] == {"apikey": "key"}
+
+
+def test_fetch_bazarr_status_health_failure_does_not_fail_whole_check():
+    status_resp = Mock(status_code=200)
+    status_resp.raise_for_status = Mock()
+    status_resp.json = Mock(return_value={"data": {"bazarr_version": "1.4.3"}})
+    with patch("requests.get", side_effect=[status_resp, requests.RequestException("boom")]):
+        result = integrations.fetch_bazarr_status("http://bazarr:6767", "key")
+    assert result["reachable"] is True
+    assert result["issues"] == []
+
+
+def test_fetch_tdarr_status_unreachable():
+    result = integrations.fetch_tdarr_status("http://localhost:1", "")
+    assert result["reachable"] is False
+    assert result["error"]
+
+
+def test_fetch_tdarr_status_parses_version_and_flags_bad_status():
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value={"status": "bad", "version": "2.00.18"})
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_tdarr_status("http://tdarr:8265", "")
+    assert result["reachable"] is True
+    assert result["version"] == "2.00.18"
+    assert result["issues"] == [{"level": "warning", "message": "Server status: bad"}]
+
+
+def test_fetch_tdarr_status_good_has_no_issues():
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value={"status": "good", "version": "2.00.18"})
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_tdarr_status("http://tdarr:8265", "")
+    assert result["issues"] == []
+
+
+def test_fetch_byparr_status_unreachable():
+    result = integrations.fetch_byparr_status("http://localhost:1", "")
+    assert result["reachable"] is False
+    assert result["error"]
+
+
+def test_fetch_byparr_status_healthy():
+    resp = Mock(status_code=200, ok=True)
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_byparr_status("http://byparr:8191", "")
+    assert result == {"reachable": True, "version": None, "issues": [], "error": None}
+
+
+def test_fetch_byparr_status_challenge_solve_failure():
+    resp = Mock(status_code=500, ok=False)
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_byparr_status("http://byparr:8191", "")
+    assert result["reachable"] is False
+    assert "challenge" in result["error"]
 
 
 def test_fetch_jellyfin_sessions_counts_transcodes_only():

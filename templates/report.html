@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Report a problem — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="wrap" style="max-width: 640px;">
+  <div class="topbar">
+    <div class="brand">
+      {% if site_logo_filename %}
+        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
+      {% else %}
+        <span class="dot-server"></span>
+      {% endif %}
+      {{ site_name }}
+    </div>
+    <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
+  </div>
+
+  <div class="admin-header">
+    <h1>Report a problem</h1>
+  </div>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+    Spotted something wrong? Let us know — this is a quick note to the admin, separate from the incident/maintenance history above.
+  </p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="POST" class="form-panel">
+    <div class="field">
+      <label for="message">What's wrong?</label>
+      <textarea id="message" name="message" required placeholder="What happened, and where did you notice it?"></textarea>
+    </div>
+    <div class="field">
+      <label for="service_id">Which service (optional)</label>
+      <select id="service_id" name="service_id">
+        <option value="">— General / not sure —</option>
+        {% for s in services %}
+          <option value="{{ s.id }}" {{ 'selected' if preselect_service_id == s.id }}>{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="contact">Contact (optional)</label>
+      <input type="text" id="contact" name="contact" placeholder="Email, Discord handle... in case follow-up is useful">
+    </div>
+    <div style="position: absolute; left: -9999px;" aria-hidden="true">
+      <label for="website">Leave this field empty</label>
+      <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Send report</button>
+      <a href="{{ url_for('index') }}" class="btn secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

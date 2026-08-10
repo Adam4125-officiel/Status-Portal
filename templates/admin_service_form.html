@@ -54,29 +54,29 @@
   </div>
   <div class="field">
     <label for="slow_threshold_ms">Slow threshold (ms)</label>
-    <input type="number" id="slow_threshold_ms" name="slow_threshold_ms" min="0" value="{{ service.slow_threshold_ms if service and service.slow_threshold_ms else '' }}" placeholder="e.g. 2000">
+    <input type="number" id="slow_threshold_ms" name="slow_threshold_ms" min="0" value="{{ service.slow_threshold_ms if service and service.slow_threshold_ms else (defaults.slow_threshold_ms if not service and defaults else '') }}" placeholder="e.g. 2000">
     <div class="field-hint">If auto-check takes longer than this to respond, show "Slow" instead of "Operational". Leave blank to disable.</div>
   </div>
   <div class="field">
     <label for="retry_count">Retry attempts before marking down</label>
-    <input type="number" id="retry_count" name="retry_count" min="0" value="{{ service.retry_count if service else 0 }}">
+    <input type="number" id="retry_count" name="retry_count" min="0" value="{{ service.retry_count if service else (defaults.retry_count if defaults else 0) }}">
     <div class="field-hint">If a check fails, retry this many times before treating it as actually down (and opening an incident, if enabled below) - handles a service that blips and recovers on its own within seconds/minutes. 0 = mark it down on the first failed check, like before.</div>
   </div>
   <div class="field">
     <label for="retry_interval_seconds">Seconds between retries</label>
-    <input type="number" id="retry_interval_seconds" name="retry_interval_seconds" min="1" value="{{ service.retry_interval_seconds if service else 5 }}">
+    <input type="number" id="retry_interval_seconds" name="retry_interval_seconds" min="1" value="{{ service.retry_interval_seconds if service else (defaults.retry_interval_seconds if defaults else 5) }}">
     <div class="field-hint">Only matters if retry attempts above is more than 0. E.g. 3 attempts × 10s = up to 30 extra seconds before this service is marked down.</div>
   </div>
   <div class="field">
     <label class="field-check">
-      <input type="checkbox" name="auto_incident" {{ 'checked' if not service or service.auto_incident }}>
+      <input type="checkbox" name="auto_incident" {{ 'checked' if (service.auto_incident if service else (defaults.auto_incident if defaults else true)) }}>
       Automatically open an incident when this service goes down, and resolve it when it recovers
     </label>
     <div class="field-hint">Only applies while auto-check is on above. Turn this off if you'd rather track outages for this service manually.</div>
   </div>
   <div class="field">
     <label for="startup_grace_seconds">Startup grace period (seconds)</label>
-    <input type="number" id="startup_grace_seconds" name="startup_grace_seconds" min="0" value="{{ service.startup_grace_seconds if service else 0 }}">
+    <input type="number" id="startup_grace_seconds" name="startup_grace_seconds" min="0" value="{{ service.startup_grace_seconds if service else (defaults.startup_grace_seconds if defaults else 0) }}">
     <div class="field-hint">Delay before this service's checks are allowed to open an automatic incident after the portal starts, giving it time to boot. Status and response time are still recorded normally during this window - only incident creation is held back.</div>
   </div>
   <div class="field">
@@ -85,6 +85,16 @@
       Exclude this service from the overall status banner
     </label>
     <div class="field-hint">This service's own card still shows its real status normally. If it's down while everything else is fine, the top banner still says "All services are operating normally" instead of reporting an outage for a service you've marked as not affecting overall status (e.g. something non-critical or expected to flap).</div>
+  </div>
+  <div class="field">
+    <label for="api_health_mode">API health check</label>
+    {% set current_api_mode = service.api_health_mode if service else (defaults.api_health_mode if defaults else 'off') %}
+    <select id="api_health_mode" name="api_health_mode">
+      <option value="off" {{ 'selected' if current_api_mode == 'off' }}>Off (ignore linked integration's API health)</option>
+      <option value="degrade" {{ 'selected' if current_api_mode == 'degrade' }}>Degrade — show "Degraded" if the API is unreachable but the web UI responds</option>
+      <option value="down" {{ 'selected' if current_api_mode == 'down' }}>Down — show "Down" if the API is unreachable, even if the web UI responds</option>
+    </select>
+    <div class="field-hint">Only takes effect if this service has an enabled Integration linked to it with "Show on public" turned on (Integrations page) — that's the API check being referred to here, not a separate URL.</div>
   </div>
   <div class="field">
     <label for="sort_order">Sort order</label>

@@ -12,14 +12,23 @@
   // local clock time, still genuinely local rather than UTC.
   var SHORT_FORMAT = { hour: '2-digit', minute: '2-digit' };
 
-  function convert(selector, format) {
-    document.querySelectorAll(selector).forEach(function (el) {
+  function convert(root, selector, format) {
+    root.querySelectorAll(selector).forEach(function (el) {
       var parsed = new Date(el.getAttribute('data-utc'));
       if (isNaN(parsed.getTime())) return; // leave the UTC fallback text as-is
       el.textContent = parsed.toLocaleString(undefined, format);
     });
   }
 
-  convert('.local-time[data-utc]', FULL_FORMAT);
-  convert('.local-time-short[data-utc]', SHORT_FORMAT);
+  // Exposed so content inserted after load (e.g. "load more" fragments in
+  // public_history.js) can be converted too, without re-running this whole file -
+  // scoped to whatever root element is passed in, defaulting to the full page for
+  // this initial on-load pass.
+  window.applyLocalTimes = function (root) {
+    root = root || document;
+    convert(root, '.local-time[data-utc]', FULL_FORMAT);
+    convert(root, '.local-time-short[data-utc]', SHORT_FORMAT);
+  };
+
+  window.applyLocalTimes(document);
 })();

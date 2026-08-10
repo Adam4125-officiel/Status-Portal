@@ -17,6 +17,9 @@
       <option value="arr" {{ 'selected' if current == 'arr' }}>*Arr app (Sonarr/Radarr/Prowlarr/Lidarr/Readarr)</option>
       <option value="jellyfin" {{ 'selected' if current == 'jellyfin' }}>Jellyfin</option>
       <option value="jellyseerr" {{ 'selected' if current == 'jellyseerr' }}>Jellyseerr / Overseerr</option>
+      <option value="bazarr" {{ 'selected' if current == 'bazarr' }}>Bazarr</option>
+      <option value="tdarr" {{ 'selected' if current == 'tdarr' }}>Tdarr</option>
+      <option value="byparr" {{ 'selected' if current == 'byparr' }}>Byparr</option>
     </select>
   </div>
   <div class="field">
@@ -24,11 +27,10 @@
     <input type="url" id="base_url" name="base_url" value="{{ integration.base_url if integration else '' }}" required placeholder="http://192.168.1.x:8989">
   </div>
   <div class="field">
-    <label for="api_key">API key</label>
+    <label for="api_key">API key (not needed for Tdarr or Byparr)</label>
     <input type="password" id="api_key" name="api_key"
-           placeholder="{{ '(unchanged — leave blank to keep the current key)' if integration else '' }}"
-           {{ 'required' if not integration else '' }}>
-    <div class="field-hint">Found in each app's Settings → General/API page. Stored so this app can read status/logs on your behalf — nothing here can change settings on those services.</div>
+           placeholder="{{ '(unchanged — leave blank to keep the current key)' if integration else '' }}">
+    <div class="field-hint">Found in each app's Settings → General/API page. Stored so this app can read status/logs on your behalf — nothing here can change settings on those services. Leave blank for Tdarr/Byparr, neither of which has an API key of its own.</div>
   </div>
   <div class="field">
     <label for="service_id">Linked service (optional)</label>

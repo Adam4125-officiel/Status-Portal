@@ -10,6 +10,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   <link rel="alternate" type="application/rss+xml" title="Status feed" href="{{ url_for('feed') }}">
+  {% if site_logo_filename %}
+  <link rel="icon" href="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}">
+  {% endif %}
   <script>
     // Applied before CSS paints, to avoid a flash of the wrong theme on load.
     (function () {
