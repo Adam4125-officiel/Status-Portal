@@ -1402,14 +1402,21 @@ def admin_new_picker():
 @login_required
 def admin_new_combined():
     if request.method == "POST":
+        # Every field admin_service_form.html exposes (Advanced settings section
+        # below, collapsed by default) is now collected here too, the same way
+        # admin_service_new() does it - previously this only ever sent
+        # name/icon/description/url/group_name, so db.create_service() silently
+        # fell back to its own hardcoded literals instead of the admin's
+        # configured Service defaults, and settings like retry/threshold/grace/
+        # api-health-mode were unreachable without a follow-up edit.
         url = request.form.get("url", "").strip()
-        service_id = db.create_service({
-            "name": request.form.get("name", ""),
-            "icon": request.form.get("icon", "") or "⚙",
-            "description": request.form.get("description", ""),
-            "url": url,
-            "group_name": request.form.get("group_name", ""),
-        })
+        service_data = dict(request.form)
+        service_data["url"] = url
+        service_data["manual_override"] = 1 if request.form.get("manual_override") else 0
+        service_data["auto_check"] = 1 if request.form.get("auto_check") else 0
+        service_data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
+        service_data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
+        service_id = db.create_service(service_data)
         db.create_integration({
             "name": request.form.get("name", ""),
             "kind": request.form.get("kind", "arr"),
@@ -1418,10 +1425,13 @@ def admin_new_combined():
             "enabled": 1,
             "service_id": service_id,
             "show_on_public": 1 if request.form.get("show_on_public") else 0,
+            # Named differently from the service's own "auto_incident" checkbox
+            # above (same form, would otherwise collide) - see the template.
+            "auto_incident": 1 if request.form.get("check_auto_incident") else 0,
         })
         flash("Service and status check created.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_new_combined.html", active="services")
+    return render_template("admin_new_combined.html", defaults=_service_defaults(), active="services")
 
 
 @app.route("/admin/integrations/<int:iid>/delete", methods=["POST"])
