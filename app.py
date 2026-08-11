@@ -462,6 +462,10 @@ def index():
     groups = _group_services(services)
     announcements = db.list_announcements(limit=10)
     incidents = _enrich_incidents(db.list_incidents(limit=8, max_age_days=_public_history_days()))
+    # Distinguishes "no incidents exist" from "incidents exist but are all older
+    # than public_history_days" - the unfiltered existence check only runs when
+    # the filtered list is already empty, so this adds no query in the common case.
+    incidents_hidden = not incidents and bool(db.list_incidents(limit=1))
     maintenance_windows = db.list_public_maintenance_windows()
     info = db.get_info_page()
     overall = compute_overall_status(services)
@@ -476,7 +480,8 @@ def index():
         else {"active": False, "reasons": []}
     jellyfin_activity = integrations.get_cached_jellyfin_activity() if visible["jellyfin_tasks"] else None
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
-                            incidents=incidents, maintenance_windows=maintenance_windows, info=info, overall=overall,
+                            incidents=incidents, incidents_hidden=incidents_hidden,
+                            maintenance_windows=maintenance_windows, info=info, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
@@ -520,16 +525,26 @@ def api_incidents_more():
     have a page rendering more incidents than that, and the cap failing closed
     (below) is safe rather than silently wrong.
 
-    Missing/empty `seen` fails closed with an empty response rather than
-    returning "page 1". That case is never a real "load more" click - the button
-    always sends its list - it's a stale cached copy of an older
-    public_history.js still sending the previous release's ?offset= parameter,
-    which the server would otherwise answer with the newest page over and over,
-    appending the same incidents forever (exactly the runaway duplication a user
-    hit after updating). An empty response makes such a button remove itself."""
+    A `seen` key entirely missing from the query string fails closed with an
+    empty response rather than returning "page 1". That case is never a real
+    "load more" click - the button always sends the key - it's a stale cached
+    copy of an older public_history.js still sending the previous release's
+    ?offset= parameter, which the server would otherwise answer with the newest
+    page over and over, appending the same incidents forever (exactly the
+    runaway duplication a user hit after updating). An empty response makes such
+    a button remove itself.
+
+    A `seen` key that IS present but empty (?seen=) is different and legitimate:
+    it's a real click on a page where nothing is currently visible (e.g. every
+    incident is hidden by public_history_days - see index()'s incidents_hidden),
+    so there's nothing yet to list in the button's data-seen-selector. Treating
+    that the same as a missing key would make the "all hidden" empty state's
+    load-more button permanently non-functional."""
+    if "seen" not in request.args:
+        return ""
     raw = request.args.get("seen", "")
     seen = [int(part) for part in raw.split(",") if part.strip().isdigit()]
-    if not seen or len(seen) > SEEN_IDS_LIMIT:
+    if len(seen) > SEEN_IDS_LIMIT:
         return ""
     incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, exclude_ids=seen))
     return render_template("sections/_incidents_fragment.html", incidents=incidents)
@@ -861,6 +876,7 @@ def admin_service_new():
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
+        data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
@@ -880,6 +896,7 @@ def admin_service_edit(service_id):
         data["auto_check"] = 1 if request.form.get("auto_check") else 0
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
+        data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
         db.update_service(service_id, data)
         labels = request.form.getlist("link_label")
         urls = request.form.getlist("link_url")
@@ -1416,6 +1433,7 @@ def admin_new_combined():
         service_data["auto_check"] = 1 if request.form.get("auto_check") else 0
         service_data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         service_data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
+        service_data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
         service_id = db.create_service(service_data)
         db.create_integration({
             "name": request.form.get("name", ""),

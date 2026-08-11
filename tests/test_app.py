@@ -976,6 +976,14 @@ def test_public_service_card_links_to_report_form(client):
     assert f"/report?service_id={sid}" in html
 
 
+def test_public_service_card_hides_report_button_when_disabled_for_service(client):
+    service = db.list_services()[0]
+    db.update_service(service["id"], {**service, "show_report_button": 0})
+
+    html = client.get("/").data.decode()
+    assert f"/report?service_id={service['id']}" not in html
+
+
 def test_admin_maintenance_window_crud(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     sid = db.list_services()[0]["id"]
@@ -1816,17 +1824,36 @@ def test_api_incidents_more_never_repeats_a_visible_incident(client):
 
 
 def test_api_incidents_more_fails_closed_without_seen_list(client):
-    """A request with no `seen` list is never a real "load more" click - it's a
-    stale cached copy of an older public_history.js still sending the previous
-    release's ?offset= parameter. Answering it with the newest page is what made
-    such a client append the same incidents forever, so it must return nothing."""
+    """A request with no `seen` key at all is never a real "load more" click -
+    it's a stale cached copy of an older public_history.js still sending the
+    previous release's ?offset= parameter. Answering it with the newest page is
+    what made such a client append the same incidents forever, so it must return
+    nothing. `?seen=` (key present, empty value) is a different, legitimate case
+    now - see test_api_incidents_more_returns_content_for_empty_seen_when_hidden."""
     sid = db.list_services()[0]["id"]
     db.create_incident({"service_id": sid, "title": "Should not leak", "status": "resolved"})
 
     assert client.get("/api/incidents/more").data.decode().strip() == ""
     assert client.get("/api/incidents/more?offset=0").data.decode().strip() == ""
     assert client.get("/api/incidents/more?offset=10").data.decode().strip() == ""
-    assert client.get("/api/incidents/more?seen=").data.decode().strip() == ""
+
+
+def test_api_incidents_more_returns_content_for_empty_seen_when_hidden(client):
+    """`?seen=` (key present, empty value) is what the real button sends when
+    nothing is currently visible on the page - e.g. every incident is hidden by
+    public_history_days (see index()'s incidents_hidden and the "elif
+    incidents_hidden" branch in sections/incidents.html). Unlike a missing `seen`
+    key entirely (the stale-client case above), this must return real content or
+    the "all hidden" empty state's load-more button would be permanently dead."""
+    sid = db.list_services()[0]["id"]
+    old = db.create_incident({"service_id": sid, "title": "Old hidden incident", "status": "resolved"})
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (old,))
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/api/incidents/more?seen=")
+    assert "Old hidden incident" in resp.data.decode()
 
 
 def test_api_incidents_more_rejects_an_oversized_seen_list(client):
@@ -1856,6 +1883,35 @@ def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
 
     resp = client.get(f"/api/incidents/more?seen={recent}")
     assert "Old one" in resp.data.decode()  # but reachable via "load more"
+
+
+def test_index_shows_load_more_when_all_incidents_hidden_by_history_days(client):
+    """Regression test: when EVERY incident is older than public_history_days,
+    the initial filtered list is empty, but incidents still exist - the page
+    must not claim "No incidents recorded. All clear." (that's only true when
+    nothing exists at all), and the load-more button must still render so the
+    hidden incidents are reachable, exactly as when only some are hidden."""
+    sid = db.list_services()[0]["id"]
+    old = db.create_incident({"service_id": sid, "title": "Old one", "status": "resolved"})
+    conn = db.get_db()
+    conn.execute("UPDATE incidents SET resolved_at='2000-01-01T00:00:00' WHERE id=?", (old,))
+    conn.commit()
+    conn.close()
+    db.set_setting("public_history_days", "3")
+
+    index_html = client.get("/").data.decode()
+    assert "No incidents recorded. All clear." not in index_html
+    assert 'id="incidents-load-more"' in index_html
+
+    resp = client.get("/api/incidents/more?seen=")
+    assert "Old one" in resp.data.decode()
+
+
+def test_index_shows_all_clear_when_no_incidents_exist_at_all(client):
+    db.set_setting("public_history_days", "3")
+    index_html = client.get("/").data.decode()
+    assert "No incidents recorded. All clear." in index_html
+    assert 'id="incidents-load-more"' not in index_html
 
 
 def test_api_maintenance_history_returns_ended_windows_only(client):

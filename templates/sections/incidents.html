@@ -10,6 +10,15 @@
           data-url="{{ url_for('api_incidents_more') }}" data-seen-selector=".incident-bubble[data-id]">
     Load more incidents
   </button>
+{% elif incidents_hidden %}
+  {# Incidents exist but are all older than the public_history_days cutoff - the
+     button must still render so they're reachable via "load more", which
+     (unlike the initial view above) never re-applies that age filter. #}
+  <div class="empty-state">No incidents to show right now — some are hidden by the history setting.</div>
+  <button type="button" class="btn secondary load-more-btn" id="incidents-load-more"
+          data-url="{{ url_for('api_incidents_more') }}" data-seen-selector=".incident-bubble[data-id]">
+    Load more incidents
+  </button>
 {% else %}
   <div class="empty-state">No incidents recorded. All clear.</div>
 {% endif %}

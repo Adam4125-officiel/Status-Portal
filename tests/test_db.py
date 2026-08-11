@@ -81,6 +81,17 @@ def test_service_ignore_in_overall_status_persists(isolated_db):
     assert db.get_service(sid)["ignore_in_overall_status"] == 0
 
 
+def test_service_show_report_button_defaults_on_and_is_toggleable(isolated_db):
+    sid = db.create_service({"name": "Test", "url": "http://example.com"})
+    assert db.get_service(sid)["show_report_button"] == 1
+
+    db.update_service(sid, {"name": "Test", "url": "http://example.com", "show_report_button": 0})
+    assert db.get_service(sid)["show_report_button"] == 0
+
+    db.update_service(sid, {"name": "Test", "url": "http://example.com", "show_report_button": 1})
+    assert db.get_service(sid)["show_report_button"] == 1
+
+
 def test_service_auto_incident_defaults_on_and_is_toggleable(isolated_db):
     # Default is on (1) when not specified, so existing behavior doesn't change for
     # anyone who doesn't touch the new checkbox.
