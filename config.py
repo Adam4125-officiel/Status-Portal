@@ -91,6 +91,14 @@ DISCORD_BOT_REFRESH_SECONDS = int(os.environ.get("PORTAL_DISCORD_BOT_REFRESH_SEC
 # globally instead, which works everywhere but can take up to an hour to first appear.
 DISCORD_BOT_GUILD_ID = os.environ.get("PORTAL_DISCORD_BOT_GUILD_ID", "").strip()
 
+# Byparr's own /health check doesn't just ping the process - it makes Byparr
+# actually navigate to a real page and solve a live Cloudflare challenge before
+# responding, which routinely takes far longer than the 5s timeout every other
+# integration fetcher uses for a plain REST call. A check interval/timeout, so
+# per this project's config split it's an env var like the ones below, not a DB
+# setting.
+BYPARR_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_BYPARR_TIMEOUT_SECONDS", "30"))
+
 # ---------------------------------------------------------------------------
 # Self-update (see updater.py / update.py)
 # ---------------------------------------------------------------------------

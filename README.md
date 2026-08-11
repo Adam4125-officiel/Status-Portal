@@ -506,6 +506,7 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_DISCORD_BOT_TOKEN` | *(blank = disabled)* | Enables the optional Discord bot (see its own section above) — requires `pip install discord.py` |
 | `PORTAL_DISCORD_BOT_REFRESH_SECONDS` | `300` | How often the bot updates its presence / edits its tracked status messages |
 | `PORTAL_DISCORD_BOT_GUILD_ID` | *(blank = global sync)* | Set to your server's ID for instant slash-command registration on a single-server bot |
+| `PORTAL_BYPARR_TIMEOUT_SECONDS` | `30` | HTTP timeout for the Byparr integration's `/health` check specifically — it solves a real Cloudflare challenge before responding, so it needs longer than every other integration's 5s timeout |
 | `PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` | `21600` (6h) | How often the background thread asks GitHub whether there's a new release |
 | `PORTAL_ENABLE_INAPP_UPDATE` | `true` | Set `false` to remove the admin panel's "Update now" button entirely (`update.py` over SSH still works) |
 
