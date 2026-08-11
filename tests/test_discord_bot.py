@@ -716,3 +716,21 @@ def test_on_ready_re_enforces_whitelist_for_already_joined_guilds(isolated_db, m
 
     kept.leave.assert_not_called()
     unwanted.leave.assert_awaited_once()
+
+
+def test_on_resumed_marks_connected_again_after_a_disconnect(isolated_db):
+    """Regression test for a real bug: on_disconnect() fires for any dropped gateway
+    connection, including an ordinary blip that gets resumed rather than needing a
+    fresh identify - and a resumed session only fires on_resumed(), never on_ready()
+    again. Without an on_resumed() handler, the admin panel kept showing "not
+    connected" forever after the first disconnect, even though the bot was still
+    fully functional (responding to commands, editing tracked messages)."""
+    bot = _build_bot()
+    discord_bot._state["connected"] = False
+    discord_bot._state["last_error"] = "Connection reset"
+
+    asyncio.run(bot.on_resumed())
+
+    status = discord_bot.get_status()
+    assert status["connected"] is True
+    assert status["last_error"] is None
