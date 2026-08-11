@@ -481,7 +481,7 @@ def index():
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
                             snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
-                            section_order=_public_section_order())
+                            section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
 @app.route("/api/status")

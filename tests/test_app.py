@@ -9,6 +9,7 @@ import pytest
 import app as app_module
 import db
 import twofactor
+import updater
 
 
 def db_all_incident_ids():
@@ -1842,6 +1843,15 @@ def test_public_page_renders_sections_in_configured_order(client):
     # "info" was moved ahead of "services" in the order above (default order has it
     # the other way around).
     assert html.index("Practical info") < html.index(">Services<")
+
+
+def test_public_page_footer_links_to_github_repo(client):
+    resp = client.get("/")
+    html = resp.data.decode()
+    assert updater.REPO_URL in html
+    assert "Check it out on GitHub" in html
+    # Sits next to the RSS feed link at the bottom of the page, not somewhere else.
+    assert html.index("RSS feed") < html.index(updater.REPO_URL)
 
 
 def test_public_page_shows_active_maintenance_window(client):
