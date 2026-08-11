@@ -247,7 +247,9 @@ DB-backed Settings pages, not a code edit.
   (`?seen=`), never by an offset or an id cursor, and never re-applies the
   initial view's `max_age_days` filter. All three of these were shipped broken
   in sequence on 2026-08-10, each caught live by the user rather than by the
-  test suite — read this before "simplifying" it back.**
+  test suite — read this before "simplifying" it back.** A fourth, related bug
+  in the same area was fixed 2026-08-11 — see item 4 below and the "fails
+  closed" paragraph at the end of this bullet, both updated for it.
   1. **Re-applying `max_age_days` on "load more"** makes anything past the
      cutoff permanently unreachable: the initial page hides it, and the button
      hides it again. The whole point of the button is to reveal what the
@@ -264,13 +266,35 @@ DB-backed Settings pages, not a code edit.
      made the button re-append the entire visible list on every click, the
      symptom the user reported as "completely broken, it loads the same
      indefinitely."
+  4. **The initial view's empty state didn't distinguish "no incidents exist"
+     from "every incident is hidden by `max_age_days`"** (fixed 2026-08-11).
+     With a filtered list of zero incidents, `sections/incidents.html`'s
+     load-more button — the only way to reach items 1-3 above — lived entirely
+     inside `{% if incidents %}`, so it silently disappeared right when it was
+     most needed, and the page claimed "No incidents recorded. All clear."
+     even though incidents existed. Fixed by having `index()` compute a
+     separate `incidents_hidden` flag (`not incidents and bool(db.list_incidents(limit=1))`
+     — an unfiltered existence check that only runs once the filtered list is
+     already empty, so it adds no query in the common case) and giving the
+     template a third branch: still no items to show, but a distinct message
+     plus the same load-more button, reachable via `?seen=` with nothing in it
+     yet (see the fails-closed paragraph below, which had to be narrowed for
+     this to work).
   Excluding the shown ids is the only formulation that is simultaneously
   gap-free and duplicate-free, because it states the intent directly instead of
   approximating it with a position. The endpoint **fails closed** (empty
-  response) when `seen` is missing/empty/oversized — that request is never a
-  real click, it's a stale cached script (see the `asset_url()` bullet below),
-  and answering it with "page 1" is what turned that stale script into an
-  infinite duplicator.
+  response) only when `seen` is missing from the query string *entirely*, or
+  oversized — a missing key is the real stale-client signal (see the
+  `asset_url()` bullet below: an old cached `public_history.js` sending
+  `?offset=` instead), and answering it with "page 1" is what turned that
+  stale script into an infinite duplicator. A `seen` key that's *present but
+  empty* (`?seen=`) is different and, since the 2026-08-11 fix above, legitimate
+  — it's exactly what the real button sends when item 4's "all hidden" empty
+  state is showing and nothing is on the page yet to list. The original version
+  of this fix treated both cases as "fails closed" identically (there's a
+  regression test from 2026-08-10 asserting exactly that), which was correct
+  until item 4 introduced a real reason to send an empty-but-present `seen` —
+  don't re-merge the two checks without re-breaking that case.
 - **Every CSS/JS reference in a template must go through `asset_url()`
   (`app.py`), never a bare `url_for('static', ...)`** — it appends a
   `?v=<mtime>` cache-buster. Added 2026-08-10 after a real user-hit bug: this
@@ -349,6 +373,18 @@ DB-backed Settings pages, not a code edit.
   both can't share the HTML `name="auto_incident"` on one `<form>` without
   colliding, so the integration's checkbox is deliberately named
   `check_auto_incident` in the template and mapped explicitly in the route.
+- **An admin page's on-page `<h1>` and its `{% block title %}` can drift apart
+  independently — check both, not just one (caught 2026-08-11).**
+  `admin_incidents.html`'s `<title>` already correctly said "Incidents —
+  Admin", but its `<h1>` still read "Incidents & maintenance" (stale from
+  before Maintenance got split out into its own nav item/page), which is what
+  the user actually saw and found confusing — the `<title>` tag is invisible
+  unless you're looking at the browser tab. Fixed by changing the `<h1>` to
+  just "Incidents", matching the nav label and the `<title>`. Every other
+  `admin_*.html` page's `<h1>`/`block title`/nav label already matched
+  3-for-3 when surveyed — this was the only mismatch found, not a systemic
+  problem, but if a nav label or a page's scope ever changes again, check the
+  on-page heading too, not just the `<title>` block.
 
 ## Self-update (`updater.py`, `update.py`, `/admin/about`) — added 2026-08-10
 
@@ -941,6 +977,23 @@ DB-backed Settings pages, not a code edit.
   is not something to echo back onto the public page. General reports
   (`service_id IS NULL`) aren't attributable to any one card and are excluded
   from the counts entirely, not folded into every service's total.
+- **Per-service "show the Report a problem button" toggle
+  (`services.show_report_button`, added 2026-08-11).** Same shape as
+  `ignore_in_overall_status`/`auto_incident` — a plain `_ensure_column`
+  retrofit, default `1` so every pre-existing service keeps showing the
+  button exactly as before, opt-*out* per service rather than opt-in. Checked
+  in `sections/services.html` (`{% if s.show_report_button %}` around the
+  existing "Report ⚑" link) — purely cosmetic, hides the button on that one
+  service's card only. **Deliberately does not touch the `/report` route
+  itself** — a visitor who already has (or guesses) `/report?service_id=N`
+  can still submit a report for a service with the button hidden. That was a
+  conscious scope call (asked for as "hide the button," not "block
+  reporting"), not an oversight — if per-service access control is ever
+  wanted, it needs its own check inside `report_problem()`, not just a
+  bigger template guard. No global/default-value setting was added either
+  (no `service_default_show_report_button`) — purely per-service, matching
+  what was actually asked for; don't add a defaults cascade for this without
+  a real reason to.
 
 ## Component restart controls (`app.py`, `discord_bot.py` — added 2026-08-10)
 
