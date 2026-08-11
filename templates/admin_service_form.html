@@ -87,6 +87,13 @@
     <div class="field-hint">This service's own card still shows its real status normally. If it's down while everything else is fine, the top banner still says "All services are operating normally" instead of reporting an outage for a service you've marked as not affecting overall status (e.g. something non-critical or expected to flap).</div>
   </div>
   <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_report_button" {{ 'checked' if (service.show_report_button if service else true) }}>
+      Show the "Report a problem" button on this service's public card
+    </label>
+    <div class="field-hint">Turn off to hide the report-a-problem link for just this service (e.g. one where visitor reports don't make sense).</div>
+  </div>
+  <div class="field">
     <label for="api_health_mode">API health check</label>
     {% set current_api_mode = service.api_health_mode if service else (defaults.api_health_mode if defaults else 'off') %}
     <select id="api_health_mode" name="api_health_mode">

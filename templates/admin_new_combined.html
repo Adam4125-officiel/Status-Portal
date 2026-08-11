@@ -124,6 +124,13 @@
       <div class="field-hint">This service's own card still shows its real status normally - it just won't drag the top banner into "down"/"degraded" on its own.</div>
     </div>
     <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="show_report_button" checked>
+        Show the "Report a problem" button on this service's public card
+      </label>
+      <div class="field-hint">Turn off to hide the report-a-problem link for just this service (e.g. one where visitor reports don't make sense).</div>
+    </div>
+    <div class="field">
       <label for="api_health_mode">API health check</label>
       {% set current_api_mode = defaults.api_health_mode if defaults else 'off' %}
       <select id="api_health_mode" name="api_health_mode">
