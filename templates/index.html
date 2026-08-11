@@ -47,7 +47,7 @@
     {% include 'sections/' ~ key ~ '.html' %}
   {% endfor %}
 
-  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a></footer>
+  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a> · <a href="{{ repo_url }}" target="_blank" rel="noopener">Like this page? ⭐ Check it out on GitHub</a></footer>
 </div>
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
 <script src="{{ asset_url('js/main.js') }}"></script>

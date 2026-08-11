@@ -296,6 +296,20 @@ DB-backed Settings pages, not a code edit.
   have no API key concept of their own at all, so the shared `api_key` form
   field is simply unused by those two fetchers (left present on the form only
   for a consistent UI across all kinds).
+- **Byparr's `/health` is genuinely slow, not flaky — it gets its own, longer,
+  configurable timeout (`config.BYPARR_TIMEOUT_SECONDS`, env
+  `PORTAL_BYPARR_TIMEOUT_SECONDS`, default 30s), added 2026-08-11 after a real
+  user hit `Read timed out (read timeout=5)` against a reachable instance.**
+  Checked against Byparr's own source (`src/endpoints.py`): `/health` doesn't
+  just ping the process, it makes Byparr actually navigate to google.com and
+  solve a real Cloudflare challenge before responding — there's no lighter
+  endpoint documented anywhere to switch to instead, so `/health` was already
+  the correct/only endpoint. The bug was purely the shared `TIMEOUT = 5`
+  constant every other fetcher also uses for a plain fast REST call being far
+  too short for this one specifically slow endpoint. If another integration
+  kind turns out to have a similarly slow health check, give it the same
+  treatment (its own `config.py` env var) rather than raising the shared
+  `TIMEOUT` for everyone.
 - **`service_default_*` settings (Settings → "Service defaults", added
   2026-08-10) are pre-fill-only, never live-cascading** — `app._service_defaults()`
   reads them and `admin_service_new`'s `GET` handler passes the result as an
@@ -306,6 +320,35 @@ DB-backed Settings pages, not a code edit.
   that already exists — `run_health_checks()` and the rest of the schema are
   completely unaffected by this setting, it only ever influences what a brand
   new "New service" form starts pre-filled with.
+- **The combined "New service + status check" wizard (`/admin/new/combined`)
+  used to be a completely separate, much smaller form from
+  `admin_service_form.html` — that gap was a real bug, fixed 2026-08-11, and
+  is worth understanding so it doesn't quietly reopen.** The wizard only ever
+  rendered/submitted `name`/`icon`/`description`/`url`/`group_name` plus the
+  integration fields — `service_default_*` settings were never reachable from
+  it at all, so `db.create_service()` silently fell back to its own hardcoded
+  literals (0, 5, `"off"`...) instead of what the admin had actually
+  configured, and anyone who wanted retry/threshold/grace/API-health-mode set
+  had to create the service via the wizard and then immediately go edit it.
+  Fixed by giving `admin_new_combined.html` every field
+  `admin_service_form.html` has (minus the extra-links repeater, which isn't
+  on the plain "New service" form either — not a wizard-specific gap), and
+  updating `admin_new_combined()`'s `POST` handler to build the same kind of
+  `data` dict `admin_service_new()` does before calling `db.create_service()`.
+  The new fields live inside a collapsed-by-default `<details>` "Advanced
+  settings" block (`.form-panel details` in `style.css`) so the common case
+  (name/URL/kind/API key, hit Create) doesn't get longer — **collapsed is a
+  CSS/visual state only, the inputs are still part of the DOM and still
+  submit normally**, which is exactly why pre-filling them server-side from
+  `_service_defaults()` is enough on its own; nothing needs an "open the
+  advanced section" JS handler for the defaults to actually reach
+  `create_service()`. One naming gotcha if you touch this again: the service
+  has its own `auto_incident` checkbox (open an incident when the *service*
+  goes down) and the integration being created alongside it has a *different*
+  `auto_incident` concept (open an incident when the *status check* fails) —
+  both can't share the HTML `name="auto_incident"` on one `<form>` without
+  colliding, so the integration's checkbox is deliberately named
+  `check_auto_incident` in the template and mapped explicitly in the route.
 
 ## Self-update (`updater.py`, `update.py`, `/admin/about`) — added 2026-08-10
 
@@ -709,6 +752,25 @@ DB-backed Settings pages, not a code edit.
   `except (NotFound, Forbidden)` / `except Exception` branches back into one —
   that distinction *is* the fix; a bare catch-all forgetting the message on
   any failure is the exact bug this replaced.
+- **`on_resumed()` (added 2026-08-11) — without it, the admin panel could get
+  permanently stuck showing "not connected" for a bot that was fully working.**
+  `on_disconnect()` sets `_state["connected"] = False` and fires for *any*
+  dropped gateway connection, including an ordinary blip that discord.py
+  resumes on its own without a fresh login. The catch: a resumed session only
+  fires `on_resumed()`, never `on_ready()` again (`on_ready()` is for a fresh
+  identify only) — so with no `on_resumed()` handler, nothing ever set
+  `connected` back to `True` after the first disconnect+resume cycle, even
+  though the bot kept dispatching events and responding normally the entire
+  time (confirmed by the user: it kept answering the slash command and
+  editing its tracked `/status` message while the admin panel insisted it
+  was offline). Fixed by adding `on_resumed()` alongside `on_ready()`/
+  `on_disconnect()`, setting `_state["connected"] = True` the same way
+  `on_ready()` does — it deliberately does *not* redo the guild-whitelist
+  enforcement or restart `refresh_loop` like `on_ready()` does, since a
+  resume means the session context didn't actually change, just the
+  connection dictionary. If you add another lifecycle-dependent piece of
+  `_state`, remember `on_ready`/`on_resumed`/`on_disconnect` are the three
+  events that matter, not just the first two.
 
 ## Crash logging (`logging_setup.py`) — added 2026-08-01
 

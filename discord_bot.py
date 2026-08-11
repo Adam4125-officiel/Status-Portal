@@ -494,6 +494,19 @@ def _make_client_class(discord, app_commands, tasks):
         async def on_disconnect(self):
             _state["connected"] = False
 
+        async def on_resumed(self):
+            # discord.py fires on_disconnect() for any dropped gateway connection,
+            # including an ordinary blip that gets resumed - but a resumed session
+            # only fires on_resumed(), never on_ready() again (on_ready() is for a
+            # fresh identify only). Without this handler, _state["connected"] stayed
+            # stuck at False after the first disconnect+resume cycle even though the
+            # bot kept dispatching events and working normally the whole time - this
+            # was the actual cause of the admin panel showing "not connected" for a
+            # bot that was demonstrably still responding and editing messages.
+            _state["connected"] = True
+            _state["last_error"] = None
+            _logger.info("session resumed")
+
         async def _fetch_channel(self, channel_id):
             # get_channel() is a cache lookup only - right after a restart the cache
             # may not be warm yet even though the channel is perfectly reachable, so

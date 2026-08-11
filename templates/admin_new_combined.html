@@ -52,6 +52,102 @@
       Show this status check's health/warnings on the public page, on this service's card
     </label>
   </div>
+
+  <details>
+    <summary>Advanced settings</summary>
+
+    <p style="color: var(--text-dim); font-size: 12px; margin: 2px 0 14px;">
+      Service options — numeric fields are pre-filled from Settings → Service defaults where you've set one.
+      Everything here can also be changed later from the service's own edit page.
+    </p>
+
+    <div class="field">
+      <label for="status">Displayed status</label>
+      <select id="status" name="status">
+        <option value="operational" selected>Operational</option>
+        <option value="slow">Slow</option>
+        <option value="degraded">Degraded</option>
+        <option value="maintenance">Maintenance</option>
+        <option value="down">Down</option>
+      </select>
+      <div class="field-hint">If auto-check is on, this status will be overwritten unless you check "Force" below. For a non-HTTP service (SMB, FTP...), leave auto-check off and manage the status here by hand.</div>
+    </div>
+    <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="manual_override">
+        Force this status (ignores auto-check, useful for planned maintenance or a non-HTTP service)
+      </label>
+    </div>
+    <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="auto_check">
+        Check automatically (HTTP ping every 2 min — only for a service that responds over HTTP, not SMB/FTP)
+      </label>
+    </div>
+    <div class="field">
+      <label for="check_url">Check URL (if auto-check is on)</label>
+      <input type="text" id="check_url" name="check_url" placeholder="http://192.168.1.x:port/health">
+      <div class="field-hint">A response is treated as reachable regardless of status code (a 401/403 login prompt still counts as up) - only a 5xx server error or a failed connection counts against it. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
+    </div>
+    <div class="field">
+      <label for="slow_threshold_ms">Slow threshold (ms)</label>
+      <input type="number" id="slow_threshold_ms" name="slow_threshold_ms" min="0" value="{{ defaults.slow_threshold_ms if defaults else '' }}" placeholder="e.g. 2000">
+      <div class="field-hint">If auto-check takes longer than this to respond, show "Slow" instead of "Operational". Leave blank to disable.</div>
+    </div>
+    <div class="field">
+      <label for="retry_count">Retry attempts before marking down</label>
+      <input type="number" id="retry_count" name="retry_count" min="0" value="{{ defaults.retry_count if defaults else 0 }}">
+      <div class="field-hint">If a check fails, retry this many times before treating it as actually down (and opening an incident, if enabled below) - handles a service that blips and recovers on its own within seconds/minutes. 0 = mark it down on the first failed check.</div>
+    </div>
+    <div class="field">
+      <label for="retry_interval_seconds">Seconds between retries</label>
+      <input type="number" id="retry_interval_seconds" name="retry_interval_seconds" min="1" value="{{ defaults.retry_interval_seconds if defaults else 5 }}">
+      <div class="field-hint">Only matters if retry attempts above is more than 0. E.g. 3 attempts × 10s = up to 30 extra seconds before this service is marked down.</div>
+    </div>
+    <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="auto_incident" {{ 'checked' if (defaults.auto_incident if defaults else true) }}>
+        Automatically open an incident when this service goes down, and resolve it when it recovers
+      </label>
+      <div class="field-hint">Only applies while auto-check is on above. Turn this off if you'd rather track outages for this service manually.</div>
+    </div>
+    <div class="field">
+      <label for="startup_grace_seconds">Startup grace period (seconds)</label>
+      <input type="number" id="startup_grace_seconds" name="startup_grace_seconds" min="0" value="{{ defaults.startup_grace_seconds if defaults else 0 }}">
+      <div class="field-hint">Delay before this service's checks are allowed to open an automatic incident after the portal starts, giving it time to boot. Status and response time are still recorded normally during this window - only incident creation is held back.</div>
+    </div>
+    <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="ignore_in_overall_status">
+        Exclude this service from the overall status banner
+      </label>
+      <div class="field-hint">This service's own card still shows its real status normally - it just won't drag the top banner into "down"/"degraded" on its own.</div>
+    </div>
+    <div class="field">
+      <label for="api_health_mode">API health check</label>
+      {% set current_api_mode = defaults.api_health_mode if defaults else 'off' %}
+      <select id="api_health_mode" name="api_health_mode">
+        <option value="off" {{ 'selected' if current_api_mode == 'off' }}>Off (ignore linked integration's API health)</option>
+        <option value="degrade" {{ 'selected' if current_api_mode == 'degrade' }}>Degrade — show "Degraded" if the API is unreachable but the web UI responds</option>
+        <option value="down" {{ 'selected' if current_api_mode == 'down' }}>Down — show "Down" if the API is unreachable, even if the web UI responds</option>
+      </select>
+      <div class="field-hint">Refers to the status check being created below, once it's linked (which this wizard does automatically).</div>
+    </div>
+    <div class="field">
+      <label for="sort_order">Sort order</label>
+      <input type="number" id="sort_order" name="sort_order" value="0">
+    </div>
+
+    <p style="color: var(--text-dim); font-size: 12px; margin: 18px 0 14px;">Status check options</p>
+    <div class="field">
+      <label class="field-check">
+        <input type="checkbox" name="check_auto_incident">
+        Also auto-open an incident when the status check itself fails
+      </label>
+      <div class="field-hint">Separate from the service's own down-detection above - this one's about the health/log check rather than the service card. Off by default to avoid noisy incidents from a flaky status check.</div>
+    </div>
+  </details>
+
   <div class="form-actions">
     <button type="submit" class="btn">Create both</button>
     <a href="{{ url_for('admin_new_picker') }}" class="btn secondary">Cancel</a>

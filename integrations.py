@@ -11,6 +11,7 @@ kind of service it's showing:
 """
 import requests
 
+import config
 import db
 import monitoring
 
@@ -126,10 +127,16 @@ def fetch_byparr_status(base_url, api_key):
     no API key of its own - GET /health makes it actually solve a real
     challenge against google.com internally and returns 200 on success, 500
     on failure, with no version field exposed anywhere. Confirmed against
-    Byparr's own source (src/endpoints.py), not against a real instance."""
+    Byparr's own source (src/endpoints.py), not against a real instance.
+    /health is the only health endpoint Byparr documents - there's no lighter
+    alternative to switch to. It's genuinely just slow (real challenge-solving,
+    not a simple ping), which is why this gets its own, much longer timeout
+    (config.BYPARR_TIMEOUT_SECONDS) instead of the shared TIMEOUT every other
+    fetcher uses - a real instance was confirmed timing out against the
+    generic 5s value. See CLAUDE.md."""
     base_url = base_url.rstrip("/")
     try:
-        r = requests.get(f"{base_url}/health", timeout=TIMEOUT)
+        r = requests.get(f"{base_url}/health", timeout=config.BYPARR_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         return {"reachable": False, "version": None, "issues": [], "error": str(e)}
     if r.status_code >= 500:

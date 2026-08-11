@@ -794,6 +794,31 @@ footer.foot {
 }
 .checkbox-list .field-check { padding: 4px 0; }
 .checkbox-list .field-check:has(input:disabled) { opacity: 0.55; }
+
+/* Collapsible "Advanced settings" block inside a .form-panel (e.g. the combined
+   new-service+status-check wizard) - fields most people leave at their
+   configured defaults live here, closed by default, rather than making a long
+   form even longer for the common case. */
+.form-panel details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+  padding: 0 14px;
+}
+.form-panel details[open] { padding-bottom: 6px; }
+.form-panel details summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  list-style: none;
+}
+.form-panel details summary::-webkit-details-marker { display: none; }
+.form-panel details summary::before { content: "▸ "; }
+.form-panel details[open] summary::before { content: "▾ "; }
+.form-panel details > .field:first-of-type { margin-top: 4px; }
+
 .form-actions { display: flex; gap: 10px; margin-top: 20px; }
 
 .flash {

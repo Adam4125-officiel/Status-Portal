@@ -9,6 +9,7 @@ import pytest
 import app as app_module
 import db
 import twofactor
+import updater
 
 
 def db_all_incident_ids():
@@ -573,6 +574,85 @@ def test_wizard_combined_creates_service_and_linked_integration(client):
     assert len(integs) == 1
     assert integs[0]["kind"] == "arr"
     assert integs[0]["base_url"] == "http://localhost:1"
+
+
+def test_wizard_combined_form_prefills_service_defaults(client):
+    """Regression test for a real bug: the wizard used to only ever render/submit
+    name/icon/description/url/group_name, so the configured Service defaults were
+    never reachable from it at all (db.create_service() silently fell back to its
+    own hardcoded literals instead)."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_slow_threshold_ms": "1500", "service_default_retry_count": "2",
+    })
+    resp = client.get("/admin/new/combined")
+    assert b'id="slow_threshold_ms"' in resp.data
+    assert b'value="1500"' in resp.data
+    assert b'id="retry_count"' in resp.data
+    assert b'value="2"' in resp.data
+
+
+def test_wizard_combined_applies_configured_service_defaults_on_create(client):
+    """End-to-end version of the regression above: submitting exactly what a real
+    browser would submit for the (collapsed but still-present-in-the-DOM) Advanced
+    settings section - i.e. the server-prefilled default values, untouched by the
+    admin - must land on the created service, not app.py's/db.py's own hardcoded
+    fallbacks."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_slow_threshold_ms": "1500", "service_default_startup_grace_seconds": "30",
+        "service_default_retry_count": "3", "service_default_retry_interval_seconds": "15",
+    })
+    resp = client.post("/admin/new/combined", data={
+        "name": "Radarr", "icon": "🎬", "url": "http://localhost:2",
+        "kind": "arr", "api_key": "testkey", "show_on_public": "on",
+        "status": "operational", "slow_threshold_ms": "1500", "retry_count": "3",
+        "retry_interval_seconds": "15", "auto_incident": "on", "startup_grace_seconds": "30",
+        "api_health_mode": "off", "sort_order": "0",
+    })
+    assert resp.status_code == 302
+
+    service = next(s for s in db.list_services() if s["name"] == "Radarr")
+    assert service["slow_threshold_ms"] == 1500
+    assert service["startup_grace_seconds"] == 30
+    assert service["retry_count"] == 3
+    assert service["retry_interval_seconds"] == 15
+
+
+def test_wizard_combined_full_advanced_fields_are_saved(client):
+    """The wizard must expose (and actually persist) every field the plain 'New
+    service' form and the 'New integration' form have, not just the original
+    subset - including the fields with no configured-default counterpart."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/new/combined", data={
+        "name": "Prowlarr", "icon": "🔍", "description": "Indexer manager",
+        "url": "http://localhost:3", "group_name": "Media",
+        "kind": "arr", "api_key": "testkey", "show_on_public": "on",
+        "status": "down", "manual_override": "on", "auto_check": "on",
+        "check_url": "http://localhost:3/health", "slow_threshold_ms": "2500",
+        "retry_count": "4", "retry_interval_seconds": "20", "auto_incident": "on",
+        "startup_grace_seconds": "60", "ignore_in_overall_status": "on",
+        "api_health_mode": "degrade", "sort_order": "5", "check_auto_incident": "on",
+    })
+    assert resp.status_code == 302
+
+    service = next(s for s in db.list_services() if s["name"] == "Prowlarr")
+    assert service["status"] == "down"
+    assert service["manual_override"] == 1
+    assert service["auto_check"] == 1
+    assert service["check_url"] == "http://localhost:3/health"
+    assert service["slow_threshold_ms"] == 2500
+    assert service["retry_count"] == 4
+    assert service["retry_interval_seconds"] == 20
+    assert service["auto_incident"] == 1
+    assert service["startup_grace_seconds"] == 60
+    assert service["ignore_in_overall_status"] == 1
+    assert service["api_health_mode"] == "degrade"
+    assert service["sort_order"] == 5
+
+    integs = db.list_integrations_for_service(service["id"])
+    assert len(integs) == 1
+    assert integs[0]["auto_incident"] == 1
 
 
 def test_public_page_never_fetches_integrations_live(client, monkeypatch):
@@ -1842,6 +1922,15 @@ def test_public_page_renders_sections_in_configured_order(client):
     # "info" was moved ahead of "services" in the order above (default order has it
     # the other way around).
     assert html.index("Practical info") < html.index(">Services<")
+
+
+def test_public_page_footer_links_to_github_repo(client):
+    resp = client.get("/")
+    html = resp.data.decode()
+    assert updater.REPO_URL in html
+    assert "Check it out on GitHub" in html
+    # Sits next to the RSS feed link at the bottom of the page, not somewhere else.
+    assert html.index("RSS feed") < html.index(updater.REPO_URL)
 
 
 def test_public_page_shows_active_maintenance_window(client):

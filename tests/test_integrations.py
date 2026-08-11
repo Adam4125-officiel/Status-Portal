@@ -141,6 +141,21 @@ def test_fetch_byparr_status_challenge_solve_failure():
     assert "challenge" in result["error"]
 
 
+def test_fetch_byparr_status_uses_its_own_longer_configurable_timeout(monkeypatch):
+    """Regression test: Byparr's /health makes it actually solve a real Cloudflare
+    challenge before responding, which routinely exceeds the 5s TIMEOUT every other
+    fetcher uses for a plain REST call - a real instance was confirmed timing out
+    against that shared value. Byparr must use its own, longer, configurable
+    timeout instead, not the shared constant."""
+    import config
+    monkeypatch.setattr(config, "BYPARR_TIMEOUT_SECONDS", 45)
+    resp = Mock(status_code=200, ok=True)
+    with patch("requests.get", return_value=resp) as mock_get:
+        integrations.fetch_byparr_status("http://byparr:8191", "")
+    assert mock_get.call_args.kwargs["timeout"] == 45
+    assert mock_get.call_args.kwargs["timeout"] != integrations.TIMEOUT
+
+
 def test_fetch_jellyfin_sessions_counts_transcodes_only():
     fake_sessions = [
         {"PlayState": {"PlayMethod": "Transcode"}},
