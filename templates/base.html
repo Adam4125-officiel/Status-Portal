@@ -15,8 +15,12 @@
   {% endif %}
   <script>
     // Applied before CSS paints, to avoid a flash of the wrong theme on load.
+    // Mirrors theme.js's own fallback: no saved choice yet -> follow the OS preference.
     (function () {
-      if (localStorage.getItem('portal-theme') === 'light') {
+      var saved = localStorage.getItem('portal-theme');
+      var wantsLight = saved ? saved === 'light'
+        : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+      if (wantsLight) {
         document.documentElement.setAttribute('data-theme', 'light');
       }
     })();
