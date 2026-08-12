@@ -1,133 +1,251 @@
-# Roadmap / ideas not built yet
+# Candidate features (not built yet)
 
-Everything proposed in earlier passes has been built: per-service/per-integration
-auto-incidents, maintenance-window scheduling, Discord/ntfy push notifications, a
-light theme toggle, SVG status badges, an RSS feed, per-service "slow" detection and
-startup grace periods, CPU/GPU/per-disk temperature and per-disk I/O (Windows), a
-high-load indicator (system metrics + Jellyfin transcode/task activity), a Discord
-server whitelist, a public "report a problem" form, component restart controls
-(whole app + Discord bot), a custom logo/favicon, Bazarr/Tdarr/Byparr integrations,
-a per-service API health check mode, and auto-hiding old incidents/maintenance
-history. What's left:
+Ideas discussed with Adam, written up so they can slot straight into
+`ROADMAP.md`. Each one lists a rough priority and implementation effort
+(**S**mall / **M**edium / **L**arge) alongside the reasoning, not just the
+label — the point is that someone new to the repo can see *why*, not just
+where it landed.
 
-## Verification against real, live instances
+## Quick wins
 
-The Jellyfin/*Arr/Jellyseerr/Bazarr/Tdarr/Byparr integration parsing (`integrations.py`,
-including the newer `/Sessions` and `/ScheduledTasks` fetchers behind the high-load
-indicator) is only tested against mocked API payloads matching each app's
-documented response shape - this sandbox has no real instance of any of them to
-test against. Bazarr/Tdarr/Byparr specifically (added 2026-08-10) are built from
-each project's own published API docs/source, not confirmed against a running
-instance - if a real Bazarr/Tdarr/Byparr's actual response shape differs from what
-`fetch_bazarr_status()`/`fetch_tdarr_status()`/`fetch_byparr_status()` in
-`integrations.py` expect, start there first. Likewise the Hyper-V VM status,
-Windows volume-label code, and the newer CPU/disk temperature + per-disk I/O code
-(all PowerShell/CIM-backed) in `monitoring.py` have only ever run their Linux/no-op
-branches for real - CPU temp (ACPI thermal zone) and disk temp
-(`Get-StorageReliabilityCounter`) are both known-unreliable even on real Windows
-hardware, so "shows nothing" there may be the platform, not a bug. The Discord
-bot's new `stop()`/`restart()` (see CLAUDE.md's Discord bot section) are also
-unit-tested only, against a fake in-thread event loop, not a real gateway
-connection. If something looks wrong against a real instance of any of these,
-start there rather than assuming the Linux-tested/mocked paths are the problem.
+Small, contained changes that mostly reuse code that already exists.
 
-## More reliable CPU/disk temperature via HWiNFO
+### Test-notification button
+A button in Settings next to the Discord/ntfy fields that fires a one-off
+test message through whichever channel(s) are configured, using the exact
+same dispatch path as a real incident/maintenance notification (`notifications.py`) rather than a separate code path. The point isn't just
+"is the webhook URL reachable" — it's confirming the whole chain (correct
+URL, correct ntfy topic, bot permissions if the bot also posts) without
+waiting for, or faking, a real incident to find out it's been broken for
+three weeks.
 
-Confirmed on the user's real box (2026-07-23): the current sources are unreliable
-on desktop/enthusiast hardware — CPU temp via the ACPI thermal zone
-(`MSAcpi_ThermalZoneTemperature`) returns nothing at all, and per-disk temp via
-`Get-StorageReliabilityCounter` returns a literal `0` (now treated as "no
-reading", not displayed as a real 0°C — see `monitoring._query_windows_disk_details()`)
-for at least one drive, apparently one whose SMART temperature is only exposed as
-attribute 190 "Airflow Temperature" rather than attribute 194
-"Temperature"/"Drive Temperature". The user already runs HWiNFO, which reads both
-sensors correctly on this exact hardware.
+**Priority:** High · **Effort:** S — no new logic, just a route that calls
+the existing notification function with a canned payload.
 
-Discussed 2026-07-23, deliberately not built yet — the user chose to leave it as
-today's graceful-degradation behavior (temp just doesn't show) for now rather than
-take on a new dependency or implementation. If revisited, the options considered:
+### Manual DB backup/export button
+An admin-triggered "download a backup" button (Settings, or a small page of
+its own) that zips up `instance/portal.db` and serves it as a download,
+independent of the automatic backups the self-updater already takes before
+every update (`instance/update_backups/<timestamp>/`). Useful as a
+"before I go poke at something manually" safety net, or just to keep an
+off-box copy around.
 
-- **Read HWiNFO's Shared Memory** (leaning option) — reuses a tool already running
-  and already correctly identifying these exact sensors, no new software to
-  install. Requires "Shared Memory Support" enabled in HWiNFO Sensors' settings and
-  HWiNFO kept running. More implementation work here: HWiNFO has no WMI provider,
-  so this means parsing a documented but non-trivial binary shared-memory layout
-  via `ctypes`/`mmap`, and temps go blank if HWiNFO isn't running.
-- **smartmontools (`smartctl`) for disks + LibreHardwareMonitor's WMI provider for
-  CPU** — two more standard, focused tools instead of one shared-memory
-  integration. `smartctl` reads raw SMART attribute 194 first, falling back to 190,
-  which would fix the specific drive precisely. LibreHardwareMonitor's WMI provider
-  is queryable the same simple way this app already queries Hyper-V. More things to
-  install, but each piece is simpler than shared-memory parsing.
+**Priority:** High · **Effort:** S — the file-copy/zip logic already exists
+in `updater.py` for update rollbacks; this mostly reuses it behind a new
+route.
 
-## Possible Linux-specific fork/mode
+### Low disk space alert
+A second threshold, separate from the existing high-load indicator
+(CPU / disk-I/O / network), that watches free disk space per volume and
+opens an incident (or just fires a notification) once it drops below an
+admin-configured percentage or absolute value. This is a different failure
+mode from high I/O throughput — a disk can be completely idle and still be
+nearly full.
 
-Idea floated 2026-07-23, prompted by live-testing the retry feature entirely in
-this (Linux) sandbox with real HTTP servers and no shortcuts — a reminder that
-almost everything in this app (services/incidents/announcements/maintenance, the
-Discord bot, integrations, high-load via system metrics, retry, slow status, grace
-periods) is already fully cross-platform, built on psutil/Flask/SQLite with nothing
-OS-specific. The *only* Windows-only pieces are in `monitoring.py`: Hyper-V VM
-detection, Windows volume labels, CPU/disk temperature (PowerShell/CIM), and
-per-disk I/O's drive-letter-to-PhysicalDriveN correlation.
+**Priority:** High · **Effort:** S — extends the same threshold/notification
+pipeline `monitoring.py` and `notifications.py` already share for high-load,
+with one more metric.
 
-Not started, just noted — if picked up, a Linux-native `monitoring.py` backend
-would likely be *simpler* than the Windows one in places, not harder:
+### Dark mode that follows the OS preference
+Today the light/dark toggle is a manual per-visitor switch. Adding a
+`prefers-color-scheme: dark` media query as the *default* — before any
+manual choice has been made — means a visitor whose system is set to dark
+mode gets it automatically, while an explicit click on the toggle still
+overrides it. Same pattern most sites use today.
 
-- **Per-disk I/O** is actually easier on Linux — `psutil.disk_io_counters(perdisk=True)`
-  already returns clean device names (`sda`, `nvme0n1`) with no PhysicalDriveN-style
-  correlation step needed; only partition→parent-disk name mapping (stripping a
-  trailing partition number/`pN` suffix) is required, which is more
-  straightforward than the Windows `Get-Partition`/`Get-PhysicalDisk` dance.
-- **CPU temperature** — `psutil.sensors_temperatures()` works natively on Linux
-  (reads `/sys/class/hwmon` under the hood), no PowerShell/CIM subprocess needed at
-  all, and no ACPI-thermal-zone unreliability class of problem.
-- **Per-disk temperature** — likely still needs `smartctl` (or parsing
-  `/sys/class/hwmon` labels, less reliable) for the same reason as the
-  HWiNFO/smartmontools option discussed above — no free lunch here on either OS.
-- **VM detection** — Hyper-V doesn't apply; would need a different concept
-  entirely (libvirt/KVM, or Docker container status) rather than a direct port.
+**Priority:** Medium · **Effort:** S — CSS-only, layered under the existing
+toggle logic in `static/js/`.
 
-## Jellyfin-backed user permissions
+### Service ↔ Hyper-V VM mapping in the admin panel
+The Resources page already lists detected Hyper-V VMs with start/stop/restart
+controls; this adds a link from a *service* to the VM it runs on, shown right
+on that service's admin card (e.g. "Seerr — runs on VM-Media02"). Mostly
+about faster troubleshooting: see a service is down, immediately see which
+VM to go check, without cross-referencing two separate admin pages.
 
-Use Jellyfin's own user database as an identity source, so individual Jellyfin
-accounts see personalized extra instructions on the public page (e.g. "here's how to
-join the Tailscale network") gated by who's logged in, instead of everyone seeing the
-same static info page. This is a bigger architectural change: it introduces a second
-authentication path alongside the existing single-admin-password login, plus a
-visibility/permissions model per piece of content - worth a dedicated design
-conversation before writing any code, rather than assumptions baked in here.
+**Priority:** Medium · **Effort:** S — a new optional field on the service
+record pointing at an already-detected VM id, plus a small UI addition.
 
-## Serve the admin panel on a separate port/subdomain from the public page
+## Solid features
 
-Idea from the user, 2026-08-01: run `/admin/*` on a different port (or a
-dedicated subdomain) than the public status page, so the two can be exposed
-completely independently — e.g. the public page reachable from the open
-internet as today, while `/admin` is only reachable via Tailscale, a
-different reverse-proxy rule, or not published externally at all. Right now
-they're inseparable: same Flask app, same port, `/admin` just happens to
-require login.
+Contained but touch the schema or add a genuinely new concept.
 
-Worth doing, not started. Roughly two shapes to pick between if this gets
-picked up:
-- **Two WSGI listeners, one Flask app** — run the existing `app` object on a
-  second port too (waitress supports binding multiple listeners, or run two
-  `serve()` calls in separate threads), with a `before_request` check that
-  404s `/admin/*` on the public-facing port and 404s everything *except*
-  `/admin/*` on the admin-facing port. Simplest change, no code duplication,
-  same process/DB connection pool.
-- **Split into two Flask apps / blueprints** sharing `db.py` — cleaner
-  separation but a bigger refactor (route registration, shared `before_request`
-  hooks like CSRF and security headers would need to move to whatever's
-  common, static file serving duplicated or centralized).
+### Service dependencies
+Lets a service be marked as depending on one or more other services (e.g.
+Seerr depends on Radarr and Sonarr). If a dependency is down, the dependent
+service shows as **degraded** instead of either lying (showing "operational"
+when it can't actually do anything useful) or falsely showing "down" (when
+the service itself is fine, just starved by something upstream). This also
+sets up the "media stack" idea further down — a coherent way to represent a
+service that's technically running but functionally broken because of
+something else.
 
-The first option is almost certainly the right call unless a reason turns up
-not to — far less code churn for the same practical outcome. Needs a
-decision on how the second port's bind address/number is configured
-(probably a new `PORTAL_ADMIN_PORT` env var in `config.py`, unset = today's
-behavior, single port, both public and admin).
+**Priority:** High · **Effort:** M — a new relation in the schema (`db.py`),
+status-computation changes on both the admin and public side, and a picker
+UI (a checkbox list, similar to how incidents/maintenance already pick
+multiple services).
+
+### External internet connectivity check
+Pings a fixed external target (1.1.1.1 by default, ideally configurable) on
+the same schedule as service health checks. If it fails, the public page can
+show a distinct "internet connectivity issue" state instead of every single
+service flipping to "down" at once with no obvious common cause — useful for
+anyone reading the status page during an ISP outage, and for whoever's on
+call not chasing five separate incidents that are actually one.
+
+**Priority:** High · **Effort:** M — a new check type in the health-check
+loop, plus a new status concept that isn't tied to any one service and needs
+its own banner/UI treatment on the public page.
+
+### Version-checker for the *Arr apps themselves
+Radarr, Sonarr and Prowlarr each expose their own current version and can be
+checked against their latest GitHub release — the same way this app already
+checks its own version for self-updates. This would surface "Radarr has an
+update available" in the admin panel, read-only, no auto-update of those
+apps involved, just visibility, so nobody's manually checking three separate
+web UIs to know if anything's behind.
+
+**Priority:** Medium · **Effort:** M — the version-comparison logic in
+`updater.py` is already there to reuse, but each app has its own
+releases API/format to query and parse.
+
+### Email notifications
+A third notification channel alongside the existing Discord webhook and
+ntfy, for incident/maintenance events. Needs an SMTP configuration block in
+`.env` (host, port, credentials, from-address) and a plain-text/HTML
+template — meaningfully more setup surface than the URL-only Discord/ntfy
+options. Worth it for anyone using neither of those, but it's a new
+dependency and a new way for things to be misconfigured.
+
+**Priority:** Medium · **Effort:** M — new config surface, a new dependency,
+and a template; the "when to send" logic itself doesn't change.
+
+## Bigger undertakings
+
+New integrations or genuinely stateful logic — worth doing, but each is a
+project of its own rather than an afternoon.
+
+### Radarr + Prowlarr + qBittorrent integration
+Three new read-only integrations feeding a new section: what's coming up
+(Radarr's release calendar), what's been requested and its current state,
+and what's actively downloading right now with progress. Note that
+qBittorrent authenticates with a username/password login rather than an API
+key, so its integration looks more like Byparr/Tdarr's setup than
+Radarr/Sonarr's. Most valuable once Jellyfin-backed user permissions exist
+(below) — at that point "requested items" and "active downloads" could be
+scoped per Jellyfin account instead of shown flat to everyone — but there's
+no hard dependency between them; this can be built and shown flat first.
+
+**Priority:** Medium-High · **Effort:** L — three integrations with two
+different auth shapes, new parsing per app, and new UI sections on top of
+the existing `integrations.py` pattern.
+
+### Prowlarr per-indexer health
+Prowlarr's own API already reports each configured indexer's individual
+state (healthy / down / rate-limited), not just whether Prowlarr itself is
+reachable. Surfacing that per-indexer list matters because "Prowlarr is up"
+hides the failure mode that actually happens in practice — one or two
+indexers going stale or getting rate-limited while Prowlarr itself runs
+fine.
+
+**Priority:** Medium · **Effort:** M-L — depends on, or extends, the
+Prowlarr integration above; needs its own endpoint parsing and a small
+per-indexer list in the UI.
+
+### Seerr pending-approval count + Discord DM to admins
+Polls Seerr for requests awaiting approval and surfaces a count, plus has
+the Discord bot DM admins directly (not post to a channel) when a new one
+comes in. Two things worth deciding before building: whether the count is
+admin-only or shown publicly (leaning admin-only — it's operational
+information, not a status signal), and how the DM target list is configured
+(likely reusing the existing comma-separated Discord user ID pattern from
+the `/status`/`/snapshot` authorization).
+
+**Priority:** Medium · **Effort:** M — Seerr API polling is straightforward,
+but DMing specific users is a different code path from the bot's current
+guild/channel posting in `discord_bot.py`.
+
+### Stuck-download alert
+Flags a download (a qBittorrent torrent, or a *Arr download-client task)
+that hasn't made progress in longer than an admin-configured window —
+usually the sign of a dead indexer or a stalled torrent nobody's noticed.
+Sent as a Discord DM to admins, the same delivery path as the Seerr approval
+alert above.
+
+**Priority:** Medium · **Effort:** M-L — unlike the other integrations,
+which just check current state, this needs to track progress *across*
+checks over time to detect "not moving" — a more stateful shape than the
+existing health-check model.
 
 ---
 
-Nothing above blocks anything already built. The current single-admin auth model and
-service schema don't preclude adding this later.
+## Architectural ideas (carried over from the repo's own ROADMAP.md)
+
+These were already scoped in more detail before this document existed —
+kept here, with priority/effort added, so nothing gets lost when the old
+`ROADMAP.md` content is replaced.
+
+### Serve the admin panel on a separate port/subdomain from the public page
+Right now `/admin/*` and the public page are the same Flask app on the same
+port — `/admin` just happens to require login. Running `/admin/*` on a
+second port (or a subdomain) would let the two be exposed completely
+independently: the public page open to the internet as today, while
+`/admin` is reachable only via Tailscale or a different reverse-proxy rule.
+The lower-churn approach — a second WSGI listener on the same Flask `app`
+object, gated by a `before_request` check on which port a request came in
+on — was already identified as the right shape, over splitting into two
+separate Flask apps. Needs a new `PORTAL_ADMIN_PORT` config value, unset by
+default so today's single-port behavior is unchanged.
+
+**Priority:** Medium-High · **Effort:** S-M — the implementation shape is
+already decided; it's mostly wiring a second listener and one
+`before_request` gate.
+
+### Jellyfin-backed user permissions
+Uses Jellyfin's own user accounts as an identity source, so a logged-in
+Jellyfin user could see personalized content on the public page (e.g.
+Tailscale join instructions) instead of everyone seeing the same static Info
+page. A genuinely bigger change: it adds a second authentication path
+alongside the current single-admin-password login, plus a
+permissions/visibility model per piece of content — worth a dedicated design
+conversation before any code, since it touches how content is modeled
+everywhere, not just one page.
+
+**Priority:** Medium · **Effort:** L — new auth path, new permissions model,
+and it's what the Radarr/Prowlarr/qBittorrent integration above would
+ideally build on rather than duplicate later.
+
+### Linux-native `monitoring.py` backend/fork
+Almost everything in this app is already OS-agnostic — services, incidents,
+maintenance, the Discord bot, integrations, high-load detection, retries,
+grace periods, all built on Flask/SQLite/psutil with nothing
+Windows-specific. The exceptions all live in `monitoring.py`: Hyper-V VM
+detection, Windows volume labels, CPU/disk temperature (via PowerShell/CIM),
+and per-disk I/O's drive-letter correlation. A Linux-native version of that
+file would in some ways be *simpler* than the Windows one:
+`psutil.disk_io_counters(perdisk=True)` gives clean per-disk names on Linux
+with no correlation step needed, and `psutil.sensors_temperatures()` reads
+CPU temperature natively with no subprocess involved. Per-disk temperature
+would still likely need `smartctl`, and VM detection would need an entirely
+different concept (libvirt/KVM, or Docker container status) rather than a
+direct port, since Hyper-V doesn't exist on Linux.
+
+**Priority:** Low · **Effort:** M-L — no pressing need while running on
+Windows/Hyper-V; mainly relevant if this app is ever run on a Linux host
+instead.
+
+---
+
+## Overall take
+
+The five quick wins are close to free value — each one reuses code that
+already exists (`notifications.py`, `updater.py`'s backup logic, the
+high-load threshold pipeline) and touches a small, contained surface.
+**Service dependencies** is worth prioritizing above what its Medium-effort
+label suggests, because it's the one item here that changes how *truthful*
+the status page is as a whole, not just adds a new capability. Of the three
+architectural carry-overs, **admin-on-a-separate-port** is the only one with
+an implementation shape already fully decided — the other two (Jellyfin
+auth, Linux fork) are genuinely open design questions, not just bigger
+builds, and worth treating that way rather than scheduling them like a
+normal feature.
