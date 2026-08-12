@@ -746,6 +746,96 @@ DB-backed Settings pages, not a code edit.
   set app-wide long before anything could actually hit it. Without the handler an
   oversized upload falls through to Flask's default unstyled error page.
 
+## Admin quick wins, service→VM/host mapping, service dependencies, low disk alert (`app.py`, `db.py`, `monitoring.py` — added 2026-08-12)
+
+- **Test-notification button** (`/admin/settings`) calls `notifications.notify()`
+  directly with a canned payload — the exact same dispatch path as a real
+  incident/maintenance alert, not a separate code path, so it actually confirms
+  the whole chain (webhook URL, ntfy topic, bot permissions) rather than just "is
+  this URL reachable." Since `notifications.notify()` is deliberately
+  fire-and-forget (catches and logs every failure, never raises), the route can't
+  report true success/failure per channel — it just confirms it was sent, and the
+  admin checks their channel, which is the entire point of the button.
+- **Manual DB backup** (`GET /admin/settings/backup-db` — GET, not POST, since it
+  has no side effects) zips a snapshot of `instance/portal.db` via
+  `db.backup_to_file()`, which uses SQLite's own `Connection.backup()` API rather
+  than a raw file copy — a plain copy of a live database file being actively
+  written by the background health-check thread could catch a torn/partial write
+  mid-transaction; `Connection.backup()` can't. Deliberately kept separate from
+  `updater.py`'s own pre-update backup machinery, which backs up app *code* for
+  rollback — a different concern from an on-demand DB export.
+- **Dark mode now defaults to `prefers-color-scheme`** when no explicit choice has
+  been saved yet (previously always defaulted to dark regardless of the OS
+  setting). Both `static/js/theme.js` *and* the FOUC-prevention inline script in
+  `base.html`'s `<head>` needed the same fix — missing the inline one would have
+  left a light-OS visitor with no saved choice flashing dark before `theme.js`
+  corrected it a moment later. An explicit toggle click still writes to
+  `localStorage` and wins forever after that, in both places.
+- **`services.run_target`** (`''` / `'host'` / `'vm:<name>'`) records which
+  machine a service actually runs on — the portal's own host (`platform.node()`)
+  or a detected Hyper-V VM by name (no stable numeric VM id exists to reference
+  instead — see `monitoring.get_vm_snapshot()`). Shown on the admin service
+  list/edit form only, never publicly, and **does not affect this service's
+  computed status** — purely informational, for faster troubleshooting ("this
+  service is down, which machine do I go check").
+- **Service dependencies** (`service_dependencies` join table) let a service be
+  marked as depending on one or more others; if any of them is down, the
+  dependent shows `degraded` instead of lying (`operational`) or falsely showing
+  `down`. `_merge_dependency_health(status, dependency_statuses)` mirrors
+  `_merge_api_health()`'s exact shape and is called in the same spot in
+  `run_health_checks()` — same non-destructive precedence (only ever raises
+  `operational`/`slow` to `degraded`, never overrides an already-worse
+  `down`/`maintenance`), preserving the "one status feeds both display and
+  incident lifecycle" invariant documented above under
+  `_handle_incident_lifecycle`. **Direct dependencies only, not transitive** — a
+  deliberate scope line: resolving a chain would need real cycle detection and
+  topological ordering that nothing here needs yet, and a one-hop-only merge
+  can't infinite-loop even if two services are configured to depend on each
+  other, so only literal self-dependency is filtered out (in
+  `db.set_service_dependencies()`), not full cycle detection. Dependency status
+  is read from a **fixed pre-loop snapshot** (`status_by_id`, built once at the
+  top of `run_health_checks()`), not a live re-query mid-loop — otherwise whether
+  a dependency's fresh-this-cycle status is visible would silently depend on
+  iteration order (already processed vs. not yet, within the same cycle). Caps
+  dependency staleness at one check interval, same as everything else here
+  already tolerates. **Deliberately kept separate from the VM/host mapping
+  above** — asked and confirmed 2026-08-12: a service's mapped VM/host being off
+  does *not* cascade into that service's status. Linking them would need reading
+  live Hyper-V VM state, unverifiable in this sandbox beyond mocked tests, and
+  was scoped out as a bigger feature for later if it turns out to actually be
+  wanted, rather than bundled in here.
+- **Low disk space alert** (`monitoring.evaluate_low_disk()` +
+  `app._check_low_disk_space()`) extends the already-cross-platform per-disk
+  `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same
+  settings-page shape as the high-load thresholds — but deliberately a
+  **separate** check, not folded into `evaluate_high_load()`, since a disk can be
+  completely idle and still be nearly full, a different failure mode from I/O
+  throughput. **Notification-only, no incident** — incidents are inherently tied
+  to a service via the join table, and disk space isn't a service; a
+  "serviceless incident" concept wasn't worth inventing just for this.
+  **Edge-triggered**, not every cycle: `_low_disk_alert_state` (module-level, per
+  mountpoint) fires once on crossing the threshold and once on recovery, never
+  repeatedly while it stays low — a raw "still low" notification every
+  `CHECK_INTERVAL_SECONDS` would spam forever. State resets on restart, like
+  every other cache-based state in this app (a restart while still low can cause
+  one duplicate notification — not worth persisting to SQLite just to avoid
+  that).
+- **Verification status**: full pytest suite (381 passing) plus live
+  `python app.py` + `curl` smoke tests of every route above (login, settings save,
+  backup download producing a real openable SQLite file, service create/edit with
+  `run_target` and `depends_on`, dependency cascade confirmed by hand-computing
+  the merge against a live DB). VM mapping's dropdown is untestable beyond "renders
+  correctly and defaults to empty" in this Linux sandbox — no real Hyper-V host to
+  detect VMs from.
+- **Workflow note**: this batch was pushed to a feature branch and opened as a PR
+  rather than committed straight to `main`, specifically because it was
+  user-requested as untested/pre-release (touches core status-computation logic
+  — `run_health_checks()`, `_handle_incident_lifecycle`'s invariant — not just
+  additive UI). Treat "push a branch + PR instead of main" as the default for a
+  batch like this (new status-computation logic, not yet run against a real
+  install) unless told otherwise, even outside the cloud-session no-tag-access
+  fallback already documented under Release process below.
+
 ## Testing/verification habits (established over many sessions — keep following them)
 
 - Run the full `pytest` suite *and* a live `python app.py` + `curl` smoke test of
