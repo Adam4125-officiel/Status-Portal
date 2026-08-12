@@ -240,6 +240,37 @@ def is_first_run():
     return db.get_setting("admin_password_hash") is None
 
 
+def _require_totp(failure_message, redirect_endpoint):
+    """Step-up re-authentication gate for this app's most destructive actions (host
+    restart/shutdown, restarting the app or the Discord bot, installing an update).
+
+    Returns None when the caller may proceed - either because 2FA isn't enabled at
+    all, or because a fresh valid code was supplied - and a ready-to-return redirect
+    response when it must not. So every call site is:
+
+        blocked = _require_totp("... cancelled.", "admin_somewhere")
+        if blocked:
+            return blocked
+
+    Not a decorator: each of these routes validates its own action/component
+    parameter *before* asking for a code, and each redirects somewhere different
+    with its own wording, none of which a decorator wrapping the whole view could
+    express without becoming more configuration than it saves.
+
+    Why this exists as one function rather than inline at each site: the check is
+    "does a stolen/replayed session cookie alone suffice to do this?", and three
+    hand-maintained copies of that check is three chances for one of them to quietly
+    stop matching the others."""
+    if not twofactor.is_enabled():
+        return None
+    code = request.form.get("totp_code", "")
+    secret = db.get_setting("admin_totp_secret")
+    if twofactor.verify_code(secret, code):
+        return None
+    flash(failure_message, "error")
+    return redirect(url_for(redirect_endpoint))
+
+
 # Global (not per-IP) login lockout: this is a single-admin app, so there's no
 # legitimate concurrent "other users" to inconvenience, and it sidesteps relying on
 # a client IP that's only trustworthy when config.BEHIND_PROXY is correctly set.
@@ -1133,12 +1164,10 @@ def admin_host_control():
     if action not in ("restart", "shutdown"):
         flash("Unknown host action.", "error")
         return redirect(url_for("admin_resources"))
-    if twofactor.is_enabled():
-        code = request.form.get("totp_code", "")
-        secret = db.get_setting("admin_totp_secret")
-        if not twofactor.verify_code(secret, code):
-            flash("Incorrect or missing 2FA code - host action cancelled.", "error")
-            return redirect(url_for("admin_resources"))
+    blocked = _require_totp("Incorrect or missing 2FA code - host action cancelled.",
+                            "admin_resources")
+    if blocked:
+        return blocked
     success, message = monitoring.control_host(action)
     flash(message, "success" if success else "error")
     return redirect(url_for("admin_resources"))
@@ -1194,12 +1223,10 @@ def admin_system_restart():
     if component not in ("app", "discord-bot"):
         flash("Unknown restart target.", "error")
         return redirect(url_for("admin_system"))
-    if twofactor.is_enabled():
-        code = request.form.get("totp_code", "")
-        secret = db.get_setting("admin_totp_secret")
-        if not twofactor.verify_code(secret, code):
-            flash("Incorrect or missing 2FA code - restart cancelled.", "error")
-            return redirect(url_for("admin_system"))
+    blocked = _require_totp("Incorrect or missing 2FA code - restart cancelled.",
+                            "admin_system")
+    if blocked:
+        return blocked
     if component == "app":
         _restart_process()
         flash("Restarting the app now - this page will be briefly unreachable.", "success")
@@ -1307,12 +1334,10 @@ def admin_update():
         flash("This is a git checkout, not an installed release - updating would overwrite "
               "tracked files. Use `git pull` instead.", "error")
         return redirect(url_for("admin_about"))
-    if twofactor.is_enabled():
-        code = request.form.get("totp_code", "")
-        secret = db.get_setting("admin_totp_secret")
-        if not twofactor.verify_code(secret, code):
-            flash("Incorrect or missing 2FA code - update cancelled.", "error")
-            return redirect(url_for("admin_about"))
+    blocked = _require_totp("Incorrect or missing 2FA code - update cancelled.",
+                            "admin_about")
+    if blocked:
+        return blocked
 
     lines = []
 

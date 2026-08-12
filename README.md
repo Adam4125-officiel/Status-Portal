@@ -494,7 +494,7 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | Variable | Default | What it does |
 |---|---|---|
 | `PORTAL_SECRET_KEY` | *(random each restart)* | Flask session key — set this or you get logged out on every restart |
-| `PORTAL_PORT` | `5000` | Port the app listens on (bare Python only; Docker uses `HOST_PORT` for the host side) |
+| `PORTAL_PORT` | `5000` | Port the app listens on (under Docker: the port inside the container, published as `HOST_PORT`) |
 | `HOST_PORT` | `5000` | Host port mapped to the container (Docker only) |
 | `PORTAL_CHECK_INTERVAL_SECONDS` | `120` | Backend health-check frequency |
 | `PORTAL_PUBLIC_REFRESH_SECONDS` | `60` | Public page auto-refresh frequency |
@@ -575,6 +575,7 @@ reloads the public page.
 ```
 status-portal/
   CLAUDE.md                # notes for future AI coding sessions on this repo
+  docs/HISTORY.md          # archived post-mortems + what's been verified on real hardware
   VERSION                  # the single source of truth for the running version
   app.py                  # Flask routes (public + admin)
   serve_waitress.py       # run this in production (instead of app.py)

@@ -1,15 +1,37 @@
 services:
   status-portal:
     build: .
+    # The container-side port follows PORTAL_PORT so the app and the mapping can't
+    # disagree: the app binds PORTAL_PORT inside the container, and HOST_PORT is
+    # what that gets published as on the host. Both default to 5000, so leaving
+    # either/both unset behaves exactly as it always has.
     ports:
-      - "${HOST_PORT:-5000}:5000"
+      - "${HOST_PORT:-5000}:${PORTAL_PORT:-5000}"
+    # Every PORTAL_* variable config.py reads is listed here. Anything missing from
+    # this list is silently invisible to the app when it runs under Docker, however
+    # faithfully it's been set in .env - compose only auto-loads .env for
+    # substitution *into this file*, it does not inject it into the container. If you
+    # add a new setting to config.py, add it here too.
     environment:
       - PORTAL_SECRET_KEY=${PORTAL_SECRET_KEY}
+      - PORTAL_PORT=${PORTAL_PORT:-5000}
       - PORTAL_CHECK_INTERVAL_SECONDS=${PORTAL_CHECK_INTERVAL_SECONDS:-120}
       - PORTAL_PUBLIC_REFRESH_SECONDS=${PORTAL_PUBLIC_REFRESH_SECONDS:-60}
       - PORTAL_RESOURCE_REFRESH_SECONDS=${PORTAL_RESOURCE_REFRESH_SECONDS:-10}
       - PORTAL_BEHIND_PROXY=${PORTAL_BEHIND_PROXY:-false}
       - PORTAL_FORCE_HTTPS_COOKIES=${PORTAL_FORCE_HTTPS_COOKIES:-false}
+      # Optional outbound notifications - blank disables each independently.
+      - PORTAL_DISCORD_WEBHOOK_URL=${PORTAL_DISCORD_WEBHOOK_URL:-}
+      - PORTAL_NTFY_URL=${PORTAL_NTFY_URL:-}
+      # Optional Discord bot. Blank token = disabled entirely. Note the bot also
+      # needs `pip install discord.py`, which this image does not install by
+      # default (it's an optional dependency, not in requirements.txt).
+      - PORTAL_DISCORD_BOT_TOKEN=${PORTAL_DISCORD_BOT_TOKEN:-}
+      - PORTAL_DISCORD_BOT_REFRESH_SECONDS=${PORTAL_DISCORD_BOT_REFRESH_SECONDS:-300}
+      - PORTAL_DISCORD_BOT_GUILD_ID=${PORTAL_DISCORD_BOT_GUILD_ID:-}
+      - PORTAL_BYPARR_TIMEOUT_SECONDS=${PORTAL_BYPARR_TIMEOUT_SECONDS:-30}
+      - PORTAL_UPDATE_CHECK_INTERVAL_SECONDS=${PORTAL_UPDATE_CHECK_INTERVAL_SECONDS:-21600}
+      - PORTAL_ENABLE_INAPP_UPDATE=${PORTAL_ENABLE_INAPP_UPDATE:-true}
     volumes:
       - portal_data:/app/instance
     restart: unless-stopped
