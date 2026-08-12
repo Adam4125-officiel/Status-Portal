@@ -442,6 +442,17 @@ def test_create_service_returns_new_id(isolated_db):
     assert db.get_service(new_id)["name"] == "Test"
 
 
+def test_service_run_target_defaults_empty_and_round_trips(isolated_db):
+    sid = db.create_service({"name": "Jellyfin", "url": ""})
+    assert db.get_service(sid)["run_target"] == ""
+
+    db.update_service(sid, {"name": "Jellyfin", "url": "", "run_target": "vm:VM-Media02"})
+    assert db.get_service(sid)["run_target"] == "vm:VM-Media02"
+
+    db.update_service(sid, {"name": "Jellyfin", "url": "", "run_target": "host"})
+    assert db.get_service(sid)["run_target"] == "host"
+
+
 def test_integration_service_linking(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr:8989"})
 

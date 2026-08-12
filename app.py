@@ -3,20 +3,23 @@ app.py — Personal server status portal.
 Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
+import io
 import logging
 import os
 import platform
 import re
 import secrets
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
@@ -895,7 +898,7 @@ def admin_dashboard():
 @login_required
 def admin_services():
     services = db.list_services()
-    return render_template("admin_services.html", services=services, active="services")
+    return render_template("admin_services.html", services=services, hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/new", methods=["GET", "POST"])
@@ -911,7 +914,8 @@ def admin_service_new():
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_service_form.html", service=None, defaults=_service_defaults(), active="services")
+    return render_template("admin_service_form.html", service=None, defaults=_service_defaults(),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/<int:service_id>/edit", methods=["GET", "POST"])
@@ -936,7 +940,8 @@ def admin_service_edit(service_id):
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
     links = db.list_service_links(service_id)
-    return render_template("admin_service_form.html", service=service, links=links, active="services")
+    return render_template("admin_service_form.html", service=service, links=links,
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/<int:service_id>/delete", methods=["POST"])
@@ -1540,6 +1545,35 @@ def admin_settings_general():
     db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/test-notification", methods=["POST"])
+@login_required
+def admin_settings_test_notification():
+    if not config.DISCORD_WEBHOOK_URL and not config.NTFY_URL:
+        flash("No notification channel configured - set PORTAL_DISCORD_WEBHOOK_URL or PORTAL_NTFY_URL first.", "error")
+    else:
+        notifications.notify("Test notification",
+                              "This is a test notification from the Status Portal admin panel.")
+        flash("Test notification sent - check your configured channel(s).", "success")
+    return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/backup-db")
+@login_required
+def admin_settings_backup_db():
+    if not os.path.isfile(db.DB_PATH):
+        abort(404)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_db_path = os.path.join(tmp_dir, "portal.db")
+        db.backup_to_file(tmp_db_path)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(tmp_db_path, arcname="portal.db")
+    buffer.seek(0)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return send_file(buffer, mimetype="application/zip", as_attachment=True,
+                      download_name=f"portal-backup-{stamp}.zip")
 
 
 @app.route("/admin/settings/logo", methods=["POST"])

@@ -1,7 +1,10 @@
 import io
 import os
 import re
+import sqlite3
+import tempfile
 import time
+import zipfile
 
 import pyotp
 import pytest
@@ -1965,6 +1968,51 @@ def test_admin_settings_general_saves_public_history_days(client):
 
 def test_public_history_days_blank_means_unlimited(client):
     assert app_module._public_history_days() is None
+
+
+def test_admin_settings_test_notification_sends_via_shared_dispatch(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Test notification sent" in resp.data
+    assert len(calls) == 1
+    assert calls[0][0] == "Test notification"
+
+
+def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/settings/backup-db")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/zip"
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        assert zf.namelist() == ["portal.db"]
+        # A real, openable SQLite file, not just arbitrary bytes under that name -
+        # confirms Connection.backup() actually produced a valid database.
+        extracted = zf.read("portal.db")
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(extracted)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+    assert "services" in tables
+    assert "settings" in tables
+
+
+def test_admin_settings_test_notification_refuses_when_unconfigured(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(app_module.config, "NTFY_URL", "")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"No notification channel configured" in resp.data
+    assert calls == []
 
 
 def test_public_page_renders_sections_in_configured_order(client):

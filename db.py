@@ -16,6 +16,19 @@ def get_db():
     return conn
 
 
+def backup_to_file(dest_path):
+    """Writes a consistent snapshot of the live database to dest_path via SQLite's
+    own online backup API - safe to call while the background health-check thread
+    (or anything else) is actively writing. A plain file copy of DB_PATH could catch
+    a torn/partial write mid-transaction; Connection.backup() can't."""
+    source = sqlite3.connect(DB_PATH)
+    dest = sqlite3.connect(dest_path)
+    with dest:
+        source.backup(dest)
+    source.close()
+    dest.close()
+
+
 def _ensure_column(conn, table, column, ddl):
     """Adds `column` to `table` if an existing database predates it - CREATE TABLE IF
     NOT EXISTS only helps for brand-new databases; a table that already exists never
@@ -229,6 +242,9 @@ def init_db():
     _ensure_column(conn, "services", "ignore_in_overall_status", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "api_health_mode", "TEXT NOT NULL DEFAULT 'off'")
     _ensure_column(conn, "services", "show_report_button", "INTEGER NOT NULL DEFAULT 1")
+    # '' = not mapped, 'host' = the machine this portal itself runs on, 'vm:<name>' =
+    # a Hyper-V VM by name (no stable numeric VM id is available - see monitoring.py).
+    _ensure_column(conn, "services", "run_target", "TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
     # One-time backfill (idempotent - re-running is a no-op once caught up): any
@@ -304,8 +320,8 @@ def _api_health_mode(data):
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button, run_target)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
@@ -313,7 +329,7 @@ def create_service(data):
           _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0),
           int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
           int(data.get("ignore_in_overall_status", 0)), _api_health_mode(data),
-          int(data.get("show_report_button", 1))))
+          int(data.get("show_report_button", 1)), data.get("run_target", "").strip()))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -326,7 +342,7 @@ def update_service(service_id, data):
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
         auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
         slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=?,
-        ignore_in_overall_status=?, api_health_mode=?, show_report_button=? WHERE id=?
+        ignore_in_overall_status=?, api_health_mode=?, show_report_button=?, run_target=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
@@ -334,7 +350,8 @@ def update_service(service_id, data):
           int(data.get("auto_incident", 1)), _slow_threshold_ms(data),
           int(data.get("startup_grace_seconds") or 0), int(data.get("retry_count") or 0),
           int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),
-          _api_health_mode(data), int(data.get("show_report_button", 1)), service_id))
+          _api_health_mode(data), int(data.get("show_report_button", 1)),
+          data.get("run_target", "").strip(), service_id))
     conn.commit()
     conn.close()
 

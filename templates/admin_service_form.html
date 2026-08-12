@@ -112,6 +112,18 @@
     <input type="text" id="group_name" name="group_name" value="{{ service.group_name if service else '' }}" placeholder="e.g. Media, Network, Infrastructure">
     <div class="field-hint">Services sharing the same group are shown together under a heading on the public page. Leave blank to show it ungrouped.</div>
   </div>
+  <div class="field">
+    <label for="run_target">Runs on</label>
+    {% set current_target = service.run_target if service else '' %}
+    <select id="run_target" name="run_target">
+      <option value="" {{ 'selected' if not current_target }}>— not mapped —</option>
+      <option value="host" {{ 'selected' if current_target == 'host' }}>This host ({{ hostname }})</option>
+      {% for vm in vms %}
+      <option value="vm:{{ vm.name }}" {{ 'selected' if current_target == 'vm:' ~ vm.name }}>VM: {{ vm.name }}</option>
+      {% endfor %}
+    </select>
+    <div class="field-hint">Which machine this service actually runs on — shown on the admin card only, purely for faster troubleshooting (see a service is down, know which machine to go check). Never shown publicly, and doesn't affect this service's computed status.{% if not vms %} No VMs currently detected (Windows/Hyper-V only).{% endif %}</div>
+  </div>
 
   {% if service %}
   <div class="field">

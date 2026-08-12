@@ -120,6 +120,16 @@
   </div>
 </form>
 
+<div class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label>Database backup</label>
+    <div class="field-hint">Downloads a zipped, consistent snapshot of <code>instance/portal.db</code> right now — separate from the automatic backups the self-updater takes before every update. Useful as a safety net before poking at something by hand, or just to keep an off-box copy.</div>
+  </div>
+  <div class="form-actions">
+    <a href="{{ url_for('admin_settings_backup_db') }}" class="btn secondary">Download backup</a>
+  </div>
+</div>
+
 <form method="POST" class="form-panel">
   <div class="field">
     <label for="current_password">Current password</label>
@@ -149,5 +159,11 @@
   ntfy {{ 'configured' if ntfy_configured else 'not configured' }}
   (<code>PORTAL_NTFY_URL</code>). Set either in <code>.env</code> — no admin-UI field, since it's a secret URL.
 </p>
+<form method="POST" action="{{ url_for('admin_settings_test_notification') }}" style="margin-top: 8px;">
+  <button type="submit" class="btn secondary" {{ 'disabled' if not (discord_configured or ntfy_configured) }}>Send test notification</button>
+  {% if not (discord_configured or ntfy_configured) %}
+  <span style="color: var(--text-faint); font-size: 12px; margin-left: 8px;">Configure a channel above first.</span>
+  {% endif %}
+</form>
 <script src="{{ asset_url('js/admin_layout_order.js') }}"></script>
 {% endblock %}
