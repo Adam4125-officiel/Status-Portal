@@ -937,11 +937,16 @@ def admin_service_edit(service_id):
         urls = request.form.getlist("link_url")
         links = [(label.strip(), url.strip()) for label, url in zip(labels, urls) if label.strip() and url.strip()]
         db.replace_service_links(service_id, links)
+        depends_on_ids = [int(i) for i in request.form.getlist("depends_on") if i.isdigit()]
+        db.set_service_dependencies(service_id, depends_on_ids)
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
     links = db.list_service_links(service_id)
+    dependency_ids = db.get_service_dependencies(service_id)
+    other_services = [s for s in db.list_services() if s["id"] != service_id]
     return render_template("admin_service_form.html", service=service, links=links,
-                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
+                            dependency_ids=dependency_ids, other_services=other_services, active="services")
 
 
 @app.route("/admin/services/<int:service_id>/delete", methods=["POST"])
@@ -1842,6 +1847,26 @@ def _linked_integration_reachable(service_id):
     return cached["status"]["reachable"]
 
 
+def _merge_dependency_health(status, dependency_statuses):
+    """Folds this service's direct dependencies' status into its own, same
+    non-destructive precedence and "one status feeds both display and incident
+    lifecycle" reasoning as _merge_api_health above: only ever raises
+    operational/slow up to degraded, never overrides an already-worse down/
+    maintenance. Only a dependency that's actually 'down' triggers this - a merely
+    degraded dependency is still serving requests, not a strong enough signal to
+    cascade further.
+
+    Direct dependencies only, not transitive - deliberately. Resolving a chain
+    would need real cycle detection and topological ordering that nothing here
+    currently needs; a one-hop-only merge can't infinite-loop even if two services
+    are configured to depend on each other."""
+    if status not in ("operational", "slow"):
+        return status
+    if "down" in dependency_statuses:
+        return "degraded"
+    return status
+
+
 def run_health_checks():
     while True:
         try:
@@ -1851,6 +1876,12 @@ def run_health_checks():
             # could get a spurious auto-incident opened in the same instant its window begins.
             _process_maintenance_and_notify()
             services = db.list_services()
+            # A fixed pre-loop snapshot, not a live re-query mid-loop - otherwise
+            # whether a dependency's fresh-this-cycle status is visible would
+            # silently depend on iteration order (already processed vs. not yet).
+            # Caps dependency staleness at one check interval, same as everything
+            # else here already tolerates.
+            status_by_id = {row["id"]: row["status"] for row in services}
             for s in services:
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
                     continue
@@ -1858,6 +1889,8 @@ def run_health_checks():
                 status, elapsed_ms = _check_service_status(s)
                 status = _merge_api_health(status, s.get("api_health_mode", "off"),
                                             _linked_integration_reachable(s["id"]))
+                dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
+                status = _merge_dependency_health(status, dependency_statuses)
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
                 # Status/response time are recorded above regardless - only the

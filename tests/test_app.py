@@ -762,6 +762,41 @@ def test_merge_api_health_down_mode_always_wins():
     assert app_module._merge_api_health("degraded", "down", False) == "down"
 
 
+def test_merge_dependency_health_raises_operational_and_slow_on_down_dependency():
+    assert app_module._merge_dependency_health("operational", ["down"]) == "degraded"
+    assert app_module._merge_dependency_health("slow", ["down"]) == "degraded"
+
+
+def test_merge_dependency_health_ignores_merely_degraded_dependency():
+    assert app_module._merge_dependency_health("operational", ["degraded"]) == "operational"
+
+
+def test_merge_dependency_health_never_overrides_down_or_maintenance():
+    assert app_module._merge_dependency_health("down", ["down"]) == "down"
+    assert app_module._merge_dependency_health("maintenance", ["down"]) == "maintenance"
+
+
+def test_merge_dependency_health_passes_through_with_no_dependencies():
+    assert app_module._merge_dependency_health("operational", []) == "operational"
+
+
+def test_admin_service_edit_saves_dependencies(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    seerr_id = db.create_service({"name": "Seerr", "url": ""})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    sonarr_id = db.create_service({"name": "Sonarr", "url": ""})
+
+    resp = client.post(f"/admin/services/{seerr_id}/edit", data={
+        "name": "Seerr", "url": "", "depends_on": [str(radarr_id), str(sonarr_id)],
+    })
+    assert resp.status_code == 302
+    assert sorted(db.get_service_dependencies(seerr_id)) == sorted([radarr_id, sonarr_id])
+
+    form_html = client.get(f"/admin/services/{seerr_id}/edit").data.decode()
+    assert "Depends on" in form_html
+    assert "Radarr" in form_html and "Sonarr" in form_html
+
+
 def test_linked_integration_reachable_none_when_no_integration(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     assert app_module._linked_integration_reachable(sid) is None

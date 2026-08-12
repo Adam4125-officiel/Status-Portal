@@ -127,6 +127,19 @@
 
   {% if service %}
   <div class="field">
+    <label id="depends_on_label">Depends on</label>
+    <div class="checkbox-list" role="group" aria-labelledby="depends_on_label">
+      {% for s in other_services %}
+      <label class="field-check">
+        <input type="checkbox" name="depends_on" value="{{ s.id }}" {{ 'checked' if s.id in dependency_ids }}>
+        {{ s.name }}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="field-hint">If any service checked here is down, this service shows "Degraded" instead of lying (Operational) or falsely showing Down itself. Direct dependencies only — this doesn't chain further (a service B depends on doesn't also count for A depending on B).{% if not other_services %} No other services exist yet to depend on.{% endif %}</div>
+  </div>
+
+  <div class="field">
     <label>Extra links</label>
     <div class="field-hint">Other ways to reach this service (Tailscale, LAN, external domain...). The link above stays the main "Open" link on the public card.</div>
     <div id="links-rows" style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">

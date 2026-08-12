@@ -453,6 +453,43 @@ def test_service_run_target_defaults_empty_and_round_trips(isolated_db):
     assert db.get_service(sid)["run_target"] == "host"
 
 
+def test_service_dependencies_round_trip_and_replace(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    sonarr = db.create_service({"name": "Sonarr", "url": ""})
+    assert db.get_service_dependencies(seerr) == []
+
+    db.set_service_dependencies(seerr, [radarr, sonarr])
+    assert sorted(db.get_service_dependencies(seerr)) == sorted([radarr, sonarr])
+
+    # Replaces the full set rather than appending.
+    db.set_service_dependencies(seerr, [radarr])
+    assert db.get_service_dependencies(seerr) == [radarr]
+
+
+def test_service_dependencies_filters_out_self_dependency(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    db.set_service_dependencies(seerr, [seerr])
+    assert db.get_service_dependencies(seerr) == []
+
+
+def test_service_dependencies_cascade_delete_either_side(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    db.set_service_dependencies(seerr, [radarr])
+
+    db.delete_service(radarr)
+    assert db.get_service_dependencies(seerr) == []
+
+    sonarr = db.create_service({"name": "Sonarr", "url": ""})
+    db.set_service_dependencies(seerr, [sonarr])
+    db.delete_service(seerr)
+    conn = db.get_db()
+    remaining = conn.execute("SELECT * FROM service_dependencies").fetchall()
+    conn.close()
+    assert remaining == []
+
+
 def test_integration_service_linking(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr:8989"})
 

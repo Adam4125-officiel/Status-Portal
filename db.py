@@ -185,6 +185,21 @@ def init_db():
         )
     """)
 
+    # Direct service->service dependencies only (no transitive chain) - a service
+    # showing "degraded" because something it depends on is down, not lying
+    # (operational) or falsely showing down itself. Brand-new table, so the FK's
+    # ON DELETE CASCADE is reliable from the start on both columns (unlike a
+    # retrofitted column - see delete_service()'s comment on integrations.service_id).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS service_dependencies (
+            service_id INTEGER NOT NULL,
+            depends_on_id INTEGER NOT NULL,
+            PRIMARY KEY (service_id, depends_on_id),
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE,
+            FOREIGN KEY (depends_on_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS info_page (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -633,6 +648,32 @@ def replace_service_links(service_id, links):
     conn.executemany("""
         INSERT INTO service_links (service_id, label, url, sort_order) VALUES (?, ?, ?, ?)
     """, [(service_id, label, url, i) for i, (label, url) in enumerate(links)])
+    conn.commit()
+    conn.close()
+
+
+def get_service_dependencies(service_id):
+    """Ids of the services this one directly depends on (not transitive)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT depends_on_id FROM service_dependencies WHERE service_id=?", (service_id,)
+    ).fetchall()
+    conn.close()
+    return [r["depends_on_id"] for r in rows]
+
+
+def set_service_dependencies(service_id, depends_on_ids):
+    """Replaces the full dependency set for a service in one go, same pattern as
+    replace_service_links(). A service can't depend on itself - filtered out here
+    as a server-side backstop even though the admin form's checkbox list already
+    excludes the service being edited from its own options."""
+    depends_on_ids = [i for i in depends_on_ids if i != service_id]
+    conn = get_db()
+    conn.execute("DELETE FROM service_dependencies WHERE service_id=?", (service_id,))
+    conn.executemany(
+        "INSERT INTO service_dependencies (service_id, depends_on_id) VALUES (?, ?)",
+        [(service_id, dep_id) for dep_id in depends_on_ids]
+    )
     conn.commit()
     conn.close()
 
