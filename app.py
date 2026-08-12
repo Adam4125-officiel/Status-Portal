@@ -426,6 +426,12 @@ def _public_section_order():
 # refreshing" because it was, in fact, blocked on a slow outbound HTTP call every time.
 _integration_status_cache = {}
 
+# Low disk space alert: edge-triggered notification state, keyed by mountpoint -
+# see _check_low_disk_space(). In-memory only, same tradeoff as the caches above:
+# resets on restart, so a restart while a disk is still low can cause one
+# duplicate "still low" notification. Not worth persisting to SQLite for that.
+_low_disk_alert_state = {}
+
 
 def _integration_severity(status):
     if not status["reachable"]:
@@ -1525,6 +1531,7 @@ def admin_settings():
                             section_order=section_order, section_labels=section_labels,
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
+                            lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
                             active="settings")
 
 
@@ -1542,6 +1549,8 @@ def admin_settings_general():
         db.set_setting("public_layout_order", layout_order)
     history_days = request.form.get("public_history_days", "").strip()
     db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
+    lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()
+    db.set_setting("lowdisk_percent_threshold", lowdisk if lowdisk.isdigit() else "")
     for key in SERVICE_DEFAULT_FIELDS:
         raw = request.form.get(f"service_default_{key}", "").strip()
         db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
@@ -1867,6 +1876,33 @@ def _merge_dependency_health(status, dependency_statuses):
     return status
 
 
+def _lowdisk_threshold():
+    raw = db.get_setting("lowdisk_percent_threshold", "")
+    return int(raw) if raw.isdigit() else None
+
+
+def _check_low_disk_space(snapshot):
+    """Edge-triggered: notifies once when a disk crosses the threshold, and once
+    when it recovers - never every cycle while it stays low, which would spam a
+    notification every CHECK_INTERVAL_SECONDS forever. Notification-only, no
+    incident - incidents are inherently tied to a service via the join table, and
+    disk space isn't a service."""
+    threshold = _lowdisk_threshold()
+    if not threshold:
+        return
+    low_disks = {d["path"] for d in monitoring.evaluate_low_disk(snapshot, threshold)}
+    for d in snapshot.get("disks", []):
+        path = d["path"]
+        was_low = _low_disk_alert_state.get(path, False)
+        is_low = path in low_disks
+        if is_low and not was_low:
+            notifications.notify("Low disk space",
+                                  f"{d['display_name']}: {d['percent']}% used ({d['free_gb']} GB free)")
+        elif was_low and not is_low:
+            notifications.notify("Disk space back to normal", f"{d['display_name']} is no longer low on space.")
+        _low_disk_alert_state[path] = is_low
+
+
 def run_health_checks():
     while True:
         try:
@@ -1899,6 +1935,7 @@ def run_health_checks():
                 if s["auto_incident"] and not _within_grace_period(s):
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
+            _check_low_disk_space(monitoring.get_resource_snapshot())
             # Reuses this existing background thread rather than starting another one:
             # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
             # -check interval doesn't turn into a GitHub API call every 120s. The

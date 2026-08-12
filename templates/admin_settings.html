@@ -63,6 +63,11 @@
     <input type="number" id="highload_network_mbs" name="highload_network_mbs" min="0" value="{{ highload_thresholds.network_mbs }}">
   </div>
   <div class="field">
+    <label for="lowdisk_percent_threshold">Low disk space alert (% used)</label>
+    <input type="number" id="lowdisk_percent_threshold" name="lowdisk_percent_threshold" min="0" max="100" value="{{ lowdisk_percent_threshold }}" placeholder="blank = off">
+    <div class="field-hint">Sends a push notification (not an incident — disk space isn't tied to any one service) when any disk's used space reaches this percentage, and another when it drops back below it. Leave blank to disable.</div>
+  </div>
+  <div class="field">
     <label>Service defaults</label>
     <div class="field-hint" style="margin-bottom: 8px;">Pre-fills these fields on the "New service" form so you don't have to retype your usual values every time. Purely a form pre-fill — changing these later never affects services that already exist.</div>
   </div>

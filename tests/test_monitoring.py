@@ -220,6 +220,23 @@ def test_evaluate_high_load_network_threshold():
     assert "Network 120 MB/s" in result["reasons"]
 
 
+def test_evaluate_low_disk_no_threshold_never_triggers():
+    snapshot = {"disks": [{"path": "/", "percent": 99}]}
+    assert monitoring.evaluate_low_disk(snapshot, None) == []
+    assert monitoring.evaluate_low_disk(snapshot, 0) == []
+
+
+def test_evaluate_low_disk_returns_disks_at_or_above_threshold():
+    snapshot = {"disks": [
+        {"path": "/", "percent": 92},
+        {"path": "/data", "percent": 50},
+    ]}
+    result = monitoring.evaluate_low_disk(snapshot, 90)
+    assert [d["path"] for d in result] == ["/"]
+
+    assert monitoring.evaluate_low_disk(snapshot, 95) == []
+
+
 def test_control_vm_rejects_unknown_name(monkeypatch):
     """The allow-list check: a name that isn't a currently-live VM must be refused
     before any PowerShell command is ever built, regardless of platform."""

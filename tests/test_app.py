@@ -1202,6 +1202,46 @@ def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     assert "Maintenance ended" in titles
 
 
+def test_lowdisk_threshold_blank_means_disabled(isolated_db):
+    assert app_module._lowdisk_threshold() is None
+    db.set_setting("lowdisk_percent_threshold", "90")
+    assert app_module._lowdisk_threshold() == 90
+
+
+def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_db, monkeypatch):
+    monkeypatch.setattr(app_module, "_low_disk_alert_state", {})
+    db.set_setting("lowdisk_percent_threshold", "90")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+
+    low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
+    app_module._check_low_disk_space(low)
+    assert [c[0] for c in calls] == ["Low disk space"]
+
+    # Still low on the next cycle - no repeat notification.
+    app_module._check_low_disk_space(low)
+    assert [c[0] for c in calls] == ["Low disk space"]
+
+    recovered = {"disks": [{"path": "/", "display_name": "/", "percent": 50, "free_gb": 40}]}
+    app_module._check_low_disk_space(recovered)
+    assert [c[0] for c in calls] == ["Low disk space", "Disk space back to normal"]
+
+
+def test_check_low_disk_space_noop_when_threshold_unset(isolated_db, monkeypatch):
+    monkeypatch.setattr(app_module, "_low_disk_alert_state", {})
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    app_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
+    assert calls == []
+
+
+def test_admin_settings_general_saves_lowdisk_threshold(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={"lowdisk_percent_threshold": "85"})
+    assert resp.status_code == 302
+    assert db.get_setting("lowdisk_percent_threshold") == "85"
+
+
 def test_overall_badge_renders_svg(client):
     resp = client.get("/badge.svg")
     assert resp.status_code == 200
