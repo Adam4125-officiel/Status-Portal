@@ -3,20 +3,23 @@ app.py — Personal server status portal.
 Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
+import io
 import logging
 import os
 import platform
 import re
 import secrets
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
@@ -322,14 +325,31 @@ def _register_report_submission():
 # ---------------------------------------------------------------------------
 # Public pages
 # ---------------------------------------------------------------------------
+def _run_target_label(run_target):
+    """Human label for services.run_target ('' / 'host' / 'vm:<name>') - only
+    called when the admin has opted a service into showing this publicly
+    (show_run_target_public); see admin_services.html for the admin-side
+    equivalent, which renders this inline in Jinja instead."""
+    if run_target == "host":
+        return f"Host ({platform.node()})"
+    if run_target.startswith("vm:"):
+        return f"VM: {run_target[3:]}"
+    return None
+
+
 def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
+    service_names = {s["id"]: s["name"] for s in services}
     for s in services:
         s["links"] = db.list_service_links(s["id"])
         s["uptime"] = db.get_uptime_percentage(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
         s["open_reports_count"] = open_reports.get(s["id"], 0)
+        s["run_target_label"] = _run_target_label(s["run_target"]) if s["show_run_target_public"] else None
+        s["dependency_names"] = [
+            service_names.get(dep_id, "?") for dep_id in db.get_service_dependencies(s["id"])
+        ] if s["show_dependencies_public"] else []
     return services
 
 
@@ -380,6 +400,9 @@ def _service_defaults():
     defaults["api_health_mode"] = db.get_setting("service_default_api_health_mode", "off")
     if defaults["api_health_mode"] not in db.API_HEALTH_MODES:
         defaults["api_health_mode"] = "off"
+    defaults["run_target"] = db.get_setting("service_default_run_target", "")
+    defaults["show_run_target_public"] = db.get_setting("service_default_show_run_target_public", "0") == "1"
+    defaults["show_dependencies_public"] = db.get_setting("service_default_show_dependencies_public", "0") == "1"
     return defaults
 
 
@@ -422,7 +445,6 @@ def _public_section_order():
 # auto-refresh cycle. That was a real bug: the public page appeared to be "stuck
 # refreshing" because it was, in fact, blocked on a slow outbound HTTP call every time.
 _integration_status_cache = {}
-
 
 def _integration_severity(status):
     if not status["reachable"]:
@@ -895,7 +917,7 @@ def admin_dashboard():
 @login_required
 def admin_services():
     services = db.list_services()
-    return render_template("admin_services.html", services=services, active="services")
+    return render_template("admin_services.html", services=services, hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/new", methods=["GET", "POST"])
@@ -908,10 +930,13 @@ def admin_service_new():
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_service_form.html", service=None, defaults=_service_defaults(), active="services")
+    return render_template("admin_service_form.html", service=None, defaults=_service_defaults(),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/<int:service_id>/edit", methods=["GET", "POST"])
@@ -928,15 +953,23 @@ def admin_service_edit(service_id):
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         db.update_service(service_id, data)
         labels = request.form.getlist("link_label")
         urls = request.form.getlist("link_url")
         links = [(label.strip(), url.strip()) for label, url in zip(labels, urls) if label.strip() and url.strip()]
         db.replace_service_links(service_id, links)
+        depends_on_ids = [int(i) for i in request.form.getlist("depends_on") if i.isdigit()]
+        db.set_service_dependencies(service_id, depends_on_ids)
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
     links = db.list_service_links(service_id)
-    return render_template("admin_service_form.html", service=service, links=links, active="services")
+    dependency_ids = db.get_service_dependencies(service_id)
+    other_services = [s for s in db.list_services() if s["id"] != service_id]
+    return render_template("admin_service_form.html", service=service, links=links,
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
+                            dependency_ids=dependency_ids, other_services=other_services, active="services")
 
 
 @app.route("/admin/services/<int:service_id>/delete", methods=["POST"])
@@ -1459,6 +1492,8 @@ def admin_new_combined():
         service_data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         service_data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         service_data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        service_data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        service_data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         service_id = db.create_service(service_data)
         db.create_integration({
             "name": request.form.get("name", ""),
@@ -1474,7 +1509,8 @@ def admin_new_combined():
         })
         flash("Service and status check created.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_new_combined.html", defaults=_service_defaults(), active="services")
+    return render_template("admin_new_combined.html", defaults=_service_defaults(),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
 
 
 @app.route("/admin/integrations/<int:iid>/delete", methods=["POST"])
@@ -1515,6 +1551,8 @@ def admin_settings():
                             section_order=section_order, section_labels=section_labels,
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
+                            lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
                             active="settings")
 
 
@@ -1532,14 +1570,50 @@ def admin_settings_general():
         db.set_setting("public_layout_order", layout_order)
     history_days = request.form.get("public_history_days", "").strip()
     db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
+    lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()
+    db.set_setting("lowdisk_percent_threshold", lowdisk if lowdisk.isdigit() else "")
     for key in SERVICE_DEFAULT_FIELDS:
         raw = request.form.get(f"service_default_{key}", "").strip()
         db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
     db.set_setting("service_default_auto_incident", "1" if request.form.get("service_default_auto_incident") else "0")
     api_mode = request.form.get("service_default_api_health_mode", "off")
     db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
+    db.set_setting("service_default_run_target", request.form.get("service_default_run_target", "").strip())
+    db.set_setting("service_default_show_run_target_public",
+                    "1" if request.form.get("service_default_show_run_target_public") else "0")
+    db.set_setting("service_default_show_dependencies_public",
+                    "1" if request.form.get("service_default_show_dependencies_public") else "0")
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/test-notification", methods=["POST"])
+@login_required
+def admin_settings_test_notification():
+    if not config.DISCORD_WEBHOOK_URL and not config.NTFY_URL:
+        flash("No notification channel configured - set PORTAL_DISCORD_WEBHOOK_URL or PORTAL_NTFY_URL first.", "error")
+    else:
+        notifications.notify("Test notification",
+                              "This is a test notification from the Status Portal admin panel.")
+        flash("Test notification sent - check your configured channel(s).", "success")
+    return redirect(url_for("admin_settings"))
+
+
+@app.route("/admin/settings/backup-db")
+@login_required
+def admin_settings_backup_db():
+    if not os.path.isfile(db.DB_PATH):
+        abort(404)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_db_path = os.path.join(tmp_dir, "portal.db")
+        db.backup_to_file(tmp_db_path)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(tmp_db_path, arcname="portal.db")
+    buffer.seek(0)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return send_file(buffer, mimetype="application/zip", as_attachment=True,
+                      download_name=f"portal-backup-{stamp}.zip")
 
 
 @app.route("/admin/settings/logo", methods=["POST"])
@@ -1808,6 +1882,58 @@ def _linked_integration_reachable(service_id):
     return cached["status"]["reachable"]
 
 
+def _merge_dependency_health(status, dependency_statuses):
+    """Folds this service's direct dependencies' status into its own, same
+    non-destructive precedence and "one status feeds both display and incident
+    lifecycle" reasoning as _merge_api_health above: only ever raises
+    operational/slow up to degraded, never overrides an already-worse down/
+    maintenance. Only a dependency that's actually 'down' triggers this - a merely
+    degraded dependency is still serving requests, not a strong enough signal to
+    cascade further.
+
+    Direct dependencies only, not transitive - deliberately. Resolving a chain
+    would need real cycle detection and topological ordering that nothing here
+    currently needs; a one-hop-only merge can't infinite-loop even if two services
+    are configured to depend on each other."""
+    if status not in ("operational", "slow"):
+        return status
+    if "down" in dependency_statuses:
+        return "degraded"
+    return status
+
+
+def _lowdisk_threshold():
+    raw = db.get_setting("lowdisk_percent_threshold", "")
+    return int(raw) if raw.isdigit() else None
+
+
+def _check_low_disk_space(snapshot):
+    """Edge-triggered: notifies once when a disk crosses the threshold, and once
+    when it recovers - never every cycle while it stays low, which would spam a
+    notification every CHECK_INTERVAL_SECONDS forever. Notification-only, no
+    incident - incidents are inherently tied to a service via the join table, and
+    disk space isn't a service.
+
+    State is persisted via db.get/set_low_disk_alert_state() (SQLite, not just
+    in-process memory) specifically so a portal restart while a disk is still low
+    doesn't re-fire the "low disk space" notification - this app is meant to
+    survive its own restart cleanly (see CLAUDE.md)."""
+    threshold = _lowdisk_threshold()
+    if not threshold:
+        return
+    low_disks = {d["path"] for d in monitoring.evaluate_low_disk(snapshot, threshold)}
+    for d in snapshot.get("disks", []):
+        path = d["path"]
+        was_low = db.get_low_disk_alert_state(path)
+        is_low = path in low_disks
+        if is_low and not was_low:
+            notifications.notify("Low disk space",
+                                  f"{d['display_name']}: {d['percent']}% used ({d['free_gb']} GB free)")
+        elif was_low and not is_low:
+            notifications.notify("Disk space back to normal", f"{d['display_name']} is no longer low on space.")
+        db.set_low_disk_alert_state(path, is_low)
+
+
 def run_health_checks():
     while True:
         try:
@@ -1817,6 +1943,12 @@ def run_health_checks():
             # could get a spurious auto-incident opened in the same instant its window begins.
             _process_maintenance_and_notify()
             services = db.list_services()
+            # A fixed pre-loop snapshot, not a live re-query mid-loop - otherwise
+            # whether a dependency's fresh-this-cycle status is visible would
+            # silently depend on iteration order (already processed vs. not yet).
+            # Caps dependency staleness at one check interval, same as everything
+            # else here already tolerates.
+            status_by_id = {row["id"]: row["status"] for row in services}
             for s in services:
                 if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
                     continue
@@ -1824,6 +1956,8 @@ def run_health_checks():
                 status, elapsed_ms = _check_service_status(s)
                 status = _merge_api_health(status, s.get("api_health_mode", "off"),
                                             _linked_integration_reachable(s["id"]))
+                dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
+                status = _merge_dependency_health(status, dependency_statuses)
                 db.update_service_status_from_check(s["id"], status, elapsed_ms)
                 db.record_status_history(s["id"], status, elapsed_ms)
                 # Status/response time are recorded above regardless - only the
@@ -1832,6 +1966,7 @@ def run_health_checks():
                 if s["auto_incident"] and not _within_grace_period(s):
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
+            _check_low_disk_space(monitoring.get_resource_snapshot())
             # Reuses this existing background thread rather than starting another one:
             # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
             # -check interval doesn't turn into a GitHub API call every 120s. The

@@ -1,7 +1,10 @@
 import io
 import os
 import re
+import sqlite3
+import tempfile
 import time
+import zipfile
 
 import pyotp
 import pytest
@@ -592,6 +595,52 @@ def test_wizard_combined_form_prefills_service_defaults(client):
     assert b'value="2"' in resp.data
 
 
+def test_wizard_combined_form_prefills_run_target_and_visibility_defaults(client):
+    """Regression test: run_target/show_run_target_public/show_dependencies_public
+    were added to the main service form and Service defaults but initially forgotten
+    on the wizard, exactly the class of bug the two regression tests above already
+    guard against for the original field set - same fix, same shape."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_run_target": "host",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    resp = client.get("/admin/new/combined")
+    html = resp.data.decode()
+    assert 'name="run_target"' in html
+    assert 'value="host" selected' in html or 'selected>This host' in html
+    assert 'name="show_run_target_public" checked' in html
+    assert 'name="show_dependencies_public" checked' in html
+
+
+def test_admin_service_new_form_prefills_run_target_and_visibility_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_run_target": "host",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    resp = client.get("/admin/services/new")
+    html = resp.data.decode()
+    assert 'name="show_run_target_public" checked' in html
+    assert 'name="show_dependencies_public" checked' in html
+
+
+def test_admin_settings_general_saves_run_target_and_visibility_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={
+        "service_default_run_target": "vm:VM-Media02",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    assert resp.status_code == 302
+    defaults = app_module._service_defaults()
+    assert defaults["run_target"] == "vm:VM-Media02"
+    assert defaults["show_run_target_public"] is True
+    assert defaults["show_dependencies_public"] is True
+
+
 def test_wizard_combined_applies_configured_service_defaults_on_create(client):
     """End-to-end version of the regression above: submitting exactly what a real
     browser would submit for the (collapsed but still-present-in-the-DOM) Advanced
@@ -633,6 +682,7 @@ def test_wizard_combined_full_advanced_fields_are_saved(client):
         "retry_count": "4", "retry_interval_seconds": "20", "auto_incident": "on",
         "startup_grace_seconds": "60", "ignore_in_overall_status": "on",
         "api_health_mode": "degrade", "sort_order": "5", "check_auto_incident": "on",
+        "run_target": "host", "show_run_target_public": "on", "show_dependencies_public": "on",
     })
     assert resp.status_code == 302
 
@@ -649,6 +699,9 @@ def test_wizard_combined_full_advanced_fields_are_saved(client):
     assert service["ignore_in_overall_status"] == 1
     assert service["api_health_mode"] == "degrade"
     assert service["sort_order"] == 5
+    assert service["run_target"] == "host"
+    assert service["show_run_target_public"] == 1
+    assert service["show_dependencies_public"] == 1
 
     integs = db.list_integrations_for_service(service["id"])
     assert len(integs) == 1
@@ -759,6 +812,41 @@ def test_merge_api_health_down_mode_always_wins():
     assert app_module._merge_api_health("degraded", "down", False) == "down"
 
 
+def test_merge_dependency_health_raises_operational_and_slow_on_down_dependency():
+    assert app_module._merge_dependency_health("operational", ["down"]) == "degraded"
+    assert app_module._merge_dependency_health("slow", ["down"]) == "degraded"
+
+
+def test_merge_dependency_health_ignores_merely_degraded_dependency():
+    assert app_module._merge_dependency_health("operational", ["degraded"]) == "operational"
+
+
+def test_merge_dependency_health_never_overrides_down_or_maintenance():
+    assert app_module._merge_dependency_health("down", ["down"]) == "down"
+    assert app_module._merge_dependency_health("maintenance", ["down"]) == "maintenance"
+
+
+def test_merge_dependency_health_passes_through_with_no_dependencies():
+    assert app_module._merge_dependency_health("operational", []) == "operational"
+
+
+def test_admin_service_edit_saves_dependencies(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    seerr_id = db.create_service({"name": "Seerr", "url": ""})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    sonarr_id = db.create_service({"name": "Sonarr", "url": ""})
+
+    resp = client.post(f"/admin/services/{seerr_id}/edit", data={
+        "name": "Seerr", "url": "", "depends_on": [str(radarr_id), str(sonarr_id)],
+    })
+    assert resp.status_code == 302
+    assert sorted(db.get_service_dependencies(seerr_id)) == sorted([radarr_id, sonarr_id])
+
+    form_html = client.get(f"/admin/services/{seerr_id}/edit").data.decode()
+    assert "Depends on" in form_html
+    assert "Radarr" in form_html and "Sonarr" in form_html
+
+
 def test_linked_integration_reachable_none_when_no_integration(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     assert app_module._linked_integration_reachable(sid) is None
@@ -804,6 +892,61 @@ def test_admin_service_form_saves_api_health_mode(client):
     assert resp.status_code == 302
     service = [s for s in db.list_services() if s["name"] == "Sonarr"][0]
     assert service["api_health_mode"] == "down"
+
+
+def test_admin_service_form_saves_public_visibility_checkboxes(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/services/new", data={
+        "name": "Overseerr", "url": "", "run_target": "host",
+        "show_run_target_public": "on", "show_dependencies_public": "on",
+    })
+    assert resp.status_code == 302
+    service = [s for s in db.list_services() if s["name"] == "Overseerr"][0]
+    assert service["show_run_target_public"] == 1
+    assert service["show_dependencies_public"] == 1
+
+    # Unchecked on the next save -> both go back to off.
+    resp = client.post(f"/admin/services/{service['id']}/edit", data={"name": "Overseerr", "url": ""})
+    assert resp.status_code == 302
+    service = db.get_service(service["id"])
+    assert service["show_run_target_public"] == 0
+    assert service["show_dependencies_public"] == 0
+
+
+def test_run_target_label_formats_host_and_vm():
+    assert app_module._run_target_label("") is None
+    assert app_module._run_target_label("host") == f"Host ({app_module.platform.node()})"
+    assert app_module._run_target_label("vm:VM-Media02") == "VM: VM-Media02"
+
+
+def test_enrich_services_exposes_run_target_and_dependencies_only_when_opted_in(isolated_db):
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    seerr = db.create_service({
+        "name": "Seerr", "url": "", "run_target": "host",
+        "show_run_target_public": 1, "show_dependencies_public": 1,
+    })
+    db.set_service_dependencies(seerr, [radarr])
+
+    enriched = {s["id"]: s for s in app_module._enrich_services(db.list_services())}
+    assert enriched[seerr]["run_target_label"] == f"Host ({app_module.platform.node()})"
+    assert enriched[seerr]["dependency_names"] == ["Radarr"]
+    # Radarr itself never opted in - both stay empty/off.
+    assert enriched[radarr]["run_target_label"] is None
+    assert enriched[radarr]["dependency_names"] == []
+
+
+def test_public_page_renders_run_target_and_dependencies_when_opted_in(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    seerr_id = db.create_service({
+        "name": "Seerr", "url": "", "run_target": "host",
+        "show_run_target_public": 1, "show_dependencies_public": 1,
+    })
+    db.set_service_dependencies(seerr_id, [radarr_id])
+
+    html = client.get("/").data.decode()
+    assert "Runs on:" in html
+    assert "Depends on: Radarr" in html
 
 
 def test_service_api_health_mode_defaults_to_off_for_invalid_value(isolated_db):
@@ -1162,6 +1305,61 @@ def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     titles = [c[0] for c in calls]
     assert "Maintenance started" in titles
     assert "Maintenance ended" in titles
+
+
+def test_lowdisk_threshold_blank_means_disabled(isolated_db):
+    assert app_module._lowdisk_threshold() is None
+    db.set_setting("lowdisk_percent_threshold", "90")
+    assert app_module._lowdisk_threshold() == 90
+
+
+def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_db, monkeypatch):
+    db.set_setting("lowdisk_percent_threshold", "90")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+
+    low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
+    app_module._check_low_disk_space(low)
+    assert [c[0] for c in calls] == ["Low disk space"]
+
+    # Still low on the next cycle - no repeat notification.
+    app_module._check_low_disk_space(low)
+    assert [c[0] for c in calls] == ["Low disk space"]
+
+    recovered = {"disks": [{"path": "/", "display_name": "/", "percent": 50, "free_gb": 40}]}
+    app_module._check_low_disk_space(recovered)
+    assert [c[0] for c in calls] == ["Low disk space", "Disk space back to normal"]
+
+
+def test_check_low_disk_space_noop_when_threshold_unset(isolated_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    app_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
+    assert calls == []
+
+
+def test_low_disk_alert_state_survives_restart_no_duplicate_notification(isolated_db, monkeypatch):
+    """Regression test: state must be read from the DB, not an in-process cache -
+    a restart while a disk is still low must not re-send the notification. Simulated
+    here by writing the "already low" state directly via db.set_low_disk_alert_state
+    (standing in for a previous process's cycle) rather than going through
+    _check_low_disk_space first, since there's no module-level state left to reset."""
+    db.set_setting("lowdisk_percent_threshold", "90")
+    db.set_low_disk_alert_state("/", True)
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+
+    still_low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
+    app_module._check_low_disk_space(still_low)
+
+    assert calls == []
+
+
+def test_admin_settings_general_saves_lowdisk_threshold(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={"lowdisk_percent_threshold": "85"})
+    assert resp.status_code == 302
+    assert db.get_setting("lowdisk_percent_threshold") == "85"
 
 
 def test_overall_badge_renders_svg(client):
@@ -1696,7 +1894,8 @@ def test_admin_settings_general_saves_service_defaults(client):
     assert defaults == {
         "slow_threshold_ms": "1500", "startup_grace_seconds": "30",
         "retry_count": "2", "retry_interval_seconds": "10", "auto_incident": False,
-        "api_health_mode": "off",
+        "api_health_mode": "off", "run_target": "",
+        "show_run_target_public": False, "show_dependencies_public": False,
     }
 
 
@@ -1965,6 +2164,51 @@ def test_admin_settings_general_saves_public_history_days(client):
 
 def test_public_history_days_blank_means_unlimited(client):
     assert app_module._public_history_days() is None
+
+
+def test_admin_settings_test_notification_sends_via_shared_dispatch(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Test notification sent" in resp.data
+    assert len(calls) == 1
+    assert calls[0][0] == "Test notification"
+
+
+def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/settings/backup-db")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/zip"
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        assert zf.namelist() == ["portal.db"]
+        # A real, openable SQLite file, not just arbitrary bytes under that name -
+        # confirms Connection.backup() actually produced a valid database.
+        extracted = zf.read("portal.db")
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(extracted)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+    assert "services" in tables
+    assert "settings" in tables
+
+
+def test_admin_settings_test_notification_refuses_when_unconfigured(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(app_module.config, "NTFY_URL", "")
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"No notification channel configured" in resp.data
+    assert calls == []
 
 
 def test_public_page_renders_sections_in_configured_order(client):

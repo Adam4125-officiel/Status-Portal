@@ -420,6 +420,14 @@ def test_settings_get_set(isolated_db):
     assert db.get_setting("site_name", "Server") == "HomeLab"
 
 
+def test_low_disk_alert_state_persists(isolated_db):
+    assert db.get_low_disk_alert_state("/") is False
+    db.set_low_disk_alert_state("/", True)
+    assert db.get_low_disk_alert_state("/") is True
+    db.set_low_disk_alert_state("/", False)
+    assert db.get_low_disk_alert_state("/") is False
+
+
 def test_integrations_crud(isolated_db):
     db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989/",
                             "api_key": "abc", "enabled": 1})
@@ -440,6 +448,54 @@ def test_create_service_returns_new_id(isolated_db):
     new_id = db.create_service({"name": "Test", "url": ""})
     assert isinstance(new_id, int)
     assert db.get_service(new_id)["name"] == "Test"
+
+
+def test_service_run_target_defaults_empty_and_round_trips(isolated_db):
+    sid = db.create_service({"name": "Jellyfin", "url": ""})
+    assert db.get_service(sid)["run_target"] == ""
+
+    db.update_service(sid, {"name": "Jellyfin", "url": "", "run_target": "vm:VM-Media02"})
+    assert db.get_service(sid)["run_target"] == "vm:VM-Media02"
+
+    db.update_service(sid, {"name": "Jellyfin", "url": "", "run_target": "host"})
+    assert db.get_service(sid)["run_target"] == "host"
+
+
+def test_service_dependencies_round_trip_and_replace(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    sonarr = db.create_service({"name": "Sonarr", "url": ""})
+    assert db.get_service_dependencies(seerr) == []
+
+    db.set_service_dependencies(seerr, [radarr, sonarr])
+    assert sorted(db.get_service_dependencies(seerr)) == sorted([radarr, sonarr])
+
+    # Replaces the full set rather than appending.
+    db.set_service_dependencies(seerr, [radarr])
+    assert db.get_service_dependencies(seerr) == [radarr]
+
+
+def test_service_dependencies_filters_out_self_dependency(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    db.set_service_dependencies(seerr, [seerr])
+    assert db.get_service_dependencies(seerr) == []
+
+
+def test_service_dependencies_cascade_delete_either_side(isolated_db):
+    seerr = db.create_service({"name": "Seerr", "url": ""})
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    db.set_service_dependencies(seerr, [radarr])
+
+    db.delete_service(radarr)
+    assert db.get_service_dependencies(seerr) == []
+
+    sonarr = db.create_service({"name": "Sonarr", "url": ""})
+    db.set_service_dependencies(seerr, [sonarr])
+    db.delete_service(seerr)
+    conn = db.get_db()
+    remaining = conn.execute("SELECT * FROM service_dependencies").fetchall()
+    conn.close()
+    assert remaining == []
 
 
 def test_integration_service_linking(isolated_db):

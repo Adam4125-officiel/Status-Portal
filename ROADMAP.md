@@ -6,84 +6,33 @@ Ideas discussed with Adam, written up so they can slot straight into
 label — the point is that someone new to the repo can see *why*, not just
 where it landed.
 
-## Quick wins
-
-Small, contained changes that mostly reuse code that already exists.
-
-### Test-notification button
-A button in Settings next to the Discord/ntfy fields that fires a one-off
-test message through whichever channel(s) are configured, using the exact
-same dispatch path as a real incident/maintenance notification (`notifications.py`) rather than a separate code path. The point isn't just
-"is the webhook URL reachable" — it's confirming the whole chain (correct
-URL, correct ntfy topic, bot permissions if the bot also posts) without
-waiting for, or faking, a real incident to find out it's been broken for
-three weeks.
-
-**Priority:** High · **Effort:** S — no new logic, just a route that calls
-the existing notification function with a canned payload.
-
-### Manual DB backup/export button
-An admin-triggered "download a backup" button (Settings, or a small page of
-its own) that zips up `instance/portal.db` and serves it as a download,
-independent of the automatic backups the self-updater already takes before
-every update (`instance/update_backups/<timestamp>/`). Useful as a
-"before I go poke at something manually" safety net, or just to keep an
-off-box copy around.
-
-**Priority:** High · **Effort:** S — the file-copy/zip logic already exists
-in `updater.py` for update rollbacks; this mostly reuses it behind a new
-route.
-
-### Low disk space alert
-A second threshold, separate from the existing high-load indicator
-(CPU / disk-I/O / network), that watches free disk space per volume and
-opens an incident (or just fires a notification) once it drops below an
-admin-configured percentage or absolute value. This is a different failure
-mode from high I/O throughput — a disk can be completely idle and still be
-nearly full.
-
-**Priority:** High · **Effort:** S — extends the same threshold/notification
-pipeline `monitoring.py` and `notifications.py` already share for high-load,
-with one more metric.
-
-### Dark mode that follows the OS preference
-Today the light/dark toggle is a manual per-visitor switch. Adding a
-`prefers-color-scheme: dark` media query as the *default* — before any
-manual choice has been made — means a visitor whose system is set to dark
-mode gets it automatically, while an explicit click on the toggle still
-overrides it. Same pattern most sites use today.
-
-**Priority:** Medium · **Effort:** S — CSS-only, layered under the existing
-toggle logic in `static/js/`.
-
-### Service ↔ Hyper-V VM mapping in the admin panel
-The Resources page already lists detected Hyper-V VMs with start/stop/restart
-controls; this adds a link from a *service* to the VM it runs on, shown right
-on that service's admin card (e.g. "Seerr — runs on VM-Media02"). Mostly
-about faster troubleshooting: see a service is down, immediately see which
-VM to go check, without cross-referencing two separate admin pages.
-
-**Priority:** Medium · **Effort:** S — a new optional field on the service
-record pointing at an already-detected VM id, plus a small UI addition.
-
 ## Solid features
 
 Contained but touch the schema or add a genuinely new concept.
 
-### Service dependencies
-Lets a service be marked as depending on one or more other services (e.g.
-Seerr depends on Radarr and Sonarr). If a dependency is down, the dependent
-service shows as **degraded** instead of either lying (showing "operational"
-when it can't actually do anything useful) or falsely showing "down" (when
-the service itself is fine, just starved by something upstream). This also
-sets up the "media stack" idea further down — a coherent way to represent a
-service that's technically running but functionally broken because of
-something else.
+### Restore from backup
+The counterpart to the "download a backup" button (built — see CLAUDE.md).
+Let an admin upload a previously-downloaded backup zip and have the portal
+restore `instance/portal.db` from it. Meaningfully riskier than the export
+button: this is a "replace the entire live database from an upload"
+primitive, so it needs real safety machinery, not just a file swap —
+validate the uploaded file is actually a well-formed SQLite database before
+touching anything, take a fresh safety snapshot of the *current* database
+first (reusing `db.backup_to_file()`) so a bad upload doesn't leave the
+admin with nothing to fall back on, atomically replace the file, then
+restart the process (`os.execv`, same pattern as `app._restart_process()`)
+so no stale connection keeps writing to the old file handle. Should go
+through `app._require_totp()` step-up re-authentication like the other
+destructive admin actions (host restart/shutdown, app restart, self-update)
+— a stolen session cookie alone must not be enough to replace the whole
+database.
 
-**Priority:** High · **Effort:** M — a new relation in the schema (`db.py`),
-status-computation changes on both the admin and public side, and a picker
-UI (a checkbox list, similar to how incidents/maintenance already pick
-multiple services).
+**Priority:** Medium · **Effort:** S-M — the individual pieces (upload
+handling, SQLite validation, atomic file replace, process restart) all
+already exist elsewhere in this codebase to reuse, but assembling them
+safely is the real work. Treat it with the same care as the self-updater,
+not as a quick add — it's the riskiest idea in this document, not the
+easiest.
 
 ### External internet connectivity check
 Pings a fixed external target (1.1.1.1 by default, ideally configurable) on
@@ -238,14 +187,14 @@ instead.
 
 ## Overall take
 
-The five quick wins are close to free value — each one reuses code that
-already exists (`notifications.py`, `updater.py`'s backup logic, the
-high-load threshold pipeline) and touches a small, contained surface.
-**Service dependencies** is worth prioritizing above what its Medium-effort
-label suggests, because it's the one item here that changes how *truthful*
-the status page is as a whole, not just adds a new capability. Of the three
-architectural carry-overs, **admin-on-a-separate-port** is the only one with
-an implementation shape already fully decided — the other two (Jellyfin
-auth, Linux fork) are genuinely open design questions, not just bigger
-builds, and worth treating that way rather than scheduling them like a
-normal feature.
+The original five quick wins plus service dependencies are all built now
+(see CLAUDE.md for the reasoning behind each) — what's left below is
+genuinely more work, not more of the same. **Restore from backup** is the
+one item worth flagging out of proportion to its Medium priority: it's the
+riskiest thing in this document precisely because its counterpart (export)
+was so easy — don't let that make restore feel like a quick add too. Of the
+three architectural carry-overs, **admin-on-a-separate-port** is the only
+one with an implementation shape already fully decided — the other two
+(Jellyfin auth, Linux fork) are genuinely open design questions, not just
+bigger builds, and worth treating that way rather than scheduling them like
+a normal feature.

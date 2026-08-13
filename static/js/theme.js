@@ -11,7 +11,11 @@
     btn.textContent = theme === 'light' ? '🌙' : '☀️';
   }
 
-  var current = localStorage.getItem('portal-theme') || 'dark';
+  // No saved choice yet -> follow the OS/browser preference; an explicit toggle
+  // click (below) always overrides it from then on via localStorage.
+  var saved = localStorage.getItem('portal-theme');
+  var osPrefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+  var current = saved || (osPrefersLight ? 'light' : 'dark');
   apply(current);
 
   btn.addEventListener('click', function () {

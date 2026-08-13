@@ -104,6 +104,21 @@ def evaluate_high_load(snapshot, thresholds):
     return {"active": bool(reasons), "reasons": reasons}
 
 
+def evaluate_low_disk(snapshot, threshold_percent):
+    """Pure function, no DB/network access - same shape as evaluate_high_load()
+    above. Returns the list of disks (from snapshot["disks"]) whose used percent
+    is at or above threshold_percent. threshold_percent may be None/0/missing to
+    disable the check entirely (returns []).
+
+    Unlike high load (I/O throughput - can be fine even when busy), this is a
+    fundamentally different failure mode: a disk can be completely idle and still
+    be nearly full, so it's evaluated as its own separate check rather than folded
+    into evaluate_high_load()."""
+    if not threshold_percent:
+        return []
+    return [d for d in snapshot.get("disks", []) if d.get("percent") is not None and d["percent"] >= threshold_percent]
+
+
 def _get_disk_snapshots():
     """All real, distinct disks/drives - not just one configured path. The same
     physical/logical device is often bind-mounted at several paths (very common under

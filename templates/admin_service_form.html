@@ -112,8 +112,47 @@
     <input type="text" id="group_name" name="group_name" value="{{ service.group_name if service else '' }}" placeholder="e.g. Media, Network, Infrastructure">
     <div class="field-hint">Services sharing the same group are shown together under a heading on the public page. Leave blank to show it ungrouped.</div>
   </div>
+  <div class="field">
+    <label for="run_target">Runs on</label>
+    {% set current_target = service.run_target if service else (defaults.run_target if defaults else '') %}
+    <select id="run_target" name="run_target">
+      <option value="" {{ 'selected' if not current_target }}>— not mapped —</option>
+      <option value="host" {{ 'selected' if current_target == 'host' }}>This host ({{ hostname }})</option>
+      {% for vm in vms %}
+      <option value="vm:{{ vm.name }}" {{ 'selected' if current_target == 'vm:' ~ vm.name }}>VM: {{ vm.name }}</option>
+      {% endfor %}
+    </select>
+    <div class="field-hint">Which machine this service actually runs on — purely for faster troubleshooting (see a service is down, know which machine to go check). Doesn't affect this service's computed status.{% if not vms %} No VMs currently detected (Windows/Hyper-V only).{% endif %}</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_run_target_public" {{ 'checked' if (service.show_run_target_public if service else (defaults.show_run_target_public if defaults else false)) }}>
+      Show "Runs on" on the public page
+    </label>
+    <div class="field-hint">Off by default — this reveals machine/VM names to visitors. Only takes effect if "Runs on" above is actually set.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_dependencies_public" {{ 'checked' if (service.show_dependencies_public if service else (defaults.show_dependencies_public if defaults else false)) }}>
+      Show "Depends on" on the public page
+    </label>
+    <div class="field-hint">Off by default. Only takes effect once at least one dependency is picked below{% if not service %} (after this service is created){% endif %}.</div>
+  </div>
 
   {% if service %}
+  <div class="field">
+    <label id="depends_on_label">Depends on</label>
+    <div class="checkbox-list" role="group" aria-labelledby="depends_on_label">
+      {% for s in other_services %}
+      <label class="field-check">
+        <input type="checkbox" name="depends_on" value="{{ s.id }}" {{ 'checked' if s.id in dependency_ids }}>
+        {{ s.name }}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="field-hint">If any service checked here is down, this service shows "Degraded" instead of lying (Operational) or falsely showing Down itself. Direct dependencies only — this doesn't chain further (a service B depends on doesn't also count for A depending on B).{% if not other_services %} No other services exist yet to depend on.{% endif %}</div>
+  </div>
+
   <div class="field">
     <label>Extra links</label>
     <div class="field-hint">Other ways to reach this service (Tailscale, LAN, external domain...). The link above stays the main "Open" link on the public card.</div>

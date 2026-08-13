@@ -256,19 +256,30 @@ DB-backed Settings pages, not a code edit.
   (`service is None` is what triggers using `defaults` instead of hardcoded
   fallbacks). Changing a default later never retroactively touches a service that
   already exists; `run_health_checks()` and the schema are completely unaffected.
-- **Both "new service" entry points must stay field-complete.** `/admin/new/combined`
-  (the wizard) and `/admin/services/new` should offer the same service fields and
-  build the same kind of `data` dict before calling `db.create_service()` — the wizard
-  having a smaller field set was a real bug where `service_default_*` settings were
-  silently unreachable and `create_service()` fell back to hardcoded literals
-  (`docs/HISTORY.md` → "The combined wizard's missing field set"). The wizard's extra
-  fields live in a collapsed-by-default `<details>` "Advanced settings" block;
-  **collapsed is a CSS/visual state only — the inputs are still in the DOM and still
-  submit**, which is why server-side pre-filling is enough on its own and no "open the
-  advanced section" JS handler is needed. Naming gotcha: the service's own
-  `auto_incident` checkbox and the integration's *different* `auto_incident` concept
-  can't share one HTML name on one form, so the integration's is deliberately
-  `check_auto_incident` in the template and mapped explicitly in the route.
+- **Any new per-service field needs to be checked against three places, not one:**
+  the main form (`admin_service_form.html`), the combined wizard
+  (`admin_new_combined.html`'s `<details>` "Advanced settings" block), and — if the
+  field is the kind of thing that's usually the same across most services (a
+  threshold, a mode, a boolean toggle; not a unique value like `name`/`url`) —
+  `service_default_*` in Settings → Service defaults (`_service_defaults()` +
+  `admin_settings_general()`'s POST handler + the "Service defaults" section of
+  `admin_settings.html`). Missing the wizard was a real bug once already
+  (`docs/HISTORY.md` → "The combined wizard's missing field set" — `service_default_*`
+  settings silently unreachable, `create_service()` falling back to hardcoded
+  literals) and **missing the same two spots happened again** the very next session,
+  this time for `run_target`/`show_run_target_public`/`show_dependencies_public` —
+  caught by the user re-testing, not by anything in this file, which is why this
+  bullet now names all three places explicitly instead of just two. When adding a
+  field, grep for an existing sibling field (e.g. `slow_threshold_ms` or
+  `api_health_mode`) and touch every spot that name appears in — that's the fastest
+  way to find all three without relying on memory. The wizard's extra fields live in
+  a collapsed-by-default `<details>` block; **collapsed is a CSS/visual state
+  only — the inputs are still in the DOM and still submit**, which is why
+  server-side pre-filling is enough on its own and no "open the advanced section"
+  JS handler is needed. Naming gotcha: the service's own `auto_incident` checkbox
+  and the integration's *different* `auto_incident` concept can't share one HTML
+  name on one form, so the integration's is deliberately `check_auto_incident` in
+  the template and mapped explicitly in the route.
 - **An admin page's on-page `<h1>`, its `{% block title %}` and its nav label must all
   match** — they drift independently, and the `<h1>` is the one the user actually
   sees. Check all three when a page's scope or nav label changes
@@ -745,6 +756,131 @@ DB-backed Settings pages, not a code edit.
 - `@app.errorhandler(413)` exists because of this feature — `MAX_CONTENT_LENGTH` was
   set app-wide long before anything could actually hit it. Without the handler an
   oversized upload falls through to Flask's default unstyled error page.
+
+## Admin quick wins, service→VM/host mapping, service dependencies, low disk alert (`app.py`, `db.py`, `monitoring.py` — added 2026-08-12)
+
+- **Test-notification button** (`/admin/settings`) calls `notifications.notify()`
+  directly with a canned payload — the exact same dispatch path as a real
+  incident/maintenance alert, not a separate code path, so it actually confirms
+  the whole chain (webhook URL, ntfy topic, bot permissions) rather than just "is
+  this URL reachable." Since `notifications.notify()` is deliberately
+  fire-and-forget (catches and logs every failure, never raises), the route can't
+  report true success/failure per channel — it just confirms it was sent, and the
+  admin checks their channel, which is the entire point of the button.
+- **Manual DB backup** (`GET /admin/settings/backup-db` — GET, not POST, since it
+  has no side effects) zips a snapshot of `instance/portal.db` via
+  `db.backup_to_file()`, which uses SQLite's own `Connection.backup()` API rather
+  than a raw file copy — a plain copy of a live database file being actively
+  written by the background health-check thread could catch a torn/partial write
+  mid-transaction; `Connection.backup()` can't. Deliberately kept separate from
+  `updater.py`'s own pre-update backup machinery, which backs up app *code* for
+  rollback — a different concern from an on-demand DB export.
+- **Dark mode now defaults to `prefers-color-scheme`** when no explicit choice has
+  been saved yet (previously always defaulted to dark regardless of the OS
+  setting). Both `static/js/theme.js` *and* the FOUC-prevention inline script in
+  `base.html`'s `<head>` needed the same fix — missing the inline one would have
+  left a light-OS visitor with no saved choice flashing dark before `theme.js`
+  corrected it a moment later. An explicit toggle click still writes to
+  `localStorage` and wins forever after that, in both places.
+- **`services.run_target`** (`''` / `'host'` / `'vm:<name>'`) records which
+  machine a service actually runs on — the portal's own host (`platform.node()`)
+  or a detected Hyper-V VM by name (no stable numeric VM id exists to reference
+  instead — see `monitoring.get_vm_snapshot()`). Shown on the admin service
+  list/edit form always; shown on the **public** card only if
+  `services.show_run_target_public` is also checked (off by default — this is
+  the one piece of this batch that can reveal infrastructure detail to
+  visitors, so it's opt-in per service, not on by default like the rest of the
+  admin-only fields it started as). **Does not affect this service's computed
+  status either way** — purely informational, for faster troubleshooting ("this
+  service is down, which machine do I go check").
+- **Service dependencies** (`service_dependencies` join table) let a service be
+  marked as depending on one or more others; if any of them is down, the
+  dependent shows `degraded` instead of lying (`operational`) or falsely showing
+  `down`. `_merge_dependency_health(status, dependency_statuses)` mirrors
+  `_merge_api_health()`'s exact shape and is called in the same spot in
+  `run_health_checks()` — same non-destructive precedence (only ever raises
+  `operational`/`slow` to `degraded`, never overrides an already-worse
+  `down`/`maintenance`), preserving the "one status feeds both display and
+  incident lifecycle" invariant documented above under
+  `_handle_incident_lifecycle`. **Direct dependencies only, not transitive** — a
+  deliberate scope line: resolving a chain would need real cycle detection and
+  topological ordering that nothing here needs yet, and a one-hop-only merge
+  can't infinite-loop even if two services are configured to depend on each
+  other, so only literal self-dependency is filtered out (in
+  `db.set_service_dependencies()`), not full cycle detection. Dependency status
+  is read from a **fixed pre-loop snapshot** (`status_by_id`, built once at the
+  top of `run_health_checks()`), not a live re-query mid-loop — otherwise whether
+  a dependency's fresh-this-cycle status is visible would silently depend on
+  iteration order (already processed vs. not yet, within the same cycle). Caps
+  dependency staleness at one check interval, same as everything else here
+  already tolerates. **Deliberately kept separate from the VM/host mapping
+  above** — asked and confirmed 2026-08-12: a service's mapped VM/host being off
+  does *not* cascade into that service's status. Linking them would need reading
+  live Hyper-V VM state, unverifiable in this sandbox beyond mocked tests, and
+  was scoped out as a bigger feature for later if it turns out to actually be
+  wanted, rather than bundled in here. Same opt-in-per-service public visibility
+  as run_target above: `services.show_dependencies_public` (off by default)
+  shows "Depends on: X, Y" on the public card, resolved from
+  `db.get_service_dependencies()` in `_enrich_services()`.
+- **Low disk space alert** (`monitoring.evaluate_low_disk()` +
+  `app._check_low_disk_space()`) extends the already-cross-platform per-disk
+  `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same
+  settings-page shape as the high-load thresholds — but deliberately a
+  **separate** check, not folded into `evaluate_high_load()`, since a disk can be
+  completely idle and still be nearly full, a different failure mode from I/O
+  throughput. **Notification-only, no incident** — incidents are inherently tied
+  to a service via the join table, and disk space isn't a service; a
+  "serviceless incident" concept wasn't worth inventing just for this.
+  **Edge-triggered**, not every cycle: fires once on crossing the threshold and
+  once on recovery, never repeatedly while it stays low — a raw "still low"
+  notification every `CHECK_INTERVAL_SECONDS` would spam forever. **State is
+  persisted via `db.get/set_low_disk_alert_state()`** (the `settings` table,
+  namespaced `lowdisk_alert_state:<path>`), *not* an in-process dict — the first
+  version of this feature used a module-level cache and was corrected the same
+  day: this app is meant to survive its own restart cleanly (see the top-level
+  convention on this), and a restart while a disk is still low must not
+  re-send the notification just because the process forgot it was already low.
+  Confirmed against a real running server: threshold set low enough to trip on
+  this sandbox's actual disk usage, a real HTTP webhook receiver standing in for
+  Discord, `python app.py` killed and restarted against the same database — the
+  notification fired exactly once per disk across both runs, never a second
+  time after restart.
+- **`_enrich_services()`** (used by both `index()` and `/api/status`, so the JSON
+  API gets these fields too, same as every other enriched field it already
+  returns) computes `run_target_label`/`dependency_names` only when the
+  corresponding `show_*_public` flag is set — the raw `run_target` column and
+  `service_dependencies` rows are otherwise never resolved into public-facing
+  values, so nothing leaks for a service that hasn't opted in. `_run_target_label()`
+  is a small standalone helper (`app.py`) mirroring the inline Jinja logic already
+  in `admin_services.html` — not deduplicated into one shared place since one side
+  is Python and the other is a template, and the duplication is two short
+  `if`/`elif` branches.
+- **`run_target`/`show_run_target_public`/`show_dependencies_public` also needed
+  `service_default_*` settings and wizard fields**, added in a same-day follow-up
+  after the user caught the gap by testing rather than by anything catching it
+  first — see the "Any new per-service field needs to be checked against three
+  places" convention bullet above, which this incident is why exists in its
+  current (three-place, not two) form.
+- **Verification status**: full pytest suite (390 passing) plus live
+  `python app.py` + `curl` smoke tests of every route above (login, settings save,
+  backup download producing a real openable SQLite file, service create/edit with
+  `run_target` and `depends_on`, dependency cascade confirmed by hand-computing
+  the merge against a live DB, public-page rendering of "Runs on"/"Depends on"
+  confirmed present only on a service that opted in and absent on one that
+  didn't, `service_default_run_target`/`show_run_target_public`/
+  `show_dependencies_public` confirmed pre-filling on both the plain "New service"
+  form and the wizard). The low-disk restart fix specifically was verified
+  against a real running server (not just pytest) — see above. VM mapping's
+  dropdown is untestable beyond "renders correctly and defaults to empty" in
+  this Linux sandbox — no real Hyper-V host to detect VMs from.
+- **Workflow note**: this batch was pushed to a feature branch and opened as a PR
+  rather than committed straight to `main`, specifically because it was
+  user-requested as untested/pre-release (touches core status-computation logic
+  — `run_health_checks()`, `_handle_incident_lifecycle`'s invariant — not just
+  additive UI). Treat "push a branch + PR instead of main" as the default for a
+  batch like this (new status-computation logic, not yet run against a real
+  install) unless told otherwise, even outside the cloud-session no-tag-access
+  fallback already documented under Release process below.
 
 ## Testing/verification habits (established over many sessions — keep following them)
 
