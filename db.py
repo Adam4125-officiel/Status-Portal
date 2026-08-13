@@ -260,6 +260,10 @@ def init_db():
     # '' = not mapped, 'host' = the machine this portal itself runs on, 'vm:<name>' =
     # a Hyper-V VM by name (no stable numeric VM id is available - see monitoring.py).
     _ensure_column(conn, "services", "run_target", "TEXT NOT NULL DEFAULT ''")
+    # Both off by default - run_target/dependencies started admin-only, these are an
+    # explicit per-service opt-in to also show them on the public card.
+    _ensure_column(conn, "services", "show_run_target_public", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "services", "show_dependencies_public", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     # One-time backfill (idempotent - re-running is a no-op once caught up): any
@@ -335,8 +339,8 @@ def _api_health_mode(data):
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button, run_target)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button, run_target, show_run_target_public, show_dependencies_public)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
@@ -344,7 +348,8 @@ def create_service(data):
           _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0),
           int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
           int(data.get("ignore_in_overall_status", 0)), _api_health_mode(data),
-          int(data.get("show_report_button", 1)), data.get("run_target", "").strip()))
+          int(data.get("show_report_button", 1)), data.get("run_target", "").strip(),
+          int(data.get("show_run_target_public", 0)), int(data.get("show_dependencies_public", 0))))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -357,7 +362,8 @@ def update_service(service_id, data):
         UPDATE services SET name=?, description=?, url=?, icon=?, status=?, manual_override=?,
         auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
         slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=?,
-        ignore_in_overall_status=?, api_health_mode=?, show_report_button=?, run_target=? WHERE id=?
+        ignore_in_overall_status=?, api_health_mode=?, show_report_button=?, run_target=?,
+        show_run_target_public=?, show_dependencies_public=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
@@ -366,7 +372,8 @@ def update_service(service_id, data):
           int(data.get("startup_grace_seconds") or 0), int(data.get("retry_count") or 0),
           int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),
           _api_health_mode(data), int(data.get("show_report_button", 1)),
-          data.get("run_target", "").strip(), service_id))
+          data.get("run_target", "").strip(), int(data.get("show_run_target_public", 0)),
+          int(data.get("show_dependencies_public", 0)), service_id))
     conn.commit()
     conn.close()
 
@@ -1012,6 +1019,19 @@ def set_setting(key, value):
                  (key, value, value))
     conn.commit()
     conn.close()
+
+
+def get_low_disk_alert_state(path):
+    """Whether `path` was already below the low-disk threshold as of the last
+    check - persisted (via the settings table, namespaced by mountpoint) rather
+    than kept only in memory, specifically so a portal restart while a disk is
+    still low doesn't re-send a duplicate "low disk space" notification (this app
+    is meant to survive its own restart cleanly - see CLAUDE.md)."""
+    return get_setting(f"lowdisk_alert_state:{path}") == "1"
+
+
+def set_low_disk_alert_state(path, is_low):
+    set_setting(f"lowdisk_alert_state:{path}", "1" if is_low else "0")
 
 
 # ---------- Discord bot status-message tracking ----------

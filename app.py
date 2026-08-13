@@ -325,14 +325,31 @@ def _register_report_submission():
 # ---------------------------------------------------------------------------
 # Public pages
 # ---------------------------------------------------------------------------
+def _run_target_label(run_target):
+    """Human label for services.run_target ('' / 'host' / 'vm:<name>') - only
+    called when the admin has opted a service into showing this publicly
+    (show_run_target_public); see admin_services.html for the admin-side
+    equivalent, which renders this inline in Jinja instead."""
+    if run_target == "host":
+        return f"Host ({platform.node()})"
+    if run_target.startswith("vm:"):
+        return f"VM: {run_target[3:]}"
+    return None
+
+
 def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
+    service_names = {s["id"]: s["name"] for s in services}
     for s in services:
         s["links"] = db.list_service_links(s["id"])
         s["uptime"] = db.get_uptime_percentage(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
         s["open_reports_count"] = open_reports.get(s["id"], 0)
+        s["run_target_label"] = _run_target_label(s["run_target"]) if s["show_run_target_public"] else None
+        s["dependency_names"] = [
+            service_names.get(dep_id, "?") for dep_id in db.get_service_dependencies(s["id"])
+        ] if s["show_dependencies_public"] else []
     return services
 
 
@@ -425,13 +442,6 @@ def _public_section_order():
 # auto-refresh cycle. That was a real bug: the public page appeared to be "stuck
 # refreshing" because it was, in fact, blocked on a slow outbound HTTP call every time.
 _integration_status_cache = {}
-
-# Low disk space alert: edge-triggered notification state, keyed by mountpoint -
-# see _check_low_disk_space(). In-memory only, same tradeoff as the caches above:
-# resets on restart, so a restart while a disk is still low can cause one
-# duplicate "still low" notification. Not worth persisting to SQLite for that.
-_low_disk_alert_state = {}
-
 
 def _integration_severity(status):
     if not status["reachable"]:
@@ -917,6 +927,8 @@ def admin_service_new():
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         db.create_service(data)
         flash("Service added.", "success")
         return redirect(url_for("admin_services"))
@@ -938,6 +950,8 @@ def admin_service_edit(service_id):
         data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         db.update_service(service_id, data)
         labels = request.form.getlist("link_label")
         urls = request.form.getlist("link_url")
@@ -1886,21 +1900,26 @@ def _check_low_disk_space(snapshot):
     when it recovers - never every cycle while it stays low, which would spam a
     notification every CHECK_INTERVAL_SECONDS forever. Notification-only, no
     incident - incidents are inherently tied to a service via the join table, and
-    disk space isn't a service."""
+    disk space isn't a service.
+
+    State is persisted via db.get/set_low_disk_alert_state() (SQLite, not just
+    in-process memory) specifically so a portal restart while a disk is still low
+    doesn't re-fire the "low disk space" notification - this app is meant to
+    survive its own restart cleanly (see CLAUDE.md)."""
     threshold = _lowdisk_threshold()
     if not threshold:
         return
     low_disks = {d["path"] for d in monitoring.evaluate_low_disk(snapshot, threshold)}
     for d in snapshot.get("disks", []):
         path = d["path"]
-        was_low = _low_disk_alert_state.get(path, False)
+        was_low = db.get_low_disk_alert_state(path)
         is_low = path in low_disks
         if is_low and not was_low:
             notifications.notify("Low disk space",
                                   f"{d['display_name']}: {d['percent']}% used ({d['free_gb']} GB free)")
         elif was_low and not is_low:
             notifications.notify("Disk space back to normal", f"{d['display_name']} is no longer low on space.")
-        _low_disk_alert_state[path] = is_low
+        db.set_low_disk_alert_state(path, is_low)
 
 
 def run_health_checks():

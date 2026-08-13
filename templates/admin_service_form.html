@@ -122,7 +122,14 @@
       <option value="vm:{{ vm.name }}" {{ 'selected' if current_target == 'vm:' ~ vm.name }}>VM: {{ vm.name }}</option>
       {% endfor %}
     </select>
-    <div class="field-hint">Which machine this service actually runs on — shown on the admin card only, purely for faster troubleshooting (see a service is down, know which machine to go check). Never shown publicly, and doesn't affect this service's computed status.{% if not vms %} No VMs currently detected (Windows/Hyper-V only).{% endif %}</div>
+    <div class="field-hint">Which machine this service actually runs on — purely for faster troubleshooting (see a service is down, know which machine to go check). Doesn't affect this service's computed status.{% if not vms %} No VMs currently detected (Windows/Hyper-V only).{% endif %}</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_run_target_public" {{ 'checked' if service and service.show_run_target_public }}>
+      Show "Runs on" on the public page
+    </label>
+    <div class="field-hint">Off by default — this reveals machine/VM names to visitors. Only takes effect if "Runs on" above is actually set.</div>
   </div>
 
   {% if service %}
@@ -137,6 +144,13 @@
       {% endfor %}
     </div>
     <div class="field-hint">If any service checked here is down, this service shows "Degraded" instead of lying (Operational) or falsely showing Down itself. Direct dependencies only — this doesn't chain further (a service B depends on doesn't also count for A depending on B).{% if not other_services %} No other services exist yet to depend on.{% endif %}</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_dependencies_public" {{ 'checked' if service.show_dependencies_public }}>
+      Show "Depends on" on the public page
+    </label>
+    <div class="field-hint">Off by default. Only takes effect if at least one dependency is checked above.</div>
   </div>
 
   <div class="field">

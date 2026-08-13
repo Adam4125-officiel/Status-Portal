@@ -420,6 +420,14 @@ def test_settings_get_set(isolated_db):
     assert db.get_setting("site_name", "Server") == "HomeLab"
 
 
+def test_low_disk_alert_state_persists(isolated_db):
+    assert db.get_low_disk_alert_state("/") is False
+    db.set_low_disk_alert_state("/", True)
+    assert db.get_low_disk_alert_state("/") is True
+    db.set_low_disk_alert_state("/", False)
+    assert db.get_low_disk_alert_state("/") is False
+
+
 def test_integrations_crud(isolated_db):
     db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr:8989/",
                             "api_key": "abc", "enabled": 1})

@@ -844,6 +844,61 @@ def test_admin_service_form_saves_api_health_mode(client):
     assert service["api_health_mode"] == "down"
 
 
+def test_admin_service_form_saves_public_visibility_checkboxes(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/services/new", data={
+        "name": "Overseerr", "url": "", "run_target": "host",
+        "show_run_target_public": "on", "show_dependencies_public": "on",
+    })
+    assert resp.status_code == 302
+    service = [s for s in db.list_services() if s["name"] == "Overseerr"][0]
+    assert service["show_run_target_public"] == 1
+    assert service["show_dependencies_public"] == 1
+
+    # Unchecked on the next save -> both go back to off.
+    resp = client.post(f"/admin/services/{service['id']}/edit", data={"name": "Overseerr", "url": ""})
+    assert resp.status_code == 302
+    service = db.get_service(service["id"])
+    assert service["show_run_target_public"] == 0
+    assert service["show_dependencies_public"] == 0
+
+
+def test_run_target_label_formats_host_and_vm():
+    assert app_module._run_target_label("") is None
+    assert app_module._run_target_label("host") == f"Host ({app_module.platform.node()})"
+    assert app_module._run_target_label("vm:VM-Media02") == "VM: VM-Media02"
+
+
+def test_enrich_services_exposes_run_target_and_dependencies_only_when_opted_in(isolated_db):
+    radarr = db.create_service({"name": "Radarr", "url": ""})
+    seerr = db.create_service({
+        "name": "Seerr", "url": "", "run_target": "host",
+        "show_run_target_public": 1, "show_dependencies_public": 1,
+    })
+    db.set_service_dependencies(seerr, [radarr])
+
+    enriched = {s["id"]: s for s in app_module._enrich_services(db.list_services())}
+    assert enriched[seerr]["run_target_label"] == f"Host ({app_module.platform.node()})"
+    assert enriched[seerr]["dependency_names"] == ["Radarr"]
+    # Radarr itself never opted in - both stay empty/off.
+    assert enriched[radarr]["run_target_label"] is None
+    assert enriched[radarr]["dependency_names"] == []
+
+
+def test_public_page_renders_run_target_and_dependencies_when_opted_in(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    seerr_id = db.create_service({
+        "name": "Seerr", "url": "", "run_target": "host",
+        "show_run_target_public": 1, "show_dependencies_public": 1,
+    })
+    db.set_service_dependencies(seerr_id, [radarr_id])
+
+    html = client.get("/").data.decode()
+    assert "Runs on:" in html
+    assert "Depends on: Radarr" in html
+
+
 def test_service_api_health_mode_defaults_to_off_for_invalid_value(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "x", "api_health_mode": "bogus"})
     assert db.get_service(sid)["api_health_mode"] == "off"
@@ -1209,7 +1264,6 @@ def test_lowdisk_threshold_blank_means_disabled(isolated_db):
 
 
 def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_db, monkeypatch):
-    monkeypatch.setattr(app_module, "_low_disk_alert_state", {})
     db.set_setting("lowdisk_percent_threshold", "90")
     calls = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
@@ -1228,10 +1282,26 @@ def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_
 
 
 def test_check_low_disk_space_noop_when_threshold_unset(isolated_db, monkeypatch):
-    monkeypatch.setattr(app_module, "_low_disk_alert_state", {})
     calls = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     app_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
+    assert calls == []
+
+
+def test_low_disk_alert_state_survives_restart_no_duplicate_notification(isolated_db, monkeypatch):
+    """Regression test: state must be read from the DB, not an in-process cache -
+    a restart while a disk is still low must not re-send the notification. Simulated
+    here by writing the "already low" state directly via db.set_low_disk_alert_state
+    (standing in for a previous process's cycle) rather than going through
+    _check_low_disk_space first, since there's no module-level state left to reset."""
+    db.set_setting("lowdisk_percent_threshold", "90")
+    db.set_low_disk_alert_state("/", True)
+    calls = []
+    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+
+    still_low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
+    app_module._check_low_disk_space(still_low)
+
     assert calls == []
 
 

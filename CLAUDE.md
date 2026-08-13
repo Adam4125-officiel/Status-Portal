@@ -775,8 +775,12 @@ DB-backed Settings pages, not a code edit.
   machine a service actually runs on — the portal's own host (`platform.node()`)
   or a detected Hyper-V VM by name (no stable numeric VM id exists to reference
   instead — see `monitoring.get_vm_snapshot()`). Shown on the admin service
-  list/edit form only, never publicly, and **does not affect this service's
-  computed status** — purely informational, for faster troubleshooting ("this
+  list/edit form always; shown on the **public** card only if
+  `services.show_run_target_public` is also checked (off by default — this is
+  the one piece of this batch that can reveal infrastructure detail to
+  visitors, so it's opt-in per service, not on by default like the rest of the
+  admin-only fields it started as). **Does not affect this service's computed
+  status either way** — purely informational, for faster troubleshooting ("this
   service is down, which machine do I go check").
 - **Service dependencies** (`service_dependencies` join table) let a service be
   marked as depending on one or more others; if any of them is down, the
@@ -803,7 +807,10 @@ DB-backed Settings pages, not a code edit.
   does *not* cascade into that service's status. Linking them would need reading
   live Hyper-V VM state, unverifiable in this sandbox beyond mocked tests, and
   was scoped out as a bigger feature for later if it turns out to actually be
-  wanted, rather than bundled in here.
+  wanted, rather than bundled in here. Same opt-in-per-service public visibility
+  as run_target above: `services.show_dependencies_public` (off by default)
+  shows "Depends on: X, Y" on the public card, resolved from
+  `db.get_service_dependencies()` in `_enrich_services()`.
 - **Low disk space alert** (`monitoring.evaluate_low_disk()` +
   `app._check_low_disk_space()`) extends the already-cross-platform per-disk
   `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same
@@ -813,20 +820,40 @@ DB-backed Settings pages, not a code edit.
   throughput. **Notification-only, no incident** — incidents are inherently tied
   to a service via the join table, and disk space isn't a service; a
   "serviceless incident" concept wasn't worth inventing just for this.
-  **Edge-triggered**, not every cycle: `_low_disk_alert_state` (module-level, per
-  mountpoint) fires once on crossing the threshold and once on recovery, never
-  repeatedly while it stays low — a raw "still low" notification every
-  `CHECK_INTERVAL_SECONDS` would spam forever. State resets on restart, like
-  every other cache-based state in this app (a restart while still low can cause
-  one duplicate notification — not worth persisting to SQLite just to avoid
-  that).
-- **Verification status**: full pytest suite (381 passing) plus live
+  **Edge-triggered**, not every cycle: fires once on crossing the threshold and
+  once on recovery, never repeatedly while it stays low — a raw "still low"
+  notification every `CHECK_INTERVAL_SECONDS` would spam forever. **State is
+  persisted via `db.get/set_low_disk_alert_state()`** (the `settings` table,
+  namespaced `lowdisk_alert_state:<path>`), *not* an in-process dict — the first
+  version of this feature used a module-level cache and was corrected the same
+  day: this app is meant to survive its own restart cleanly (see the top-level
+  convention on this), and a restart while a disk is still low must not
+  re-send the notification just because the process forgot it was already low.
+  Confirmed against a real running server: threshold set low enough to trip on
+  this sandbox's actual disk usage, a real HTTP webhook receiver standing in for
+  Discord, `python app.py` killed and restarted against the same database — the
+  notification fired exactly once per disk across both runs, never a second
+  time after restart.
+- **`_enrich_services()`** (used by both `index()` and `/api/status`, so the JSON
+  API gets these fields too, same as every other enriched field it already
+  returns) computes `run_target_label`/`dependency_names` only when the
+  corresponding `show_*_public` flag is set — the raw `run_target` column and
+  `service_dependencies` rows are otherwise never resolved into public-facing
+  values, so nothing leaks for a service that hasn't opted in. `_run_target_label()`
+  is a small standalone helper (`app.py`) mirroring the inline Jinja logic already
+  in `admin_services.html` — not deduplicated into one shared place since one side
+  is Python and the other is a template, and the duplication is two short
+  `if`/`elif` branches.
+- **Verification status**: full pytest suite (387 passing) plus live
   `python app.py` + `curl` smoke tests of every route above (login, settings save,
   backup download producing a real openable SQLite file, service create/edit with
   `run_target` and `depends_on`, dependency cascade confirmed by hand-computing
-  the merge against a live DB). VM mapping's dropdown is untestable beyond "renders
-  correctly and defaults to empty" in this Linux sandbox — no real Hyper-V host to
-  detect VMs from.
+  the merge against a live DB, public-page rendering of "Runs on"/"Depends on"
+  confirmed present only on a service that opted in and absent on one that
+  didn't). The low-disk restart fix specifically was verified against a real
+  running server (not just pytest) — see above. VM mapping's dropdown is
+  untestable beyond "renders correctly and defaults to empty" in this Linux
+  sandbox — no real Hyper-V host to detect VMs from.
 - **Workflow note**: this batch was pushed to a feature branch and opened as a PR
   rather than committed straight to `main`, specifically because it was
   user-requested as untested/pre-release (touches core status-computation logic

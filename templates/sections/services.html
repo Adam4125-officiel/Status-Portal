@@ -23,6 +23,12 @@
         {% if s.open_reports_count %}
         <div class="service-card__note" title="Visitor-submitted report(s) about this service, awaiting admin review">⚑ {{ s.open_reports_count }} open report{{ 's' if s.open_reports_count != 1 else '' }}</div>
         {% endif %}
+        {% if s.run_target_label %}
+        <div class="service-card__note" title="Which machine this service runs on">🖥 Runs on: {{ s.run_target_label }}</div>
+        {% endif %}
+        {% if s.dependency_names %}
+        <div class="service-card__note" title="This service depends on these others">⛓ Depends on: {{ s.dependency_names|join(', ') }}</div>
+        {% endif %}
         {% if s.uptime is not none %}
         <div class="status-bar {{ status_css[s.status] }}" title="{{ s.uptime }}% uptime over the last 30 days"></div>
         {% endif %}
