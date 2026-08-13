@@ -114,7 +114,7 @@
   </div>
   <div class="field">
     <label for="run_target">Runs on</label>
-    {% set current_target = service.run_target if service else '' %}
+    {% set current_target = service.run_target if service else (defaults.run_target if defaults else '') %}
     <select id="run_target" name="run_target">
       <option value="" {{ 'selected' if not current_target }}>— not mapped —</option>
       <option value="host" {{ 'selected' if current_target == 'host' }}>This host ({{ hostname }})</option>
@@ -126,10 +126,17 @@
   </div>
   <div class="field">
     <label class="field-check">
-      <input type="checkbox" name="show_run_target_public" {{ 'checked' if service and service.show_run_target_public }}>
+      <input type="checkbox" name="show_run_target_public" {{ 'checked' if (service.show_run_target_public if service else (defaults.show_run_target_public if defaults else false)) }}>
       Show "Runs on" on the public page
     </label>
     <div class="field-hint">Off by default — this reveals machine/VM names to visitors. Only takes effect if "Runs on" above is actually set.</div>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="show_dependencies_public" {{ 'checked' if (service.show_dependencies_public if service else (defaults.show_dependencies_public if defaults else false)) }}>
+      Show "Depends on" on the public page
+    </label>
+    <div class="field-hint">Off by default. Only takes effect once at least one dependency is picked below{% if not service %} (after this service is created){% endif %}.</div>
   </div>
 
   {% if service %}
@@ -144,13 +151,6 @@
       {% endfor %}
     </div>
     <div class="field-hint">If any service checked here is down, this service shows "Degraded" instead of lying (Operational) or falsely showing Down itself. Direct dependencies only — this doesn't chain further (a service B depends on doesn't also count for A depending on B).{% if not other_services %} No other services exist yet to depend on.{% endif %}</div>
-  </div>
-  <div class="field">
-    <label class="field-check">
-      <input type="checkbox" name="show_dependencies_public" {{ 'checked' if service.show_dependencies_public }}>
-      Show "Depends on" on the public page
-    </label>
-    <div class="field-hint">Off by default. Only takes effect if at least one dependency is checked above.</div>
   </div>
 
   <div class="field">

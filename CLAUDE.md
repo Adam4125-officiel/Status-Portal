@@ -256,19 +256,30 @@ DB-backed Settings pages, not a code edit.
   (`service is None` is what triggers using `defaults` instead of hardcoded
   fallbacks). Changing a default later never retroactively touches a service that
   already exists; `run_health_checks()` and the schema are completely unaffected.
-- **Both "new service" entry points must stay field-complete.** `/admin/new/combined`
-  (the wizard) and `/admin/services/new` should offer the same service fields and
-  build the same kind of `data` dict before calling `db.create_service()` — the wizard
-  having a smaller field set was a real bug where `service_default_*` settings were
-  silently unreachable and `create_service()` fell back to hardcoded literals
-  (`docs/HISTORY.md` → "The combined wizard's missing field set"). The wizard's extra
-  fields live in a collapsed-by-default `<details>` "Advanced settings" block;
-  **collapsed is a CSS/visual state only — the inputs are still in the DOM and still
-  submit**, which is why server-side pre-filling is enough on its own and no "open the
-  advanced section" JS handler is needed. Naming gotcha: the service's own
-  `auto_incident` checkbox and the integration's *different* `auto_incident` concept
-  can't share one HTML name on one form, so the integration's is deliberately
-  `check_auto_incident` in the template and mapped explicitly in the route.
+- **Any new per-service field needs to be checked against three places, not one:**
+  the main form (`admin_service_form.html`), the combined wizard
+  (`admin_new_combined.html`'s `<details>` "Advanced settings" block), and — if the
+  field is the kind of thing that's usually the same across most services (a
+  threshold, a mode, a boolean toggle; not a unique value like `name`/`url`) —
+  `service_default_*` in Settings → Service defaults (`_service_defaults()` +
+  `admin_settings_general()`'s POST handler + the "Service defaults" section of
+  `admin_settings.html`). Missing the wizard was a real bug once already
+  (`docs/HISTORY.md` → "The combined wizard's missing field set" — `service_default_*`
+  settings silently unreachable, `create_service()` falling back to hardcoded
+  literals) and **missing the same two spots happened again** the very next session,
+  this time for `run_target`/`show_run_target_public`/`show_dependencies_public` —
+  caught by the user re-testing, not by anything in this file, which is why this
+  bullet now names all three places explicitly instead of just two. When adding a
+  field, grep for an existing sibling field (e.g. `slow_threshold_ms` or
+  `api_health_mode`) and touch every spot that name appears in — that's the fastest
+  way to find all three without relying on memory. The wizard's extra fields live in
+  a collapsed-by-default `<details>` block; **collapsed is a CSS/visual state
+  only — the inputs are still in the DOM and still submit**, which is why
+  server-side pre-filling is enough on its own and no "open the advanced section"
+  JS handler is needed. Naming gotcha: the service's own `auto_incident` checkbox
+  and the integration's *different* `auto_incident` concept can't share one HTML
+  name on one form, so the integration's is deliberately `check_auto_incident` in
+  the template and mapped explicitly in the route.
 - **An admin page's on-page `<h1>`, its `{% block title %}` and its nav label must all
   match** — they drift independently, and the `<h1>` is the one the user actually
   sees. Check all three when a page's scope or nav label changes
@@ -844,16 +855,24 @@ DB-backed Settings pages, not a code edit.
   in `admin_services.html` — not deduplicated into one shared place since one side
   is Python and the other is a template, and the duplication is two short
   `if`/`elif` branches.
-- **Verification status**: full pytest suite (387 passing) plus live
+- **`run_target`/`show_run_target_public`/`show_dependencies_public` also needed
+  `service_default_*` settings and wizard fields**, added in a same-day follow-up
+  after the user caught the gap by testing rather than by anything catching it
+  first — see the "Any new per-service field needs to be checked against three
+  places" convention bullet above, which this incident is why exists in its
+  current (three-place, not two) form.
+- **Verification status**: full pytest suite (390 passing) plus live
   `python app.py` + `curl` smoke tests of every route above (login, settings save,
   backup download producing a real openable SQLite file, service create/edit with
   `run_target` and `depends_on`, dependency cascade confirmed by hand-computing
   the merge against a live DB, public-page rendering of "Runs on"/"Depends on"
   confirmed present only on a service that opted in and absent on one that
-  didn't). The low-disk restart fix specifically was verified against a real
-  running server (not just pytest) — see above. VM mapping's dropdown is
-  untestable beyond "renders correctly and defaults to empty" in this Linux
-  sandbox — no real Hyper-V host to detect VMs from.
+  didn't, `service_default_run_target`/`show_run_target_public`/
+  `show_dependencies_public` confirmed pre-filling on both the plain "New service"
+  form and the wizard). The low-disk restart fix specifically was verified
+  against a real running server (not just pytest) — see above. VM mapping's
+  dropdown is untestable beyond "renders correctly and defaults to empty" in
+  this Linux sandbox — no real Hyper-V host to detect VMs from.
 - **Workflow note**: this batch was pushed to a feature branch and opened as a PR
   rather than committed straight to `main`, specifically because it was
   user-requested as untested/pre-release (touches core status-computation logic

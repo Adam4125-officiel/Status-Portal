@@ -595,6 +595,52 @@ def test_wizard_combined_form_prefills_service_defaults(client):
     assert b'value="2"' in resp.data
 
 
+def test_wizard_combined_form_prefills_run_target_and_visibility_defaults(client):
+    """Regression test: run_target/show_run_target_public/show_dependencies_public
+    were added to the main service form and Service defaults but initially forgotten
+    on the wizard, exactly the class of bug the two regression tests above already
+    guard against for the original field set - same fix, same shape."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_run_target": "host",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    resp = client.get("/admin/new/combined")
+    html = resp.data.decode()
+    assert 'name="run_target"' in html
+    assert 'value="host" selected' in html or 'selected>This host' in html
+    assert 'name="show_run_target_public" checked' in html
+    assert 'name="show_dependencies_public" checked' in html
+
+
+def test_admin_service_new_form_prefills_run_target_and_visibility_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "service_default_run_target": "host",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    resp = client.get("/admin/services/new")
+    html = resp.data.decode()
+    assert 'name="show_run_target_public" checked' in html
+    assert 'name="show_dependencies_public" checked' in html
+
+
+def test_admin_settings_general_saves_run_target_and_visibility_defaults(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/settings/general", data={
+        "service_default_run_target": "vm:VM-Media02",
+        "service_default_show_run_target_public": "on",
+        "service_default_show_dependencies_public": "on",
+    })
+    assert resp.status_code == 302
+    defaults = app_module._service_defaults()
+    assert defaults["run_target"] == "vm:VM-Media02"
+    assert defaults["show_run_target_public"] is True
+    assert defaults["show_dependencies_public"] is True
+
+
 def test_wizard_combined_applies_configured_service_defaults_on_create(client):
     """End-to-end version of the regression above: submitting exactly what a real
     browser would submit for the (collapsed but still-present-in-the-DOM) Advanced
@@ -636,6 +682,7 @@ def test_wizard_combined_full_advanced_fields_are_saved(client):
         "retry_count": "4", "retry_interval_seconds": "20", "auto_incident": "on",
         "startup_grace_seconds": "60", "ignore_in_overall_status": "on",
         "api_health_mode": "degrade", "sort_order": "5", "check_auto_incident": "on",
+        "run_target": "host", "show_run_target_public": "on", "show_dependencies_public": "on",
     })
     assert resp.status_code == 302
 
@@ -652,6 +699,9 @@ def test_wizard_combined_full_advanced_fields_are_saved(client):
     assert service["ignore_in_overall_status"] == 1
     assert service["api_health_mode"] == "degrade"
     assert service["sort_order"] == 5
+    assert service["run_target"] == "host"
+    assert service["show_run_target_public"] == 1
+    assert service["show_dependencies_public"] == 1
 
     integs = db.list_integrations_for_service(service["id"])
     assert len(integs) == 1
@@ -1844,7 +1894,8 @@ def test_admin_settings_general_saves_service_defaults(client):
     assert defaults == {
         "slow_threshold_ms": "1500", "startup_grace_seconds": "30",
         "retry_count": "2", "retry_interval_seconds": "10", "auto_incident": False,
-        "api_health_mode": "off",
+        "api_health_mode": "off", "run_target": "",
+        "show_run_target_public": False, "show_dependencies_public": False,
     }
 
 

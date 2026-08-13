@@ -400,6 +400,9 @@ def _service_defaults():
     defaults["api_health_mode"] = db.get_setting("service_default_api_health_mode", "off")
     if defaults["api_health_mode"] not in db.API_HEALTH_MODES:
         defaults["api_health_mode"] = "off"
+    defaults["run_target"] = db.get_setting("service_default_run_target", "")
+    defaults["show_run_target_public"] = db.get_setting("service_default_show_run_target_public", "0") == "1"
+    defaults["show_dependencies_public"] = db.get_setting("service_default_show_dependencies_public", "0") == "1"
     return defaults
 
 
@@ -1489,6 +1492,8 @@ def admin_new_combined():
         service_data["auto_incident"] = 1 if request.form.get("auto_incident") else 0
         service_data["ignore_in_overall_status"] = 1 if request.form.get("ignore_in_overall_status") else 0
         service_data["show_report_button"] = 1 if request.form.get("show_report_button") else 0
+        service_data["show_run_target_public"] = 1 if request.form.get("show_run_target_public") else 0
+        service_data["show_dependencies_public"] = 1 if request.form.get("show_dependencies_public") else 0
         service_id = db.create_service(service_data)
         db.create_integration({
             "name": request.form.get("name", ""),
@@ -1504,7 +1509,8 @@ def admin_new_combined():
         })
         flash("Service and status check created.", "success")
         return redirect(url_for("admin_services"))
-    return render_template("admin_new_combined.html", defaults=_service_defaults(), active="services")
+    return render_template("admin_new_combined.html", defaults=_service_defaults(),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(), active="services")
 
 
 @app.route("/admin/integrations/<int:iid>/delete", methods=["POST"])
@@ -1546,6 +1552,7 @@ def admin_settings():
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
                             lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
+                            vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
                             active="settings")
 
 
@@ -1571,6 +1578,11 @@ def admin_settings_general():
     db.set_setting("service_default_auto_incident", "1" if request.form.get("service_default_auto_incident") else "0")
     api_mode = request.form.get("service_default_api_health_mode", "off")
     db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
+    db.set_setting("service_default_run_target", request.form.get("service_default_run_target", "").strip())
+    db.set_setting("service_default_show_run_target_public",
+                    "1" if request.form.get("service_default_show_run_target_public") else "0")
+    db.set_setting("service_default_show_dependencies_public",
+                    "1" if request.form.get("service_default_show_dependencies_public") else "0")
     flash("Settings updated.", "success")
     return redirect(url_for("admin_settings"))
 

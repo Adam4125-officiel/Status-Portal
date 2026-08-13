@@ -101,6 +101,28 @@
       <option value="down" {{ 'selected' if service_defaults.api_health_mode == 'down' }}>Down</option>
     </select>
   </div>
+  <div class="field">
+    <label for="service_default_run_target">Runs on, by default</label>
+    <select id="service_default_run_target" name="service_default_run_target">
+      <option value="" {{ 'selected' if not service_defaults.run_target }}>— not mapped —</option>
+      <option value="host" {{ 'selected' if service_defaults.run_target == 'host' }}>This host ({{ hostname }})</option>
+      {% for vm in vms %}
+      <option value="vm:{{ vm.name }}" {{ 'selected' if service_defaults.run_target == 'vm:' ~ vm.name }}>VM: {{ vm.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="service_default_show_run_target_public" {{ 'checked' if service_defaults.show_run_target_public }}>
+      Show "Runs on" publicly, by default
+    </label>
+  </div>
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="service_default_show_dependencies_public" {{ 'checked' if service_defaults.show_dependencies_public }}>
+      Show "Depends on" publicly, by default
+    </label>
+  </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save</button>
   </div>
