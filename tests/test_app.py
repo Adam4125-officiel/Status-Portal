@@ -2552,3 +2552,55 @@ def test_system_page_lists_caches_and_integration_reachability(client):
     assert "Cached data" in body
     assert "Uptime percentages" in body
     assert "Jellyfin" in body and "not reachable" in body
+
+
+def test_clear_browser_cache_sends_clear_site_data_without_touching_cookies(client):
+    """The 'cookies' directive would sign the admin out as a side effect of a cache
+    action - the one directive this must never send."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/system/clear-browser-cache", data={"theme": "dark"})
+    assert resp.status_code == 200
+    header = resp.headers["Clear-Site-Data"]
+    assert '"cache"' in header and '"storage"' in header
+    assert "cookies" not in header
+    with client.session_transaction() as sess:
+        assert sess["logged_in"] is True
+
+
+def test_clear_browser_cache_page_lists_every_static_asset(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.post("/admin/system/clear-browser-cache", data={"theme": ""}).data.decode()
+    # Handed to the page as a data attribute, not interpolated into inline JS.
+    assert "data-assets=" in body
+    for name in ("js/main.js", "js/theme.js", "css/style.css"):
+        assert name in body
+    assert "data-theme=\"\"" in body
+
+
+def test_clear_browser_cache_carries_the_theme_through(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.post("/admin/system/clear-browser-cache", data={"theme": "light"}).data.decode()
+    assert 'data-theme="light"' in body
+
+
+def test_clear_browser_cache_requires_login(client):
+    resp = client.post("/admin/system/clear-browser-cache", data={})
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_static_asset_list_covers_new_files_automatically(client, tmp_path, monkeypatch):
+    """Enumerated from the directory, not a hand-maintained list - a JS file added
+    later must not be silently left out of the re-fetch."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    new_file = os.path.join(app_module.app.root_path, "static", "js", "_tmp_probe.js")
+    with open(new_file, "w", encoding="utf-8") as f:
+        f.write("// temporary probe file\n")
+    try:
+        with app_module.app.test_request_context():
+            urls = app_module._all_static_asset_urls()
+        assert any("_tmp_probe.js" in u for u in urls)
+        # And every entry is cache-busted, not a bare static URL.
+        assert all("?v=" in u for u in urls)
+    finally:
+        os.remove(new_file)

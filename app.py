@@ -1448,6 +1448,60 @@ def admin_system_clear_caches():
     return redirect(url_for("admin_system"))
 
 
+def _all_static_asset_urls():
+    """Every CSS/JS file this app serves, as cache-busted URLs. Used by the
+    clear-browser-cache page to re-fetch each one with `cache: 'reload'`, which is
+    what actually replaces a browser's stored copy - a directory listing rather than
+    a hand-maintained list, so a file added later can't be quietly left behind."""
+    urls = []
+    for subdir in ("css", "js"):
+        directory = os.path.join(app.root_path, "static", subdir)
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        urls += [asset_url(f"{subdir}/{name}") for name in names
+                 if name.endswith((".css", ".js"))]
+    logo = db.get_setting("site_logo_filename", "")
+    if logo:
+        urls.append(url_for("static", filename=f"uploads/{logo}"))
+    return urls
+
+
+@app.route("/admin/system/clear-browser-cache", methods=["POST"])
+@login_required
+def admin_system_clear_browser_cache():
+    """Clears *this* browser's own cached copy of the site - a different thing from
+    the server-side button next to it, and worth keeping separate rather than merging
+    the two.
+
+    The server-side one changes what every visitor is *asked* to download (it bumps
+    the ?v= salt, so their next request is for a URL they've never seen). This one
+    only reaches the browser that clicked it, because that's all a web page can
+    reach - there is no way to reach into someone else's browser and evict a file.
+    Which is exactly why both exist: this one is for "I'm looking at a stale page
+    right now", the other is for "make sure nobody else is".
+
+    Two mechanisms, because neither is sufficient alone:
+
+    - The Clear-Site-Data response header is the standards-based way, and it clears
+      things a page cannot touch itself. Chrome and Edge only honor it in a secure
+      context, and this portal is very often served over plain HTTP on a LAN or
+      Tailscale, so it can't be relied on here.
+    - The page's own script then re-does what it can reach (Cache Storage, service
+      workers, DOM storage) and re-fetches every asset with `cache: 'reload'`, which
+      forces a network fetch and replaces the stored copy.
+
+    Deliberately NOT sending the "cookies" directive: that would clear the session
+    cookie and sign the admin out as a side effect of a cache action."""
+    theme = request.form.get("theme", "")
+    response = Response(render_template("admin_clear_browser_cache.html",
+                                         assets=_all_static_asset_urls(), theme=theme,
+                                         active="system"))
+    response.headers["Clear-Site-Data"] = '"cache", "storage"'
+    return response
+
+
 @app.route("/admin/system/restart", methods=["POST"])
 @login_required
 def admin_system_restart():

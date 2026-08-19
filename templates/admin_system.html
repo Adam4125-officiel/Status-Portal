@@ -62,7 +62,28 @@
   {% endif %}
 
   <form method="POST" action="{{ url_for('admin_system_clear_caches') }}">
-    <button type="submit" class="btn secondary">Clear cached data</button>
+    <button type="submit" class="btn secondary">Clear server-side cached data</button>
+  </form>
+</div>
+
+<div class="form-panel" style="max-width: 520px; margin-top: 16px;">
+  <h2 style="font-size: 15px; margin: 0 0 4px;">This browser's cache</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Clears the copy of the page's CSS, JavaScript and images stored by
+    <em>this</em> browser, then reloads them from the server — the fix for
+    &ldquo;I updated the portal but it still looks the same&rdquo;, without hunting
+    through your browser's own settings.
+  </p>
+  <p style="font-size: 13px; color: var(--text-dim);">
+    It can only reach the browser you're clicking it in — no web page can evict a
+    file from someone else's browser. To make sure <em>every</em> visitor picks up
+    a change, use the server-side button above: it changes the address each file is
+    requested at, so nobody can answer from a stale copy. Your dark/light choice is
+    kept; you'll stay signed in.
+  </p>
+  <form method="POST" action="{{ url_for('admin_system_clear_browser_cache') }}" id="clear-browser-cache-form">
+    <input type="hidden" name="theme" id="clear-browser-cache-theme">
+    <button type="submit" class="btn secondary">Clear this browser's cache</button>
   </form>
 </div>
 
@@ -87,4 +108,5 @@
   </form>
 </div>
 <script src="{{ asset_url('js/admin_system_control.js') }}"></script>
+<script src="{{ asset_url('js/admin_browser_cache_form.js') }}"></script>
 {% endblock %}

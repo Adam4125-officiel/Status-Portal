@@ -20,6 +20,45 @@ how it presented, how it was caught). That split is what keeps this file readabl
 the project grows. Verification records — "confirmed working on real Windows on date
 X" — always go in `docs/HISTORY.md`.
 
+## If you're touching X, read Y first
+
+This file is long enough that the real failure mode is not "the rule wasn't written
+down", it's "the rule was written down three hundred lines away from what I was
+editing". Look your change up here before you start; each row names the sections that
+have bitten someone on exactly that change.
+
+| What you're about to touch | Read before you start |
+|---|---|
+| Any DB schema change | *Conventions* → `_ensure_column()`; *Sessions/caching* → indexes go in `init_db()`'s list |
+| A new per-service field | *Conventions* → "three places, not one" (main form, wizard, Service defaults) |
+| A new setting of any kind | *Conventions* → the config split (env var vs DB row), and "a new `PORTAL_*` env var means three files" |
+| Anything in `run_health_checks()` or a status value | *Conventions* → level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
+| Anything a request handler calls | *Conventions* → no slow I/O in a request handler; *Monitoring architecture*; *Sessions/caching* |
+| Login, sessions, cookies, CSRF | *Sessions, caching and DB performance*; *Two-factor authentication* |
+| A new admin route | *Conventions* → CSRF is automatic under `/admin/`; `_require_totp()` for destructive actions only |
+| A template's CSS/JS reference | *Conventions* → always `asset_url()`; *Sessions/caching* → `SEND_FILE_MAX_AGE_DEFAULT` is 30 days |
+| Anything rendering a timestamp | *Conventions* → server-side UTC + `local-time` spans; *Sessions/caching* → ISO strings only |
+| A new cache of any kind | *Sessions/caching* → module-owned `clear_caches()`, and reset it in `tests/conftest.py` |
+| Pagination / "load more" | *Conventions* → `/api/incidents/more`, and `docs/HISTORY.md` → "four pagination bugs in sequence" |
+| A new integration kind | *Conventions* → the `fetch_integration_status()` dispatch dict; per-integration timeouts |
+| The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
+| The updater | *Self-update* — especially what rollback can and cannot do |
+| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
+| A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
+| Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
+
+Three things that are true no matter what you're touching:
+
+1. **Run the full suite *and* the real server.** Most of the bugs recorded in
+   `docs/HISTORY.md` passed their unit tests.
+2. **Say what you actually verified.** This sandbox is Linux with no Windows, no real
+   Jellyfin/*Arr, and no Discord gateway — "confirmed working" has to mean something
+   narrower here, and saying which part is guesswork is more useful than a clean
+   summary.
+3. **The user tests things and finds what you missed.** Several rules in this file
+   exist because they re-tested something and caught a gap the same session it
+   shipped. Make what you changed easy for them to check.
+
 ## What this is
 
 A personal Flask/SQLite status portal for a home server (Jellyfin, *Arr stack,
@@ -954,15 +993,31 @@ DB-backed Settings pages, not a code edit.
   `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup
   download passes `max_age=0` explicitly for the same reason - it's a point-in-time
   file, not a versioned asset.
-- **The admin "clear cached data" button (`/admin/system`) clears via each module's
-  own `clear_caches()`**, not by reaching into other modules' globals from `app.py`.
-  Add a cache, add it to that module's `clear_caches()`/`cache_summary()` - not to a
-  list in `app.py`. It also bumps `asset_cache_salt` (a settings row, so it survives a
-  restart - otherwise the restart hands every browser back the URL it already cached)
-  which is appended to `asset_url()`'s `?v=`. The salt is **random, not a timestamp**:
-  two clicks in the same second would otherwise produce an identical "bust".
-  Deliberately *not* behind `_require_totp()` - nothing is destroyed and nothing goes
-  offline.
+- **`/admin/system` has *two* cache buttons and they are not redundant - don't merge
+  them.** They act on different machines, and only one of them can act on a machine
+  you don't control:
+  - *Clear server-side cached data* clears each module's caches via its own
+    `clear_caches()`, not by reaching into other modules' globals from `app.py` (add a
+    cache -> add it to that module's `clear_caches()`/`cache_summary()`, not to a list
+    in `app.py`). It also bumps `asset_cache_salt`, appended to `asset_url()`'s `?v=`,
+    which is the *only* mechanism that reaches **other people's** browsers - it changes
+    the URL they're asked for, so a stale copy can't answer. The salt is a settings row
+    (a restart that forgot it would hand every browser back the URL it already cached)
+    and is **random, not a timestamp**: two clicks in the same second would otherwise
+    produce an identical "bust".
+  - *Clear this browser's cache* only reaches the browser that clicked it, because
+    that is all a web page can reach. It sends `Clear-Site-Data: "cache", "storage"`
+    **and** re-does the work in JS, because Chrome/Edge only honor that header in a
+    secure context and this portal is very often plain HTTP on a LAN/Tailscale. The
+    JS half is what actually does the job in practice: `caches.delete()`, service
+    worker unregistration, DOM storage, then `fetch(url, {cache: 'reload'})` over
+    every asset (enumerated from the static directory by `_all_static_asset_urls()`,
+    never a hand-maintained list). **Never add the `"cookies"` directive** - it would
+    sign the admin out as a side effect of a cache action. The dark/light choice is
+    carried through the wipe and put back deliberately; it's a preference, not stale
+    data.
+
+  Neither is behind `_require_totp()` - nothing is destroyed and nothing goes offline.
 - **`_uptime_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
   resets them** alongside `_integration_status_cache` and the Jellyfin cache. A new
   module-level cache needs the same treatment or it leaks across tests.
@@ -981,10 +1036,14 @@ DB-backed Settings pages, not a code edit.
   enrollment `KeyError`) were only ever caught by actually running the server, never by
   unit tests alone.
 - **For anything that depends on client-side JS (AJAX "load more" buttons, the
-  favicon/logo actually rendering, console errors), `curl` alone isn't enough — use the
-  pre-installed Playwright/Chromium browser** (see the environment notes on
-  `PLAYWRIGHT_BROWSERS_PATH`/`executablePath` — don't run `playwright install`) to
-  actually click through the flow and check for console errors. This caught a real bug:
+  favicon/logo actually rendering, console errors), `curl` alone isn't enough — drive a
+  real browser.** A previous version of this file claimed Playwright/Chromium was
+  pre-installed and told you not to run `playwright install`; that was wrong as of
+  2026-08-19, when a fresh sandbox had neither. **Just install it** (the user has
+  standing authorization to install tooling in this sandbox without asking):
+  `pip install playwright && python -m playwright install --with-deps chromium`, ~1
+  minute. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
+  `requestfailed` so an error can't pass unnoticed. This caught a real bug:
   `report_problem()` never passed `site_name` to `report.html`, silently leaving the
   topbar brand text and page title blank — every route-level pytest test for that route
   only checked for form-field presence, and `curl` output looked fine since the HTML was

@@ -489,6 +489,20 @@ thread, which until then had been a no-op on non-Windows entirely), and
 `GetVolumeInformationW` — which can block until a spun-down Windows drive spins up —
 ran per disk per page load rather than once per device.
 
+### `CLAUDE.md` said Playwright was pre-installed. It wasn't.
+
+`CLAUDE.md` had instructed sessions to use a "pre-installed Playwright/Chromium
+browser" and explicitly *not* to run `playwright install`. On 2026-08-19 neither
+existed in the sandbox — no `playwright` module, no `ms-playwright` cache, no
+chromium on `PATH` — so the browser-verification step documented as mandatory was
+quietly skipped for a whole release instead.
+
+Worth recording because of the shape of the mistake rather than the mistake itself: a
+note about the *environment* went stale in a file whose staleness checks are all
+aimed at the *code*. The corrected instruction is simply to install it
+(`pip install playwright && python -m playwright install --with-deps chromium`, about
+a minute) rather than to trust a claim about what's already there.
+
 ### "The portal stops responding when the host is loaded"
 
 Raised as a separate, root-cause-unknown symptom. Two structural contributors were

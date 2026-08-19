@@ -44,9 +44,10 @@ touching the HTML.
   restart the portal's own process or just its Discord bot connection, each behind
   a typed confirmation and a fresh 2FA code if enabled
 - The **System** page also shows what the app is holding in memory (and whether each
-  integration is currently reachable), with one button to drop every cache and force
-  browsers to re-download the page's CSS/JS — the thing to reach for after an update
-  if something looks stale
+  integration is currently reachable), with two cache buttons for when something looks
+  stale after an update: one drops the server's caches and changes the address every
+  file is requested at (so *every* visitor picks up the change), the other clears the
+  cache of the browser you're sitting at, without digging through its settings
 - A custom **logo** (Settings → Branding), also used as the browser-tab favicon
 - Per-service links (Tailscale, LAN, external domain...), per-incident update
   timelines, 30-day uptime tracking, and admin-configurable **defaults** so a new
