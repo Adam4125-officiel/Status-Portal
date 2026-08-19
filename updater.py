@@ -362,6 +362,15 @@ def get_cached_update_status():
     return _update_cache["result"]
 
 
+def clear_update_cache():
+    """Forgets the last update check. Called when the release channel changes (a
+    cached 'latest available' fetched for the *other* channel would be actively
+    misleading next to the newly-selected one) and from the admin panel's clear-caches
+    button. The next refresh_update_cache_if_stale() call re-asks GitHub."""
+    _update_cache["result"] = None
+    _update_cache["refreshed_monotonic"] = None
+
+
 def refresh_update_cache(channel=None):
     result = check_for_update(channel)
     _update_cache["result"] = result

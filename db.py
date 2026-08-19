@@ -2,9 +2,12 @@
 db.py — The entire database layer (SQLite).
 No ORM, just plain SQL to stay readable and easy to modify.
 """
+import logging
 import sqlite3
 import os
 from datetime import datetime, timedelta, timezone
+
+_logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "portal.db")
 
@@ -264,6 +267,63 @@ def init_db():
     # explicit per-service opt-in to also show them on the public card.
     _ensure_column(conn, "services", "show_run_target_public", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "show_dependencies_public", "INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+    # Write-ahead logging. SQLite's default rollback journal takes a database-wide
+    # exclusive lock for every write, and readers and writers block each other: while
+    # the background health-check thread is writing a status update, every request
+    # handler touching the database waits (up to the 5s busy timeout, then fails
+    # outright with "database is locked"). On a busy host that is exactly what "the
+    # portal stops responding under load" looks like - the production server
+    # (waitress) only has a handful of request threads, and they all end up parked on
+    # the same lock. Under WAL, readers never block the writer and the writer never
+    # blocks readers.
+    #
+    # A persistent property of the database file, so setting it once here covers
+    # every connection from then on. WAL needs real filesystem locking, which network
+    # filesystems (SMB/NFS) don't provide - if this database lives on one, SQLite
+    # refuses the switch and it stays on the old journal mode, which still works.
+    try:
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(mode).lower() != "wal":
+            _logger.info("SQLite stayed in '%s' journal mode (WAL unavailable here)", mode)
+    except sqlite3.Error:
+        _logger.exception("Could not enable WAL journal mode")
+
+    # Indexes. Every one of these backs a query that runs on a *public page load*,
+    # not just an admin action, and every table below grows without bound. They're
+    # created here rather than in the CREATE TABLE blocks above for the same reason
+    # _ensure_column() exists: CREATE TABLE IF NOT EXISTS is a silent no-op on a
+    # database that already exists, so an index declared inline would never appear on
+    # any real user's database. CREATE INDEX IF NOT EXISTS, by contrast, applies to
+    # both new and existing databases.
+    #
+    # status_history is the one that actually hurt: it gains a row per service per
+    # check forever (a 120s interval and 15 services is ~324k rows a month), and
+    # get_uptime_percentages() reads a 30-day slice of it on every single public page
+    # load. Unindexed, that's a full scan of the whole table per page.
+    for ddl in (
+        # status is in the index, not just the two lookup columns, so
+        # get_uptime_percentages() can be answered entirely from the index without
+        # touching the table at all (SQLite reports it as a COVERING INDEX). Measured
+        # 131ms -> 43ms over 30 days of history for 17 services. A (service_id,
+        # checked_at) index is a prefix of this one, so this replaces it rather than
+        # sitting alongside it.
+        "CREATE INDEX IF NOT EXISTS idx_status_history_service_checked "
+        "ON status_history (service_id, checked_at, status)",
+        "CREATE INDEX IF NOT EXISTS idx_status_history_checked "
+        "ON status_history (checked_at)",
+        "CREATE INDEX IF NOT EXISTS idx_service_links_service ON service_links (service_id)",
+        "CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON incident_updates (incident_id)",
+        "CREATE INDEX IF NOT EXISTS idx_incident_services_incident ON incident_services (incident_id)",
+        "CREATE INDEX IF NOT EXISTS idx_incident_services_service ON incident_services (service_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mw_services_window ON maintenance_window_services (window_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mw_services_service ON maintenance_window_services (service_id)",
+        "CREATE INDEX IF NOT EXISTS idx_service_dependencies_service ON service_dependencies (service_id)",
+        "CREATE INDEX IF NOT EXISTS idx_problem_reports_service ON problem_reports (service_id)",
+        "CREATE INDEX IF NOT EXISTS idx_integrations_service ON integrations (service_id)",
+    ):
+        conn.execute(ddl)
     conn.commit()
 
     # One-time backfill (idempotent - re-running is a no-op once caught up): any
@@ -695,22 +755,76 @@ def record_status_history(service_id, status, response_ms):
     conn.close()
 
 
-def get_uptime_percentage(service_id, days=30):
-    """Share of recorded checks that were NOT 'down' over the last N days. Checks logged
-    while the service was in 'maintenance' are excluded entirely (planned maintenance
-    shouldn't count against uptime). Returns None if there's no history yet (e.g. a
-    service with auto-check off, which never gets a status_history row)."""
+UPTIME_WINDOW_DAYS = 30
+
+
+def get_uptime_percentages(days=UPTIME_WINDOW_DAYS):
+    """{service_id: percentage} for every service that has history in the window -
+    the share of recorded checks that were NOT 'down'. Checks logged while the
+    service was in 'maintenance' are excluded entirely (planned maintenance
+    shouldn't count against uptime). A service with no history in the window is
+    simply absent from the dict, which callers render as "no data" - same meaning as
+    the None that get_uptime_percentage() returns for one service.
+
+    One grouped query for all services, counted by SQLite, rather than one query per
+    service each materializing every matching row into Python. That matters because
+    this runs on every public page load and every /api/status hit: the per-service
+    version measured ~1s for 17 services against 90 days of history, and grew with
+    the table forever. Backed by idx_status_history_service_checked (see init_db)."""
     conn = get_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     rows = conn.execute("""
-        SELECT status FROM status_history WHERE service_id=? AND checked_at >= ? AND status != 'maintenance'
-    """, (service_id, cutoff)).fetchall()
+        SELECT service_id,
+               COUNT(*) AS total,
+               SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS down_count
+        FROM status_history
+        WHERE checked_at >= ? AND status != 'maintenance'
+        GROUP BY service_id
+    """, (cutoff,)).fetchall()
     conn.close()
-    total = len(rows)
-    if total == 0:
+    return {
+        r["service_id"]: round((r["total"] - r["down_count"]) / r["total"] * 100, 1)
+        for r in rows if r["total"]
+    }
+
+
+def get_uptime_percentage(service_id, days=UPTIME_WINDOW_DAYS):
+    """Single-service form of get_uptime_percentages(). Returns None if there's no
+    history yet (e.g. a service with auto-check off, which never gets a
+    status_history row). Kept for callers that only need one service; anything
+    iterating over every service should use the grouped version instead."""
+    conn = get_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    row = conn.execute("""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS down_count
+        FROM status_history
+        WHERE service_id=? AND checked_at >= ? AND status != 'maintenance'
+    """, (service_id, cutoff)).fetchone()
+    conn.close()
+    if not row or not row["total"]:
         return None
-    up = sum(1 for r in rows if r["status"] != "down")
-    return round(up / total * 100, 1)
+    return round((row["total"] - row["down_count"]) / row["total"] * 100, 1)
+
+
+def prune_status_history(days):
+    """Deletes check results older than `days` and returns how many rows went.
+
+    status_history is the only unbounded table in this schema - one row per service
+    per check, forever - and nothing reads further back than UPTIME_WINDOW_DAYS, so
+    without this it grows purely to slow itself (and every backup) down. Called from
+    the background health-check loop, not a request handler. Backed by
+    idx_status_history_checked (see init_db) so the DELETE doesn't scan the table it
+    is trying to trim."""
+    if not days or days <= 0:
+        return 0
+    conn = get_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cur = conn.execute("DELETE FROM status_history WHERE checked_at < ?", (cutoff,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
 
 
 # ---------- Integrations (read-only external service status) ----------
@@ -772,6 +886,25 @@ def list_integrations_for_service(service_id):
     """, (service_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def list_public_integrations_by_service():
+    """{service_id: [integration, ...]} for every publicly-shown, enabled integration
+    that's linked to a service. Same filter as list_integrations_for_service(), in
+    one query - app.py's _attach_integration_status() runs this over every service on
+    every public page load, and one query beats one-per-service (each of which opens
+    its own SQLite connection)."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM integrations
+        WHERE service_id IS NOT NULL AND enabled=1 AND show_on_public=1
+        ORDER BY id
+    """).fetchall()
+    conn.close()
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["service_id"], []).append(dict(r))
+    return grouped
 
 
 def delete_integration(iid):

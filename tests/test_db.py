@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import db
 
@@ -589,3 +590,109 @@ def test_count_open_reports_by_service_excludes_resolved_and_general(isolated_db
     assert counts[sid] == 3  # "new" + "new" + "reviewed", not the resolved one
     assert counts[other_sid] == 1
     assert len(counts) == 2  # no entry for the general (service_id=None) report
+
+
+# ---------------------------------------------------------------------------
+# Uptime aggregation, indexes and history retention
+# ---------------------------------------------------------------------------
+def test_grouped_uptime_matches_the_per_service_version(isolated_db):
+    """The grouped query replaced N per-service queries on the public page's hot
+    path - it has to answer identically, not just faster."""
+    a = db.create_service({"name": "A", "url": "", "check_url": "", "description": ""})
+    b = db.create_service({"name": "B", "url": "", "check_url": "", "description": ""})
+    c = db.create_service({"name": "C", "url": "", "check_url": "", "description": ""})
+    for status in ("operational", "operational", "down", "slow"):
+        db.record_status_history(a, status, 10)
+    for status in ("down", "down"):
+        db.record_status_history(b, status, None)
+    # c has no history at all.
+
+    grouped = db.get_uptime_percentages()
+    assert grouped == {a: 75.0, b: 0.0}
+    assert grouped.get(a) == db.get_uptime_percentage(a)
+    assert grouped.get(b) == db.get_uptime_percentage(b)
+    assert grouped.get(c) is None and db.get_uptime_percentage(c) is None
+
+
+def test_uptime_excludes_maintenance_checks_in_both_forms(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    db.record_status_history(sid, "operational", 10)
+    db.record_status_history(sid, "maintenance", None)
+    db.record_status_history(sid, "down", None)
+    # 2 counted checks, 1 down -> 50%, with the maintenance row ignored entirely.
+    assert db.get_uptime_percentage(sid) == 50.0
+    assert db.get_uptime_percentages()[sid] == 50.0
+
+
+def test_prune_status_history_drops_only_rows_past_the_cutoff(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    conn = db.get_db()
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    conn.executemany(
+        "INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?,?,?,?)",
+        [(sid, "operational", 5, old), (sid, "operational", 5, recent)])
+    conn.commit()
+    conn.close()
+
+    assert db.prune_status_history(30) == 1
+    conn = db.get_db()
+    remaining = conn.execute("SELECT checked_at FROM status_history").fetchall()
+    conn.close()
+    assert [r["checked_at"] for r in remaining] == [recent]
+
+    # A missing/zero retention must never be read as "delete everything".
+    assert db.prune_status_history(0) == 0
+    assert db.prune_status_history(None) == 0
+
+
+def test_uptime_query_is_answered_from_a_covering_index(isolated_db):
+    """Guards the index actually being used - a plain (service_id, checked_at) index
+    still 'works' but drops back to a full table scan for this query, which is the
+    slow behavior this replaced."""
+    conn = db.get_db()
+    plan = conn.execute("""
+        EXPLAIN QUERY PLAN
+        SELECT service_id, COUNT(*), SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END)
+        FROM status_history WHERE checked_at >= ? AND status != 'maintenance'
+        GROUP BY service_id
+    """, ("2000-01-01",)).fetchall()
+    conn.close()
+    assert any("COVERING INDEX idx_status_history_service_checked" in row[3] for row in plan), plan
+
+
+def test_indexes_are_created_on_a_database_that_predates_them(isolated_db):
+    """init_db() must be able to add an index to an existing database - the same
+    problem _ensure_column() solves for columns. CREATE INDEX IF NOT EXISTS does
+    apply to an existing table, unlike CREATE TABLE IF NOT EXISTS."""
+    conn = db.get_db()
+    conn.execute("DROP INDEX idx_status_history_service_checked")
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+
+    conn = db.get_db()
+    names = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    conn.close()
+    assert "idx_status_history_service_checked" in names
+
+
+def test_public_integrations_by_service_matches_the_per_service_filter(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    other = db.create_service({"name": "O", "url": "", "check_url": "", "description": ""})
+    shown = db.create_integration({"name": "shown", "kind": "jellyfin", "base_url": "http://x",
+                                    "api_key": "k", "enabled": 1, "service_id": sid,
+                                    "show_on_public": 1, "auto_incident": 0})
+    db.create_integration({"name": "hidden", "kind": "jellyfin", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1, "service_id": sid,
+                            "show_on_public": 0, "auto_incident": 0})
+    db.create_integration({"name": "disabled", "kind": "jellyfin", "base_url": "http://x",
+                            "api_key": "k", "enabled": 0, "service_id": other,
+                            "show_on_public": 1, "auto_incident": 0})
+
+    grouped = db.list_public_integrations_by_service()
+    assert [i["id"] for i in grouped[sid]] == [shown]
+    assert other not in grouped
+    assert grouped[sid] == db.list_integrations_for_service(sid)

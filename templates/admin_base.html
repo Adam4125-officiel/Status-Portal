@@ -30,4 +30,9 @@
     {% block admin_content %}{% endblock %}
   </main>
 </div>
+{# Loaded for every admin page, not per-template: admin_about.html already had a
+   .local-time span with no script behind it, so it silently rendered the raw UTC
+   fallback forever. One include here means the next admin page to add a timestamp
+   can't repeat that. #}
+<script src="{{ asset_url('js/local_time.js') }}"></script>
 {% endblock %}
