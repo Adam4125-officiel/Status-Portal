@@ -1091,6 +1091,14 @@ DB-backed Settings pages, not a code edit.
   go red, then revert. A convention test that silently can't fire is worse than none,
   because it reads as coverage.
 - Static checks only. Anything needing a running app belongs in `tests/test_app.py`.
+- **A `Stop` hook runs these checks automatically** (`.claude/settings.json` ->
+  `.claude/check_conventions.sh`), so a violation surfaces at the end of the turn
+  without anyone having to remember to run the suite — which is the same failure mode
+  as the forgotten rule itself. It is silent when the checks pass. On a failure it
+  asks once for a fix, and if it has *already* woken the model once
+  (`stop_hook_active`), it downgrades to a message for the human instead of asking
+  again — a violation that can't be fixed must never become a loop. To disable it
+  temporarily, `/hooks`; to see what it does, read the script, it's 40 lines.
 
 ## Testing/verification habits (established over many sessions — keep following them)
 

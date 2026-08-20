@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/check_conventions.sh\"",
+            "timeout": 60,
+            "statusMessage": "Checking project conventions"
+          }
+        ]
+      }
+    ]
+  }
+}
