@@ -13,11 +13,12 @@ services:
     # substitution *into this file*, it does not inject it into the container. If you
     # add a new setting to config.py, add it here too.
     environment:
-      - PORTAL_SECRET_KEY=${PORTAL_SECRET_KEY}
+      - PORTAL_SECRET_KEY=${PORTAL_SECRET_KEY:-}
       - PORTAL_PORT=${PORTAL_PORT:-5000}
       - PORTAL_CHECK_INTERVAL_SECONDS=${PORTAL_CHECK_INTERVAL_SECONDS:-120}
       - PORTAL_PUBLIC_REFRESH_SECONDS=${PORTAL_PUBLIC_REFRESH_SECONDS:-60}
       - PORTAL_RESOURCE_REFRESH_SECONDS=${PORTAL_RESOURCE_REFRESH_SECONDS:-10}
+      - PORTAL_WAITRESS_THREADS=${PORTAL_WAITRESS_THREADS:-12}
       - PORTAL_BEHIND_PROXY=${PORTAL_BEHIND_PROXY:-false}
       - PORTAL_FORCE_HTTPS_COOKIES=${PORTAL_FORCE_HTTPS_COOKIES:-false}
       # Optional outbound notifications - blank disables each independently.

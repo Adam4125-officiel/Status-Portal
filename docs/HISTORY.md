@@ -426,6 +426,103 @@ display is gone.
 
 ---
 
+## Sessions and performance (v1.6.1, 2026-08-19)
+
+### The random-logout / never-logout pair
+
+Two separate reports that turned out to be two different bugs wearing one description
+("session handling is inconsistent"):
+
+**"A refresh sometimes logs me out mid-session."** `config.SECRET_KEY` fell back to
+`"change-me-in-prod-" + os.urandom(8).hex()` whenever `PORTAL_SECRET_KEY` was unset —
+a *different key every process start*. Flask signs the session cookie with it, so
+every restart silently invalidated every logged-in session, and the next request
+looked like a spontaneous logout. What made it feel random rather than
+restart-shaped is how many things restart this app without the user thinking of it as
+a restart: the in-app updater `os.execv`s itself, `/admin/system` has a restart
+button, and a systemd/Task Scheduler unit restarts on failure. `.env.example` had
+even documented the symptom ("without this, every restart logs you out of /admin") —
+it was treated as expected behavior rather than a bug, which is why it survived this
+long.
+
+**"On other devices a single login lasts forever."** Nothing ever set
+`session.permanent`, so Flask emitted a *browser-session* cookie: no `Max-Age`, so it
+dies when the browser process exits. On a desktop that means being logged out
+whenever the browser is closed; on a phone, whose browser is essentially never
+closed, it means staying logged in indefinitely. Same code, opposite behavior, purely
+by device habit — and no expiry anywhere on the server side to bound either.
+
+The fix for the pair: persist a generated key to `instance/secret_key`, mark sessions
+permanent with an explicit `Max-Age`, and add a server-side sliding idle timeout
+(`session["last_seen"]`, default 12h, admin-configurable). Verified live: logged in,
+killed and restarted `python app.py`, reused the same cookie jar — `200`, still signed
+in, and `instance/secret_key` unchanged across both runs. The cookie jar showed a
+30-day expiry instead of the previous `0` (session cookie).
+
+### Refresh slowness: the suspected cause wasn't the cause
+
+The report was "the client-side refresh cycle feels excessively slow", suspected to be
+each refresh re-pinging every service synchronously. It wasn't: service checks have
+always run in the background health-check thread, and `index()` only ever reads
+`services.status` out of the database. Worth stating because it's the kind of guess
+that's easy to "confirm" by finding *something* slow nearby and stopping there.
+
+The measured cause was `db.get_uptime_percentage()`. It ran **once per service on
+every public page load**, and each call was a full table scan of `status_history` —
+a table with **no indexes at all** anywhere in the schema, which gains a row per
+service per check *forever* and was never pruned. Benchmarked against a synthetic 90
+days of history for 17 services (1.1M rows, 64 MB): **1042 ms per page load**, growing
+without bound. On the user's real hardware (spinning disks, a loaded host) that is
+comfortably seconds.
+
+Three changes, each measured: one grouped `GROUP BY service_id` aggregate instead of N
+queries materializing every row into Python; a **covering** index
+`(service_id, checked_at, status)` — the `status` column is what lets SQLite answer
+without touching the table at all, 131 ms → 43 ms, and a plain two-column index drops
+straight back to a table scan; and a 60s TTL cache, since a 30-day uptime percentage
+cannot meaningfully change between two page loads 60 seconds apart. Public page load
+went from ~1 s to 13–45 ms locally.
+
+Two smaller things found in the same pass: `psutil.cpu_percent(interval=0.2)` *sleeps*
+0.2 s and was being called from inside request handlers (moved to the background
+thread, which until then had been a no-op on non-Windows entirely), and
+`GetVolumeInformationW` — which can block until a spun-down Windows drive spins up —
+ran per disk per page load rather than once per device.
+
+### `CLAUDE.md` said Playwright was pre-installed. It wasn't.
+
+`CLAUDE.md` had instructed sessions to use a "pre-installed Playwright/Chromium
+browser" and explicitly *not* to run `playwright install`. On 2026-08-19 neither
+existed in the sandbox — no `playwright` module, no `ms-playwright` cache, no
+chromium on `PATH` — so the browser-verification step documented as mandatory was
+quietly skipped for a whole release instead.
+
+Worth recording because of the shape of the mistake rather than the mistake itself: a
+note about the *environment* went stale in a file whose staleness checks are all
+aimed at the *code*. The corrected instruction is simply to install it
+(`pip install playwright && python -m playwright install --with-deps chromium`, about
+a minute) rather than to trust a claim about what's already there.
+
+### "The portal stops responding when the host is loaded"
+
+Raised as a separate, root-cause-unknown symptom. Two structural contributors were
+confirmed by inspection, on top of the page-load cost above:
+
+1. **SQLite was in `delete` (rollback journal) mode**, where readers and writers block
+   each other database-wide. The background health-check thread writes every cycle
+   (two writes per service), so any request touching the database waits on that lock —
+   up to the 5 s busy timeout, then fails outright with "database is locked". Now WAL.
+2. **waitress runs 4 request threads by default.** With requests that could each take
+   a second or more, four concurrent visitors (or four auto-refreshing tabs) is
+   enough to leave the portal answering nothing at all. Now `PORTAL_WAITRESS_THREADS`,
+   default 12.
+
+Neither was reproduced under real load — this is a diagnosis from the code, not a
+confirmed fix. If it recurs, that's the thing to say: the remaining candidate is
+simply the host being CPU-starved, which no amount of application tuning fixes.
+
+---
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

@@ -15,7 +15,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
 
@@ -44,6 +44,19 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=config.FORCE_HTTPS_COOKIES,
     MAX_CONTENT_LENGTH=2 * 1024 * 1024,  # 2 MB - plenty for any form on this app
+    # Admin sessions are marked permanent (see _start_admin_session) so the cookie
+    # carries an explicit Max-Age instead of being a browser-session cookie. That
+    # distinction is what made session behavior differ per device: a browser-session
+    # cookie dies when the browser is closed (desktop) but lives forever on a device
+    # whose browser is never closed (phone/tablet), which is exactly the
+    # "logged out on one device, logged in forever on another" report. With an
+    # explicit Max-Age every device follows the same rule.
+    PERMANENT_SESSION_LIFETIME=timedelta(days=config.SESSION_COOKIE_MAX_AGE_DAYS),
+    # Every static URL in this app is cache-busted (asset_url()'s ?v=<mtime> for
+    # CSS/JS, site_logo_version for the logo), so a long max-age can never serve a
+    # stale asset - it just stops the browser re-validating a dozen files on every
+    # auto-refresh reload. See asset_url() for why the busting is mandatory.
+    SEND_FILE_MAX_AGE_DEFAULT=timedelta(days=30),
 )
 
 if config.BEHIND_PROXY:
@@ -164,7 +177,34 @@ def asset_url(filename):
         version = int(os.path.getmtime(path))
     except OSError:
         return url_for("static", filename=filename)
-    return f"{url_for('static', filename=filename)}?v={version}"
+    return f"{url_for('static', filename=filename)}?v={version}{_asset_cache_salt()}"
+
+
+# A suffix appended to every asset URL's ?v=, bumped by the admin panel's
+# clear-caches button. mtime alone covers the normal case (a file changed, so its URL
+# changes), but not the ones where a browser is holding a copy that mtime can't
+# distinguish: a rollback to an older release, a file restored with its timestamp
+# intact, or a proxy/CDN caching more aggressively than expected. This is the manual
+# escape hatch for "I shipped a fix and their browser still runs the old file".
+# Stored in settings so it survives a restart - otherwise a restart would hand every
+# browser back the URL it already has cached, undoing the bump.
+_asset_salt = {"value": None}
+
+
+def _asset_cache_salt():
+    if _asset_salt["value"] is None:
+        raw = db.get_setting("asset_cache_salt", "")
+        _asset_salt["value"] = f"-{raw}" if raw else ""
+    return _asset_salt["value"]
+
+
+def _bump_asset_cache_salt():
+    # Random rather than a timestamp: two clicks inside the same second would produce
+    # an identical timestamp, i.e. a "cache bust" that hands the browser back the URL
+    # it already has - precisely the failure this button exists to rule out.
+    raw = secrets.token_hex(4)
+    db.set_setting("asset_cache_salt", raw)
+    _asset_salt["value"] = f"-{raw}"
 
 
 @app.context_processor
@@ -198,6 +238,72 @@ def _inject_admin_badges():
         "unread_reports_count": db.count_unread_problem_reports(),
         "update_available": bool(cached and cached.get("update_available")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin session lifetime
+# ---------------------------------------------------------------------------
+# Idle timeout in hours. 0 (or a blank/invalid value) means "no idle timeout" - the
+# session then lasts until the cookie's own Max-Age
+# (config.SESSION_COOKIE_MAX_AGE_DAYS) runs out, which is still a real, uniform
+# expiry rather than the old "forever on some devices, never on others".
+DEFAULT_SESSION_TIMEOUT_HOURS = 12
+MAX_SESSION_TIMEOUT_HOURS = config.SESSION_COOKIE_MAX_AGE_DAYS * 24
+
+# The session's last_seen stamp is only rewritten once per this many seconds. Writing
+# it on literally every request would re-sign and re-send the cookie on every single
+# hit (including the public page's auto-refresh) for no benefit - a minute of
+# granularity is far finer than any timeout worth configuring.
+SESSION_TOUCH_INTERVAL_SECONDS = 60
+
+
+def _session_timeout_seconds():
+    """None = no idle timeout configured. Clamped to MAX_SESSION_TIMEOUT_HOURS
+    because anything beyond the cookie's own Max-Age is a promise this can't keep."""
+    raw = db.get_setting("admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS))
+    hours = int(raw) if raw.isdigit() else DEFAULT_SESSION_TIMEOUT_HOURS
+    if hours <= 0:
+        return None
+    return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
+
+
+def _start_admin_session():
+    """The one place a login becomes a logged-in session. Marks it permanent (so the
+    cookie gets an explicit Max-Age instead of dying with the browser) and stamps
+    last_seen so the idle clock starts now. Every place that logs someone in goes
+    through this - three hand-maintained copies is three chances for one to drift."""
+    session.permanent = True
+    session["logged_in"] = True
+    session["last_seen"] = time.time()
+
+
+@app.before_request
+def _enforce_session_timeout():
+    """Server-side idle expiry, and the sliding-window touch that feeds it.
+
+    Registered *before* _check_csrf on purpose: an admin POST arriving on an expired
+    session must redirect to the login page, not fail the CSRF check with a bare 400
+    (the token lives in the very session being cleared here, so ordering them the
+    other way round turns "your session expired" into an unexplained error page).
+
+    Server-side rather than relying on the cookie's Max-Age alone: a cookie's expiry
+    attribute isn't covered by the signature, so a client that simply keeps sending
+    an "expired" cookie would otherwise stay logged in indefinitely."""
+    if not session.get("logged_in"):
+        return
+    session.permanent = True
+    timeout = _session_timeout_seconds()
+    now = time.time()
+    last_seen = session.get("last_seen")
+    if timeout is not None and last_seen is not None and now - last_seen > timeout:
+        session.clear()
+        if request.path.startswith("/admin/"):
+            flash("Your session expired after a period of inactivity. Please sign in again.", "error")
+            return redirect(url_for("admin_login", next=request.path))
+        # A public page doesn't need a redirect - it renders identically signed out.
+        return
+    if last_seen is None or now - last_seen > SESSION_TOUCH_INTERVAL_SECONDS:
+        session["last_seen"] = now
 
 
 @app.before_request
@@ -337,12 +443,41 @@ def _run_target_label(run_target):
     return None
 
 
+# Uptime percentages, cached briefly. Two separate wins stack here: one grouped
+# query instead of one per service (see db.get_uptime_percentages), and then not
+# re-running even that on every hit. A 30-day uptime figure can only change when the
+# background checker records a new result - once every CHECK_INTERVAL_SECONDS, 120s
+# by default - and one more sample moves a 30-day percentage by well under 0.1%, so
+# a minute of staleness is invisible where a per-page-load scan of the whole history
+# table is not. The public page reloads itself every 60s per visitor; this is the
+# difference between that costing a full aggregate each time and costing nothing.
+UPTIME_CACHE_TTL_SECONDS = 60
+_uptime_cache = {"value": {}, "fetched_at": 0.0}
+_uptime_cache_lock = threading.Lock()
+
+
+def _cached_uptime_percentages():
+    now = time.monotonic()
+    with _uptime_cache_lock:
+        if _uptime_cache["fetched_at"] and now - _uptime_cache["fetched_at"] < UPTIME_CACHE_TTL_SECONDS:
+            return _uptime_cache["value"]
+    # Deliberately computed outside the lock: this is an idempotent read, so two
+    # threads racing on a cold cache just do the same harmless work twice - far
+    # better than every request queueing behind whichever one got there first.
+    value = db.get_uptime_percentages()
+    with _uptime_cache_lock:
+        _uptime_cache["value"] = value
+        _uptime_cache["fetched_at"] = now
+    return value
+
+
 def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
+    uptimes = _cached_uptime_percentages()
     service_names = {s["id"]: s["name"] for s in services}
     for s in services:
         s["links"] = db.list_service_links(s["id"])
-        s["uptime"] = db.get_uptime_percentage(s["id"])
+        s["uptime"] = uptimes.get(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
         s["open_reports_count"] = open_reports.get(s["id"], 0)
@@ -457,7 +592,8 @@ def _integration_severity(status):
 
 
 def _refresh_integration_cache():
-    for integ in db.list_integrations():
+    integrations_list = db.list_integrations()
+    for integ in integrations_list:
         if not integ["enabled"]:
             continue
         previous = _integration_status_cache.get(integ["id"])
@@ -475,7 +611,7 @@ def _refresh_integration_cache():
     # transcode count, running scheduled tasks like trickplay generation) beyond
     # plain reachability - refreshed here (background loop) for the same reason as
     # everything else in this function: never queried live from a request handler.
-    jellyfin = next((i for i in db.list_integrations() if i["kind"] == "jellyfin" and i["enabled"]), None)
+    jellyfin = next((i for i in integrations_list if i["kind"] == "jellyfin" and i["enabled"]), None)
     if jellyfin:
         try:
             integrations.refresh_jellyfin_activity_cache(jellyfin["base_url"], jellyfin["api_key"])
@@ -485,8 +621,9 @@ def _refresh_integration_cache():
 
 def _attach_integration_status(services):
     """Reads the cache only - see the module-level note above for why."""
+    linked_by_service = db.list_public_integrations_by_service()
     for s in services:
-        linked = db.list_integrations_for_service(s["id"])
+        linked = linked_by_service.get(s["id"], [])
         entry = _integration_status_cache.get(linked[0]["id"]) if linked else None
         s["integration_status"] = entry["status"] if entry else None
         s["integration_severity"] = _integration_severity(entry["status"]) if entry else None
@@ -861,7 +998,7 @@ def admin_login():
             if secret and twofactor.verify_code(secret, code):
                 _register_login_success()
                 session.pop("awaiting_totp", None)
-                session["logged_in"] = True
+                _start_admin_session()
                 nxt = session.pop("login_next", None) or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
@@ -877,7 +1014,7 @@ def admin_login():
                 flash("Passwords do not match.", "error")
             else:
                 db.set_setting("admin_password_hash", generate_password_hash(password))
-                session["logged_in"] = True
+                _start_admin_session()
                 return redirect(url_for("admin_dashboard"))
         else:
             stored = db.get_setting("admin_password_hash")
@@ -889,7 +1026,7 @@ def admin_login():
                     session["login_next"] = request.args.get("next") or url_for("admin_dashboard")
                     return render_template("login.html", first_run=False, awaiting_totp=True)
                 _register_login_success()
-                session["logged_in"] = True
+                _start_admin_session()
                 nxt = request.args.get("next") or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
@@ -1238,9 +1375,131 @@ def _restart_process():
 @app.route("/admin/system")
 @login_required
 def admin_system():
+    caches, connections = _cache_inventory()
     return render_template("admin_system.html", discord_status=discord_bot.get_status(),
                             discord_configured=bool(config.DISCORD_BOT_TOKEN),
-                            totp_enabled=twofactor.is_enabled(), active="system")
+                            totp_enabled=twofactor.is_enabled(), caches=caches,
+                            connections=connections, cache_clear_note=CACHE_CLEAR_NOTE,
+                            active="system")
+
+
+CACHE_CLEAR_NOTE = ("Everything here is derived data that rebuilds itself - the "
+                    "background checker refills it within one check cycle, and "
+                    "nothing stored in the database is touched.")
+
+
+def _cache_inventory():
+    """What's currently held in memory, for the System page's overview. Read-only,
+    and cheap: every entry is a len() over a dict this process already has.
+
+    The integration rows double as the "is it actually reachable" view - that
+    reachability *is* the cached value, so there's nothing extra to query for it."""
+    integration_names = {i["id"]: i["name"] for i in db.list_integrations()}
+    entries = [
+        {"name": "Uptime percentages",
+         "entries": len(_uptime_cache["value"]),
+         "detail": f"services (recomputed every {UPTIME_CACHE_TTL_SECONDS}s)",
+         "updated_at": None},
+        {"name": "Integration status checks",
+         "entries": len(_integration_status_cache),
+         "detail": "integrations polled", "updated_at": None},
+        {"name": "Update check (GitHub releases)",
+         "entries": 1 if updater._update_cache["result"] else 0,
+         "detail": "result cached", "updated_at": None},
+        {"name": "Jellyfin activity",
+         "entries": len(integrations.get_cached_jellyfin_activity()["running_tasks"]),
+         "detail": "running tasks", "updated_at": None},
+    ] + monitoring.cache_summary()
+    # Reachability per integration, straight out of the cache above.
+    connections = [
+        {"name": integration_names.get(iid, f"integration {iid}"),
+         "reachable": entry["status"]["reachable"],
+         "checked_at": entry["checked_at"]}
+        for iid, entry in sorted(_integration_status_cache.items())
+    ]
+    return entries, connections
+
+
+def _clear_all_caches():
+    """Drops every in-memory cache in the app and bumps the static-asset cache-buster
+    so browsers re-fetch CSS/JS too.
+
+    Each module clears its own globals (monitoring/integrations/updater) rather than
+    this function reaching into them - a cache added over there should not need an
+    edit over here to be covered by this button."""
+    _uptime_cache["value"] = {}
+    _uptime_cache["fetched_at"] = 0.0
+    _integration_status_cache.clear()
+    integrations.clear_caches()
+    monitoring.clear_caches()
+    updater.clear_update_cache()
+    _bump_asset_cache_salt()
+
+
+@app.route("/admin/system/clear-caches", methods=["POST"])
+@login_required
+def admin_system_clear_caches():
+    """Deliberately not behind _require_totp(), unlike the restart buttons next to it:
+    nothing is destroyed and nothing goes offline - the worst case is one slightly
+    emptier page until the background loop's next tick refills things."""
+    _clear_all_caches()
+    flash("Cached data cleared. Fresh values are fetched on the next background "
+          "check, and browsers will re-download the page's CSS/JS.", "success")
+    return redirect(url_for("admin_system"))
+
+
+def _all_static_asset_urls():
+    """Every CSS/JS file this app serves, as cache-busted URLs. Used by the
+    clear-browser-cache page to re-fetch each one with `cache: 'reload'`, which is
+    what actually replaces a browser's stored copy - a directory listing rather than
+    a hand-maintained list, so a file added later can't be quietly left behind."""
+    urls = []
+    for subdir in ("css", "js"):
+        directory = os.path.join(app.root_path, "static", subdir)
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        urls += [asset_url(f"{subdir}/{name}") for name in names
+                 if name.endswith((".css", ".js"))]
+    logo = db.get_setting("site_logo_filename", "")
+    if logo:
+        urls.append(url_for("static", filename=f"uploads/{logo}"))
+    return urls
+
+
+@app.route("/admin/system/clear-browser-cache", methods=["POST"])
+@login_required
+def admin_system_clear_browser_cache():
+    """Clears *this* browser's own cached copy of the site - a different thing from
+    the server-side button next to it, and worth keeping separate rather than merging
+    the two.
+
+    The server-side one changes what every visitor is *asked* to download (it bumps
+    the ?v= salt, so their next request is for a URL they've never seen). This one
+    only reaches the browser that clicked it, because that's all a web page can
+    reach - there is no way to reach into someone else's browser and evict a file.
+    Which is exactly why both exist: this one is for "I'm looking at a stale page
+    right now", the other is for "make sure nobody else is".
+
+    Two mechanisms, because neither is sufficient alone:
+
+    - The Clear-Site-Data response header is the standards-based way, and it clears
+      things a page cannot touch itself. Chrome and Edge only honor it in a secure
+      context, and this portal is very often served over plain HTTP on a LAN or
+      Tailscale, so it can't be relied on here.
+    - The page's own script then re-does what it can reach (Cache Storage, service
+      workers, DOM storage) and re-fetches every asset with `cache: 'reload'`, which
+      forces a network fetch and replaces the stored copy.
+
+    Deliberately NOT sending the "cookies" directive: that would clear the session
+    cookie and sign the admin out as a side effect of a cache action."""
+    theme = request.form.get("theme", "")
+    response = Response(render_template("admin_clear_browser_cache.html",
+                                         assets=_all_static_asset_urls(), theme=theme,
+                                         active="system"))
+    response.headers["Clear-Site-Data"] = '"cache", "storage"'
+    return response
 
 
 @app.route("/admin/system/restart", methods=["POST"])
@@ -1336,8 +1595,7 @@ def admin_about_settings():
     db.set_setting("update_check_enabled", "1" if request.form.get("update_check_enabled") else "0")
     # The cached result belongs to the old channel - drop it so the page doesn't show
     # a stale "latest stable" reading next to a freshly-selected unstable channel.
-    updater._update_cache["result"] = None
-    updater._update_cache["refreshed_monotonic"] = None
+    updater.clear_update_cache()
     flash("Update preferences saved.", "success")
     return redirect(url_for("admin_about"))
 
@@ -1552,6 +1810,12 @@ def admin_settings():
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
                             lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
+                            admin_session_timeout_hours=db.get_setting(
+                                "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
+                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
+                            session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
+                            status_history_retention_days=db.get_setting(
+                                "status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS)),
                             vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
                             active="settings")
 
@@ -1572,6 +1836,16 @@ def admin_settings_general():
     db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
     lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()
     db.set_setting("lowdisk_percent_threshold", lowdisk if lowdisk.isdigit() else "")
+    # Both stored as plain digit strings; a non-numeric submission falls back to the
+    # default rather than being stored blank, since neither has a meaningful
+    # "unset" state the way the two optional thresholds above do.
+    timeout_hours = request.form.get("admin_session_timeout_hours", "").strip()
+    db.set_setting("admin_session_timeout_hours",
+                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_SESSION_TIMEOUT_HOURS))
+    retention = request.form.get("status_history_retention_days", "").strip()
+    db.set_setting("status_history_retention_days",
+                    retention if (retention.isdigit() and int(retention) > 0)
+                    else str(DEFAULT_HISTORY_RETENTION_DAYS))
     for key in SERVICE_DEFAULT_FIELDS:
         raw = request.form.get(f"service_default_{key}", "").strip()
         db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
@@ -1612,8 +1886,10 @@ def admin_settings_backup_db():
             zf.write(tmp_db_path, arcname="portal.db")
     buffer.seek(0)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    # max_age=0 overrides SEND_FILE_MAX_AGE_DEFAULT: this is a point-in-time
+    # download, not a versioned static asset, and must never be re-served from cache.
     return send_file(buffer, mimetype="application/zip", as_attachment=True,
-                      download_name=f"portal-backup-{stamp}.zip")
+                      download_name=f"portal-backup-{stamp}.zip", max_age=0)
 
 
 @app.route("/admin/settings/logo", methods=["POST"])
@@ -1902,6 +2178,37 @@ def _merge_dependency_health(status, dependency_statuses):
     return status
 
 
+# How long individual health-check results are kept (settings-page tunable).
+# 30 days is all get_uptime_percentages() ever reads; the extra headroom is there so
+# an admin can go look at more history than the uptime figure covers if they want to.
+DEFAULT_HISTORY_RETENTION_DAYS = 90
+
+# Pruning only needs to happen roughly daily, not on every 120s check cycle.
+_PRUNE_INTERVAL_SECONDS = 24 * 3600
+# Deliberately in-process rather than persisted in SQLite, unlike the low-disk alert
+# state: an extra prune after a restart is idempotent and costs one indexed DELETE,
+# whereas re-firing a notification would be user-visible noise. Nothing here needs to
+# survive a restart.
+_last_history_prune = 0.0
+
+
+def _history_retention_days():
+    raw = db.get_setting("status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS))
+    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_HISTORY_RETENTION_DAYS
+
+
+def _prune_status_history_if_due():
+    global _last_history_prune
+    now = time.monotonic()
+    if _last_history_prune and now - _last_history_prune < _PRUNE_INTERVAL_SECONDS:
+        return
+    _last_history_prune = now
+    deleted = db.prune_status_history(_history_retention_days())
+    if deleted:
+        _logger.info("Pruned %d status_history rows older than %d days",
+                      deleted, _history_retention_days())
+
+
 def _lowdisk_threshold():
     raw = db.get_setting("lowdisk_percent_threshold", "")
     return int(raw) if raw.isdigit() else None
@@ -1967,6 +2274,7 @@ def run_health_checks():
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
             _check_low_disk_space(monitoring.get_resource_snapshot())
+            _prune_status_history_if_due()
             # Reuses this existing background thread rather than starting another one:
             # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
             # -check interval doesn't turn into a GitHub API call every 120s. The

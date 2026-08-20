@@ -20,6 +20,15 @@ def isolated_db(tmp_path, monkeypatch):
     # a fresh DB.
     integrations_module._jellyfin_activity_cache["transcoding"] = 0
     integrations_module._jellyfin_activity_cache["running_tasks"] = []
+    # And the uptime cache, for the same reason: it's a module-level dict keyed by
+    # service id, so without this a test would happily read the *previous* test's
+    # uptime figures for its own freshly-created (and identically numbered) services.
+    app_module._uptime_cache["value"] = {}
+    app_module._uptime_cache["fetched_at"] = 0.0
+    # The asset cache-buster salt is memoised in a module global on first read, so
+    # without this a test would keep serving the salt from whichever earlier test
+    # last cleared the caches.
+    app_module._asset_salt["value"] = None
     return db.DB_PATH
 
 

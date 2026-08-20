@@ -5,6 +5,7 @@ file than set real env vars). Nothing else in this app should read
 os.environ directly - add new settings here instead.
 """
 import os
+import secrets
 
 from dotenv import load_dotenv
 
@@ -51,7 +52,61 @@ IS_GIT_CHECKOUT = os.path.isdir(os.path.join(APP_ROOT, ".git"))
 # against (VERSION is what update checks use), just an honest label.
 VERSION_DISPLAY = VERSION + ("+dev" if IS_GIT_CHECKOUT else "")
 
-SECRET_KEY = os.environ.get("PORTAL_SECRET_KEY", "change-me-in-prod-" + os.urandom(8).hex())
+# ---------------------------------------------------------------------------
+# Session signing key
+# ---------------------------------------------------------------------------
+# Flask signs the session cookie with this. If it changes, every existing session
+# cookie stops validating and every logged-in admin is silently signed out on their
+# next request - which is exactly what used to happen on every restart, because the
+# fallback here was a fresh os.urandom() per process. Restarts are routine on this
+# app (the in-app updater re-execs itself, /admin/system has a restart button, and a
+# systemd/Task Scheduler unit restarts on failure), so "a random key per process"
+# meant "logged out at random, mid-session".
+#
+# PORTAL_SECRET_KEY still wins when set. Without it, a key is generated once and
+# persisted to instance/secret_key (0600) so it survives restarts on its own -
+# instance/ is gitignored and is already the docker-compose volume mount, so this
+# also survives a container recreate. If the file can't be written (read-only fs),
+# it degrades to a process-lifetime key: same behavior as before, no crash.
+SECRET_KEY_FILE = os.path.join(APP_ROOT, "instance", "secret_key")
+
+
+def _load_or_create_secret_key():
+    env_key = os.environ.get("PORTAL_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    try:
+        with open(SECRET_KEY_FILE, "r", encoding="utf-8") as f:
+            stored = f.read().strip()
+        if stored:
+            return stored
+    except OSError:
+        pass
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(SECRET_KEY_FILE), exist_ok=True)
+        # 0600 via os.open's mode rather than a chmod after the fact - the key must
+        # never exist world-readable, not even for the instant between the two calls.
+        fd = os.open(SECRET_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key)
+    except OSError:
+        # Nothing is logged here: config.py is imported before logging_setup runs.
+        # A per-process key still works, it just logs everyone out on restart.
+        pass
+    return key
+
+
+SECRET_KEY = _load_or_create_secret_key()
+
+# How long an idle admin session survives before it's expired server-side, in hours.
+# This is the *upper bound* the DB setting (admin_session_timeout_hours, editable at
+# /admin/settings) is clamped to, and also the session cookie's own Max-Age - the
+# cookie lifetime is deliberately fixed at import rather than tracking the DB
+# setting, because Flask reads app.permanent_session_lifetime at cookie-set time and
+# mutating that per-request would be a cross-thread global write under waitress.
+# The server-side idle check in app.py is the authoritative one; this is the backstop.
+SESSION_COOKIE_MAX_AGE_DAYS = 30
 PORT = int(os.environ.get("PORTAL_PORT", "5000"))
 
 # Backend health-check frequency (server-side polling of each service's check_url).
@@ -62,6 +117,14 @@ PUBLIC_REFRESH_SECONDS = int(os.environ.get("PORTAL_PUBLIC_REFRESH_SECONDS", "60
 
 # How often the resources page (admin, and public if enabled) auto-refreshes itself.
 RESOURCE_REFRESH_SECONDS = int(os.environ.get("PORTAL_RESOURCE_REFRESH_SECONDS", "10"))
+
+# How many request-handling threads waitress (the production server, see
+# serve_waitress.py) runs. Waitress's own default is 4, which is low for a page that
+# every open browser tab reloads on a timer: four simultaneously slow requests and
+# the portal stops answering anything at all until one finishes. Static deployment
+# config, so an env var - and changing it needs a restart by definition, since it's
+# passed to serve() at startup.
+WAITRESS_THREADS = int(os.environ.get("PORTAL_WAITRESS_THREADS", "12"))
 
 # Set to true only if a reverse proxy (nginx, Caddy, Cloudflare Tunnel...) sits in front
 # of this app - enables trusting its X-Forwarded-* headers (client IP/scheme). Leave

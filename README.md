@@ -43,6 +43,11 @@ touching the HTML.
   for VMs), from the admin Resources page — plus a separate **System** page to
   restart the portal's own process or just its Discord bot connection, each behind
   a typed confirmation and a fresh 2FA code if enabled
+- The **System** page also shows what the app is holding in memory (and whether each
+  integration is currently reachable), with two cache buttons for when something looks
+  stale after an update: one drops the server's caches and changes the address every
+  file is requested at (so *every* visitor picks up the change), the other clears the
+  cache of the browser you're sitting at, without digging through its settings
 - A custom **logo** (Settings → Branding), also used as the browser-tab favicon
 - Per-service links (Tailscale, LAN, external domain...), per-incident update
   timelines, 30-day uptime tracking, and admin-configurable **defaults** so a new
@@ -82,11 +87,25 @@ Use whatever your OS provides for running a background process on boot (a system
 Task Scheduler, a process manager like `pm2`/`supervisord`, etc.) to run
 `python serve_waitress.py` on startup, from the `status-portal` folder.
 
-### ⚠️ Important: the session key
+### The session key
 
-Without `PORTAL_SECRET_KEY` set (in `.env` or as a real env var), every server restart
-logs you out of the admin panel. Generate a random string once and set it there, then
-forget about it.
+The admin session cookie is signed with a secret key. You don't have to set one: on
+first start the app generates a key and saves it to `instance/secret_key` (readable only
+by the account running the portal), and reuses it from then on — so restarts, updates
+and reboots leave you signed in.
+
+Set `PORTAL_SECRET_KEY` (in `.env` or as a real env var) if you'd rather keep the key
+somewhere you control. Setting it always wins over the generated file.
+
+> Before 1.6.1 this key was random per process whenever `PORTAL_SECRET_KEY` was unset,
+> which is why restarts used to log you out at seemingly random moments.
+
+### How long you stay signed in
+
+Sessions last for **12 hours of inactivity** by default, on every device the same way.
+Any page you load resets the clock. Change it (or switch it off) under
+**Settings → Admin session timeout**; with the timeout off, a sign-in still expires
+after 30 days.
 
 ### Publishing it
 
@@ -215,7 +234,7 @@ If you'd rather run it in a container instead of directly on the host:
 
 ```bash
 cp .env.example .env
-# edit .env: at minimum, set PORTAL_SECRET_KEY to a long random string
+# every setting in .env is optional - edit whatever you want to change
 docker compose up -d
 ```
 
@@ -493,12 +512,13 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PORTAL_SECRET_KEY` | *(random each restart)* | Flask session key — set this or you get logged out on every restart |
+| `PORTAL_SECRET_KEY` | *(generated into `instance/secret_key`)* | Flask session key. Optional — a persistent one is generated on first start if unset |
 | `PORTAL_PORT` | `5000` | Port the app listens on (under Docker: the port inside the container, published as `HOST_PORT`) |
 | `HOST_PORT` | `5000` | Host port mapped to the container (Docker only) |
 | `PORTAL_CHECK_INTERVAL_SECONDS` | `120` | Backend health-check frequency |
 | `PORTAL_PUBLIC_REFRESH_SECONDS` | `60` | Public page auto-refresh frequency |
 | `PORTAL_RESOURCE_REFRESH_SECONDS` | `10` | Auto-refresh frequency of the resources page (admin, and public if enabled) |
+| `PORTAL_WAITRESS_THREADS` | `12` | Request-handling threads for the production server (`serve_waitress.py`). Waitress's own default of 4 is easy to exhaust when several tabs auto-refresh at once |
 | `PORTAL_BEHIND_PROXY` | `false` | Set `true` only if a reverse proxy sits in front (trusts its `X-Forwarded-*` headers) |
 | `PORTAL_FORCE_HTTPS_COOKIES` | `false` | Set `true` once served over HTTPS, to mark the session cookie `Secure` |
 | `PORTAL_DISCORD_WEBHOOK_URL` | *(blank = disabled)* | Discord webhook URL — get pinged on incident/maintenance events |
@@ -592,6 +612,7 @@ status-portal/
   requirements.txt, requirements-dev.txt
   Dockerfile, docker-compose.yml, .dockerignore, .env.example
   instance/portal.db      # created automatically on first launch
+  instance/secret_key     # created automatically if PORTAL_SECRET_KEY isn't set
   instance/logs/app.log   # created automatically once the app is actually run
   templates/               # HTML pages (Jinja2)
   templates/sections/      # the public page's reorderable content blocks, one file each

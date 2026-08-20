@@ -2300,3 +2300,307 @@ def test_public_page_hides_jellyfin_activity_section_when_no_tasks_running(clien
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
     resp = client.get("/")
     assert b"Jellyfin activity" not in resp.data
+
+
+# ---------------------------------------------------------------------------
+# Admin session lifetime
+# ---------------------------------------------------------------------------
+def test_login_marks_the_session_permanent_with_a_last_seen_stamp(client):
+    """A permanent session is what gives the cookie an explicit Max-Age. Without it
+    Flask emits a browser-session cookie, which dies on browser close (desktop) but
+    survives indefinitely on a device whose browser is never closed (phone) - the
+    "inconsistent across devices" behavior this replaced."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess["logged_in"] is True
+        assert sess.permanent is True
+        assert sess["last_seen"] > 0
+
+
+def test_session_expires_after_the_configured_idle_timeout(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("admin_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 3601  # one second past the hour
+
+    resp = client.get("/admin/services")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+
+
+def test_session_survives_activity_inside_the_idle_timeout(client):
+    """The window slides: any request inside it re-stamps last_seen, so an admin who
+    keeps using the panel is never signed out mid-session."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("admin_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 3500  # inside the hour
+
+    assert client.get("/admin/services").status_code == 200
+    with client.session_transaction() as sess:
+        assert sess["logged_in"] is True
+        # Re-stamped to roughly now, not left at the old value.
+        assert time.time() - sess["last_seen"] < 5
+
+
+def test_zero_timeout_disables_idle_expiry(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("admin_session_timeout_hours", "0")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 400 * 24 * 3600  # over a year idle
+
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_expired_session_on_a_post_redirects_to_login_rather_than_failing_csrf(isolated_db, monkeypatch):
+    """The timeout hook is registered before _check_csrf specifically so this case
+    reads as "your session expired" instead of a bare 400 - the CSRF token lives in
+    the very session being cleared."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    monkeypatch.setitem(app_module._login_state, "failures", 0)
+    monkeypatch.setitem(app_module._login_state, "locked_until", 0.0)
+    with app_module.app.test_client() as c:
+        token = _extract_csrf_token(c.get("/admin/login").data)
+        c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
+                                      "csrf_token": token})
+        db.set_setting("admin_session_timeout_hours", "1")
+        with c.session_transaction() as sess:
+            sess["last_seen"] = time.time() - 7200
+
+        resp = c.post("/admin/settings/general", data={"site_name": "Nope", "csrf_token": token})
+        assert resp.status_code == 302
+        assert "/admin/login" in resp.headers["Location"]
+
+
+def test_session_timeout_setting_round_trips_and_falls_back_when_invalid(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={"site_name": "S", "admin_session_timeout_hours": "6"})
+    assert db.get_setting("admin_session_timeout_hours") == "6"
+    assert app_module._session_timeout_seconds() == 6 * 3600
+
+    client.post("/admin/settings/general", data={"site_name": "S", "admin_session_timeout_hours": "not-a-number"})
+    assert db.get_setting("admin_session_timeout_hours") == str(app_module.DEFAULT_SESSION_TIMEOUT_HOURS)
+
+
+def test_session_timeout_is_clamped_to_the_cookie_lifetime(isolated_db):
+    """A timeout longer than the cookie's own Max-Age is a promise the server can't
+    keep - the cookie would be gone before the idle clock ever ran out."""
+    db.set_setting("admin_session_timeout_hours", "100000")
+    assert app_module._session_timeout_seconds() == app_module.MAX_SESSION_TIMEOUT_HOURS * 3600
+
+
+def test_public_page_is_unaffected_by_an_expired_admin_session(client):
+    """An expired session on a public page is just cleared - no redirect, the page
+    renders exactly as it does for any signed-out visitor."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("admin_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 7200
+
+    assert client.get("/").status_code == 200
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+
+
+def test_secret_key_persists_across_reimport(tmp_path, monkeypatch):
+    """The whole point: a restart must not invalidate every session cookie. This is
+    what "a refresh randomly logs me out" was - config.SECRET_KEY used to be a fresh
+    os.urandom() per process whenever PORTAL_SECRET_KEY wasn't set."""
+    import importlib
+    import config as config_module
+
+    monkeypatch.delenv("PORTAL_SECRET_KEY", raising=False)
+    monkeypatch.setattr(config_module, "SECRET_KEY_FILE", str(tmp_path / "secret_key"))
+    first = config_module._load_or_create_secret_key()
+    second = config_module._load_or_create_secret_key()
+    assert first == second and len(first) >= 32
+    # And it's not left world-readable.
+    assert oct(os.stat(tmp_path / "secret_key").st_mode)[-3:] == "600"
+
+    monkeypatch.setenv("PORTAL_SECRET_KEY", "explicit-key-wins")
+    assert config_module._load_or_create_secret_key() == "explicit-key-wins"
+
+
+def test_secret_key_degrades_to_a_process_key_when_it_cannot_be_written(tmp_path, monkeypatch):
+    """A read-only filesystem must not crash the app on import - it just goes back to
+    the old per-process behavior."""
+    import config as config_module
+    monkeypatch.delenv("PORTAL_SECRET_KEY", raising=False)
+    unwritable = tmp_path / "nope" / "secret_key"
+    monkeypatch.setattr(config_module, "SECRET_KEY_FILE", str(unwritable))
+    monkeypatch.setattr(config_module.os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    key = config_module._load_or_create_secret_key()
+    assert len(key) >= 32
+
+
+# ---------------------------------------------------------------------------
+# Uptime caching / history retention
+# ---------------------------------------------------------------------------
+def test_uptime_percentages_are_cached_between_calls(isolated_db, monkeypatch):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    db.record_status_history(sid, "operational", 10)
+    assert app_module._cached_uptime_percentages() == {sid: 100.0}
+
+    calls = []
+    monkeypatch.setattr(db, "get_uptime_percentages", lambda *a, **k: calls.append(1) or {})
+    app_module._cached_uptime_percentages()
+    assert calls == [], "a second call inside the TTL should not re-query"
+
+
+def test_uptime_cache_expires_after_its_ttl(isolated_db, monkeypatch):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    db.record_status_history(sid, "operational", 10)
+    app_module._cached_uptime_percentages()
+    monkeypatch.setitem(app_module._uptime_cache, "fetched_at",
+                        time.monotonic() - app_module.UPTIME_CACHE_TTL_SECONDS - 1)
+    db.record_status_history(sid, "down", None)
+    assert app_module._cached_uptime_percentages() == {sid: 50.0}
+
+
+def test_history_pruning_runs_once_a_day_not_every_cycle(isolated_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(db, "prune_status_history", lambda days: calls.append(days) or 0)
+    monkeypatch.setattr(app_module, "_last_history_prune", 0.0)
+    app_module._prune_status_history_if_due()
+    app_module._prune_status_history_if_due()
+    assert calls == [app_module.DEFAULT_HISTORY_RETENTION_DAYS]
+
+
+def test_history_retention_setting_is_honoured(isolated_db, monkeypatch):
+    db.set_setting("status_history_retention_days", "7")
+    assert app_module._history_retention_days() == 7
+    db.set_setting("status_history_retention_days", "0")
+    assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
+
+
+# ---------------------------------------------------------------------------
+# Clear cached data (admin -> System)
+# ---------------------------------------------------------------------------
+def test_clear_caches_empties_every_in_memory_cache(client):
+    import integrations as integrations_module
+    import monitoring as monitoring_module
+
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    app_module._uptime_cache["value"] = {1: 99.0}
+    app_module._uptime_cache["fetched_at"] = time.monotonic()
+    app_module._integration_status_cache[1] = {
+        "status": {"reachable": True, "version": "1", "issues": [], "error": None},
+        "checked_at": db.now_iso()}
+    integrations_module._jellyfin_activity_cache["running_tasks"] = ["Scan"]
+    monitoring_module._volume_label_cache["/dev/sda1"] = "Media"
+    monitoring_module._CPU_CACHE["per_core"] = [1.0]
+    monitoring_module._CPU_CACHE["updated_at"] = time.time()
+    updater._update_cache["result"] = {"anything": True}
+
+    resp = client.post("/admin/system/clear-caches")
+    assert resp.status_code == 302
+
+    assert app_module._uptime_cache["value"] == {}
+    assert app_module._integration_status_cache == {}
+    assert integrations_module._jellyfin_activity_cache["running_tasks"] == []
+    assert monitoring_module._volume_label_cache == {}
+    assert monitoring_module._CPU_CACHE["updated_at"] is None
+    assert updater._update_cache["result"] is None
+
+
+def test_clear_caches_bumps_the_static_asset_cache_buster(client):
+    """The browser-side half: an mtime-only ?v= can't invalidate a file whose
+    timestamp didn't change (a rollback, a restored file), which is exactly the
+    "I shipped a fix and they still see the old page" case this button is for."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with app_module.app.test_request_context():
+        before = app_module.asset_url("js/main.js")
+    client.post("/admin/system/clear-caches")
+    with app_module.app.test_request_context():
+        after = app_module.asset_url("js/main.js")
+    assert before != after
+    assert db.get_setting("asset_cache_salt")
+
+
+def test_asset_cache_salt_survives_a_restart(client):
+    """Stored in settings, not just memory - a restart that forgot it would hand
+    every browser back the URL it already has cached, silently undoing the bump."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/system/clear-caches")
+    with app_module.app.test_request_context():
+        after_clear = app_module.asset_url("js/main.js")
+    app_module._asset_salt["value"] = None  # stands in for a fresh process
+    with app_module.app.test_request_context():
+        assert app_module.asset_url("js/main.js") == after_clear
+
+
+def test_clear_caches_requires_login(client):
+    resp = client.post("/admin/system/clear-caches")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_system_page_lists_caches_and_integration_reachability(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sid = db.create_service({"name": "Media", "url": "", "check_url": "", "description": ""})
+    iid = db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
+                                  "api_key": "k", "enabled": 1, "service_id": sid,
+                                  "show_on_public": 1, "auto_incident": 0})
+    app_module._integration_status_cache[iid] = {
+        "status": {"reachable": False, "version": None, "issues": [], "error": "boom"},
+        "checked_at": db.now_iso()}
+
+    body = client.get("/admin/system").data.decode()
+    assert "Cached data" in body
+    assert "Uptime percentages" in body
+    assert "Jellyfin" in body and "not reachable" in body
+
+
+def test_clear_browser_cache_sends_clear_site_data_without_touching_cookies(client):
+    """The 'cookies' directive would sign the admin out as a side effect of a cache
+    action - the one directive this must never send."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/system/clear-browser-cache", data={"theme": "dark"})
+    assert resp.status_code == 200
+    header = resp.headers["Clear-Site-Data"]
+    assert '"cache"' in header and '"storage"' in header
+    assert "cookies" not in header
+    with client.session_transaction() as sess:
+        assert sess["logged_in"] is True
+
+
+def test_clear_browser_cache_page_lists_every_static_asset(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.post("/admin/system/clear-browser-cache", data={"theme": ""}).data.decode()
+    # Handed to the page as a data attribute, not interpolated into inline JS.
+    assert "data-assets=" in body
+    for name in ("js/main.js", "js/theme.js", "css/style.css"):
+        assert name in body
+    assert "data-theme=\"\"" in body
+
+
+def test_clear_browser_cache_carries_the_theme_through(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.post("/admin/system/clear-browser-cache", data={"theme": "light"}).data.decode()
+    assert 'data-theme="light"' in body
+
+
+def test_clear_browser_cache_requires_login(client):
+    resp = client.post("/admin/system/clear-browser-cache", data={})
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_static_asset_list_covers_new_files_automatically(client, tmp_path, monkeypatch):
+    """Enumerated from the directory, not a hand-maintained list - a JS file added
+    later must not be silently left out of the re-fetch."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    new_file = os.path.join(app_module.app.root_path, "static", "js", "_tmp_probe.js")
+    with open(new_file, "w", encoding="utf-8") as f:
+        f.write("// temporary probe file\n")
+    try:
+        with app_module.app.test_request_context():
+            urls = app_module._all_static_asset_urls()
+        assert any("_tmp_probe.js" in u for u in urls)
+        # And every entry is cache-busted, not a bare static URL.
+        assert all("?v=" in u for u in urls)
+    finally:
+        os.remove(new_file)

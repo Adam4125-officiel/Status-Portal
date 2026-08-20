@@ -20,6 +20,46 @@ how it presented, how it was caught). That split is what keeps this file readabl
 the project grows. Verification records — "confirmed working on real Windows on date
 X" — always go in `docs/HISTORY.md`.
 
+## If you're touching X, read Y first
+
+This file is long enough that the real failure mode is not "the rule wasn't written
+down", it's "the rule was written down three hundred lines away from what I was
+editing". Look your change up here before you start; each row names the sections that
+have bitten someone on exactly that change.
+
+| What you're about to touch | Read before you start |
+|---|---|
+| Any DB schema change | *Conventions* → `_ensure_column()`; *Sessions/caching* → indexes go in `init_db()`'s list |
+| A new per-service field | *Conventions* → "three places, not one" (main form, wizard, Service defaults) |
+| A new setting of any kind | *Conventions* → the config split (env var vs DB row), and "a new `PORTAL_*` env var means three files" |
+| Anything in `run_health_checks()` or a status value | *Conventions* → level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
+| Anything a request handler calls | *Conventions* → no slow I/O in a request handler; *Monitoring architecture*; *Sessions/caching* |
+| Login, sessions, cookies, CSRF | *Sessions, caching and DB performance*; *Two-factor authentication* |
+| A new admin route | *Conventions* → CSRF is automatic under `/admin/`; `_require_totp()` for destructive actions only |
+| A template's CSS/JS reference | *Conventions* → always `asset_url()`; *Sessions/caching* → `SEND_FILE_MAX_AGE_DEFAULT` is 30 days |
+| Anything rendering a timestamp | *Conventions* → server-side UTC + `local-time` spans; *Sessions/caching* → ISO strings only |
+| A new cache of any kind | *Sessions/caching* → module-owned `clear_caches()`, and reset it in `tests/conftest.py` |
+| Pagination / "load more" | *Conventions* → `/api/incidents/more`, and `docs/HISTORY.md` → "four pagination bugs in sequence" |
+| A new integration kind | *Conventions* → the `fetch_integration_status()` dispatch dict; per-integration timeouts |
+| The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
+| The updater | *Self-update* — especially what rollback can and cannot do |
+| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
+| A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
+| Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
+| Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
+
+Three things that are true no matter what you're touching:
+
+1. **Run the full suite *and* the real server.** Most of the bugs recorded in
+   `docs/HISTORY.md` passed their unit tests.
+2. **Say what you actually verified.** This sandbox is Linux with no Windows, no real
+   Jellyfin/*Arr, and no Discord gateway — "confirmed working" has to mean something
+   narrower here, and saying which part is guesswork is more useful than a clean
+   summary.
+3. **The user tests things and finds what you missed.** Several rules in this file
+   exist because they re-tested something and caught a gap the same session it
+   shipped. Make what you changed easy for them to check.
+
 ## What this is
 
 A personal Flask/SQLite status portal for a home server (Jellyfin, *Arr stack,
@@ -882,6 +922,113 @@ DB-backed Settings pages, not a code edit.
   install) unless told otherwise, even outside the cloud-session no-tag-access
   fallback already documented under Release process below.
 
+## Sessions, caching and DB performance (added 2026-08-19, v1.6.1)
+
+- **`config.SECRET_KEY` must stay stable across restarts.** It used to fall back to
+  `os.urandom()` per process when `PORTAL_SECRET_KEY` was unset, which invalidates
+  every session cookie on every restart - and this app restarts routinely (the
+  in-app updater re-execs itself, `/admin/system` has a restart button, systemd
+  restarts on failure). That was the "a refresh randomly logs me out" bug.
+  `_load_or_create_secret_key()` now persists a generated key to
+  `instance/secret_key` at mode 0600. **Don't reintroduce a random default**, and
+  don't move the file out of `instance/` - that path is gitignored *and* is the
+  docker-compose volume mount, which is what makes the key survive a container
+  recreate too. A read-only filesystem degrades to a per-process key rather than
+  crashing (config.py is imported before logging is configured, so that path can't
+  log - it's deliberately silent).
+- **Admin sessions are permanent cookies with a server-side idle timeout, not
+  browser-session cookies.** Flask's default (no `session.permanent`) emits a cookie
+  that dies when the browser closes - so a desktop got logged out on every browser
+  restart while a phone whose browser is never closed stayed logged in forever. That
+  asymmetry *was* the "inconsistent across devices" report; the fix is
+  `PERMANENT_SESSION_LIFETIME` + `session.permanent = True`, set in exactly one place
+  (`_start_admin_session()`, which every login path calls).
+- **`_enforce_session_timeout` must stay registered before `_check_csrf`.** Flask runs
+  `before_request` hooks in registration order, and an admin POST on an expired
+  session has to redirect to the login page - the CSRF token lives in the very
+  session being cleared, so the other order turns "your session expired" into a bare
+  400. If you add another `before_request` hook, mind where you define it.
+- **The idle check is server-side (`session["last_seen"]`), not just the cookie's
+  Max-Age.** A cookie's expiry attribute isn't covered by the signature, so a client
+  that keeps sending an "expired" cookie would otherwise stay logged in forever. The
+  cookie's own `Max-Age` is a fixed `config.SESSION_COOKIE_MAX_AGE_DAYS` backstop set
+  at import - **don't make it track the DB setting**: Flask reads
+  `app.permanent_session_lifetime` at cookie-set time, and mutating that per-request
+  is a cross-thread global write under waitress. `admin_session_timeout_hours` (DB
+  setting, live-editable) is clamped to it.
+- **`status_history` is the only unbounded table, and every query against it runs on
+  a public page load.** Two things keep it from becoming the app's slowest part, and
+  both matter: `idx_status_history_service_checked` is deliberately
+  `(service_id, checked_at, status)` - the third column is what makes it a *covering*
+  index for the uptime aggregate (131ms -> 43ms; a 2-column version drops back to a
+  table scan, and there's a test asserting `EXPLAIN QUERY PLAN` still says COVERING
+  INDEX) - and `prune_status_history()` runs daily from the health-check loop.
+  Before this, `get_uptime_percentage()` full-scanned the whole table *once per
+  service* on every page load: ~1s for 17 services at 90 days of history, growing
+  forever. Anything iterating over all services must use
+  `db.get_uptime_percentages()` (one grouped query), never the single-service form
+  in a loop.
+- **Indexes go in `init_db()`'s explicit list, not inline in `CREATE TABLE`.** Same
+  reasoning as `_ensure_column()`: `CREATE TABLE IF NOT EXISTS` is a no-op on an
+  existing database, so an inline index would never appear on any real user's
+  database. `CREATE INDEX IF NOT EXISTS` applies to both.
+- **The database runs in WAL mode.** SQLite's default rollback journal makes readers
+  and writers block each other database-wide, so the background health-check thread's
+  writes stall every request handler that touches the DB (up to the 5s busy timeout,
+  then "database is locked"). Combined with waitress's default of *4* request threads,
+  that is what "the portal stops responding when the host is loaded" looks like -
+  hence `config.WAITRESS_THREADS` (default 12) as well. WAL is a persistent property
+  of the file, set once in `init_db()`; it can't be enabled on a network filesystem
+  (SMB/NFS), which is why the switch is wrapped and logged rather than assumed.
+- **`monitoring.start_background_refresh()` is no longer a no-op off Windows.** It now
+  also owns the CPU sample: `psutil.cpu_percent(interval=0.2)` *sleeps* 0.2s, and it
+  was being called from `get_resource_snapshot()` inside request handlers. The thread
+  publishes `_CPU_CACHE` with the non-blocking `interval=None` form; handlers read it
+  and fall back to a live blocking sample only when nothing has been published or the
+  cache went stale (a dead thread must show a fresh number, not a frozen one).
+  psutil's *first* `interval=None` call always answers 0.0, which is why
+  `_refresh_cpu_cache()` won't publish a window shorter than
+  `MIN_CPU_SAMPLE_WINDOW_SECONDS`.
+- **`SEND_FILE_MAX_AGE_DEFAULT` is 30 days, which is only safe because `asset_url()`
+  cache-busts every CSS/JS URL.** If you ever add a static reference that bypasses
+  `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup
+  download passes `max_age=0` explicitly for the same reason - it's a point-in-time
+  file, not a versioned asset.
+- **`/admin/system` has *two* cache buttons and they are not redundant - don't merge
+  them.** They act on different machines, and only one of them can act on a machine
+  you don't control:
+  - *Clear server-side cached data* clears each module's caches via its own
+    `clear_caches()`, not by reaching into other modules' globals from `app.py` (add a
+    cache -> add it to that module's `clear_caches()`/`cache_summary()`, not to a list
+    in `app.py`). It also bumps `asset_cache_salt`, appended to `asset_url()`'s `?v=`,
+    which is the *only* mechanism that reaches **other people's** browsers - it changes
+    the URL they're asked for, so a stale copy can't answer. The salt is a settings row
+    (a restart that forgot it would hand every browser back the URL it already cached)
+    and is **random, not a timestamp**: two clicks in the same second would otherwise
+    produce an identical "bust".
+  - *Clear this browser's cache* only reaches the browser that clicked it, because
+    that is all a web page can reach. It sends `Clear-Site-Data: "cache", "storage"`
+    **and** re-does the work in JS, because Chrome/Edge only honor that header in a
+    secure context and this portal is very often plain HTTP on a LAN/Tailscale. The
+    JS half is what actually does the job in practice: `caches.delete()`, service
+    worker unregistration, DOM storage, then `fetch(url, {cache: 'reload'})` over
+    every asset (enumerated from the static directory by `_all_static_asset_urls()`,
+    never a hand-maintained list). **Never add the `"cookies"` directive** - it would
+    sign the admin out as a side effect of a cache action. The dark/light choice is
+    carried through the wipe and put back deliberately; it's a preference, not stale
+    data.
+
+  Neither is behind `_require_totp()` - nothing is destroyed and nothing goes offline.
+- **`_uptime_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
+  resets them** alongside `_integration_status_cache` and the Jellyfin cache. A new
+  module-level cache needs the same treatment or it leaks across tests.
+- **`local_time.js` is loaded once in `admin_base.html`, not per admin template.**
+  `admin_about.html` had a `.local-time` span with no script behind it and silently
+  rendered its raw UTC fallback forever. Timestamps handed to a `.local-time` span
+  must be **ISO-8601 strings** - caches that stamp themselves with `time.time()`
+  floats convert at the boundary (`monitoring._as_iso()`), because `local_time.js`
+  leaves anything `new Date()` can't parse showing its fallback text.
+
 ## Testing/verification habits (established over many sessions — keep following them)
 
 - Run the full `pytest` suite *and* a live `python app.py` + `curl` smoke test of
@@ -890,10 +1037,14 @@ DB-backed Settings pages, not a code edit.
   enrollment `KeyError`) were only ever caught by actually running the server, never by
   unit tests alone.
 - **For anything that depends on client-side JS (AJAX "load more" buttons, the
-  favicon/logo actually rendering, console errors), `curl` alone isn't enough — use the
-  pre-installed Playwright/Chromium browser** (see the environment notes on
-  `PLAYWRIGHT_BROWSERS_PATH`/`executablePath` — don't run `playwright install`) to
-  actually click through the flow and check for console errors. This caught a real bug:
+  favicon/logo actually rendering, console errors), `curl` alone isn't enough — drive a
+  real browser.** A previous version of this file claimed Playwright/Chromium was
+  pre-installed and told you not to run `playwright install`; that was wrong as of
+  2026-08-19, when a fresh sandbox had neither. **Just install it** (the user has
+  standing authorization to install tooling in this sandbox without asking):
+  `pip install playwright && python -m playwright install --with-deps chromium`, ~1
+  minute. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
+  `requestfailed` so an error can't pass unnoticed. This caught a real bug:
   `report_problem()` never passed `site_name` to `report.html`, silently leaving the
   topbar brand text and page title blank — every route-level pytest test for that route
   only checked for form-field presence, and `curl` output looked fine since the HTML was
@@ -923,6 +1074,40 @@ DB-backed Settings pages, not a code edit.
   a real XSS bug that manual review and the existing test suite both missed
   (`docs/HISTORY.md` → "VM-name XSS"). Doesn't replace live smoke testing; catches a
   different class of issue.
+
+## Commit cadence — commit per fix, not per session
+
+**Explicitly asked for on 2026-08-20**, after a session landed a whole batch (session
+persistence + performance + a new admin control + docs) as one enormous commit.
+Don't do that.
+
+**Commit as soon as a single fix or feature is complete and its tests pass** — one
+self-contained change per commit, with its own tests and its own doc/CLAUDE.md
+updates included in that same commit. A session that fixes three bugs and adds a
+button should produce four commits, not one.
+
+"Complete" means the suite passes and the thing works, not that the whole batch is
+done. Don't wait for the end of the session, don't wait for the user to confirm the
+whole batch, and don't hold everything back for one tidy final commit — the tidy
+final commit is the problem, not the goal.
+
+Why this matters more here than the size of the diff suggests:
+
+- **`git bisect` and `git revert` only work at commit granularity.** One 19-file
+  commit spanning sessions, performance and a new feature can't be reverted to undo
+  just the risky third of it — which, on a project where the user runs the release
+  on a real home server and finds regressions by using it, is exactly the operation
+  most likely to be needed.
+- **The release notes write themselves** from `git log <previous-tag>..HEAD --oneline`
+  (see the changelog step below). One giant commit collapses that into a single
+  useless line.
+- **Review is possible at all.** The PR convention below exists so a risky batch gets
+  looked at; a single commit containing everything defeats it.
+
+This does not change the *release* cadence — mid-session pre-releases stay coarse
+(one `-rc.N` per completed batch, per the checkpoint rule below). Committing often
+and releasing at checkpoints are separate things: commit at every completed fix, cut
+a release when a batch is done.
 
 ## Release process
 

@@ -9,6 +9,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 import psutil
 
@@ -42,6 +43,32 @@ _net_cache = {"time": None, "sent_bytes": None, "recv_bytes": None}
 # available here" the same way GPU detection does when there's no NVIDIA card.
 _WINDOWS_CACHE = {"vms": [], "cpu_temp_c": None, "disk_details": {}, "updated_at": None}
 
+# Cross-platform CPU utilisation, refreshed by the same background thread. psutil
+# offers two forms: cpu_percent(interval=N) *sleeps* N seconds to measure a window,
+# and cpu_percent(interval=None) returns usage since the previous call without
+# blocking at all. get_resource_snapshot() used the blocking form, which put a fixed
+# 0.2s stall into every public page load and every 10s auto-refresh of the resources
+# page - small, but squarely the kind of thing the "no slow I/O in a request handler"
+# rule exists to keep out of the request path. The thread now owns the sampling and
+# request handlers read this, exactly like _WINDOWS_CACHE above.
+_CPU_CACHE = {"per_core": [], "updated_at": None, "sampled_at": None, "max_age": None}
+
+# A cpu_percent(interval=None) window shorter than this is too small to mean
+# anything - and psutil's very first call for a process always answers 0.0 whatever
+# the real load is, so the first sample is a baseline, never a reading.
+MIN_CPU_SAMPLE_WINDOW_SECONDS = 1.0
+
+# What the blocking fallback below samples over, when no background reading exists
+# yet. Same value get_resource_snapshot() used to block for on every single call.
+CPU_FALLBACK_SAMPLE_SECONDS = 0.2
+
+# Volume labels, keyed by device. A partition's label doesn't change while the
+# machine is running, and looking it up is the one part of a disk snapshot that can
+# genuinely stall: on Windows GetVolumeInformationW against a spun-down drive blocks
+# until it spins up. Looked up once per device per process instead of on every page
+# load. A None result is cached too - "this device has no label" is an answer.
+_volume_label_cache = {}
+
 
 def _severity(percent):
     if percent >= 85:
@@ -51,8 +78,41 @@ def _severity(percent):
     return "ok"
 
 
+def _refresh_cpu_cache():
+    """Publishes a fresh non-blocking CPU reading for request handlers to read.
+    Skips publishing when the window since the previous sample was too short to be
+    meaningful (which is exactly what the first call after startup is)."""
+    per_core = psutil.cpu_percent(interval=None, percpu=True) or []
+    now = time.time()
+    previous = _CPU_CACHE["sampled_at"]
+    if previous is not None and now - previous >= MIN_CPU_SAMPLE_WINDOW_SECONDS:
+        _CPU_CACHE["per_core"] = per_core
+        _CPU_CACHE["updated_at"] = now
+    _CPU_CACHE["sampled_at"] = now
+
+
+def _get_cpu_percentages():
+    """Per-core CPU usage, from the background cache when it has a fresh reading.
+
+    Falls back to a live blocking sample when nothing has published yet (the first
+    seconds after startup, a caller that never started the background thread, or
+    unit tests) or when the cache has gone stale enough to suggest the thread died -
+    a stale number is worse than a 0.2s wait, and silently showing minutes-old load
+    as if it were current is the failure mode worth avoiding here."""
+    updated_at = _CPU_CACHE["updated_at"]
+    max_age = _CPU_CACHE["max_age"]
+    if updated_at is not None and (max_age is None or time.time() - updated_at <= max_age):
+        return _CPU_CACHE["per_core"]
+    per_core = psutil.cpu_percent(interval=CPU_FALLBACK_SAMPLE_SECONDS, percpu=True) or []
+    # That call reset psutil's internal per-call baseline, so tell the background
+    # thread its next window starts here - otherwise its next publish would report a
+    # reading measured over a truncated, meaningless slice of time.
+    _CPU_CACHE["sampled_at"] = time.time()
+    return per_core
+
+
 def get_resource_snapshot():
-    per_core = psutil.cpu_percent(interval=0.2, percpu=True)
+    per_core = _get_cpu_percentages()
     cpu_percent = round(sum(per_core) / len(per_core), 1) if per_core else 0.0
     mem = psutil.virtual_memory()
     return {
@@ -176,6 +236,14 @@ def _get_disk_snapshots():
 
 
 def _get_volume_label(mountpoint, device):
+    """Cached wrapper around _query_volume_label() - see _volume_label_cache."""
+    key = device or mountpoint
+    if key not in _volume_label_cache:
+        _volume_label_cache[key] = _query_volume_label(mountpoint, device)
+    return _volume_label_cache[key]
+
+
+def _query_volume_label(mountpoint, device):
     """Best-effort human-readable volume/partition label (e.g. "Media" instead of a
     bare drive letter or mountpoint). Returns None if unavailable - unlabeled
     partitions, or a lookup method that isn't supported here - callers fall back to
@@ -532,24 +600,72 @@ def _refresh_windows_cache():
 def _background_refresh_loop(interval_seconds):
     while True:
         try:
-            _refresh_windows_cache()
+            _refresh_cpu_cache()
+            if os.name == "nt":
+                _refresh_windows_cache()
         except Exception:
             _logger.exception("background refresh error")
         time.sleep(interval_seconds)
 
 
 def start_background_refresh(interval_seconds=10):
-    """Starts the Windows-only PowerShell/CIM-backed refresh loop (VM list, CPU
-    temp, per-disk details) in a background thread, mirroring
-    start_background_checker() in app.py and discord_bot.start() - these three
-    queries are the only slow (subprocess) I/O in this module, so per the project's
-    standing rule against slow I/O in a request handler, they're polled here instead
-    of queried live from index()/admin_resources(). No-op on non-Windows, since
-    nothing in this module shells out there. Called once from app.py at startup."""
-    if os.name != "nt":
-        return
+    """Starts this module's polling loop in a background thread, mirroring
+    start_background_checker() in app.py and discord_bot.start(). Everything it
+    refreshes is something a request handler would otherwise have to wait on, per
+    the project's standing rule against slow I/O in the request path: the
+    Windows-only PowerShell/CIM queries (VM list, CPU temp, per-disk details), and -
+    on every platform - the CPU utilisation sample, which used to block each caller
+    for 0.2s. Called once from app.py/serve_waitress.py at startup.
+
+    Unlike before, this is no longer a no-op on non-Windows: the CPU half applies
+    everywhere. The Windows half still only runs where it means anything."""
+    # Tolerate one missed tick before falling back to a live sample, so an ordinary
+    # scheduling hiccup doesn't reintroduce the blocking call it was meant to remove.
+    _CPU_CACHE["max_age"] = interval_seconds * 3 + 5
     threading.Thread(target=_background_refresh_loop, args=(interval_seconds,),
-                      daemon=True, name="monitoring-windows-refresh").start()
+                      daemon=True, name="monitoring-refresh").start()
+
+
+def clear_caches():
+    """Drops every cached reading this module holds, so the next call re-queries the
+    machine instead of answering from memory. Backs the admin panel's "clear cached
+    data" button; nothing here is persistent, so this is always safe.
+
+    The delta-based caches (per-disk I/O, network throughput) lose their baseline
+    along with everything else, which means the very next reading reports no rate at
+    all rather than a wrong one - they re-establish themselves on the following
+    sample, exactly as they do at startup."""
+    _WINDOWS_CACHE.update({"vms": [], "cpu_temp_c": None, "disk_details": {}, "updated_at": None})
+    _CPU_CACHE.update({"per_core": [], "updated_at": None, "sampled_at": None})
+    _volume_label_cache.clear()
+    _perdisk_io_cache.clear()
+    _net_cache.update({"time": None, "sent_bytes": None, "recv_bytes": None})
+
+
+def _as_iso(epoch):
+    """These caches stamp themselves with time.time() floats, but every timestamp
+    this app renders is an ISO-8601 UTC string (that's what static/js/local_time.js
+    parses to convert into the visitor's own timezone). Converted at the boundary
+    rather than changing what the caches store, since nothing else reads them."""
+    if not epoch:
+        return None
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def cache_summary():
+    """What this module currently holds, for the admin panel's cache overview."""
+    return [
+        {"name": "CPU utilisation sample",
+         "entries": len(_CPU_CACHE["per_core"]),
+         "detail": "per-core readings", "updated_at": _as_iso(_CPU_CACHE["updated_at"])},
+        {"name": "Windows queries (VMs, temperatures, disk mapping)",
+         "entries": len(_WINDOWS_CACHE["vms"]),
+         "detail": "VMs detected" if os.name == "nt" else "not applicable off Windows",
+         "updated_at": _as_iso(_WINDOWS_CACHE["updated_at"])},
+        {"name": "Disk volume labels",
+         "entries": len(_volume_label_cache),
+         "detail": "devices looked up", "updated_at": None},
+    ]
 
 
 def get_cached_vm_snapshot():

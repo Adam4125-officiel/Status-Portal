@@ -248,6 +248,14 @@ def fetch_jellyfin_running_tasks(base_url, api_key):
     return [t.get("Name", "task") for t in tasks if t.get("State") == "Running"]
 
 
+def clear_caches():
+    """Drops the Jellyfin activity cache (transcode count, running tasks). The
+    background loop refills it on its next tick; until then the public page simply
+    shows no Jellyfin activity, same as before the first refresh ever ran."""
+    _jellyfin_activity_cache["transcoding"] = 0
+    _jellyfin_activity_cache["running_tasks"] = []
+
+
 def refresh_jellyfin_activity_cache(base_url, api_key):
     """Called from app.py's background health-check loop (never from a request
     handler) for the first enabled Jellyfin-kind integration, if any."""

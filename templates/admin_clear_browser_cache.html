@@ -1,0 +1,26 @@
+{% extends "admin_base.html" %}
+{% block title %}Clearing browser cache — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Clearing this browser's cache</h1>
+</div>
+
+<div class="form-panel" style="max-width: 520px;"
+     id="clear-browser-cache"
+     data-assets='{{ assets|tojson }}'
+     data-theme="{{ theme }}"
+     data-done-url="{{ url_for('admin_system') }}">
+  <p id="clear-browser-cache-status" style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Working… this page returns to the System page on its own.
+  </p>
+  <noscript>
+    <p style="font-size: 13px; color: var(--warn);">
+      This step needs JavaScript. The server already sent a <code>Clear-Site-Data</code>
+      header, which handles it on browsers that honour it — otherwise clear the cache
+      from your browser's own settings, or reload this page with Ctrl+Shift+R.
+    </p>
+    <a class="btn secondary" href="{{ url_for('admin_system') }}">Back to System</a>
+  </noscript>
+</div>
+<script src="{{ asset_url('js/admin_clear_browser_cache.js') }}"></script>
+{% endblock %}

@@ -375,3 +375,129 @@ def test_control_host_handles_subprocess_failure(monkeypatch):
     success, message = monitoring.control_host("restart")
     assert success is False
     assert "not permitted" in message
+
+
+# ---------------------------------------------------------------------------
+# CPU sampling off the request path
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def clean_cpu_cache():
+    """_CPU_CACHE is a module-level global; reset it so these tests don't inherit a
+    reading left behind by whatever ran before them."""
+    saved = dict(monitoring._CPU_CACHE)
+    monitoring._CPU_CACHE.update({"per_core": [], "updated_at": None,
+                                  "sampled_at": None, "max_age": None})
+    yield
+    monitoring._CPU_CACHE.update(saved)
+
+
+def test_snapshot_reads_the_cpu_cache_without_blocking(clean_cpu_cache, monkeypatch):
+    """The whole point of the change: with a fresh cached reading, get_resource_snapshot()
+    must not call the *blocking* form of psutil.cpu_percent at all."""
+    monitoring._CPU_CACHE.update({"per_core": [10.0, 30.0], "updated_at": time.time(),
+                                  "max_age": 60})
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("psutil.cpu_percent must not be called when the cache is fresh")
+
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent", _explode)
+    snapshot = monitoring.get_resource_snapshot()
+    assert snapshot["cpu_percent"] == 20.0
+    assert [c["percent"] for c in snapshot["cpu_per_core"]] == [10.0, 30.0]
+
+
+def test_falls_back_to_a_live_sample_when_no_reading_has_been_published(clean_cpu_cache, monkeypatch):
+    calls = []
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: calls.append(interval) or [50.0])
+    assert monitoring._get_cpu_percentages() == [50.0]
+    # The blocking form, i.e. a real interval - not psutil's meaningless 0.0 first call.
+    assert calls == [monitoring.CPU_FALLBACK_SAMPLE_SECONDS]
+
+
+def test_falls_back_when_the_cached_reading_has_gone_stale(clean_cpu_cache, monkeypatch):
+    """A dead background thread must show a fresh number, not a silently frozen one."""
+    monitoring._CPU_CACHE.update({"per_core": [99.0], "updated_at": time.time() - 500,
+                                  "max_age": 35})
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: [7.0])
+    assert monitoring._get_cpu_percentages() == [7.0]
+
+
+def test_cpu_cache_refresh_ignores_a_too_short_first_window(clean_cpu_cache, monkeypatch):
+    """psutil's first cpu_percent(interval=None) call always answers 0.0 regardless of
+    load - publishing it would show an idle CPU on a busy machine."""
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: [0.0])
+    monitoring._refresh_cpu_cache()
+    assert monitoring._CPU_CACHE["updated_at"] is None
+    assert monitoring._CPU_CACHE["sampled_at"] is not None
+
+    monitoring._CPU_CACHE["sampled_at"] -= monitoring.MIN_CPU_SAMPLE_WINDOW_SECONDS + 1
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: [42.0])
+    monitoring._refresh_cpu_cache()
+    assert monitoring._CPU_CACHE["per_core"] == [42.0]
+    assert monitoring._CPU_CACHE["updated_at"] is not None
+
+
+def test_volume_label_is_looked_up_once_per_device(monkeypatch):
+    monitoring._volume_label_cache.clear()
+    calls = []
+    monkeypatch.setattr(monitoring, "_query_volume_label",
+                        lambda mp, dev: calls.append(dev) or "Media")
+    assert monitoring._get_volume_label("/mnt/media", "/dev/sdb1") == "Media"
+    assert monitoring._get_volume_label("/mnt/media", "/dev/sdb1") == "Media"
+    assert calls == ["/dev/sdb1"]
+
+    # "no label" is an answer too, and must not be re-queried on every page load.
+    monkeypatch.setattr(monitoring, "_query_volume_label",
+                        lambda mp, dev: calls.append(dev) or None)
+    assert monitoring._get_volume_label("/mnt/other", "/dev/sdc1") is None
+    assert monitoring._get_volume_label("/mnt/other", "/dev/sdc1") is None
+    assert calls == ["/dev/sdb1", "/dev/sdc1"]
+    monitoring._volume_label_cache.clear()
+
+
+def test_background_refresh_now_starts_on_every_platform(monkeypatch):
+    """It used to return early off Windows. The CPU half of the loop applies
+    everywhere, and that's what keeps the blocking sample out of the request path."""
+    started = []
+    monkeypatch.setattr(monitoring.threading, "Thread",
+                        lambda **kwargs: started.append(kwargs) or SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    monitoring.start_background_refresh(10)
+    assert len(started) == 1
+    assert monitoring._CPU_CACHE["max_age"] == 35
+
+
+def test_cache_summary_reports_iso_timestamps(clean_cpu_cache):
+    """The caches stamp themselves with time.time() floats; static/js/local_time.js
+    parses ISO strings and silently leaves anything else showing its raw fallback
+    text, so the conversion has to happen before the template sees it."""
+    monitoring._CPU_CACHE.update({"per_core": [5.0], "updated_at": 1_700_000_000.0})
+    entry = next(c for c in monitoring.cache_summary() if c["name"].startswith("CPU"))
+    assert entry["updated_at"].startswith("2023-11-14T")
+    assert entry["entries"] == 1
+
+    monitoring._CPU_CACHE["updated_at"] = None
+    entry = next(c for c in monitoring.cache_summary() if c["name"].startswith("CPU"))
+    assert entry["updated_at"] is None
+
+
+def test_clear_caches_resets_every_module_cache(clean_cpu_cache):
+    monitoring._WINDOWS_CACHE.update({"vms": [{"name": "vm1"}], "cpu_temp_c": 45,
+                                      "disk_details": {"C": {}}, "updated_at": 1.0})
+    monitoring._CPU_CACHE.update({"per_core": [3.0], "updated_at": 1.0, "sampled_at": 1.0})
+    monitoring._volume_label_cache["/dev/sda1"] = "Media"
+    monitoring._perdisk_io_cache["PhysicalDrive0"] = {"time": 1.0, "read_bytes": 1, "write_bytes": 1}
+    monitoring._net_cache.update({"time": 1.0, "sent_bytes": 1, "recv_bytes": 1})
+
+    monitoring.clear_caches()
+
+    assert monitoring._WINDOWS_CACHE["vms"] == []
+    assert monitoring._WINDOWS_CACHE["cpu_temp_c"] is None
+    assert monitoring._CPU_CACHE["updated_at"] is None
+    assert monitoring._volume_label_cache == {}
+    assert monitoring._perdisk_io_cache == {}
+    assert monitoring._net_cache["time"] is None
