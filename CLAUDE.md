@@ -46,6 +46,7 @@ have bitten someone on exactly that change.
 | Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
+| Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
 
@@ -1073,6 +1074,40 @@ DB-backed Settings pages, not a code edit.
   a real XSS bug that manual review and the existing test suite both missed
   (`docs/HISTORY.md` → "VM-name XSS"). Doesn't replace live smoke testing; catches a
   different class of issue.
+
+## Commit cadence — commit per fix, not per session
+
+**Explicitly asked for on 2026-08-20**, after a session landed a whole batch (session
+persistence + performance + a new admin control + docs) as one enormous commit.
+Don't do that.
+
+**Commit as soon as a single fix or feature is complete and its tests pass** — one
+self-contained change per commit, with its own tests and its own doc/CLAUDE.md
+updates included in that same commit. A session that fixes three bugs and adds a
+button should produce four commits, not one.
+
+"Complete" means the suite passes and the thing works, not that the whole batch is
+done. Don't wait for the end of the session, don't wait for the user to confirm the
+whole batch, and don't hold everything back for one tidy final commit — the tidy
+final commit is the problem, not the goal.
+
+Why this matters more here than the size of the diff suggests:
+
+- **`git bisect` and `git revert` only work at commit granularity.** One 19-file
+  commit spanning sessions, performance and a new feature can't be reverted to undo
+  just the risky third of it — which, on a project where the user runs the release
+  on a real home server and finds regressions by using it, is exactly the operation
+  most likely to be needed.
+- **The release notes write themselves** from `git log <previous-tag>..HEAD --oneline`
+  (see the changelog step below). One giant commit collapses that into a single
+  useless line.
+- **Review is possible at all.** The PR convention below exists so a risky batch gets
+  looked at; a single commit containing everything defeats it.
+
+This does not change the *release* cadence — mid-session pre-releases stay coarse
+(one `-rc.N` per completed batch, per the checkpoint rule below). Committing often
+and releasing at checkpoints are separate things: commit at every completed fix, cut
+a release when a batch is done.
 
 ## Release process
 
