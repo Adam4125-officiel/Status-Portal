@@ -4,6 +4,47 @@ This file is for context that survives between sessions — architecture decisio
 gotchas, and standing workflows that aren't obvious from reading the code cold. Keep
 it updated as the project evolves; don't let it go stale.
 
+## Read this part even if you read nothing else
+
+This file is long. If you are working fast, or you are a smaller/faster model, read
+*this* section and the lookup table below it, then jump straight to the section for
+whatever you're touching. Do not skim the whole file — that's how rules get missed.
+
+**The ten that have actually been broken before:**
+
+1. New column on an existing table → add `_ensure_column()` in `init_db()`. `CREATE
+   TABLE IF NOT EXISTS` is a no-op on a database that already exists.
+2. New index → `CREATE INDEX IF NOT EXISTS` in `init_db()`'s list, same reason.
+3. New `PORTAL_*` env var → **three files**: `config.py`, `.env.example`,
+   `docker-compose.yml`. Missing from compose = silently ignored under Docker.
+4. Never call slow/external I/O in a request handler. Background thread writes a
+   cache; handlers only read it.
+5. CSS/JS in a template → **always** `asset_url()`, never bare `url_for('static')`.
+6. `_handle_incident_lifecycle`'s open branch is **level-triggered**. Never add a
+   `previous_status != "down"` check.
+7. Any status enumeration needs a `slow` entry, not just the four obvious ones.
+8. New per-service field → **three places**: main form, combined wizard, Service
+   defaults in Settings.
+9. New module-level cache → reset it in `tests/conftest.py`, and clear it in that
+   module's `clear_caches()`.
+10. Entity picker → checkbox list, never `<select multiple>`.
+
+**Most of those are enforced by `tests/test_conventions.py`.** It runs in a fraction
+of a second and its failure messages name the file and the fix. Run it early rather
+than relying on having remembered the rule:
+
+```
+python -m pytest tests/test_conventions.py -q
+```
+
+A failure there is a real violation of a rule that cost someone a bug once — fix the
+code, don't loosen the test. If you genuinely need an exception, add it explicitly
+(with the reason) to the check itself, so the next person sees the decision.
+
+**And the one habit that matters most:** run the full suite *and* the actual server
+before calling anything done, and say plainly what you did and didn't verify. Most
+bugs in `docs/HISTORY.md` passed their unit tests.
+
 **Two companion files:**
 
 - `ROADMAP.md` — open feature ideas. This file is about *how the existing code works
@@ -46,6 +87,7 @@ have bitten someone on exactly that change.
 | Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
+| A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
@@ -1028,6 +1070,27 @@ DB-backed Settings pages, not a code edit.
   must be **ISO-8601 strings** - caches that stamp themselves with `time.time()`
   floats convert at the boundary (`monitoring._as_iso()`), because `local_time.js`
   leaves anything `new Date()` can't parse showing its fallback text.
+
+## Keeping rules enforceable (`tests/test_conventions.py`)
+
+- **When you add a rule to this file, ask whether it can be a test instead.** Prose in
+  a 1200-line file is a request; a failing test is a fact. Anything checkable without
+  running the app (a naming rule, a "these three files must agree" rule, an invariant
+  expressible over the AST) belongs in `tests/test_conventions.py` *as well as* here —
+  the prose explains why, the test makes forgetting it impossible.
+- **No false positives, ever.** A check that fires on legitimate code is worse than no
+  check at all, because the correct response to it becomes "ignore the convention
+  tests", and that generalizes to the ones that matter. Encode real exceptions
+  explicitly (see the uploaded-logo case in `test_templates_use_asset_url_for_css_and_js`)
+  rather than watering the rule down until it never fires.
+- **Failure messages are the interface.** Write them for someone who has *not* read the
+  matching section here: say what is wrong, and what to do about it. That's the whole
+  point — it delivers the rule at the moment it's being broken, instead of hoping it
+  was read 900 lines earlier.
+- **Prove a new check can fail.** Temporarily introduce the violation, watch the test
+  go red, then revert. A convention test that silently can't fire is worse than none,
+  because it reads as coverage.
+- Static checks only. Anything needing a running app belongs in `tests/test_app.py`.
 
 ## Testing/verification habits (established over many sessions — keep following them)
 
