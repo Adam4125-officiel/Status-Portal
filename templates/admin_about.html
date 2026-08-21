@@ -206,9 +206,11 @@
 
 {% if backups %}
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
-  <h2 style="margin-top: 0;">Rollback points</h2>
+  <h2 style="margin-top: 0;">Rollback points (application code)</h2>
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
     Each update backs up the files it replaces, under <code>instance/update_backups/</code>.
+    These hold <strong>code, not data</strong> — rolling one back undoes an update and leaves
+    your services, incidents and settings exactly as they are.
     Restore one from a shell: <code>python update.py rollback --to &lt;name&gt;</code>.
     Deliberately not a button here — the case it exists for is a portal that won’t start.
   </p>
@@ -222,6 +224,68 @@
   </table>
 </div>
 {% endif %}
+
+<div class="form-panel" style="max-width: 640px; margin-top: 16px; border-color: var(--crit);">
+  <h2 style="margin-top: 0;">Restore the database from a backup</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Upload a backup zip produced by <strong>Settings → Download a backup</strong> (or the
+    <code>portal.db</code> from inside one) to replace your current database with it.
+    This is <strong>data, not code</strong> — the opposite of the rollback points above,
+    and neither can restore the other.
+  </p>
+  <p style="font-size: 13px; color: var(--text-dim);">
+    Everything currently in the portal — services, incidents, maintenance windows,
+    settings, reports, the admin password and any 2FA enrolment — is replaced by whatever
+    the backup holds. Your current database is saved to <code>instance/db_backups/</code>
+    first, and the file is checked for being a real Status Portal database before anything
+    is touched. The portal restarts afterwards.
+  </p>
+  <form method="POST" action="{{ url_for('admin_restore_db') }}" enctype="multipart/form-data">
+    <div class="field">
+      <label for="restore-file">Backup file</label>
+      <input type="file" id="restore-file" name="backup" accept=".zip,.db">
+      <div class="field-hint">A <code>.zip</code> from the backup button, or a bare <code>.db</code>.</div>
+    </div>
+    <button type="button" class="btn danger" id="restore-trigger" disabled>Restore this backup…</button>
+
+    <div id="restore-confirm" class="form-panel" style="display:none; border-color: var(--crit); margin-top: 12px;">
+      <p id="restore-confirm-text" style="font-size: 13px;"></p>
+      <div class="field">
+        <input type="text" id="restore-confirm-input" placeholder="Type to confirm" autocomplete="off">
+      </div>
+      {% if totp_enabled %}
+      <div class="field">
+        <label for="restore-totp">2FA code</label>
+        <input type="text" id="restore-totp" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+               maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+      </div>
+      {% endif %}
+      <div class="form-actions">
+        <button type="submit" id="restore-submit" class="btn danger" disabled>Replace the database and restart</button>
+        <button type="button" id="restore-cancel" class="btn secondary">Cancel</button>
+      </div>
+    </div>
+  </form>
+
+  {% if db_backups %}
+  <h3 style="font-size: 13px; margin: 18px 0 6px;">Saved before a previous restore</h3>
+  <p style="font-size: 12px; color: var(--text-faint); margin-top: 0;">
+    Kept in <code>instance/db_backups/</code>. To undo a restore, copy one of these over
+    <code>instance/portal.db</code> from a shell and restart — there is deliberately no
+    button for that, since the case it exists for is a portal that won’t start.
+  </p>
+  <table class="info-table">
+    {% for b in db_backups %}
+    <tr>
+      <th style="font-weight: normal;"><code>{{ b.name }}</code></th>
+      <td>{{ b.size_mb }} MB ·
+        <span class="local-time" data-utc="{{ b.created_at }}">{{ b.created_at[:16].replace('T', ' ') }} UTC</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
 
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
   <h2 style="margin-top: 0;">This install</h2>
@@ -244,4 +308,5 @@
 </div>
 
 <script src="{{ asset_url('js/admin_update_control.js') }}"></script>
+<script src="{{ asset_url('js/admin_db_restore.js') }}"></script>
 {% endblock %}

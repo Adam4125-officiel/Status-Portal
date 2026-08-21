@@ -109,8 +109,12 @@ def handle_bad_request(e):
 
 @app.errorhandler(413)
 def handle_too_large(e):
+    # request.max_content_length, not the app-wide config value: the database-restore
+    # endpoint raises its own limit for that one request, and quoting 2 MB at someone
+    # whose 30 MB upload was actually allowed would be actively confusing.
+    limit = getattr(request, "max_content_length", None) or app.config["MAX_CONTENT_LENGTH"]
     return render_template("error.html", code=413, message="That file is too large "
-                            f"(max {app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB)."), 413
+                            f"(max {limit // (1024 * 1024)} MB)."), 413
 
 
 @app.errorhandler(500)
@@ -304,6 +308,25 @@ def _start_admin_session():
     session.permanent = True
     session["logged_in"] = True
     session["last_seen"] = time.time()
+
+
+# Restoring the database means uploading one, and a real portal.db is far larger than
+# the 2 MB app-wide cap that exists for the logo upload. Flask 3.1 lets that cap be
+# raised for one request instead of for the whole app, which is the difference between
+# "the restore endpoint accepts a database" and "every form on the site, including the
+# public report form, now accepts 64 MB".
+DB_RESTORE_MAX_BYTES = 64 * 1024 * 1024
+
+
+# Registration order matters: Flask runs before_request hooks in the order they were
+# defined, and _check_csrf below reads request.form - which parses the body, and would
+# therefore hit the *old* limit and 413 a perfectly good upload before the view that
+# raises the limit ever runs. This has to be first. (Same class of ordering constraint
+# as _enforce_session_timeout needing to precede _check_csrf; see CLAUDE.md.)
+@app.before_request
+def _allow_large_upload_for_restore():
+    if request.method == "POST" and request.path == "/admin/about/restore-db":
+        request.max_content_length = DB_RESTORE_MAX_BYTES
 
 
 @app.before_request
@@ -1788,6 +1811,36 @@ def admin_vm_control():
 
 # ---- System (this app's own process/components - separate from Resources above,
 # which is about the host machine's hardware) ----
+def _release_dev_server_socket():
+    """Closes the listening socket Werkzeug's development server deliberately leaks
+    across exec, so a restart can rebind the port.
+
+    Only ever does anything under `python app.py`. `werkzeug.serving.run_simple()`
+    calls `socket.set_inheritable(True)` on its listening socket and exports the
+    descriptor as WERKZEUG_SERVER_FD, so that its auto-reloader can hand the same
+    bound port to a child process. That socket therefore survives os.execv - but the
+    re-executed process only *adopts* WERKZEUG_SERVER_FD when the reloader is active,
+    which it never is here (debug=False). The result was a portal that restarted
+    straight into "Address already in use" and died: same PID gone, nothing listening,
+    and no trace anywhere but the console.
+
+    Production runs `serve_waitress.py`, and waitress never marks its socket
+    inheritable, so that path was always fine - which is exactly why this went
+    unnoticed. Anyone following the README's `python app.py` had a restart button, a
+    self-updater and (now) a database restore that all took the portal down for good.
+
+    Failure here is deliberately swallowed: not being able to close a socket must never
+    be the reason a restart doesn't happen, and on the waitress path there is nothing
+    to close in the first place."""
+    raw_fd = os.environ.pop("WERKZEUG_SERVER_FD", None)
+    if raw_fd is None:
+        return
+    try:
+        os.close(int(raw_fd))
+    except (ValueError, OSError):
+        _logger.info("Could not close the inherited development-server socket", exc_info=True)
+
+
 def _restart_process():
     """Replaces the running process image in place via os.execv - same PID, works
     identically whether launched as `python app.py`, `python serve_waitress.py`, or
@@ -1798,6 +1851,9 @@ def _restart_process():
     instead of shelling out to the OS to restart the whole machine."""
     def _do():
         time.sleep(1)
+        # After the sleep, so the response the admin is waiting on has already gone out
+        # over this socket's accepted connection.
+        _release_dev_server_socket()
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_do, daemon=True).start()
 
@@ -2016,6 +2072,7 @@ def admin_about():
         repo_url=updater.REPO_URL,
         releases_url=updater.RELEASES_PAGE_URL,
         backups=list(reversed(updater.list_backups()))[:5],
+        db_backups=list_db_safety_backups(),
         python_version=sys.version.split()[0],
         platform_name=f"{platform.system()} {platform.release()}".strip(),
         db_path=db.DB_PATH,
@@ -2125,6 +2182,198 @@ def admin_update():
     flash(f"Updated {result['current']} → {result['latest']}. Restarting now - this page will be "
           f"briefly unreachable. If it doesn't come back, run "
           f"`python update.py rollback` on the server.", "success")
+    _restart_process()
+    return redirect(url_for("admin_about"))
+
+
+# ---------------------------------------------------------------------------
+# Restoring the database from a backup zip
+# ---------------------------------------------------------------------------
+# The counterpart to Settings' "download a backup" button, and by some distance the
+# most destructive thing in this admin panel: it replaces the entire live database with
+# an uploaded file. It lives on the About page rather than in Settings because someone
+# reaching for a restore is usually recovering from something and will look next to the
+# update-rollback machinery first.
+#
+# Do not confuse the two kinds of backup on that page, and do not let the UI confuse
+# them either. updater.py's backups are **application code**, taken to undo a bad
+# update, and contain no data. These are **database** snapshots and contain nothing
+# else. Neither can restore the other.
+DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
+KEEP_DB_SAFETY_BACKUPS = 5
+
+# An extracted database is capped separately from the upload itself, so a small zip that
+# expands to an enormous file (a zip bomb) is refused before it is written out.
+MAX_EXTRACTED_DB_BYTES = DB_RESTORE_MAX_BYTES
+
+
+def _write_uploaded_database(upload, dest_path):
+    """The uploaded file -> a plain .db at `dest_path`. Returns None, or a reason.
+
+    Accepts either the zip the backup button produces or a bare .db, because an admin
+    who unzipped it to look inside should not be told their own backup is invalid.
+
+    Nothing here inspects the *contents*; that's db.validate_backup_file()'s job. This
+    only gets the bytes safely onto disk - which for a zip means never trusting the
+    declared size, and never trusting a member name (a member called `../../app.py` is
+    the classic zip-slip, avoided here by never joining a member name to a path at all:
+    the single member is streamed to a filename we chose)."""
+    filename = (upload.filename or "").lower()
+    try:
+        if filename.endswith(".zip"):
+            with zipfile.ZipFile(upload.stream) as zf:
+                members = [m for m in zf.infolist()
+                            if not m.is_dir() and m.filename.lower().endswith(".db")]
+                if not members:
+                    return "That zip doesn't contain a .db file."
+                if len(members) > 1:
+                    return f"That zip contains {len(members)} .db files - expected exactly one."
+                member = members[0]
+                if member.file_size > MAX_EXTRACTED_DB_BYTES:
+                    return (f"The database inside that zip is too large "
+                            f"({member.file_size // (1024 * 1024)} MB).")
+                written = 0
+                with zf.open(member) as src, open(dest_path, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        # Checked against what was actually read, not against the
+                        # header's declared file_size, which a hostile zip can lie about.
+                        written += len(chunk)
+                        if written > MAX_EXTRACTED_DB_BYTES:
+                            return "The database inside that zip is too large."
+                        out.write(chunk)
+        else:
+            upload.save(dest_path)
+    except zipfile.BadZipFile:
+        return "That file isn't a readable zip."
+    except OSError as e:
+        return f"Could not read the uploaded file: {e}"
+    return None
+
+
+def _db_safety_snapshot():
+    """A consistent snapshot of the database as it is *right now*, taken before it is
+    replaced. This is the whole reason a bad restore isn't unrecoverable, so it happens
+    after validation (no point snapshotting for a file we're going to reject) and before
+    a single byte of the live database is touched.
+
+    Uses db.backup_to_file(), i.e. SQLite's own online backup API - a plain file copy
+    could catch a torn write from the background health-check thread."""
+    os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"portal-before-restore-{stamp}.db")
+    db.backup_to_file(path)
+    return path
+
+
+def list_db_safety_backups():
+    """Newest first. A local os.listdir + stat, the same cheap class of call as
+    asset_url()'s getmtime - not the kind of slow outbound I/O the no-blocking-in-a-
+    request-handler rule is about, and not worth a cache."""
+    try:
+        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR) if n.endswith(".db")]
+    except OSError:
+        return []
+    entries = []
+    for name in names:
+        path = os.path.join(DB_SAFETY_BACKUP_DIR, name)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        entries.append({"name": name, "path": path,
+                        "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                        "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()})
+    return sorted(entries, key=lambda e: e["created_at"], reverse=True)
+
+
+def _prune_db_safety_backups():
+    """Keeps the newest KEEP_DB_SAFETY_BACKUPS. Reads the module constant inside the
+    function rather than as a default argument, so a monkeypatched value in a test is
+    actually honoured - a default arg binds at def time, the same trap that made
+    updater._prune_backups pass for the wrong reason once."""
+    for entry in list_db_safety_backups()[KEEP_DB_SAFETY_BACKUPS:]:
+        try:
+            os.remove(entry["path"])
+        except OSError:
+            _logger.warning("Could not prune old database snapshot %s", entry["name"])
+
+
+@app.route("/admin/about/restore-db", methods=["POST"])
+@login_required
+def admin_restore_db():
+    """Replaces the live database with an uploaded backup, then restarts.
+
+    Behind _require_totp() like the other actions where a stolen session cookie alone
+    must not be enough (host restart/shutdown, app restart, self-update) - this one
+    replaces every piece of data the portal holds, so it belongs in that set rather than
+    beside the harmless cache buttons.
+
+    The order below is the safety machinery and is not rearrangeable:
+      1. write the upload to a temp file - the live database is untouched;
+      2. validate it is a well-formed SQLite database *and* one of ours;
+      3. snapshot the current database, so a regretted restore is still recoverable;
+      4. atomically replace, dealing with the WAL sidecars (see db.restore_from_file);
+      5. restart, because every existing connection still points at the old file.
+    """
+    blocked = _require_totp("Enter your 2FA code to restore the database.", "admin_about")
+    if blocked:
+        return blocked
+
+    upload = request.files.get("backup")
+    if not upload or not upload.filename:
+        flash("Choose a backup file to restore.", "error")
+        return redirect(url_for("admin_about"))
+
+    # Staged next to the database rather than in the system temp directory, so the final
+    # os.replace() is a rename within one filesystem (atomic) rather than a cross-device
+    # copy - and so a large upload can't fill a small /tmp.
+    os.makedirs(os.path.dirname(db.DB_PATH), exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix="restore-", suffix=".db",
+                                   dir=os.path.dirname(db.DB_PATH))
+    os.close(fd)
+    snapshot = None
+    try:
+        error = _write_uploaded_database(upload, staged)
+        if error is None:
+            error = db.validate_backup_file(staged)
+        if error:
+            flash(f"Restore refused: {error} Your database has not been touched.", "error")
+            return redirect(url_for("admin_about"))
+
+        try:
+            snapshot = _db_safety_snapshot()
+        except Exception as e:
+            _logger.exception("Could not snapshot the database before restoring")
+            flash(f"Restore aborted: couldn't back up your current database first ({e}). "
+                  "Nothing has been changed.", "error")
+            return redirect(url_for("admin_about"))
+
+        try:
+            db.restore_from_file(staged)
+        except Exception as e:
+            _logger.exception("Database restore failed")
+            flash(f"Restore failed: {e}. Your previous database was saved to "
+                  f"{snapshot} before the attempt.", "error")
+            return redirect(url_for("admin_about"))
+        # staged has been renamed onto the live path, so there is nothing left to clean
+        # up - and the finally block must not delete the database we just installed.
+        staged = None
+        _prune_db_safety_backups()
+    finally:
+        if staged and os.path.exists(staged):
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+
+    _logger.warning("Database restored from an uploaded backup; previous database saved to %s",
+                     os.path.basename(snapshot))
+    flash(f"Database restored. Your previous database was saved as "
+          f"{os.path.basename(snapshot)} in instance/db_backups/. Restarting now - this "
+          f"page will be briefly unreachable.", "success")
     _restart_process()
     return redirect(url_for("admin_about"))
 

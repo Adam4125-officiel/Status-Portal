@@ -32,6 +32,95 @@ def backup_to_file(dest_path):
     dest.close()
 
 
+# ---------------------------------------------------------------------------
+# Restoring the database from a backup (see app.py's /admin/about/restore-db)
+# ---------------------------------------------------------------------------
+# Every SQLite file starts with this exact 16-byte string. Checked first because it
+# rejects the overwhelmingly common mistake (a zip of the wrong thing, a text file
+# renamed) instantly and without handing the bytes to SQLite at all.
+SQLITE_HEADER = b"SQLite format 3\x00"
+
+# Tables a file must contain before this app will accept it as *its own* backup. The
+# header and an integrity check together only prove "a valid SQLite database" - which
+# a Jellyfin library, a browser cookie store or an *Arr database all also are, and
+# restoring one of those would silently wipe the portal and leave it unable to start.
+RESTORE_REQUIRED_TABLES = ("services", "settings", "incidents", "maintenance_windows")
+
+
+def validate_backup_file(path):
+    """Returns None if `path` is a well-formed SQLite database that looks like this
+    app's, otherwise a string explaining why not.
+
+    Deliberately returns a reason rather than raising: the caller is a form handler
+    whose entire job is to tell the admin what was wrong with their file, and the
+    difference between "that isn't a database" and "that's a database, but not this
+    app's" is exactly what they need to hear.
+
+    Runs entirely against a *temporary copy*. Nothing here touches the live database,
+    so a file that fails any check has cost nothing."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(len(SQLITE_HEADER))
+    except OSError as e:
+        return f"Could not read the uploaded file: {e}"
+    if header != SQLITE_HEADER:
+        return "That file isn't a SQLite database (its header doesn't match)."
+
+    conn = None
+    try:
+        # Read-only, and via a URI so SQLite cannot create or modify anything even if
+        # the path is wrong - a validation step must never have side effects.
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        if not result or result[0] != "ok":
+            detail = result[0] if result else "no result"
+            return f"That database failed SQLite's integrity check ({detail})."
+        names = {row[0] for row in
+                 conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except sqlite3.DatabaseError as e:
+        return f"That file couldn't be opened as a database: {e}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    missing = [t for t in RESTORE_REQUIRED_TABLES if t not in names]
+    if missing:
+        return ("That's a valid SQLite database, but it isn't a Status Portal backup - "
+                f"it has no {', '.join(missing)} table(s).")
+    return None
+
+
+def restore_from_file(src_path):
+    """Replaces the live database with `src_path`. Assumes it has already been
+    validated - this function does the dangerous part, not the deciding.
+
+    The WAL sidecars are the subtle bit. The database runs in WAL mode, so
+    `portal.db-wal` holds committed pages belonging to the *old* database; leaving it
+    in place next to a *new* main file would let SQLite replay one file's journal into
+    another, which is a corrupt database rather than a failed restore. So: checkpoint
+    the live database to fold its WAL back into the main file, replace the main file,
+    then delete both sidecars.
+
+    os.replace() is atomic on both platforms, so a crash mid-restore leaves either the
+    old database or the new one - never half of either."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except sqlite3.DatabaseError:
+        # A live database too broken to checkpoint is precisely when someone is
+        # reaching for a restore. Pressing on is correct: the sidecars are removed
+        # below either way, and the file is about to be replaced wholesale.
+        _logger.warning("Could not checkpoint the database before restoring it", exc_info=True)
+
+    os.replace(src_path, DB_PATH)
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(DB_PATH + suffix)
+        except FileNotFoundError:
+            pass
+
+
 def _ensure_column(conn, table, column, ddl):
     """Adds `column` to `table` if an existing database predates it - CREATE TABLE IF
     NOT EXISTS only helps for brand-new databases; a table that already exists never

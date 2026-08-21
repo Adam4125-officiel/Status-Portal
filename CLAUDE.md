@@ -88,7 +88,9 @@ have bitten someone on exactly that change.
 | Comparing a version of anything | *Version checks* → `updater.parse_version` is 3-component semver; Servarr is 4-component |
 | The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
 | The updater | *Self-update* — especially what rollback can and cannot do |
-| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
+| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`; `_restart_process()` has its own, narrower rule |
+| Anything that ends in a restart | *Testing/verification habits* → mocks can't tell you the process came back; exercise it live once |
+| The database restore | *Restoring the database* → the order is the safety machinery |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
@@ -871,11 +873,60 @@ DB-backed Settings pages, not a code edit.
   it. Same typed-confirmation UI pattern too (`static/js/admin_system_control.js`,
   mirroring `admin_host_control.js` — one confirm panel driving both trigger buttons
   via a `data-component` attribute instead of `data-action`).
-- **Never live-invoke `_restart_process()` for real in this sandbox or any shared
-  environment** — same rule as `monitoring.control_host()`. Verify exclusively by
-  mocking `app._restart_process()`/`discord_bot.restart()` in pytest and asserting the
-  route called them; a live smoke test should exit the confirm-panel flow right before
-  actually submitting, not click through it.
+- **`_restart_process()` and `control_host()` are not the same risk, and the rule
+  distinguishing them was learned the hard way.** `control_host()` reboots or shuts
+  down the *machine* and must never be live-invoked anywhere, full stop.
+  `_restart_process()` only re-execs *this app's own process*, and testing it
+  exclusively with mocks hid a real bug for months: under `python app.py` every
+  restart died with "Address already in use" and the portal never came back
+  (`docs/HISTORY.md` → "the restart that never came back"). A mocked test asserts that
+  the route *called* the function — it cannot tell you the process comes back up.
+  So: mocked tests remain the default and are what the route tests use, but **a change
+  to restart behaviour must also be exercised live at least once** against a
+  throwaway portal in this sandbox, checking the PID is unchanged and the port answers
+  again. Never against anything the user depends on, and never `control_host()`.
+
+## Restoring the database (`/admin/about/restore-db`, `db.py`)
+
+- **The order of operations is the safety machinery and is not rearrangeable**:
+  stage the upload to a temp file (live database untouched) → validate → snapshot the
+  *current* database → atomic replace → restart. A refusal at any point must leave the
+  live database byte-identical and take no snapshot; there are tests asserting exactly
+  that for junk files, foreign databases, bad zips and zip bombs.
+- **Validation is three checks, and the third is the one people forget.** The SQLite
+  header, then `PRAGMA integrity_check`, then **`RESTORE_REQUIRED_TABLES` must all be
+  present**. The first two only prove "a valid SQLite database" — which a Jellyfin
+  library, a browser cookie store or an *Arr database all also are, and restoring one
+  of those silently wipes the portal and leaves it unable to start. Validation opens
+  the file **read-only via a `file:...?mode=ro` URI**, so checking a file can never
+  create or modify one.
+- **The WAL sidecars must be deleted as part of the replace** (`db.restore_from_file`).
+  The database runs in WAL mode, so `portal.db-wal` holds committed pages belonging to
+  the *old* database; leaving it beside a new main file lets SQLite replay one file's
+  journal into another, which is a corrupt database rather than a failed restore.
+  Checkpoint first, replace, then remove both `-wal` and `-shm`.
+- **The staged upload is written next to `instance/portal.db`, never in the system temp
+  directory** — `os.replace()` is only atomic within one filesystem, and a 60 MB
+  upload shouldn't be able to fill a small `/tmp`.
+- **A zip's declared `file_size` is not trusted**: the extraction cap is enforced
+  against bytes actually read. Member names are never joined to a path at all (the one
+  member is streamed to a filename we chose), which is what makes zip-slip
+  structurally impossible here rather than merely guarded against.
+- **The two kinds of backup on the About page must stay visibly distinct.**
+  `updater.py`'s are **application code**, for undoing a bad update, and hold no data;
+  these are **database** snapshots and hold nothing else. Neither can restore the
+  other, and the page says so. Don't merge the two lists.
+- **`DB_RESTORE_MAX_BYTES` is applied per-request, not app-wide.** Flask 3.1 (hence
+  `Flask>=3.1` in `requirements.txt`) allows `request.max_content_length` to be set for
+  one request; raising `MAX_CONTENT_LENGTH` instead would hand every form on the site,
+  the public report form included, a 64 MB body allowance. The hook that sets it
+  **must be registered before `_check_csrf`**, because `_check_csrf` reads
+  `request.form`, which parses the body and would 413 a perfectly good upload before
+  the view ever runs.
+- **`_prune_db_safety_backups()` reads `KEEP_DB_SAFETY_BACKUPS` inside the function**,
+  not as a default argument — a default arg binds at def time and silently ignores a
+  monkeypatched constant, the same trap that made `updater._prune_backups` pass for the
+  wrong reason once.
 
 ## Custom logo / branding (`app.py`, `static/uploads/`)
 

@@ -75,15 +75,44 @@ def test_every_portal_env_var_is_documented_in_all_three_places():
         "Without it the setting is silently ignored under Docker.")
 
 
+# Environment variables that are NOT settings, and therefore legitimately read outside
+# config.py. Each needs a reason, because the default answer is "put it in config.py".
+ENVIRON_EXCEPTIONS = {
+    # Written by werkzeug.serving.run_simple() at server-start time - i.e. long after
+    # config.py was imported - purely so its auto-reloader can hand a bound socket to a
+    # child process. app.py has to clear it (and close that descriptor) before os.execv,
+    # or a restart under `python app.py` dies with "Address already in use". It is a
+    # runtime handshake with the WSGI server, not something a user configures, so
+    # config.py is the wrong home for it.
+    ("app.py", "WERKZEUG_SERVER_FD"),
+}
+
+
 def test_only_config_reads_os_environ():
     """CLAUDE.md: nothing but config.py reads os.environ directly - that's what keeps
     every setting discoverable in one place, and what the .env.example/compose check
-    above relies on to be complete."""
-    offenders = [name for name, src in _python_modules()
-                 if name != "config.py" and re.search(r"\bos\.environ\b", src)]
+    above relies on to be complete.
+
+    Real exceptions are listed explicitly above with their reasoning, rather than the
+    rule being loosened to a module-wide exemption that would let a genuine setting
+    slip in beside them."""
+    allowed_files = {name for name, _ in ENVIRON_EXCEPTIONS}
+    offenders = []
+    for name, src in _python_modules():
+        if name == "config.py":
+            continue
+        for match in re.finditer(r"\bos\.environ\b(?:\.\w+)?\(?\s*[\"']?([A-Z_][A-Z0-9_]*)?",
+                                  src):
+            variable = match.group(1)
+            line = src[:match.start()].count("\n") + 1
+            if name in allowed_files and (name, variable) in ENVIRON_EXCEPTIONS:
+                continue
+            offenders.append(f"{name}:{line} (os.environ[{variable!r}])")
     assert not offenders, (
         f"{offenders} read os.environ directly. Add the setting to config.py and import "
-        "it from there instead.")
+        "it from there instead - or, if it genuinely isn't a setting (something the WSGI "
+        "server or the OS puts there at runtime), add it to ENVIRON_EXCEPTIONS above "
+        "with the reason.")
 
 
 # ---------------------------------------------------------------------------
@@ -400,12 +429,34 @@ def test_every_module_level_cache_is_reset_between_tests():
 # ---------------------------------------------------------------------------
 # Recurring work goes through the scheduler, not a fourth background thread
 # ---------------------------------------------------------------------------
+def _polling_loops(source):
+    """`while True:` blocks that sleep - i.e. background polling loops.
+
+    Matching on `while True:` alone was the first version of this check and it was
+    wrong: it fired on a perfectly ordinary streaming read loop in app.py's zip
+    handling. A check that fires on legitimate code is worse than no check, because
+    the correct response to it becomes "ignore the convention tests". A polling loop
+    is specifically one that *waits* between iterations, so that is what this looks
+    for."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.While)
+                and isinstance(node.test, ast.Constant) and node.test.value is True):
+            continue
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "sleep"):
+                found.append(node.lineno)
+                break
+    return found
+
+
 def test_no_new_bare_background_loops():
     """CLAUDE.md: a new recurring job is a scheduler.register() call, not another
-    `while True` thread. Three such loops predate the framework and are allowed by
-    name below - each is also registered via scheduler.register_loop() so it still
-    shows up on /admin/tasks. A fourth means either making it a task, or (if it
-    genuinely can't be one) registering it as a loop and adding it here on purpose."""
+    polling thread. Three such loops predate the framework and are allowed by name
+    below - each is also registered via scheduler.register_loop() so it still shows up
+    on /admin/tasks. A fourth means either making it a task, or (if it genuinely can't
+    be one) registering it as a loop and adding it here on purpose."""
     allowed = {
         # The core health-check cycle. Not a task: switching it off from a browser
         # would also switch off incident detection.
@@ -417,11 +468,11 @@ def test_no_new_bare_background_loops():
     }
     offenders = []
     for name, src in _python_modules():
-        found = len(re.findall(r"^\s*while True:", src, re.M))
-        if found > allowed.get(name, 0):
-            offenders.append(f"{name} ({found} found, {allowed.get(name, 0)} expected)")
+        lines = _polling_loops(src)
+        if len(lines) > allowed.get(name, 0):
+            offenders.append(f"{name} (lines {lines}, {allowed.get(name, 0)} expected)")
     assert not offenders, (
-        f"New bare background loop(s): {offenders}. Recurring work belongs in "
+        f"New background polling loop(s): {offenders}. Recurring work belongs in "
         "scheduler.register() - you get an on/off switch, a schedule, a last-run "
         "record and a 'Run now' button for free, and it shows up on /admin/tasks. "
         "If it genuinely cannot be a task (too frequent for the tick, or it lives in "
