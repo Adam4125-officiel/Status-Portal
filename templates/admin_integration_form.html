@@ -20,6 +20,7 @@
       <option value="bazarr" {{ 'selected' if current == 'bazarr' }}>Bazarr</option>
       <option value="tdarr" {{ 'selected' if current == 'tdarr' }}>Tdarr</option>
       <option value="byparr" {{ 'selected' if current == 'byparr' }}>Byparr</option>
+      <option value="qbittorrent" {{ 'selected' if current == 'qbittorrent' }}>qBittorrent</option>
     </select>
   </div>
   <div class="field">
@@ -31,6 +32,20 @@
     <input type="password" id="api_key" name="api_key"
            placeholder="{{ '(unchanged — leave blank to keep the current key)' if integration else '' }}">
     <div class="field-hint">Found in each app's Settings → General/API page. Stored so this app can read status/logs on your behalf — nothing here can change settings on those services. Leave blank for Tdarr/Byparr, neither of which has an API key of its own.</div>
+  </div>
+  {# Shown for every kind rather than revealed by JavaScript, matching how the API-key
+     field above handles the kinds that don't use it: the hint says who needs it. This
+     admin panel deliberately has no JS that hides form fields. #}
+  <div class="field">
+    <label for="username">Username (qBittorrent only)</label>
+    <input type="text" id="username" name="username" autocomplete="off"
+           value="{{ integration.username if integration else '' }}">
+    <div class="field-hint">qBittorrent has no API key — its WebUI authenticates with a login. Leave blank for every other type, and also for a qBittorrent with “Bypass authentication for clients on localhost” switched on.</div>
+  </div>
+  <div class="field">
+    <label for="password">Password (qBittorrent only)</label>
+    <input type="password" id="password" name="password" autocomplete="new-password"
+           placeholder="{{ '(unchanged — leave blank to keep the current password)' if integration else '' }}">
   </div>
   <div class="field">
     <label for="service_id">Linked service (optional)</label>

@@ -1879,17 +1879,21 @@ def test_admin_vm_control_route_rejects_unknown_action(client):
     assert b"Unknown VM action" in resp.data
 
 
-def test_public_section_order_defaults_to_original_order(isolated_db):
-    order = app_module._public_section_order()
-    assert order == ["announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"]
+def test_public_section_order_defaults_to_the_declared_order(isolated_db):
+    """Derived from PUBLIC_SECTIONS rather than hardcoding the list, so adding a
+    section doesn't fail this test for the wrong reason - what's being asserted is
+    "the default order is the declared order", not which sections happen to exist."""
+    assert app_module._public_section_order() == [k for k, _ in app_module.PUBLIC_SECTIONS]
 
 
 def test_public_section_order_respects_stored_setting(isolated_db):
     db.set_setting("public_layout_order", "vms,services,announcements")
     order = app_module._public_section_order()
-    # Stored order first, then every other valid key appended in its default position.
+    # Stored order first, then every other valid key appended in its default position -
+    # so a section added after the admin last saved an order still appears, at the end,
+    # rather than silently disappearing.
     assert order[:3] == ["vms", "services", "announcements"]
-    assert set(order) == {"announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"}
+    assert set(order) == {k for k, _ in app_module.PUBLIC_SECTIONS}
 
 
 def test_public_section_order_drops_unknown_keys(isolated_db):

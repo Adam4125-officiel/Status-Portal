@@ -1,0 +1,104 @@
+{# Media activity: what's coming, what was asked for, what's downloading, and how the
+   indexers behind all of it are doing. Every part is independently switchable and all
+   four default to off - unlike the resource cards, this says something about what is in
+   (or on its way into) the library and who asked for it.
+
+   `media` is None when the section is switched off entirely or the viewer isn't allowed
+   to see it, so one guard covers both. #}
+{% if media %}
+{% set has_calendar = media_visible.calendar and media.calendar %}
+{% set has_requests = media_visible.requests and media.requests %}
+{% set has_downloads = media_visible.downloads and media.downloads %}
+{% set has_indexers = media_visible.indexers and media.indexers %}
+{% if has_calendar or has_requests or has_downloads or has_indexers %}
+<section class="section">
+  <h2 class="section__title">Media activity</h2>
+
+  {% if has_downloads %}
+  <h3 class="section__subtitle">Downloading now</h3>
+  <div class="media-list">
+    {% for d in media.downloads %}
+    <div class="media-row">
+      <div class="media-row__main">
+        <span class="media-row__name">{{ d.name }}</span>
+        <span class="media-row__meta">
+          {{ d.size_gb }} GB{% if d.dl_speed_mbs %} · {{ d.dl_speed_mbs }} MB/s{% endif %}
+        </span>
+      </div>
+      <div class="media-progress" role="progressbar" aria-valuenow="{{ d.progress }}"
+           aria-valuemin="0" aria-valuemax="100">
+        <div class="media-progress__bar" style="width: {{ d.progress }}%"></div>
+      </div>
+      <span class="media-row__pct">{{ d.progress }}%</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if has_calendar %}
+  <h3 class="section__subtitle">Coming soon</h3>
+  <div class="media-list">
+    {% for c in media.calendar %}
+    <div class="media-row">
+      <div class="media-row__main">
+        <span class="media-row__name">{{ c.title }}</span>
+        <span class="media-row__meta">{{ c.detail }}</span>
+      </div>
+      <span class="media-row__meta">
+        <span class="local-time-short" data-utc="{{ c.date }}">{{ c.date[:10] }}</span>
+      </span>
+      {% if c.have %}<span class="pill">in library</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if has_requests %}
+  <h3 class="section__subtitle">Requests</h3>
+  <div class="media-list">
+    {% for r in media.requests %}
+    <div class="media-row">
+      <div class="media-row__main">
+        <span class="media-row__name">{{ r.title }}</span>
+        <span class="media-row__meta">
+          {{ r.media_type }}{% if r.requested_by %} · asked for by {{ r.requested_by }}{% endif %}
+        </span>
+      </div>
+      <span class="pill {{ 'warn' if r.pending }}">{{ r.request_status }}</span>
+      <span class="media-row__meta">{{ r.media_status }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if has_indexers %}
+  <h3 class="section__subtitle">Indexers</h3>
+  <div class="media-list">
+    {% for i in media.indexers %}
+    <div class="media-row">
+      <div class="media-row__main">
+        <span class="media-row__name">{{ i.name }}</span>
+        {% if i.failing and i.last_error %}
+          <span class="media-row__meta">{{ i.last_error }}</span>
+        {% endif %}
+      </div>
+      {% if not i.enabled %}
+        <span class="pill">disabled</span>
+      {% elif i.failing %}
+        <span class="led crit"></span><span class="media-row__meta">failing</span>
+      {% else %}
+        <span class="led ok"></span><span class="media-row__meta">ok</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if media.refreshed_at %}
+  <p class="section__footnote">
+    Updated <span class="local-time" data-utc="{{ media.refreshed_at }}">{{ media.refreshed_at[:16].replace('T', ' ') }} UTC</span>
+  </p>
+  {% endif %}
+</section>
+{% endif %}
+{% endif %}

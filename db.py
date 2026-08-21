@@ -440,6 +440,10 @@ def init_db():
     # Jellyfin-backed auth). Stored as the username, not the user id: it's shown to
     # the admin, and it has to stay readable for a user who was later removed from
     # Jellyfin entirely.
+    # qBittorrent authenticates with a username/password login rather than an API key,
+    # so it needs its own two fields. Every other integration leaves them blank.
+    _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
     # Whether this portal lets the user sign in, independently of whether Jellyfin
     # does. On by default: users appear here by being synced from Jellyfin, and
@@ -1057,11 +1061,12 @@ def get_integration(iid):
 def create_integration(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id, show_on_public, auto_incident)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id,
+                                  show_on_public, auto_incident, username, password)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data.get("api_key", ""),
           int(data.get("enabled", 1)), data.get("service_id") or None, int(data.get("show_on_public", 0)),
-          int(data.get("auto_incident", 0))))
+          int(data.get("auto_incident", 0)), data.get("username", ""), data.get("password", "")))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -1073,20 +1078,21 @@ def update_integration(iid, data):
     service_id = data.get("service_id") or None
     show_on_public = int(data.get("show_on_public", 0))
     auto_incident = int(data.get("auto_incident", 0))
+    conn.execute("""
+        UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?,
+        show_on_public=?, auto_incident=?, username=? WHERE id=?
+    """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
+          int(data.get("enabled", 1)), service_id, show_on_public, auto_incident,
+          data.get("username", ""), iid))
+    # Blank secret on the edit form means "keep the existing one" - never overwrite a
+    # stored credential with an empty string just because the admin left the field
+    # blank. Applies to the qBittorrent password for exactly the same reason it always
+    # has to the API key; forgetting it there would silently break the integration on
+    # every unrelated edit (renaming it, changing its URL).
     if data.get("api_key"):
-        conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=?, service_id=?,
-            show_on_public=?, auto_incident=? WHERE id=?
-        """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data["api_key"],
-              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
-    else:
-        # Blank api_key on the edit form means "keep the existing one" - never overwrite
-        # a stored key with an empty string just because the admin left the field blank.
-        conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?,
-            show_on_public=?, auto_incident=? WHERE id=?
-        """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
-              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
+        conn.execute("UPDATE integrations SET api_key=? WHERE id=?", (data["api_key"], iid))
+    if data.get("password"):
+        conn.execute("UPDATE integrations SET password=? WHERE id=?", (data["password"], iid))
     conn.commit()
     conn.close()
 

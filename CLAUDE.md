@@ -736,6 +736,45 @@ DB-backed Settings pages, not a code edit.
   See `tests/test_monitoring.py`'s `test_vm_snapshot_logs_stderr_on_failure` for the
   pattern.
 
+## Media activity (`integrations.py`, `templates/sections/media.html`)
+
+- **Four read-only views, one cache, one scheduled task** (`media_refresh`, 5 min):
+  the Radarr/Sonarr calendar, Jellyseerr requests, qBittorrent downloads, and
+  Prowlarr's per-indexer health. Request handlers only ever read
+  `integrations.get_cached_media()`, which returns **copies** so a template iterating a
+  list can't be tripped by the task replacing it mid-render.
+- **Every source is independent.** One unreachable app leaves the other three showing
+  real data, with its own entry in the cache's `errors` dict. Don't "simplify" this
+  into a single try/except around the whole refresh.
+- **A 404 from an *Arr app means "this app doesn't have that feature", not a failure.**
+  Every `arr` integration is asked for both a calendar and an indexer list because
+  which app it is isn't known here; Radarr/Sonarr answer the first and 404 the second,
+  Prowlarr the reverse. Recording those 404s as errors made a perfectly healthy setup
+  report "1 source(s) failed" (caught live). Anything *other* than a 404 is still
+  reported, so a genuinely broken Prowlarr doesn't quietly show an empty list.
+- **Which *Arr app a calendar entry came from is decided per item, not per app** — a
+  Sonarr entry carries a `series` object, a Radarr entry doesn't. One request, and it
+  can't get the answer wrong the way guessing from the integration's name could.
+- **qBittorrent is the only integration that logs in rather than presenting a key**, so
+  it has its own `username`/`password` columns and `fetch_integration_status()` routes
+  it differently. `Referer` is **required** on the login POST — qBittorrent rejects it
+  outright without one, as a CSRF defence for its own WebUI. The SID is deliberately
+  not cached across calls: expiry, invalidation on a password change and a stale cookie
+  looking exactly like wrong credentials are all real complications, for a request made
+  once every few minutes from a background task. A blank username is a valid
+  configuration ("Bypass authentication for clients on localhost"), not an error.
+- **The blank-secret-means-keep rule now covers the qBittorrent password too**, not
+  just `api_key` — forgetting it would silently break the integration on every
+  unrelated edit (a rename, a URL change).
+- **All four parts default to OFF, and the section is signed-in-only by default.**
+  Unlike the resource cards, this says what is in (or heading into) the library and who
+  asked for it. `media_requires_login` only *means* anything while Jellyfin sign-in is
+  enabled — with no sign-in configured there is no such thing as a signed-in visitor,
+  so enforcing it would hide the section from everybody rather than restrict it. Same
+  shape and same reasoning as `report_requires_login`.
+- **`eta == 8640000` is qBittorrent's "unknown"**, not 100 days. Rendering it literally
+  gives a nonsense countdown.
+
 ## Public page layout (`templates/sections/`)
 
 - Each of the 7 public-page content blocks (announcements, services, incidents &

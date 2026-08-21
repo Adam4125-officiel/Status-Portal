@@ -732,6 +732,35 @@ _PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_d
                          "show_public_network", "show_public_gpu",
                          "show_public_vms", "show_public_highload", "show_public_jellyfin_tasks"]
 
+# The Media section's four parts, each independently switchable. All default to OFF:
+# unlike the resource cards, these say something about what is in (or on its way into)
+# the library and who asked for it, which is a different kind of disclosure and has to
+# be opted into rather than appearing the moment an integration is configured.
+_PUBLIC_MEDIA_KEYS = ["show_public_calendar", "show_public_requests",
+                      "show_public_downloads", "show_public_indexers"]
+
+
+def _public_media_visibility():
+    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+            for key in _PUBLIC_MEDIA_KEYS}
+
+
+def _media_requires_login():
+    """Whether the Media section is for signed-in visitors only.
+
+    Defaults to on, and only *means* anything while Jellyfin sign-in is enabled - with
+    no sign-in configured there is no such thing as a signed-in visitor, so enforcing it
+    would make the section unreachable for everyone rather than restricted. Same shape
+    as report_requires_login."""
+    return db.get_setting("media_requires_login", "1") == "1"
+
+
+def _media_visible_to(user):
+    """Whether this viewer may see the Media section at all."""
+    if not jellyfin_auth.is_enabled():
+        return True
+    return bool(user) if _media_requires_login() else True
+
 
 def _public_resource_visibility():
     return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
@@ -785,6 +814,7 @@ PUBLIC_SECTIONS = [
     ("resources", "Server resources"),
     ("vms", "Virtual machines"),
     ("jellyfin_activity", "Jellyfin activity"),
+    ("media", "Media activity"),
 ]
 _DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
 
@@ -900,6 +930,10 @@ def index():
     high_load = integrations.evaluate_high_load(snapshot) if (visible["highload"] and snapshot) \
         else {"active": False, "reasons": []}
     jellyfin_activity = integrations.get_cached_jellyfin_activity() if visible["jellyfin_tasks"] else None
+    # Reads the cache the media_refresh task fills - never fetches anything here.
+    media_visible = _public_media_visibility()
+    media = (integrations.get_cached_media()
+             if (any(media_visible.values()) and _media_visible_to(current_user())) else None)
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, info=info, overall=overall,
@@ -907,6 +941,7 @@ def index():
                             resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
                             snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
+                            media=media, media_visible=media_visible,
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -2518,6 +2553,8 @@ def admin_settings():
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            show_media=_public_media_visibility(),
+                            media_requires_login=_media_requires_login(),
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
                             show_public=_public_resource_visibility(),
@@ -2542,6 +2579,9 @@ def admin_settings_general():
     db.set_setting("site_name", request.form.get("site_name", "").strip() or "Server")
     for key in _PUBLIC_RESOURCE_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
+    for key in _PUBLIC_MEDIA_KEYS:
+        db.set_setting(key, "1" if request.form.get(key) else "0")
+    db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
         raw = request.form.get(f"highload_{key}", "").strip()
         db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)

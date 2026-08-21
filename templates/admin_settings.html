@@ -25,6 +25,31 @@
       <label class="field-check"><input type="checkbox" name="show_public_jellyfin_tasks" {{ 'checked' if show_public.jellyfin_tasks }}> Jellyfin running background tasks (trickplay, library scans...)</label>
     </div>
   </div>
+
+  <div class="field">
+    <label>Media activity section</label>
+    <div class="field-hint" style="margin-bottom: 8px;">
+      Reads your Radarr/Sonarr calendar, Jellyseerr requests, qBittorrent downloads and
+      Prowlarr indexers. All off by default: unlike the resource cards, these say
+      something about what's in (or heading into) your library and who asked for it.
+      Refreshed by the <strong>Media activity refresh</strong> scheduled task.
+    </div>
+    <div class="checkbox-list">
+      <label class="field-check"><input type="checkbox" name="show_public_calendar" {{ 'checked' if show_media.calendar }}> Coming soon (Radarr/Sonarr calendar)</label>
+      <label class="field-check"><input type="checkbox" name="show_public_requests" {{ 'checked' if show_media.requests }}> Requests and their state (Jellyseerr/Overseerr)</label>
+      <label class="field-check"><input type="checkbox" name="show_public_downloads" {{ 'checked' if show_media.downloads }}> Downloading now, with progress (qBittorrent)</label>
+      <label class="field-check"><input type="checkbox" name="show_public_indexers" {{ 'checked' if show_media.indexers }}> Per-indexer health (Prowlarr)</label>
+    </div>
+    <div class="checkbox-list" style="margin-top: 8px;">
+      <label class="field-check"><input type="checkbox" name="media_requires_login" {{ 'checked' if media_requires_login }}> Only show this section to signed-in visitors</label>
+    </div>
+    <div class="field-hint">
+      Only has an effect while Jellyfin sign-in is enabled — with no sign-in configured
+      there's no such thing as a signed-in visitor, so enforcing it would hide the
+      section from everybody rather than restricting it.
+    </div>
+    </div>
+  </div>
   <div class="field">
     <label>Public page layout</label>
     <div class="field-hint" style="margin-bottom: 8px;">The order these blocks appear in on the public page — the top status banner and footer always stay fixed. Move rows up/down; a section still only shows when it actually has something to show (e.g. "Virtual machines" stays hidden if none are detected), this just controls where it appears when it does.</div>
