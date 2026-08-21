@@ -36,6 +36,7 @@ import notifications
 import scheduler
 import twofactor
 import updater
+import version_checks
 
 _logger = logging.getLogger(__name__)
 
@@ -262,6 +263,9 @@ def _inject_admin_badges():
     return {
         "unread_reports_count": db.count_unread_problem_reports() + db.count_unseen_user_messages(),
         "update_available": bool(cached and cached.get("update_available")),
+        # How many *Arr apps the last version check found behind. Reads one stored
+        # setting - never checks anything here, same rule as the update badge above.
+        "arr_updates_count": version_checks.updates_available(),
     }
 
 
@@ -2132,7 +2136,10 @@ def admin_integrations():
     configured = db.list_integrations()
     statuses = {i["id"]: _integration_status_cache.get(i["id"]) for i in configured if i["enabled"]}
     return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
-                            check_interval=config.CHECK_INTERVAL_SECONDS, active="integrations")
+                            check_interval=config.CHECK_INTERVAL_SECONDS,
+                            version_check=version_checks.get_results(),
+                            version_task=scheduler.task_view(scheduler.get_task(version_checks.TASK_NAME)),
+                            active="integrations")
 
 
 @app.route("/admin/integrations/<int:iid>/check", methods=["POST"])

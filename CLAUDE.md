@@ -85,6 +85,7 @@ have bitten someone on exactly that change.
 | A new cache of any kind | *Sessions/caching* → module-owned `clear_caches()`, and reset it in `tests/conftest.py` |
 | Pagination / "load more" | *Conventions* → `/api/incidents/more`, and `docs/HISTORY.md` → "four pagination bugs in sequence" |
 | A new integration kind | *Conventions* → the `fetch_integration_status()` dispatch dict; per-integration timeouts |
+| Comparing a version of anything | *Version checks* → `updater.parse_version` is 3-component semver; Servarr is 4-component |
 | The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
 | The updater | *Self-update* — especially what rollback can and cannot do |
 | Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
@@ -531,6 +532,37 @@ DB-backed Settings pages, not a code edit.
   from that same panel would address nothing. Same reasoning as
   `twofactor.RESET_2FA` being a host-level file. It defaults to **enabled** (the button
   was explicitly asked for), and the route checks it, not just the template.
+
+## Servarr version checks (`version_checks.py`, `/admin/integrations`)
+
+- **`version_checks.parse_version()` is deliberately not `updater.parse_version()`, and
+  this is the trap.** Servarr versions have **four** numeric components
+  (`6.4.1.10545`) and the fourth - the build number - is the one that actually moves
+  between releases. `updater.parse_version` keeps three and spends its fourth slot on a
+  prerelease rank, so it parses `6.4.0.10540` and `6.4.0.10523` as the *identical*
+  tuple and would report a months-old Radarr as up to date. There is a test asserting
+  exactly that. The portal's own tags are semver with `-rc.N` and genuinely need the
+  other function; these two formats must not share a parser.
+- **Which app an integration is comes from the app's own `appName`**, never from the
+  name the admin typed. `movies-4k` is still Radarr and something called `radarr`
+  might not be; guessing from the label eventually checks the wrong project's releases
+  and reports the wrong answer confidently.
+- **`KNOWN_APPS` is a module constant and must stay one** - same argument as
+  `updater.py`'s repo constant. Adding an app is a line there *plus* a check that its
+  release tags really are plain version numbers: a project tagging releases
+  `2024.10-hotfix` parses as `0.0.0` and would silently report "up to date" forever.
+- **Results are persisted to the `settings` table, not held in a module cache.** This
+  is a daily task, so an in-memory result would mean the admin page saying "not checked
+  yet" for up to a day after every restart.
+- **A run where *every* app failed is recorded as a failure, not a success** - it
+  answered no question at all, and showing green for it hides the most likely cause.
+  Per-app results are stored *before* that failure is raised, so the page still
+  explains what went wrong instead of going blank. (Found by live-testing against a
+  genuinely rate-limited GitHub, not by the unit tests.)
+- **GitHub's unauthenticated API allows 60 requests/hour per IP, shared across
+  everything this portal asks it** - the self-update check and these three. Fine at
+  daily/6-hourly cadence; worth remembering before adding a fourth caller or shortening
+  an interval.
 
 ## Monitoring architecture (`monitoring.py`)
 
@@ -1460,6 +1492,15 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   request needs *both* `-b cookiejar` (send) *and* `-c cookiejar` (save the response's
   possibly-updated cookie). `-b` alone silently reads a stale cookie and looks exactly
   like a real bug (a missing flash message, a "lost" session value).
+- **Never combine `curl -X POST` with `-L` against an admin route.** `-X` forces the
+  method on the redirect too, so curl re-POSTs to the redirect target - which for every
+  route here is a page whose form has a *different* CSRF token, giving a 400 that looks
+  exactly like the action having failed when it actually succeeded (302) a moment
+  earlier. Use `--data` without `-X` (curl then correctly switches to GET on 302), or
+  drop `-L` and check the 302 directly.
+- **Don't `pkill -f "python app.py"` from a Bash tool call.** `-f` matches full command
+  lines, and the shell running the command contains that string, so it kills its own
+  session. `kill $(lsof -t -i:5000)` targets the actual listener instead.
 - This sandbox is Linux. Hyper-V VM detection, Windows volume labels, CPU/disk
   temperature and per-disk I/O (all Windows-only, PowerShell/CIM-backed), real
   Jellyfin/*Arr/Jellyseerr instances, and a real Discord gateway connection can't be

@@ -11,6 +11,64 @@
   can control those services — it only reads their health/logs.
 </p>
 
+<div class="form-panel" style="margin-bottom: 16px;">
+  <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+    <h2 style="font-size: 15px; margin: 0;">App updates</h2>
+    <form action="{{ url_for('admin_task_run', name=version_task.name) }}" method="POST" style="display:inline;">
+      <button type="submit" class="btn secondary" style="padding:4px 10px;"{{ ' disabled' if version_task.running }}>
+        {{ 'Checking…' if version_task.running else 'Check now' }}
+      </button>
+    </form>
+  </div>
+  <p style="color: var(--text-dim); font-size: 13px; margin: 0 0 12px;">
+    Whether your Radarr, Sonarr and Prowlarr are behind their latest release — so you
+    don't have to open three web UIs to find out. Read-only: this portal never updates
+    them, and can't. Which app each integration is comes from the app's own
+    <code>appName</code>, not from the name you gave it here.
+  </p>
+
+  {% if not version_check %}
+    <div class="empty-state">
+      Not checked yet — this runs as the <strong>{{ version_task.label }}</strong> scheduled task
+      ({% if version_task.enabled %}{% if version_task.schedule_kind == 'daily' %}daily at {{ version_task.daily_at }} UTC{% else %}every {{ version_task.interval_minutes }} min{% endif %}{% else %}currently disabled{% endif %}),
+      or press “Check now”.
+    </div>
+  {% else %}
+    <div class="admin-table" style="font-size: 13px;">
+      <table>
+        <thead>
+          <tr><th style="width: 170px;">Integration</th><th style="width: 110px;">Installed</th><th style="width: 110px;">Latest</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {% for r in version_check.results %}
+          <tr>
+            <td><strong>{{ r.name }}</strong>{% if r.app %} <span style="color: var(--text-faint);">({{ r.app }})</span>{% endif %}</td>
+            <td>{{ r.installed or '—' }}</td>
+            <td>
+              {% if r.latest %}
+                <a href="{{ r.latest_url }}" target="_blank" rel="noopener noreferrer">{{ r.latest }} ↗</a>
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              {% if r.error %}
+                <span class="led maint"></span> <span style="color: var(--text-dim);">{{ r.error }}</span>
+              {% elif r.update_available %}
+                <span class="led warn"></span> <strong>Update available</strong>
+              {% else %}
+                <span class="led ok"></span> Up to date
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="resource-card__sub" style="margin-top: 8px;">
+      Last checked <span class="local-time" data-utc="{{ version_check.checked_at }}">{{ version_check.checked_at[:16].replace('T', ' ') }} UTC</span>
+    </div>
+  {% endif %}
+</div>
+
 {% if integrations %}
 {% for i in integrations %}
   {% set entry = statuses.get(i.id) %}

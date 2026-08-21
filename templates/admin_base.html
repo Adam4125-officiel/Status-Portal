@@ -18,7 +18,7 @@
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
 
     <div class="admin-nav__group">Monitoring</div>
-    <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations</a>
+    <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations{% if arr_updates_count %} <span class="nav-badge">{{ arr_updates_count }}</span>{% endif %}</a>
     <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources</a>
     <a href="{{ url_for('admin_tasks') }}" class="{{ 'active' if active == 'tasks' }}">Scheduled tasks</a>
 
