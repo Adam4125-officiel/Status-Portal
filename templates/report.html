@@ -43,8 +43,8 @@
     </div>
     <div class="field">
       <label for="contact">Contact (optional)</label>
-      <input type="text" id="contact" name="contact" placeholder="Email, Discord handle... in case follow-up is useful">
-      {% if portal_user %}<div class="field-hint">Your Jellyfin username ({{ portal_user.name }}) is attached to this report already — this is only if you'd rather be contacted somewhere specific.</div>{% endif %}
+      <input type="text" id="contact" name="contact" value="{{ prefill_contact or '' }}" placeholder="Email, Discord handle... in case follow-up is useful">
+      {% if portal_user %}<div class="field-hint">Your Jellyfin username ({{ portal_user.name }}) is attached to this report already, and the admin can reply to you on <a href="{{ url_for('user_account') }}">your account page</a> — this is only if you'd rather be contacted somewhere specific.</div>{% endif %}
     </div>
     <div style="position: absolute; left: -9999px;" aria-hidden="true">
       <label for="website">Leave this field empty</label>

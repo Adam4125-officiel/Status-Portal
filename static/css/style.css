@@ -120,6 +120,47 @@
   white-space: nowrap;
 }
 .user-chip__out:hover { border-color: var(--brand-dim); color: var(--text-primary); text-decoration: none; }
+/* The unread-reply dot on the sign-in chip. The only thing that tells a user an
+   answer is waiting, so it has to read as a notification rather than decoration. */
+.user-chip__dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+  margin-left: 5px;
+  vertical-align: middle;
+}
+a.user-chip__name { color: var(--text-primary); }
+a.user-chip__name:hover { text-decoration: none; color: var(--brand); }
+
+/* ---------------- Account page ---------------- */
+.account-note {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+.account-note--quiet { color: var(--text-faint); font-style: italic; }
+.account-reply {
+  margin-top: 12px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--brand);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.account-reply__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--brand);
+  margin-bottom: 6px;
+}
+.account-reply__body { font-size: 13px; color: var(--text-primary); white-space: pre-wrap; }
+
 .btn.signin {
   border-radius: 20px;
   padding: 6px 16px;
@@ -853,6 +894,24 @@ footer.foot {
   font-family: var(--font-body);
 }
 .field textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); font-size: 13px; }
+
+/* The admin reply box on the reports table. The shared input styling above is scoped
+   to .field, which is a block-level form row - wrong shape for a control that has to
+   sit inline in a table cell. Without this the textarea keeps the browser default
+   white background and is unreadable in dark mode, which is exactly how it shipped
+   for about ten minutes before a screenshot caught it. */
+.reply-box {
+  width: 100%;
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-body);
+  resize: vertical;
+}
+.reply-box:disabled { color: var(--text-faint); background: var(--bg-panel); }
 .field-check {
   display: flex;
   align-items: center;

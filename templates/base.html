@@ -1,5 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+{# data-server-theme is the signed-in user's account-level preference. It is not the
+   applied theme (that stays data-theme, set below) - it's the default this device
+   falls back to when it has no choice of its own stored locally. #}
+<html lang="en"{% if user_theme and user_theme != 'auto' %} data-server-theme="{{ user_theme }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -17,11 +20,19 @@
     // Applied before CSS paints, to avoid a flash of the wrong theme on load.
     // Mirrors theme.js's own fallback: no saved choice yet -> follow the OS preference.
     (function () {
+      // Precedence, matching theme.js exactly: this browser's own saved choice wins
+      // (it's the most recent deliberate action taken here), then the signed-in
+      // user's account preference (so a new device looks right immediately), then
+      // the OS setting.
       var saved = localStorage.getItem('portal-theme');
-      var wantsLight = saved ? saved === 'light'
+      var server = document.documentElement.getAttribute('data-server-theme');
+      var choice = saved || server;
+      var wantsLight = choice ? choice === 'light'
         : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
       if (wantsLight) {
         document.documentElement.setAttribute('data-theme', 'light');
+      } else {
+        document.documentElement.removeAttribute('data-theme');
       }
     })();
   </script>
@@ -39,8 +50,10 @@
   <div class="page-actions">
     {% if user_auth_enabled and not request.path.startswith('/admin') %}
       {% if portal_user %}
-        <span class="user-chip" title="Signed in with your Jellyfin account">
-          <span class="user-chip__name">👤 {{ portal_user.name }}</span>
+        <span class="user-chip">
+          <a class="user-chip__name" href="{{ url_for('user_account') }}"
+             title="Your settings and the reports you've sent">👤 {{ portal_user.name }}{%
+             if unseen_replies %}<span class="user-chip__dot" title="{{ unseen_replies }} reply from the admin"></span>{% endif %}</a>
           <a class="user-chip__out" href="{{ url_for('user_logout') }}">Sign out</a>
         </span>
       {% elif request.endpoint != 'user_login' %}
@@ -51,6 +64,7 @@
             title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
   </div>
   {% block body %}{% endblock %}
+  <script>window.PORTAL_SIGNED_IN = {{ 'true' if portal_user else 'false' }};</script>
   <script src="{{ asset_url('js/theme.js') }}"></script>
   <script src="{{ asset_url('js/csrf.js') }}"></script>
 </body>

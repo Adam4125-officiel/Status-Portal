@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Your account — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="wrap" style="max-width: 760px;">
+  <div class="topbar">
+    <div class="brand">
+      {% if site_logo_filename %}
+        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
+      {% else %}
+        <span class="dot-server"></span>
+      {% endif %}
+      {{ site_name }}
+    </div>
+    <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
+  </div>
+
+  <div class="admin-header">
+    <h1>Your account</h1>
+  </div>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+    Signed in as <strong>{{ portal_user.name }}</strong> with your Jellyfin account.
+    Your settings here are stored by this portal only — nothing on this page changes
+    anything in Jellyfin.
+  </p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <h2 class="section-title">Your reports</h2>
+  {% if reports %}
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
+    Everything you've sent through “Report a problem”, and what's happened to it since.
+  </p>
+  {% for r in reports %}
+  <div class="incident-bubble" style="margin-bottom: 12px;">
+    <div class="incident__head">
+      <span class="badge {{ 'resolved' if r.status == 'resolved' else ('monitoring' if r.status == 'reviewed' else 'identified') }}">
+        {{ report_statuses.get(r.status, r.status) }}
+      </span>
+      <span class="incident__time">
+        <span class="local-time" data-utc="{{ r.created_at }}">{{ r.created_at[:16].replace('T', ' ') }} UTC</span>
+      </span>
+    </div>
+    <div class="incident__body">
+      {% if r.service_name %}
+        <div class="incident__services">About: {{ r.service_name }}</div>
+      {% endif %}
+      <div class="incident__desc">{{ r.message }}</div>
+
+      {% if r.incident_id and r.incident_title %}
+        <div class="account-note">
+          <strong>An incident was opened from this report:</strong>
+          “{{ r.incident_title }}” — currently <em>{{ r.incident_status }}</em>.
+          <a href="{{ url_for('index') }}#incidents">See it on the status page</a>
+        </div>
+      {% elif r.incident_id %}
+        <div class="account-note">
+          An incident was opened from this report, but it has since been deleted.
+        </div>
+      {% endif %}
+
+      {% if r.admin_reply %}
+        <div class="account-reply">
+          <div class="account-reply__label">Reply from the admin{% if r.replied_at %}
+            · <span class="local-time" data-utc="{{ r.replied_at }}">{{ r.replied_at[:16].replace('T', ' ') }} UTC</span>{% endif %}
+          </div>
+          <div class="account-reply__body">{{ r.admin_reply }}</div>
+        </div>
+      {% elif r.status == 'new' %}
+        <div class="account-note account-note--quiet">No reply yet.</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="empty-state">
+    You haven't sent any reports yet. If something looks wrong,
+    <a href="{{ url_for('report_problem') }}">let the admin know</a> — you'll be able to
+    follow what happens to it here.
+  </div>
+  {% endif %}
+
+  <h2 class="section-title" style="margin-top: 28px;">Settings</h2>
+  <form method="POST" class="form-panel" id="account-prefs"
+        data-just-saved="{{ '1' if just_saved else '0' }}" data-theme-pref="{{ prefs.theme }}">
+    <div class="field">
+      <label for="theme">Theme</label>
+      <select id="theme" name="theme">
+        <option value="auto" {{ 'selected' if prefs.theme == 'auto' }}>Auto — follow each device's setting</option>
+        <option value="dark" {{ 'selected' if prefs.theme == 'dark' }}>Dark</option>
+        <option value="light" {{ 'selected' if prefs.theme == 'light' }}>Light</option>
+      </select>
+      <div class="field-hint">
+        Applies to every device you sign in on. The ☀️/🌙 button in the corner still
+        works and takes priority on the device you press it — pressing it just updates
+        this setting too.
+      </div>
+    </div>
+    <div class="field">
+      <label for="contact">Contact details for your reports (optional)</label>
+      <input type="text" id="contact" name="contact" value="{{ prefs.contact }}"
+             placeholder="Email, Discord handle…">
+      <div class="field-hint">
+        Pre-fills the contact box when you report a problem, so you don't retype it.
+        The admin can already reply here without it — this is for if you'd rather be
+        reached somewhere specific.
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save settings</button>
+      <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
+    </div>
+  </form>
+</div>
+<script src="{{ asset_url('js/local_time.js') }}"></script>
+<script src="{{ asset_url('js/account.js') }}"></script>
+{% endblock %}

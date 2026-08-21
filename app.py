@@ -232,9 +232,17 @@ def _inject_portal_user():
     by the public topbar, the report form and the sign-in page itself, so it goes
     here rather than being threaded through every route by hand (same reasoning as
     csrf_token() being a Jinja global)."""
-    return {"portal_user": session.get("portal_user"),
+    user = session.get("portal_user")
+    # Two extra reads, and only for a signed-in visitor: the theme they've chosen
+    # (rendered into <html> so a device that has never seen this portal doesn't flash
+    # the wrong colours before JavaScript runs) and whether an admin reply is waiting
+    # (the only thing that tells them to go and look).
+    theme = db.get_user_preferences(user["id"])["theme"] if user else "auto"
+    return {"portal_user": user,
             "user_auth_enabled": jellyfin_auth.is_enabled(),
-            "report_needs_login": _report_login_required()}
+            "report_needs_login": _report_login_required(),
+            "user_theme": theme if theme in db.USER_THEMES else "auto",
+            "unseen_replies": db.count_unseen_replies(user["id"]) if user else 0}
 
 
 @app.context_processor
@@ -361,7 +369,7 @@ def _enforce_user_session():
 
 # POST paths outside /admin/ that still need CSRF protection. /report is
 # conditional rather than listed here - see _csrf_required_for().
-_CSRF_PROTECTED_PUBLIC_PATHS = {"/login"}
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme"}
 
 
 def _csrf_required_for(path, method):
@@ -593,6 +601,15 @@ def _report_rate_limited():
 
 def _register_report_submission():
     _report_state["count"] += 1
+
+
+# Wording aimed at the person who filed the report, not at the admin triaging it:
+# "new" is meaningless to a reporter, "not looked at yet" isn't.
+REPORT_STATUS_LABELS = {
+    "new": "Waiting to be looked at",
+    "reviewed": "Being looked into",
+    "resolved": "Closed",
+}
 
 
 def _report_login_required():
@@ -1108,14 +1125,16 @@ def report_problem():
         message = request.form.get("message", "").strip()
         if not message:
             flash("Please describe the problem.", "error")
-            return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
-                                    site_name=site_name)
+            return render_template("report.html", services=services,
+                                    preselect_service_id=preselect_service_id, site_name=site_name,
+                                    prefill_contact=request.form.get("contact", ""))
         contact = request.form.get("contact", "").strip()[:200]
         service_id = request.form.get("service_id", type=int)
         service = db.get_service(service_id) if service_id else None
         user = current_user()
         db.create_problem_report(message[:2000], contact, service["id"] if service else None,
-                                  reporter_user=(user or {}).get("name", "")[:100])
+                                  reporter_user=(user or {}).get("name", "")[:100],
+                                  reporter_user_id=(user or {}).get("id", ""))
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
@@ -1123,8 +1142,10 @@ def report_problem():
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
+    user = current_user()
     return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
-                            site_name=site_name)
+                            site_name=site_name,
+                            prefill_contact=db.get_user_preferences(user["id"])["contact"] if user else "")
 
 
 @app.route("/admin/reports")
@@ -1139,6 +1160,29 @@ def admin_report_status(rid):
     status = request.form.get("status", "reviewed")
     db.update_problem_report_status(rid, status if status in ("new", "reviewed", "resolved") else "reviewed")
     flash("Report updated.", "success")
+    return redirect(url_for("admin_reports"))
+
+
+@app.route("/admin/reports/<int:rid>/reply", methods=["POST"])
+@login_required
+def admin_report_reply(rid):
+    """Answers the reporter. Only visible to them, on their own account page - a
+    reply is a message to one person, not something to publish next to the service
+    card, and the report's own text was never shown publicly either.
+
+    Saving an empty reply clears it, which is the only way to retract something said
+    by mistake."""
+    report = db.get_problem_report(rid)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("admin_reports"))
+    db.set_problem_report_reply(rid, request.form.get("reply", "")[:2000])
+    if not report["reporter_user_id"]:
+        flash("Reply saved — but this report was submitted anonymously, so nobody can "
+              "see it. Use the contact details if there are any.", "error")
+    else:
+        flash(f"Reply saved. {report['reporter_user']} will see it on their account page.",
+              "success")
     return redirect(url_for("admin_reports"))
 
 
@@ -1168,6 +1212,9 @@ def admin_report_create_incident(rid):
     description = f'{source}\n\n{report["message"]}'
     iid = db.create_incident({"title": title, "description": description, "status": "investigating"}, service_ids)
     db.update_problem_report_status(rid, "resolved")
+    # Remembered so the reporter's account page can show what became of their report,
+    # and keep showing that incident's current status as it progresses.
+    db.set_problem_report_incident(rid, iid)
     flash("Incident created from report.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -1239,6 +1286,58 @@ def user_login():
             flash("Incorrect username or password.", "error")
 
     return render_template("user_login.html", next_url=next_url)
+
+
+@app.route("/account", methods=["GET", "POST"])
+@user_login_required
+def user_account():
+    """A signed-in visitor's own page: their preferences, and what became of the
+    problem reports they filed.
+
+    The reports half is the point. Before this, submitting a report was a black hole -
+    no way to see whether anyone had looked at it, whether it became an incident, or
+    whether the admin had said anything back. Everything shown here already existed in
+    the database; the only new fact is the admin's reply.
+
+    Scoped strictly to the signed-in user's own reports, by Jellyfin user id (see
+    db.list_reports_for_user, which refuses a blank id so anonymous reports can never
+    be handed to whoever asks first)."""
+    user = current_user()
+    user_id = user["id"]
+
+    if request.method == "POST":
+        theme = request.form.get("theme", "auto")
+        contact = request.form.get("contact", "").strip()[:200]
+        db.set_user_preferences(user_id, theme=theme, contact=contact)
+        flash("Your settings have been saved.", "success")
+        # saved=1 tells the page to bring this browser's own stored theme into line
+        # with what was just saved - otherwise the setting would appear to do nothing
+        # on the very device it was changed from, because a local choice made with
+        # the floating toggle takes precedence over the account-level default.
+        return redirect(url_for("user_account", saved=1))
+
+    # Opening the page is what marks replies as read; the write is skipped entirely
+    # when there's nothing to mark, which is the overwhelmingly common case.
+    db.mark_replies_seen(user_id)
+    return render_template("account.html",
+                            reports=db.list_reports_for_user(user_id),
+                            prefs=db.get_user_preferences(user_id),
+                            themes=db.USER_THEMES,
+                            just_saved=bool(request.args.get("saved")),
+                            site_name=db.get_setting("site_name", "Server"),
+                            report_statuses=REPORT_STATUS_LABELS)
+
+
+@app.route("/account/theme", methods=["POST"])
+@user_login_required
+def user_account_theme():
+    """Endpoint for the floating light/dark toggle, so a signed-in user's choice
+    follows them to their other devices instead of living only in the browser that
+    made it. Deliberately tiny and separate from the settings form above: it must not
+    be able to touch any other preference, and it answers with no body because the
+    page has already applied the change locally."""
+    db.set_user_preferences(current_user()["id"], theme=request.form.get("theme", "auto"))
+    return ("", 204)
 
 
 @app.route("/logout")

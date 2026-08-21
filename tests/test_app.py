@@ -3219,3 +3219,206 @@ def test_an_anonymous_report_says_so_in_the_incident(client, isolated_db):
     rid = db.create_problem_report("Something broke")
     client.post(f"/admin/reports/{rid}/create-incident", follow_redirects=True)
     assert "Reported anonymously" in db.list_incidents()[0]["description"]
+
+
+# ---------------------------------------------------------------------------
+# The signed-in user's own account page (/account)
+# ---------------------------------------------------------------------------
+def _file_report(client, message="something is broken"):
+    client.get("/report")
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    return client.post("/report", data={"message": message}, follow_redirects=True)
+
+
+def test_the_account_page_requires_a_signed_in_visitor(client, user_auth):
+    resp = client.get("/account")
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+
+def test_being_the_admin_does_not_grant_the_account_page(client, user_auth):
+    """user_login_required reads portal_user and nothing else - the admin session is a
+    different identity, not a superset of this one."""
+    _login(client)
+    assert client.get("/account").status_code == 302
+
+
+def test_the_account_page_shows_the_signed_in_user(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "Your account" in body
+    assert "adam" in body
+
+
+def test_the_username_in_the_chip_links_to_the_account_page(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/").data.decode()
+    assert 'href="/account"' in body
+
+
+def test_a_user_sees_their_own_report_and_its_status(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Playback keeps buffering")
+    body = client.get("/account").data.decode()
+    assert "Playback keeps buffering" in body
+    assert "Waiting to be looked at" in body
+
+
+def test_a_user_never_sees_someone_elses_report(client, user_auth, monkeypatch):
+    """The security property of this whole page."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    db.create_problem_report("sam's private report", "", None,
+                             reporter_user="sam", reporter_user_id="u2")
+    db.create_problem_report("an anonymous report")
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "sam's private report" not in body
+    assert "an anonymous report" not in body
+
+
+def test_the_status_wording_is_aimed_at_the_reporter(client, user_auth, monkeypatch):
+    """"new"/"reviewed" are triage words that mean nothing to the person waiting."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "reviewed")
+    assert "Being looked into" in client.get("/account").data.decode()
+
+
+def test_an_admin_reply_is_shown_to_the_reporter(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+
+    _login(client)
+    client.post(f"/admin/reports/{rid}/reply", data={"reply": "Restarted the transcoder."})
+    client.get("/admin/logout")
+
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "Restarted the transcoder." in body
+    assert "Reply from the admin" in body
+
+
+def test_an_unread_reply_puts_a_dot_on_the_chip_and_opening_the_page_clears_it(client, user_auth, monkeypatch):
+    """Without the dot nobody knows to go and look, which makes replying pointless."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.set_problem_report_reply(rid, "Answered.")
+
+    assert "user-chip__dot" in client.get("/").data.decode()
+    client.get("/account")
+    assert "user-chip__dot" not in client.get("/").data.decode()
+
+
+def test_a_linked_incident_is_shown_on_the_account_page(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Jellyfin is down")
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+
+    _login(client)
+    client.post(f"/admin/reports/{rid}/create-incident")
+    client.get("/admin/logout")
+
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "An incident was opened from this report" in body
+    assert "investigating" in body
+
+
+def test_saving_preferences_persists_them(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    resp = client.post("/account", data={"theme": "light", "contact": "me@example.invalid"},
+                       follow_redirects=True)
+    assert "settings have been saved" in resp.data.decode()
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
+
+
+def test_an_explicit_theme_is_rendered_into_the_html_tag(client, user_auth, monkeypatch):
+    """So a device that has never seen this portal doesn't flash the wrong colours
+    before any JavaScript runs."""
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="light")
+    assert 'data-server-theme="light"' in client.get("/").data.decode()
+
+
+# The bare string "data-server-theme" also appears inside the inline FOUC script,
+# which reads the attribute - so these assert on the *attribute* form specifically
+# (the script uses single quotes), not on the name appearing anywhere in the page.
+def test_auto_renders_no_server_theme_attribute(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="auto")
+    assert 'data-server-theme="' not in client.get("/").data.decode()
+
+
+def test_a_signed_out_visitor_gets_no_server_theme(client, user_auth):
+    assert 'data-server-theme="' not in client.get("/").data.decode()
+
+
+def test_the_theme_endpoint_updates_only_the_theme(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="dark", contact="keep me")
+    resp = client.post("/account/theme", data={"theme": "light"})
+    assert resp.status_code == 204
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+
+
+def test_the_theme_endpoint_requires_a_signed_in_visitor(client, user_auth):
+    assert client.post("/account/theme", data={"theme": "light"}).status_code == 302
+
+
+def test_the_saved_flag_is_passed_through_for_the_local_sync(client, user_auth, monkeypatch):
+    """account.js only syncs this browser's stored theme right after a save - the flag
+    is how it knows, and without it the setting appears to do nothing on the very
+    device it was changed from."""
+    _sign_in(client, monkeypatch)
+    assert 'data-just-saved="1"' in client.get("/account?saved=1").data.decode()
+    assert 'data-just-saved="0"' in client.get("/account").data.decode()
+
+
+def test_the_report_form_prefills_the_saved_contact(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", contact="adam@example.invalid")
+    assert 'value="adam@example.invalid"' in client.get("/report").data.decode()
+
+
+# ---- The admin side of replying ----
+def test_replying_to_an_anonymous_report_warns_that_nobody_will_see_it(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("anonymous complaint")
+    resp = client.post(f"/admin/reports/{rid}/reply", data={"reply": "hello?"},
+                       follow_redirects=True)
+    assert "nobody can see it" in resp.data.decode()
+
+
+def test_replying_requires_admin_login(client, isolated_db):
+    rid = db.create_problem_report("x", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert client.post(f"/admin/reports/{rid}/reply", data={"reply": "sneaky"}).status_code == 302
+    assert db.get_problem_report(rid)["admin_reply"] == ""
+
+
+def test_replying_to_a_missing_report_is_rejected_cleanly(client, isolated_db):
+    _login(client)
+    resp = client.post("/admin/reports/9999/reply", data={"reply": "x"}, follow_redirects=True)
+    assert "Report not found" in resp.data.decode()
+
+
+def test_the_admin_list_shows_whether_a_reply_has_been_read(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+    _login(client)
+    client.post(f"/admin/reports/{rid}/reply", data={"reply": "On it."})
+    assert "Not read yet" in client.get("/admin/reports").data.decode()
+
+    client.get("/admin/logout")
+    _sign_in(client, monkeypatch)
+    client.get("/account")
+    client.get("/logout")
+    _login(client)
+    assert "Seen by adam" in client.get("/admin/reports").data.decode()

@@ -281,6 +281,26 @@ def init_db():
         )
     """)
 
+    # Per-user settings the *user* chooses about themselves, as opposed to
+    # jellyfin_users, which mirrors Jellyfin (plus the one admin-owned decision,
+    # portal_allowed, that predates this table). Deliberately its own table rather
+    # than more columns on jellyfin_users: that one is rewritten wholesale by every
+    # sync, so anything stored there has to be explicitly carried across
+    # replace_jellyfin_users() or it is silently wiped within the hour. Keeping
+    # user-owned data out of it means future preferences can't fall into that trap.
+    #
+    # Rows are keyed by Jellyfin's stable user id and are deliberately NOT deleted
+    # when a user disappears from Jellyfin - if the account comes back (or the sync
+    # was simply wrong for a poll), their settings are still here.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id TEXT PRIMARY KEY,
+            theme TEXT NOT NULL DEFAULT 'auto',   -- auto | dark | light
+            contact TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
     # Retrofit columns added after a table already existed in some earlier version of
@@ -318,6 +338,19 @@ def init_db():
     # normal case. Needs _ensure_column rather than living in the CREATE TABLE above
     # because jellyfin_users already exists on any install running 1.7.0-rc.1.
     _ensure_column(conn, "jellyfin_users", "portal_allowed", "INTEGER NOT NULL DEFAULT 1")
+    # Who filed a report, by Jellyfin's stable user id - reporter_user (the name) is
+    # kept alongside it for *display*, because it has to stay readable for someone
+    # later removed from Jellyfin entirely. The id is what "show me my reports" looks
+    # up by, so renaming yourself in Jellyfin doesn't orphan your own report history.
+    _ensure_column(conn, "problem_reports", "reporter_user_id", "TEXT NOT NULL DEFAULT ''")
+    # The admin's reply, and whether the reporter has seen it yet.
+    _ensure_column(conn, "problem_reports", "admin_reply", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "problem_reports", "replied_at", "TEXT")
+    _ensure_column(conn, "problem_reports", "reply_seen", "INTEGER NOT NULL DEFAULT 0")
+    # Set when an admin turns a report into an incident, so the reporter can be shown
+    # what came of it. No FK constraint: _ensure_column can't add one to an existing
+    # table, so a deleted incident is handled by the LEFT JOIN reading it instead.
+    _ensure_column(conn, "problem_reports", "incident_id", "INTEGER")
     conn.commit()
 
     # Write-ahead logging. SQLite's default rollback journal takes a database-wide
@@ -377,6 +410,9 @@ def init_db():
         # *after* a successful authentication). Small table, but this is the one
         # query on the sign-in path, and an index costs nothing here.
         "CREATE INDEX IF NOT EXISTS idx_jellyfin_users_name_lower ON jellyfin_users (name_lower)",
+        # Backs "show me my own reports" on the account page, which runs on every
+        # visit by a signed-in user.
+        "CREATE INDEX IF NOT EXISTS idx_problem_reports_reporter ON problem_reports (reporter_user_id)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -1262,12 +1298,13 @@ def delete_discord_status_message(channel_id):
 # ---------- Problem reports ----------
 # A visitor-submitted bug/issue report, separate from the admin-authored
 # incidents/maintenance system entirely - see app.py's public /report route.
-def create_problem_report(message, contact="", service_id=None, reporter_user=""):
+def create_problem_report(message, contact="", service_id=None, reporter_user="", reporter_user_id=""):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO problem_reports (message, contact, service_id, status, created_at, reporter_user)
-        VALUES (?, ?, ?, 'new', ?, ?)
-    """, (message, contact, service_id, now_iso(), reporter_user))
+        INSERT INTO problem_reports (message, contact, service_id, status, created_at,
+                                      reporter_user, reporter_user_id)
+        VALUES (?, ?, ?, 'new', ?, ?, ?)
+    """, (message, contact, service_id, now_iso(), reporter_user, reporter_user_id))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -1484,3 +1521,125 @@ def jellyfin_users_synced_at():
     row = conn.execute("SELECT MAX(last_synced_at) FROM jellyfin_users").fetchone()
     conn.close()
     return row[0] if row and row[0] else None
+
+
+# ---------- Problem report replies and per-user report history ----------
+# What turns the report form from a black hole into a conversation: the admin can
+# answer, and the reporter can see the answer plus what became of their report.
+def set_problem_report_reply(rid, reply):
+    """Stores (or clears) the admin's reply. Writing a reply resets reply_seen, so
+    editing an already-read reply shows up as new again - which is what the reporter
+    needs, since the text they read is no longer the text that's there."""
+    reply = (reply or "").strip()
+    conn = get_db()
+    conn.execute("""
+        UPDATE problem_reports SET admin_reply=?, replied_at=?, reply_seen=0 WHERE id=?
+    """, (reply, now_iso() if reply else None, rid))
+    conn.commit()
+    conn.close()
+
+
+def set_problem_report_incident(rid, incident_id):
+    """Links a report to the incident an admin raised from it, so the reporter can be
+    told what came of it rather than just seeing the report marked resolved."""
+    conn = get_db()
+    conn.execute("UPDATE problem_reports SET incident_id=? WHERE id=?", (incident_id, rid))
+    conn.commit()
+    conn.close()
+
+
+def list_reports_for_user(user_id):
+    """One signed-in user's own reports, newest first, with the linked incident's
+    current title/status where there is one.
+
+    Scoped by Jellyfin's stable user id and nothing else. A blank user_id must never
+    match anything: every anonymous report has reporter_user_id = '', so a caller
+    that passed an empty id would otherwise be handed every anonymous report in the
+    database. The guard is here rather than in the route so it can't be forgotten by
+    a second caller later.
+
+    LEFT JOIN so a report whose incident was deleted still lists, with no incident
+    attached - there's no FK to null it out for us."""
+    if not user_id:
+        return []
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT r.*, i.title AS incident_title, i.status AS incident_status
+        FROM problem_reports r
+        LEFT JOIN incidents i ON i.id = r.incident_id
+        WHERE r.reporter_user_id = ?
+        ORDER BY r.created_at DESC
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [_attach_report_service(dict(r)) for r in rows]
+
+
+def count_unseen_replies(user_id):
+    """How many of this user's reports have a reply they haven't looked at yet -
+    backs the little dot on the sign-in chip, which is the only thing that tells
+    someone an answer is waiting."""
+    if not user_id:
+        return 0
+    conn = get_db()
+    count = conn.execute("""
+        SELECT COUNT(*) FROM problem_reports
+        WHERE reporter_user_id = ? AND admin_reply != '' AND reply_seen = 0
+    """, (user_id,)).fetchone()[0]
+    conn.close()
+    return count
+
+
+def mark_replies_seen(user_id):
+    """Called when the user actually opens their account page. Returns how many rows
+    it marked, so the caller can skip the write entirely when there was nothing to
+    mark (the common case, on a page that's read far more often than it changes)."""
+    if not user_id:
+        return 0
+    conn = get_db()
+    cur = conn.execute("""
+        UPDATE problem_reports SET reply_seen=1
+        WHERE reporter_user_id = ? AND admin_reply != '' AND reply_seen = 0
+    """, (user_id,))
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+    return changed
+
+
+# ---------- Per-user preferences (user-owned, unlike jellyfin_users) ----------
+USER_THEMES = ("auto", "dark", "light")
+DEFAULT_USER_PREFERENCES = {"theme": "auto", "contact": ""}
+
+
+def get_user_preferences(user_id):
+    """Always returns a complete dict, so callers never branch on "has this user ever
+    saved anything". An unrecognised stored theme falls back to the default rather
+    than being handed to a template that will render it into an HTML attribute."""
+    prefs = dict(DEFAULT_USER_PREFERENCES)
+    if not user_id:
+        return prefs
+    conn = get_db()
+    row = conn.execute("SELECT * FROM user_preferences WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    if row:
+        prefs["theme"] = row["theme"] if row["theme"] in USER_THEMES else "auto"
+        prefs["contact"] = row["contact"] or ""
+    return prefs
+
+
+def set_user_preferences(user_id, theme=None, contact=None):
+    """Upsert. Only the named fields are written, so a caller that only knows about
+    the theme (the toggle button's endpoint) can't blank out the contact."""
+    if not user_id:
+        return
+    current = get_user_preferences(user_id)
+    theme = theme if theme in USER_THEMES else current["theme"]
+    contact = current["contact"] if contact is None else contact
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO user_preferences (user_id, theme, contact, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, contact=excluded.contact,
+                                            updated_at=excluded.updated_at
+    """, (user_id, theme, contact, now_iso()))
+    conn.commit()
+    conn.close()

@@ -792,3 +792,136 @@ def test_problem_reports_record_their_reporter(isolated_db):
     assert db.get_problem_report(rid)["reporter_user"] == "adam"
     anon = db.create_problem_report("also broken")
     assert db.get_problem_report(anon)["reporter_user"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Report replies and per-user report history
+# ---------------------------------------------------------------------------
+def test_reports_are_scoped_to_their_own_reporter(isolated_db):
+    """The one that must never regress: a signed-in user sees their reports and
+    nobody else's."""
+    db.create_problem_report("mine", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.create_problem_report("theirs", "", None, reporter_user="sam", reporter_user_id="u2")
+    mine = db.list_reports_for_user("u1")
+    assert [r["message"] for r in mine] == ["mine"]
+
+
+def test_a_blank_user_id_matches_nothing(isolated_db):
+    """Every anonymous report has reporter_user_id = '', so a caller passing an empty
+    id must get nothing rather than the whole anonymous pile."""
+    db.create_problem_report("anonymous one")
+    db.create_problem_report("anonymous two")
+    assert db.list_reports_for_user("") == []
+    assert db.list_reports_for_user(None) == []
+    assert db.count_unseen_replies("") == 0
+    assert db.mark_replies_seen("") == 0
+
+
+def test_a_reply_is_stored_and_starts_unseen(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.set_problem_report_reply(rid, "  Looking into it now.  ")
+    row = db.get_problem_report(rid)
+    assert row["admin_reply"] == "Looking into it now."
+    assert row["replied_at"] is not None
+    assert row["reply_seen"] == 0
+    assert db.count_unseen_replies("u1") == 1
+
+
+def test_marking_replies_seen_clears_the_count(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.set_problem_report_reply(rid, "Fixed.")
+    assert db.mark_replies_seen("u1") == 1
+    assert db.count_unseen_replies("u1") == 0
+    # Nothing left to mark, so a second visit writes nothing at all.
+    assert db.mark_replies_seen("u1") == 0
+
+
+def test_editing_a_reply_makes_it_unread_again(isolated_db):
+    """The text they read is no longer the text that's there, so it has to resurface."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.set_problem_report_reply(rid, "Fixed.")
+    db.mark_replies_seen("u1")
+    db.set_problem_report_reply(rid, "Actually, not fixed.")
+    assert db.count_unseen_replies("u1") == 1
+
+
+def test_an_empty_reply_clears_it(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.set_problem_report_reply(rid, "Oops, wrong report.")
+    db.set_problem_report_reply(rid, "")
+    row = db.get_problem_report(rid)
+    assert row["admin_reply"] == ""
+    assert row["replied_at"] is None
+    assert db.count_unseen_replies("u1") == 0
+
+
+def test_a_linked_incident_is_reported_with_its_current_status(isolated_db):
+    rid = db.create_problem_report("down", "", None, reporter_user="adam", reporter_user_id="u1")
+    iid = db.create_incident({"title": "Jellyfin unreachable", "description": "",
+                               "status": "investigating"})
+    db.set_problem_report_incident(rid, iid)
+    report = db.list_reports_for_user("u1")[0]
+    assert report["incident_title"] == "Jellyfin unreachable"
+    assert report["incident_status"] == "investigating"
+
+    db.update_incident(iid, {"title": "Jellyfin unreachable", "description": "",
+                              "status": "resolved", "service_id": None})
+    assert db.list_reports_for_user("u1")[0]["incident_status"] == "resolved"
+
+
+def test_a_deleted_incident_leaves_the_report_listable(isolated_db):
+    """There's no FK to null the column out, so the LEFT JOIN has to cope."""
+    rid = db.create_problem_report("down", "", None, reporter_user="adam", reporter_user_id="u1")
+    iid = db.create_incident({"title": "Gone", "description": "", "status": "investigating"})
+    db.set_problem_report_incident(rid, iid)
+    db.delete_incident(iid)
+    report = db.list_reports_for_user("u1")[0]
+    assert report["incident_id"] == iid
+    assert report["incident_title"] is None
+
+
+def test_reports_follow_a_rename_because_they_key_off_the_user_id(isolated_db):
+    """reporter_user is for display and freezes at submission time; reporter_user_id
+    is what "my reports" looks up by."""
+    db.create_problem_report("old", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.create_problem_report("new", "", None, reporter_user="adam-renamed", reporter_user_id="u1")
+    assert len(db.list_reports_for_user("u1")) == 2
+
+
+# ---------------------------------------------------------------------------
+# User preferences
+# ---------------------------------------------------------------------------
+def test_preferences_default_without_a_stored_row(isolated_db):
+    assert db.get_user_preferences("u1") == {"theme": "auto", "contact": ""}
+    assert db.get_user_preferences("") == {"theme": "auto", "contact": ""}
+
+
+def test_preferences_round_trip(isolated_db):
+    db.set_user_preferences("u1", theme="light", contact="adam@example.invalid")
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "adam@example.invalid"}
+
+
+def test_setting_only_the_theme_leaves_the_contact_alone(isolated_db):
+    """The toggle button's endpoint only knows about the theme and must not be able
+    to blank out anything else."""
+    db.set_user_preferences("u1", theme="dark", contact="keep me")
+    db.set_user_preferences("u1", theme="light")
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+
+
+def test_an_unknown_theme_is_ignored_rather_than_stored(isolated_db):
+    db.set_user_preferences("u1", theme="rainbow")
+    assert db.get_user_preferences("u1")["theme"] == "auto"
+    db.set_user_preferences("u1", theme="dark")
+    db.set_user_preferences("u1", theme="nonsense")
+    assert db.get_user_preferences("u1")["theme"] == "dark"
+
+
+def test_preferences_are_untouched_by_a_user_sync(isolated_db):
+    """The reason preferences live in their own table: replace_jellyfin_users() is a
+    full delete-and-reinsert, and anything stored there has to be explicitly carried
+    across or it's silently wiped."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", theme="light", contact="me@example.invalid")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
