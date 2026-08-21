@@ -674,7 +674,20 @@ footer.foot {
   position: sticky;
   top: 0;
   height: 100vh;
+  /* Grouping headings made the nav taller than a laptop viewport. Without this the
+     bottom entries (About, Two-factor) are simply unreachable on a short screen. */
+  overflow-y: auto;
 }
+.admin-nav__group {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 10px 5px;
+  margin-top: 14px;
+}
+.admin-nav__group:first-of-type { margin-top: 0; }
 .admin-nav__brand {
   font-family: var(--font-display);
   font-weight: 600;

@@ -92,6 +92,7 @@ have bitten someone on exactly that change.
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
+| A new admin page, or moving one in the nav | *Admin panel navigation* → pick a group, keep the route, three labels must agree |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
@@ -1126,6 +1127,76 @@ DB-backed Settings pages, not a code edit.
 - `config.SCHEDULER_TICK_SECONDS` (30s) is the granularity floor — a task set to
   "every 5 minutes" can only be as punctual as the tick allows. It's a check
   interval, hence an env var; everything per-task is a DB row.
+- **Three of this app's recurring jobs are deliberately *not* tasks, and must stay
+  that way** — the health-check loop (switching it off from a browser would also
+  switch off incident detection, which is the portal's whole job), resource polling
+  (runs every 10s, faster than `SCHEDULER_TICK_SECONDS`, so the scheduler physically
+  cannot drive it), and the Discord bot's refresh (lives inside discord.py's own
+  asyncio loop). They are registered read-only via **`scheduler.register_loop()`** so
+  `/admin/tasks` is still the complete answer to "what runs on a timer" instead of
+  two thirds of it. `is_alive` is a **callable**, not a value — a thread that died
+  since startup has to render as dead, and a value would freeze "alive" forever.
+  `alive is None` means "never started in this process", which reads differently from
+  "started and died" and must not be collapsed into it.
+- **`tests/test_conventions.py::test_no_new_bare_background_loops` counts `while
+  True:` per module against a named allow-list.** A fourth one fails the suite with
+  instructions. If a new loop genuinely can't be a task, register it as a loop *and*
+  add it there with the reason — don't just raise the number.
+- **The update check and the status-history prune are tasks** (`update_check` in
+  `updater.py`, `prune_status_history` in `app.py`), not hand-rolled "is it due yet"
+  checks bolted onto the health-check loop, which is what both used to be. The prune
+  in particular was tracked on a module-level float, so a portal restarted twice a
+  day never pruned at all — deriving the schedule from the stored `last_run_at` is
+  what fixes that, and is the general argument for the framework.
+- **Automatic update checking has exactly one switch.** `/admin/about`'s checkbox
+  writes the `update_check` task's own `enabled` flag (via `app._set_update_check_enabled()`,
+  preserving the rest of the schedule — it's an on/off switch, not a reschedule), and
+  `updater.update_check_enabled()` reads that row. Don't reintroduce a separate
+  `update_check_enabled` setting beside it: the two would drift, and the About page
+  would confidently contradict the Tasks page. The legacy setting is still read
+  **once, at import**, purely to seed the new task's default so upgrading preserves an
+  admin's existing "don't phone home" choice. `updater.py`'s import surface widened to
+  include `scheduler` for the registration — still config/db-only, still no Flask, so
+  the CLI is unaffected.
+- **`PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` is now a *default*, not a fixed interval** —
+  it decides what the task's schedule starts as; after that the DB row wins and an
+  admin changes it from `/admin/tasks` with no restart.
+
+## Admin panel navigation (`templates/admin_base.html`)
+
+- **The nav is grouped by what an admin is trying to do** (Status · Content ·
+  Monitoring · Notifications · System), not by when a feature was added. Group
+  headings are `.admin-nav__group` spans, not nested lists — the nav is still a flat
+  sequence of `<a>` tags, which is what keeps the `active` matching trivial.
+- **Grouping is presentation only: no route ever moves for it.** Bookmarks are the
+  reason. A page that belongs in a new group gets a new nav position and keeps its
+  URL; if a genuinely new page is needed (as `/admin/notifications` was), add the
+  route rather than relocating an existing one.
+- **`.admin-nav` needs `overflow-y: auto`.** The grouped nav is ~966px tall and a
+  laptop viewport is ~650–720px, so without it the bottom entries (About, Two-factor
+  auth) are simply unreachable — invisible to every route-level test and obvious the
+  moment you open a browser at a real window height.
+- **A page's `<h1>`, its `{% block title %}` and its nav label must all match**, and
+  the nav label is now also the thing that decides the other two when they disagree.
+  Renaming a nav entry means checking all three (this is why "Discord Bot — Servers"
+  became "Discord servers" in three places at once).
+- **Every nav entry needs its own `active` key.** A sub-page sharing its parent's key
+  (as `/admin/discord-bot/guilds` did) highlights the wrong entry the moment it gets
+  its own line in the nav.
+
+## Notification channels (`/admin/notifications`, `notifications.py`)
+
+- **`notifications.channel_summary()` is the single list of what channels exist**, and
+  it lives next to `notify()` on purpose: those are the two places a new channel has
+  to appear, and keeping them adjacent is what stops a channel that sends perfectly
+  from being invisible on the admin page, or vice versa. The admin route just renders
+  whatever that function returns.
+- The channel status and "Send test" button **moved off `/admin/settings`** into this
+  page. The test button still calls `notifications.notify()` with a canned payload —
+  the real dispatch path, not a parallel one. It deliberately no longer refuses when
+  nothing is configured: `notify()` with no channels is already a no-op and the button
+  is disabled in the template, so the refusal was a third place to keep in step for no
+  benefit.
 
 ## Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0
 

@@ -184,10 +184,11 @@ JELLYFIN_AUTH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_JELLYFIN_AUTH_TIMEOUT
 # ---------------------------------------------------------------------------
 # Self-update (see updater.py / update.py)
 # ---------------------------------------------------------------------------
-# How often the background thread re-asks GitHub what the latest release is. This
-# is a check interval, so per this project's config split it's an env var, not a
-# DB setting - unlike the *channel* (stable/unstable), which is a routine toggle an
-# admin flips from the browser and therefore lives in the settings table.
+# How often the portal re-asks GitHub what the latest release is. The check is a
+# scheduled task now (see updater.py's registration), so this is the *default* for
+# that task's schedule rather than a hard interval: per-task scheduling is a DB row an
+# admin can change from /admin/tasks, and this decides what it starts as. The
+# *channel* (stable/unstable) is a routine toggle and likewise lives in the database.
 # 6h by default: GitHub's unauthenticated API allows 60 requests/hour per IP and
 # nothing here benefits from knowing about a new release sooner than that.
 UPDATE_CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_UPDATE_CHECK_INTERVAL_SECONDS", "21600"))

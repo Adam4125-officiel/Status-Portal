@@ -11,6 +11,28 @@ import config
 TIMEOUT = 5
 
 
+def channel_summary():
+    """What delivery channels exist and whether each one is set up.
+
+    Lives here rather than in the admin route so that adding a channel is a change to
+    this module alone: notify() and this list are the two things a new channel has to
+    appear in, and keeping them side by side is what stops a channel that sends
+    perfectly from being invisible on the admin page (or vice versa)."""
+    return [
+        {"key": "discord",
+         "label": "Discord webhook",
+         "description": "Posts to one Discord channel. Separate from the Discord bot - "
+                        "a webhook is a one-way URL and needs no bot in your server.",
+         "env_var": "PORTAL_DISCORD_WEBHOOK_URL",
+         "configured": bool(config.DISCORD_WEBHOOK_URL)},
+        {"key": "ntfy",
+         "label": "ntfy",
+         "description": "Push notification to your phone via ntfy.sh or your own ntfy server.",
+         "env_var": "PORTAL_NTFY_URL",
+         "configured": bool(config.NTFY_URL)},
+    ]
+
+
 def notify(title, message):
     """Sends `title`/`message` to every configured channel. No-op if none are set."""
     if config.DISCORD_WEBHOOK_URL:

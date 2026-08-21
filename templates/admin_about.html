@@ -22,8 +22,8 @@
       <td>
         {% if not update_status %}
           <span style="color: var(--text-dim);">
-            {% if check_enabled %}Not checked yet — the background check runs every
-              {{ check_interval_hours }}h, or press “Check now”.{% else %}Automatic checking is
+            {% if check_enabled %}Not checked yet — the scheduled check runs
+              {{ check_schedule }}, or press “Check now”.{% else %}Automatic checking is
               off — press “Check now”.{% endif %}
           </span>
         {% elif not update_status.ok %}
@@ -81,10 +81,13 @@
     </div>
     <div class="field-check">
       <input type="checkbox" name="update_check_enabled" id="update_check_enabled" {{ 'checked' if check_enabled }}>
-      <label for="update_check_enabled">Check GitHub for new releases automatically (every {{ check_interval_hours }}h)</label>
+      <label for="update_check_enabled">Check GitHub for new releases automatically ({{ check_schedule }})</label>
     </div>
     <p class="field-hint">
       Turn this off to stop the portal making any periodic outbound call — “Check now” still works on demand.
+      This is the same switch as the <strong>Update check</strong> task on
+      <a href="{{ url_for('admin_tasks') }}">Scheduled tasks</a>, where you can also change how
+      often it runs and see when it last did.
     </p>
     <div class="form-actions">
       <button type="submit" class="btn">Save</button>

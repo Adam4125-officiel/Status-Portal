@@ -8,7 +8,9 @@ This module is the single implementation. Both entry points are thin wrappers:
   * `/admin/about`   - the in-app "Update now" button (app.py).
 
 Nothing here imports app.py (app.py imports this), and nothing here touches Flask -
-so the CLI works on a portal that won't even start.
+so the CLI works on a portal that won't even start. `scheduler` is imported too, to
+register the periodic update check as a proper scheduled task; it is subject to the
+same rule (config and db only, no Flask), so the CLI is unaffected.
 
 --------------------------------------------------------------------------------
 Security posture - read this before changing anything below
@@ -52,6 +54,7 @@ import requests
 
 import config
 import db
+import scheduler
 
 _logger = logging.getLogger(__name__)
 
@@ -190,11 +193,42 @@ def set_channel(channel):
         raise UpdateError(f"Could not save the channel setting: {e}")
 
 
+# The setting that governed automatic checking before it became a scheduled task.
+# Still read - once, at import - to seed the new task's default, so an admin who had
+# turned checking off doesn't silently get it back when they upgrade. Nothing writes
+# it any more; the task row is the source of truth from here on.
+LEGACY_CHECK_SETTING = "update_check_enabled"
+
+TASK_NAME = "update_check"
+
+
+def _read_task_enabled(name, default):
+    """The scheduled task's enabled flag, read without ever creating a database.
+
+    Same guard, and the same reasoning, as _read_setting() above: sqlite3.connect()
+    creates an empty file for a path that doesn't exist, and the CLI must not leave a
+    zero-table portal.db behind on a fresh install just by being asked whether
+    checking is on."""
+    if not os.path.isfile(db.DB_PATH):
+        return default
+    try:
+        row = db.get_task_row(name)
+    except Exception:
+        _logger.warning("Could not read the '%s' task row; assuming %r", name, default)
+        return default
+    return default if row is None else bool(row["enabled"])
+
+
 def update_check_enabled():
-    """Whether the background thread is allowed to poll GitHub at all. Off means the
-    About page only ever checks when the admin presses "Check now" - for someone who
-    would rather their home server not make a periodic outbound call."""
-    return _read_setting("update_check_enabled", "1") != "0"
+    """Whether the portal polls GitHub for releases on its own. Off means the About
+    page only ever checks when the admin presses "Check now" - for someone who would
+    rather their home server not make a periodic outbound call.
+
+    This is now the `update_check` scheduled task's own enabled flag, so there is one
+    switch rather than two that can disagree: /admin/tasks and /admin/about are two
+    views of the same row. Until that row exists, the legacy setting still answers."""
+    legacy_default = _read_setting(LEGACY_CHECK_SETTING, "1") != "0"
+    return _read_task_enabled(TASK_NAME, legacy_default)
 
 
 # ---------------------------------------------------------------------------
@@ -350,10 +384,15 @@ def _compare(current, latest):
 # Cached update check (read by request handlers - never checked inline)
 # ---------------------------------------------------------------------------
 # Same rule and same shape as app.py's _integration_status_cache: an outbound HTTP
-# call must never happen inside a Flask request handler. The background health-check
-# loop calls refresh_update_cache_if_stale() on every tick; it no-ops until the TTL
-# has elapsed, so the loop's own (much shorter) interval doesn't turn into a GitHub
-# request every 2 minutes.
+# call must never happen inside a Flask request handler. The `update_check` scheduled
+# task registered at the bottom of this section is what refills it; the About page
+# only ever reads it.
+#
+# This used to be driven from the health-check loop via refresh_update_cache_if_stale(),
+# which had to carry its own TTL so a 120s health-check interval didn't become a GitHub
+# request every 120s. The scheduler owns "when" now, so that TTL no longer gates the
+# periodic check - refresh_update_cache_if_stale() remains for the "Check now" button
+# (which forces) and for anything that wants the cheap "only if stale" behaviour.
 _update_cache = {"result": None, "refreshed_monotonic": None}
 
 
@@ -386,6 +425,47 @@ def refresh_update_cache_if_stale(ttl_seconds=None, force=False, channel=None):
     if not force and last is not None and (time.monotonic() - last) < ttl:
         return _update_cache["result"]
     return refresh_update_cache(channel)
+
+
+def run_update_check_task():
+    """Body of the `update_check` scheduled task.
+
+    Checks unconditionally rather than going through refresh_update_cache_if_stale():
+    the scheduler already decided this was due, and a second opinion from a TTL here
+    would mean a task that reports "ran fine" while quietly doing nothing.
+
+    A network failure is raised so the scheduler records it as a failed run with the
+    message intact - that is strictly more informative than the silent degradation the
+    About page needs, and the About page is unaffected either way since it reads the
+    cache and renders "couldn't check" for a failed result."""
+    result = refresh_update_cache()
+    if not result["ok"]:
+        raise UpdateError(result["error"] or "Could not check for updates.")
+    if result["update_available"]:
+        return f"Update available: {result['current']} -> {result['latest']}."
+    if result["ahead"]:
+        return (f"Running {result['current']}, which is newer than the latest "
+                f"{result['channel']} release.")
+    return f"Up to date ({result['current']})."
+
+
+scheduler.register(
+    TASK_NAME,
+    "Update check",
+    "Asks GitHub whether a newer release of this portal has been published on the "
+    "channel you've selected, and caches the answer for the About page. Checking "
+    "never installs anything - it only decides whether the About page offers you the "
+    "button.",
+    run_update_check_task,
+    # Seeded from the setting that governed this before it was a task, so upgrading
+    # preserves an admin's existing "don't phone home" choice rather than resetting it.
+    default_enabled=_read_setting(LEGACY_CHECK_SETTING, "1") != "0",
+    # PORTAL_UPDATE_CHECK_INTERVAL_SECONDS is now the *default* for this task's
+    # schedule rather than a hard TTL: the interval is per-task, so per this project's
+    # config split it belongs in the database where an admin can change it, with the
+    # env var deciding what it starts as.
+    default_interval_minutes=max(1, config.UPDATE_CHECK_INTERVAL_SECONDS // 60),
+)
 
 
 # ---------------------------------------------------------------------------

@@ -395,3 +395,35 @@ def test_every_module_level_cache_is_reset_between_tests():
         f"Module-level caches not reset between tests: {missing}. Add them to "
         "_reset_module_state() in tests/conftest.py, or to that module's own "
         "clear_caches() helper (which conftest already calls).")
+
+
+# ---------------------------------------------------------------------------
+# Recurring work goes through the scheduler, not a fourth background thread
+# ---------------------------------------------------------------------------
+def test_no_new_bare_background_loops():
+    """CLAUDE.md: a new recurring job is a scheduler.register() call, not another
+    `while True` thread. Three such loops predate the framework and are allowed by
+    name below - each is also registered via scheduler.register_loop() so it still
+    shows up on /admin/tasks. A fourth means either making it a task, or (if it
+    genuinely can't be one) registering it as a loop and adding it here on purpose."""
+    allowed = {
+        # The core health-check cycle. Not a task: switching it off from a browser
+        # would also switch off incident detection.
+        "app.py": 1,
+        # Resource polling, which runs faster than SCHEDULER_TICK_SECONDS.
+        "monitoring.py": 1,
+        # The scheduler's own loop, which is what drives every task.
+        "scheduler.py": 1,
+    }
+    offenders = []
+    for name, src in _python_modules():
+        found = len(re.findall(r"^\s*while True:", src, re.M))
+        if found > allowed.get(name, 0):
+            offenders.append(f"{name} ({found} found, {allowed.get(name, 0)} expected)")
+    assert not offenders, (
+        f"New bare background loop(s): {offenders}. Recurring work belongs in "
+        "scheduler.register() - you get an on/off switch, a schedule, a last-run "
+        "record and a 'Run now' button for free, and it shows up on /admin/tasks. "
+        "If it genuinely cannot be a task (too frequent for the tick, or it lives in "
+        "another event loop), register it with scheduler.register_loop() so it is at "
+        "least visible, and add it to `allowed` here with the reason.")

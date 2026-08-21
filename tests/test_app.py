@@ -1699,9 +1699,34 @@ def test_about_settings_saves_channel_and_clears_the_stale_cache(client):
                         follow_redirects=True)
     assert b"Update preferences saved" in resp.data
     assert db.get_setting("update_channel") == "unstable"
-    assert db.get_setting("update_check_enabled") == "1"
+    # Automatic checking is the `update_check` scheduled task's own enabled flag now,
+    # not a second setting beside it - /admin/about and /admin/tasks are two views of
+    # one row, so they can't drift into disagreeing.
+    assert db.get_task_row(app_module.updater.TASK_NAME)["enabled"] == 1
+    assert app_module.updater.update_check_enabled() is True
     # The cached "latest" belonged to the old channel.
     assert app_module.updater.get_cached_update_status() is None
+
+
+def test_about_settings_can_turn_automatic_checking_off(client):
+    _login(client)
+    client.post("/admin/about/settings", data={"update_channel": "stable"},
+                 follow_redirects=True)
+    assert db.get_task_row(app_module.updater.TASK_NAME)["enabled"] == 0
+    assert app_module.updater.update_check_enabled() is False
+
+
+def test_turning_checking_off_leaves_the_schedule_alone(client):
+    """The About page's checkbox is an on/off switch, not a reschedule - an admin who
+    set the check to run daily at 04:00 must not silently get it back on the default
+    interval just for unticking and re-ticking the box."""
+    _login(client)
+    scheduler.save_schedule(app_module.updater.TASK_NAME, enabled=True,
+                             schedule_kind="daily", interval_minutes=360, daily_at="04:00")
+    client.post("/admin/about/settings", data={"update_channel": "stable"},
+                 follow_redirects=True)
+    row = db.get_task_row(app_module.updater.TASK_NAME)
+    assert (row["enabled"], row["schedule_kind"], row["daily_at"]) == (0, "daily", "04:00")
 
 
 def test_about_settings_rejects_an_unknown_channel(client):
@@ -2168,16 +2193,27 @@ def test_public_history_days_blank_means_unlimited(client):
     assert app_module._public_history_days() is None
 
 
-def test_admin_settings_test_notification_sends_via_shared_dispatch(client, monkeypatch):
+def test_notifications_test_button_sends_via_shared_dispatch(client, monkeypatch):
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
     calls = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    resp = client.post("/admin/notifications/test", follow_redirects=True)
     assert resp.status_code == 200
     assert b"Test notification sent" in resp.data
     assert len(calls) == 1
     assert calls[0][0] == "Test notification"
+
+
+def test_notifications_page_lists_every_channel_and_its_state(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    monkeypatch.setattr(app_module.config, "NTFY_URL", "")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/notifications")
+    assert resp.status_code == 200
+    assert b"PORTAL_DISCORD_WEBHOOK_URL" in resp.data
+    assert b"PORTAL_NTFY_URL" in resp.data
+    assert b"configured" in resp.data
 
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
@@ -2201,16 +2237,36 @@ def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     assert "settings" in tables
 
 
-def test_admin_settings_test_notification_refuses_when_unconfigured(client, monkeypatch):
+def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypatch):
+    """Replaces an older test that asserted the route refused to send. It doesn't need
+    to: notify() with nothing configured is a no-op, and the button is disabled in the
+    template, so the refusal was a third place to keep in step for no benefit."""
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "")
     monkeypatch.setattr(app_module.config, "NTFY_URL", "")
-    calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    resp = client.get("/admin/notifications")
+    assert b"Set up a channel above first" in resp.data
+
+
+def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/settings/backup-db")
     assert resp.status_code == 200
-    assert b"No notification channel configured" in resp.data
-    assert calls == []
+    assert resp.mimetype == "application/zip"
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        assert zf.namelist() == ["portal.db"]
+        # A real, openable SQLite file, not just arbitrary bytes under that name -
+        # confirms Connection.backup() actually produced a valid database.
+        extracted = zf.read("portal.db")
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(extracted)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+    assert "services" in tables
+    assert "settings" in tables
 
 
 def test_public_page_renders_sections_in_configured_order(client):
@@ -2461,13 +2517,26 @@ def test_uptime_cache_expires_after_its_ttl(isolated_db, monkeypatch):
     assert app_module._cached_uptime_percentages() == {sid: 50.0}
 
 
-def test_history_pruning_runs_once_a_day_not_every_cycle(isolated_db, monkeypatch):
-    calls = []
-    monkeypatch.setattr(db, "prune_status_history", lambda days: calls.append(days) or 0)
-    monkeypatch.setattr(app_module, "_last_history_prune", 0.0)
-    app_module._prune_status_history_if_due()
-    app_module._prune_status_history_if_due()
-    assert calls == [app_module.DEFAULT_HISTORY_RETENTION_DAYS]
+def test_history_prune_task_reports_what_it_removed(isolated_db, monkeypatch):
+    monkeypatch.setattr(db, "prune_status_history", lambda days: 12)
+    message = app_module._prune_status_history_task()
+    assert "12" in message and str(app_module.DEFAULT_HISTORY_RETENTION_DAYS) in message
+
+
+def test_history_prune_task_is_a_success_when_there_is_nothing_to_remove(isolated_db, monkeypatch):
+    """Not a TaskSkipped: "nothing was old enough to delete" is the job working, not
+    the job being unconfigured, and the two read very differently in the task list."""
+    monkeypatch.setattr(db, "prune_status_history", lambda days: 0)
+    message = app_module._prune_status_history_task()
+    assert "Nothing to remove" in message
+
+
+def test_history_prune_is_registered_as_a_daily_task(isolated_db):
+    """It used to be a "have 24 hours passed?" check on a module-level float inside the
+    health-check loop, which meant a portal restarted twice a day never pruned at all."""
+    task = scheduler.get_task("prune_status_history")
+    assert task is not None
+    assert task.defaults["schedule_kind"] == "daily"
 
 
 def test_history_retention_setting_is_honoured(isolated_db, monkeypatch):

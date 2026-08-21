@@ -1958,14 +1958,46 @@ def admin_system_restart():
 
 
 # ---- About / self-update (see updater.py for everything that actually happens) ----
+def _update_check_task_view():
+    """The `update_check` task's row as the admin page sees it, or None if updater.py
+    somehow didn't register it (a build with the task removed shouldn't 500 here)."""
+    task = scheduler.get_task(updater.TASK_NAME)
+    return scheduler.task_view(task) if task else None
+
+
+def _update_check_schedule_label():
+    """How often the check runs, in words, for the About page - which shouldn't have
+    to know that a schedule can be either an interval or a daily time."""
+    view = _update_check_task_view()
+    if not view:
+        return "on a schedule"
+    if view["schedule_kind"] == "daily":
+        return f"daily at {view['daily_at']} UTC"
+    minutes = view["interval_minutes"] or 0
+    if minutes >= 120 and minutes % 60 == 0:
+        return f"every {minutes // 60}h"
+    return f"every {minutes} min"
+
+
+def _set_update_check_enabled(enabled):
+    """Flips the scheduled task on or off without touching its schedule."""
+    view = _update_check_task_view()
+    if not view:
+        return
+    scheduler.save_schedule(updater.TASK_NAME, enabled=enabled,
+                             schedule_kind=view["schedule_kind"],
+                             interval_minutes=view["interval_minutes"],
+                             daily_at=view["daily_at"])
+
+
 @app.route("/admin/about")
 @login_required
 def admin_about():
     """Reads the update-check cache only - never checks GitHub inline. The cache is
-    refreshed by the background health-check loop (see run_health_checks) on its own
-    much longer TTL, same pattern as _integration_status_cache. A cache miss (nothing
-    checked yet this process, or checking disabled) renders as "not checked yet"
-    rather than blocking the page on an outbound call."""
+    refreshed by the `update_check` scheduled task (see /admin/tasks), same
+    read-the-cache pattern as _integration_status_cache. A cache miss (nothing checked
+    yet this process, or checking disabled) renders as "not checked yet" rather than
+    blocking the page on an outbound call."""
     return render_template(
         "admin_about.html",
         version=config.VERSION,
@@ -1975,7 +2007,7 @@ def admin_about():
         channel=updater.get_channel(),
         channels=updater.CHANNELS,
         check_enabled=updater.update_check_enabled(),
-        check_interval_hours=round(config.UPDATE_CHECK_INTERVAL_SECONDS / 3600, 1),
+        check_schedule=_update_check_schedule_label(),
         inapp_update_enabled=config.ENABLE_INAPP_UPDATE,
         repo_url=updater.REPO_URL,
         releases_url=updater.RELEASES_PAGE_URL,
@@ -2018,7 +2050,11 @@ def admin_about_settings():
         flash("Unknown update channel.", "error")
         return redirect(url_for("admin_about"))
     db.set_setting("update_channel", channel)
-    db.set_setting("update_check_enabled", "1" if request.form.get("update_check_enabled") else "0")
+    # Writes the scheduled task's own enabled flag rather than a second setting beside
+    # it: /admin/about and /admin/tasks are two views of one row, so they cannot drift
+    # into disagreeing about whether the portal checks for updates. The rest of the
+    # schedule is preserved - this checkbox is an on/off switch, not a reschedule.
+    _set_update_check_enabled(bool(request.form.get("update_check_enabled")))
     # The cached result belongs to the old channel - drop it so the page doesn't show
     # a stale "latest stable" reading next to a freshly-selected unstable channel.
     updater.clear_update_cache()
@@ -2230,8 +2266,6 @@ def admin_settings():
                             site_name=db.get_setting("site_name", "Server"),
                             show_public=_public_resource_visibility(),
                             highload_thresholds=integrations.high_load_thresholds(),
-                            discord_configured=bool(config.DISCORD_WEBHOOK_URL),
-                            ntfy_configured=bool(config.NTFY_URL),
                             section_order=section_order, section_labels=section_labels,
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
@@ -2287,16 +2321,35 @@ def admin_settings_general():
     return redirect(url_for("admin_settings"))
 
 
-@app.route("/admin/settings/test-notification", methods=["POST"])
+# ---- Notifications ----
+@app.route("/admin/notifications")
 @login_required
-def admin_settings_test_notification():
-    if not config.DISCORD_WEBHOOK_URL and not config.NTFY_URL:
-        flash("No notification channel configured - set PORTAL_DISCORD_WEBHOOK_URL or PORTAL_NTFY_URL first.", "error")
-    else:
-        notifications.notify("Test notification",
-                              "This is a test notification from the Status Portal admin panel.")
-        flash("Test notification sent - check your configured channel(s).", "success")
-    return redirect(url_for("admin_settings"))
+def admin_notifications():
+    """The hub for everything notification-related, which used to be scattered: the
+    channel status lived in a paragraph at the bottom of Settings, and the Discord bot
+    had its own top-level nav entry unrelated to either. Grouping them means "how do I
+    get told about this" has one answer."""
+    channels = notifications.channel_summary()
+    return render_template("admin_notifications.html", channels=channels,
+                            any_configured=any(c["configured"] for c in channels),
+                            active="notifications")
+
+
+@app.route("/admin/notifications/test", methods=["POST"])
+@login_required
+def admin_notifications_test():
+    """Goes through notifications.notify() with a canned payload - the exact dispatch
+    path a real incident alert takes, not a parallel one, so this confirms the whole
+    chain rather than just that a setting is non-empty. notify() is deliberately
+    fire-and-forget (it catches and logs every failure and never raises), so this
+    can't report per-channel success; the admin checks their channel, which is the
+    point of the button."""
+    notifications.notify("Test notification",
+                          "This is a test from your status portal. If you can read this, "
+                          "notifications are working.")
+    flash("Test notification sent. Check your channel(s) - delivery failures are "
+          "logged, not reported back here.", "success")
+    return redirect(url_for("admin_notifications"))
 
 
 @app.route("/admin/settings/backup-db")
@@ -2535,7 +2588,7 @@ def admin_discord_bot_guilds():
                             token_configured=bool(config.DISCORD_BOT_TOKEN),
                             connected=status["connected"], guilds=status["guilds"],
                             channel_whitelist=db.get_setting("discordbot_channel_whitelist", ""),
-                            active="discord-bot")
+                            active="discord-bot-guilds")
 
 
 # ---- Scheduled tasks (see scheduler.py - the framework; the tasks themselves are
@@ -2544,6 +2597,7 @@ def admin_discord_bot_guilds():
 @login_required
 def admin_tasks():
     return render_template("admin_tasks.html", tasks=scheduler.list_task_views(),
+                            loops=scheduler.list_loop_views(),
                             tick_seconds=config.SCHEDULER_TICK_SECONDS, active="tasks")
 
 
@@ -2726,30 +2780,45 @@ def _merge_dependency_health(status, dependency_statuses):
 # an admin can go look at more history than the uptime figure covers if they want to.
 DEFAULT_HISTORY_RETENTION_DAYS = 90
 
-# Pruning only needs to happen roughly daily, not on every 120s check cycle.
-_PRUNE_INTERVAL_SECONDS = 24 * 3600
-# Deliberately in-process rather than persisted in SQLite, unlike the low-disk alert
-# state: an extra prune after a restart is idempotent and costs one indexed DELETE,
-# whereas re-firing a notification would be user-visible noise. Nothing here needs to
-# survive a restart.
-_last_history_prune = 0.0
-
-
 def _history_retention_days():
     raw = db.get_setting("status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS))
     return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_HISTORY_RETENTION_DAYS
 
 
-def _prune_status_history_if_due():
-    global _last_history_prune
-    now = time.monotonic()
-    if _last_history_prune and now - _last_history_prune < _PRUNE_INTERVAL_SECONDS:
-        return
-    _last_history_prune = now
-    deleted = db.prune_status_history(_history_retention_days())
+def _prune_status_history_task():
+    """Body of the `prune_status_history` scheduled task.
+
+    status_history is the only unbounded table in this app, and every query against it
+    runs on a public page load - so this is what keeps the covering index doing an
+    index scan over a bounded range instead of an ever-growing one.
+
+    This used to be a "have 24 hours passed?" check inside the health-check loop,
+    tracked in a module-level float. Being a real task instead means the schedule
+    survives a restart (a portal restarted twice a day would otherwise never prune at
+    all, because the in-process clock reset every time) and that an admin can see when
+    it last ran and how much it removed."""
+    days = _history_retention_days()
+    deleted = db.prune_status_history(days)
     if deleted:
-        _logger.info("Pruned %d status_history rows older than %d days",
-                      deleted, _history_retention_days())
+        _logger.info("Pruned %d status_history rows older than %d days", deleted, days)
+        return f"Removed {deleted} check result(s) older than {days} days."
+    # A normal success, not a TaskSkipped: there was nothing to do because the table
+    # is already inside its retention window, which is the job working, not the job
+    # being unconfigured.
+    return f"Nothing to remove - no check results are older than {days} days."
+
+
+scheduler.register(
+    "prune_status_history",
+    "Prune old check results",
+    "Deletes individual health-check results older than the retention window set "
+    "under Settings. This is the only table in the portal that grows without limit, "
+    "and every public page load reads it, so keeping it trimmed is what stops the "
+    "page getting slower every week.",
+    _prune_status_history_task,
+    default_schedule_kind="daily",
+    default_daily_at="03:30",
+)
 
 
 def _lowdisk_threshold():
@@ -2817,12 +2886,12 @@ def run_health_checks():
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
             _check_low_disk_space(monitoring.get_resource_snapshot())
-            _prune_status_history_if_due()
-            # Reuses this existing background thread rather than starting another one:
-            # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
-            # -check interval doesn't turn into a GitHub API call every 120s. The
-            # About page only ever reads the cache this populates.
-            updater.refresh_update_cache_if_stale()
+            # Pruning old history and checking GitHub for releases used to be tacked
+            # on here, each with its own hand-rolled "is it due yet" check. Both are
+            # scheduled tasks now (see /admin/tasks) - this loop is back to being only
+            # the things that genuinely have to happen on the health-check cycle:
+            # maintenance windows first, then every service's status, then the
+            # integration cache that _merge_api_health() reads from.
         except Exception:
             _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)
@@ -2905,9 +2974,64 @@ def _handle_integration_incident_lifecycle(integration, previous_reachable, new_
                 "resolved")
 
 
+# The health-check thread, held only so /admin/tasks can report whether it is still
+# alive. threading.excepthook already logs a thread dying from something outside its
+# own try/except (see logging_setup.py), but "services just stopped updating" is
+# exactly the symptom nobody thinks to look in a log file for.
+_health_thread = {"thread": None}
+
+
+def _health_thread_alive():
+    thread = _health_thread["thread"]
+    return None if thread is None else thread.is_alive()
+
+
 def start_background_checker():
-    t = threading.Thread(target=run_health_checks, daemon=True)
+    t = threading.Thread(target=run_health_checks, daemon=True, name="health-checks")
     t.start()
+    _health_thread["thread"] = t
+    return t
+
+
+# ---------------------------------------------------------------------------
+# The recurring jobs that are deliberately *not* scheduled tasks
+# ---------------------------------------------------------------------------
+# Registered read-only so /admin/tasks can answer "what does this portal do on a
+# timer" completely, rather than listing the two thirds of the answer that happen to
+# be controllable. Each one's reason for staying a plain loop is on the entry itself;
+# the general argument is in scheduler.BackgroundLoop's docstring.
+scheduler.register_loop(
+    "health_checks",
+    "Service health checks",
+    "Requests every service's check URL, records the result, applies maintenance "
+    "windows, and opens or resolves automatic incidents. Not a task you can switch "
+    "off here on purpose: turning it off would also turn off incident detection, "
+    "which is the portal's whole job.",
+    interval_seconds=config.CHECK_INTERVAL_SECONDS,
+    configured_by="PORTAL_CHECK_INTERVAL_SECONDS",
+    is_alive=_health_thread_alive,
+)
+scheduler.register_loop(
+    "resource_polling",
+    "Resource polling",
+    "Samples CPU, memory, disks and network into the cache the Resources page reads, "
+    "plus the Windows-only queries (Hyper-V VMs, temperatures). Runs far faster than "
+    "the scheduler's tick, so the scheduler could not drive it even if it were "
+    "listed as a task.",
+    interval_seconds=config.RESOURCE_REFRESH_SECONDS,
+    configured_by="PORTAL_RESOURCE_REFRESH_SECONDS",
+    is_alive=monitoring.refresh_thread_alive,
+)
+scheduler.register_loop(
+    "discord_bot_refresh",
+    "Discord bot refresh",
+    "Updates the bot's presence and re-edits its tracked live status message. Runs "
+    "inside discord.py's own event loop, where it belongs - driving it from here "
+    "would mean scheduling coroutines across threads for no benefit.",
+    interval_seconds=config.DISCORD_BOT_REFRESH_SECONDS,
+    configured_by="PORTAL_DISCORD_BOT_REFRESH_SECONDS",
+    is_alive=lambda: discord_bot.get_status()["connected"] if config.DISCORD_BOT_TOKEN else None,
+)
 
 
 # ---------------------------------------------------------------------------

@@ -190,17 +190,9 @@
   environment variable).<br>
   Public page auto-refresh: every {{ refresh_seconds }}s (set via <code>PORTAL_PUBLIC_REFRESH_SECONDS</code>).<br>
   These are independent settings — no code to edit, just restart the app after changing either.<br><br>
-  Push notifications (incident open/resolve/update, maintenance start/end):
-  Discord {{ 'configured' if discord_configured else 'not configured' }}
-  (<code>PORTAL_DISCORD_WEBHOOK_URL</code>),
-  ntfy {{ 'configured' if ntfy_configured else 'not configured' }}
-  (<code>PORTAL_NTFY_URL</code>). Set either in <code>.env</code> — no admin-UI field, since it's a secret URL.
+  Push notifications moved to their own page —
+  see <a href="{{ url_for('admin_notifications') }}">Notifications → Channels</a> for what's
+  configured, and to send a test.
 </p>
-<form method="POST" action="{{ url_for('admin_settings_test_notification') }}" style="margin-top: 8px;">
-  <button type="submit" class="btn secondary" {{ 'disabled' if not (discord_configured or ntfy_configured) }}>Send test notification</button>
-  {% if not (discord_configured or ntfy_configured) %}
-  <span style="color: var(--text-faint); font-size: 12px; margin-left: 8px;">Configure a channel above first.</span>
-  {% endif %}
-</form>
 <script src="{{ asset_url('js/admin_layout_order.js') }}"></script>
 {% endblock %}

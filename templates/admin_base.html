@@ -3,21 +3,37 @@
 <div class="admin-shell">
   <nav class="admin-nav">
     <div class="admin-nav__brand">⚙ Admin</div>
+
+    {# Grouped by what an admin is trying to do, not by when the feature was added.
+       Routes are deliberately unchanged - this is navigation only, so every existing
+       bookmark still works. #}
+    <div class="admin-nav__group">Status</div>
     <a href="{{ url_for('admin_services') }}" class="{{ 'active' if active == 'services' }}">Services</a>
-    <a href="{{ url_for('admin_announcements') }}" class="{{ 'active' if active == 'announcements' }}">Announcements</a>
     <a href="{{ url_for('admin_incidents') }}" class="{{ 'active' if active == 'incidents' }}">Incidents</a>
     <a href="{{ url_for('admin_maintenance') }}" class="{{ 'active' if active == 'maintenance' }}">Maintenance</a>
-    <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations</a>
     <a href="{{ url_for('admin_reports') }}" class="{{ 'active' if active == 'reports' }}">Reports{% if unread_reports_count %} <span class="nav-badge">{{ unread_reports_count }}</span>{% endif %}</a>
+
+    <div class="admin-nav__group">Content</div>
+    <a href="{{ url_for('admin_announcements') }}" class="{{ 'active' if active == 'announcements' }}">Announcements</a>
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
+
+    <div class="admin-nav__group">Monitoring</div>
+    <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations</a>
     <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources</a>
     <a href="{{ url_for('admin_tasks') }}" class="{{ 'active' if active == 'tasks' }}">Scheduled tasks</a>
+
+    <div class="admin-nav__group">Notifications</div>
+    <a href="{{ url_for('admin_notifications') }}" class="{{ 'active' if active == 'notifications' }}">Channels</a>
+    <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord bot</a>
+    <a href="{{ url_for('admin_discord_bot_guilds') }}" class="{{ 'active' if active == 'discord-bot-guilds' }}">Discord servers</a>
+
+    <div class="admin-nav__group">System</div>
     <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
     <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
-    <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord Bot</a>
     <a href="{{ url_for('admin_about') }}" class="{{ 'active' if active == 'about' }}">About{% if update_available %} <span class="nav-badge">1</span>{% endif %}</a>
+
     <div class="back-link">
       <a href="{{ url_for('index') }}">← View portal</a><br>
       <a href="{{ url_for('admin_logout') }}">Log out</a>
