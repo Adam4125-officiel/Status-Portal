@@ -322,7 +322,20 @@ def test_start_is_a_no_op_when_nothing_is_registered(registry):
 
 
 def test_start_launches_a_daemon_thread_when_tasks_exist(registry, monkeypatch):
-    monkeypatch.setattr(scheduler.config, "SCHEDULER_TICK_SECONDS", 3600)
+    """The loop body is stubbed out rather than allowed to run.
+
+    A real scheduler thread outlives the test that started it, and once the
+    isolated_db fixture has torn its monkeypatch down, db.DB_PATH is the *real*
+    instance/portal.db again - so the first tick opens (and therefore creates) an
+    empty database file in the developer's actual checkout. That's precisely the
+    "empty file that looks like a corrupted database" this project takes care to
+    avoid elsewhere (see updater._read_setting). start()'s own responsibility is
+    creating a daemon thread pointed at the loop; the loop is tested through tick()."""
+    ran = threading.Event()
+    monkeypatch.setattr(scheduler, "_loop", ran.set)
     _register(registry, run=lambda: "ok")
     thread = registry.start()
     assert thread is not None and thread.daemon is True
+    assert ran.wait(5), "start() did not actually run the scheduler loop"
+    thread.join(5)
+    assert thread.is_alive() is False
