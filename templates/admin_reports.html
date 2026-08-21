@@ -10,12 +10,13 @@
 
 {% if reports %}
 <table class="admin-table">
-  <thead><tr><th>Message</th><th>Service</th><th>Contact</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+  <thead><tr><th>Message</th><th>Service</th><th>From</th><th>Contact</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
   <tbody>
     {% for r in reports %}
     <tr>
       <td style="max-width: 320px;">{{ r.message }}</td>
       <td>{{ r.service_name or '—' }}</td>
+      <td>{% if r.reporter_user %}👤 {{ r.reporter_user }}{% else %}<span style="color: var(--text-faint);">anonymous</span>{% endif %}</td>
       <td>{{ r.contact or '—' }}</td>
       <td>
         <form action="{{ url_for('admin_report_status', rid=r.id) }}" method="POST" style="display:inline">

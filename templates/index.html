@@ -16,8 +16,16 @@
       {% endif %}
       {{ site_name }}
     </div>
-    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
-      next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
+    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); display: flex; align-items: center; gap: 12px;">
+      {% if user_auth_enabled %}
+        {% if portal_user %}
+          <span title="Signed in with your Jellyfin account">👤 {{ portal_user.name }}</span>
+          <a href="{{ url_for('user_logout') }}">Sign out</a>
+        {% else %}
+          <a href="{{ url_for('user_login') }}">Sign in</a>
+        {% endif %}
+      {% endif %}
+      <span>next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span></span>
     </div>
   </div>
 

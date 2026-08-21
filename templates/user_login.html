@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block body %}
+<div class="login-shell">
+  <div class="login-card">
+    <h1>Sign in</h1>
+    <p class="sub">Use your Jellyfin username and password.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, msg in messages %}
+        <div class="flash {{ category }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <form method="POST">
+      {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+      <div class="field">
+        <label for="username">Jellyfin username</label>
+        <input type="text" id="username" name="username" required autofocus autocomplete="username">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit">Sign in</button>
+        <a href="{{ url_for('index') }}" class="btn secondary">Cancel</a>
+      </div>
+    </form>
+
+    <p class="sub" style="margin-top: 18px; margin-bottom: 0;">
+      Your password is checked against the Jellyfin server itself and is never stored
+      here. This is not the admin login.
+    </p>
+  </div>
+</div>
+{% endblock %}

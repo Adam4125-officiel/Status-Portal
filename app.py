@@ -227,6 +227,17 @@ def _inject_branding():
 
 
 @app.context_processor
+def _inject_portal_user():
+    """Who (if anyone) is signed in, plus whether the feature is on at all - needed
+    by the public topbar, the report form and the sign-in page itself, so it goes
+    here rather than being threaded through every route by hand (same reasoning as
+    csrf_token() being a Jinja global)."""
+    return {"portal_user": session.get("portal_user"),
+            "user_auth_enabled": jellyfin_auth.is_enabled(),
+            "report_needs_login": _report_login_required()}
+
+
+@app.context_processor
 def _inject_admin_badges():
     """Unread problem-report count for the admin nav's "Reports" badge - scoped to
     admin pages only (not computed on every public page load) since it's only ever
@@ -309,8 +320,77 @@ def _enforce_session_timeout():
 
 
 @app.before_request
+def _enforce_user_session():
+    """The visitor-session equivalent of _enforce_session_timeout above, kept
+    completely separate from it: this reads and clears its own session keys and
+    never so much as looks at `logged_in`.
+
+    Registered *between* the admin timeout hook and _check_csrf, which preserves the
+    ordering rule those two depend on (see _enforce_session_timeout's docstring)
+    while making sure an expired visitor session is gone before anything downstream
+    treats it as valid.
+
+    Two independent reasons a session ends here:
+
+    * idle timeout, checked server-side against session["portal_user_last_seen"] for
+      the same reason the admin one is - a cookie's expiry attribute isn't covered
+      by the signature, so a client that keeps sending an "expired" cookie would
+      otherwise stay signed in forever;
+    * the user no longer being valid in the cached Jellyfin list, which is what
+      makes the sync task an actual revocation mechanism. Jellyfin is never
+      contacted here - an outage must not sign anybody out, and an unpopulated cache
+      never invalidates anyone (see jellyfin_auth.session_user_still_valid)."""
+    user = session.get("portal_user")
+    if not user:
+        return
+    session.permanent = True
+    now = time.time()
+    timeout = _user_session_timeout_seconds()
+    last_seen = session.get("portal_user_last_seen")
+    if timeout is not None and last_seen is not None and now - last_seen > timeout:
+        _end_user_session()
+        return
+    if not jellyfin_auth.session_user_still_valid(user.get("id", "")):
+        _logger.info("Ended the portal session for '%s' - no longer a valid Jellyfin user",
+                      user.get("name", "?"))
+        _end_user_session()
+        return
+    if last_seen is None or now - last_seen > SESSION_TOUCH_INTERVAL_SECONDS:
+        session["portal_user_last_seen"] = now
+
+
+# POST paths outside /admin/ that still need CSRF protection. /report is
+# conditional rather than listed here - see _csrf_required_for().
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login"}
+
+
+def _csrf_required_for(path, method):
+    """Which POSTs the check below applies to.
+
+    Everything under /admin/ always, as before - that's what makes a new admin route
+    protected for free. Beyond that:
+
+    * /login establishes a session, so a cross-site POST to it is session fixation.
+    * /report is protected *only while somebody is signed in*. Its documented
+      exemption rested on it exercising no authenticated privilege, which stops
+      being true the moment reports are attributable to a user - but on an install
+      that hasn't enabled sign-in, nothing has changed and the form keeps working
+      without JavaScript (the token is injected by static/js/csrf.js).
+
+    Adding another public POST route means making a deliberate decision here;
+    tests/test_conventions.py reads this function to make sure of that."""
+    if method != "POST":
+        return False
+    if path.startswith("/admin/") or path in _CSRF_PROTECTED_PUBLIC_PATHS:
+        return True
+    if path == "/report":
+        return bool(session.get("portal_user"))
+    return False
+
+
+@app.before_request
 def _check_csrf():
-    if app.testing or request.method != "POST" or not request.path.startswith("/admin/"):
+    if app.testing or not _csrf_required_for(request.path, request.method):
         return
     expected = session.get("csrf_token")
     submitted = request.form.get("csrf_token")
@@ -349,6 +429,91 @@ def login_required(f):
 
 def is_first_run():
     return db.get_setting("admin_password_hash") is None
+
+
+# ---------------------------------------------------------------------------
+# Visitor sessions (Jellyfin-backed) - a second, entirely separate identity
+# ---------------------------------------------------------------------------
+# Deliberately built as a parallel system rather than an extension of the admin
+# login, and the separation is structural, not a convention anyone has to remember:
+#
+# * different session keys. `logged_in` is the admin's and is set in exactly one
+#   place (_start_admin_session); nothing here ever writes it, so no amount of
+#   getting the visitor flow wrong can produce an admin session.
+# * different decorator. login_required gates /admin/ and only ever reads
+#   `logged_in`; user_login_required gates the visitor-facing routes and only ever
+#   reads `portal_user`. Neither consults the other's key.
+# * different lifetimes, different lockout counters, different logout routes.
+#
+# A signed-in Jellyfin user is a visitor with a name, not a lesser admin. What's
+# stored is the minimum that identity needs: Jellyfin's user id (stable across a
+# rename, which is why sessions key off it rather than the username), the display
+# name, and whether Jellyfin considers them an administrator - that last one is
+# groundwork for the per-content visibility work on the ROADMAP, and is deliberately
+# *not* consulted anywhere in this app today. No password and no Jellyfin access
+# token ever goes in here: the session cookie is signed, not encrypted.
+def _start_user_session(user):
+    session.permanent = True
+    session["portal_user"] = {
+        "id": user["id"],
+        "name": user["name"],
+        "jellyfin_admin": bool(user.get("is_administrator")),
+        "authenticated_at": time.time(),
+    }
+    session["portal_user_last_seen"] = time.time()
+
+
+def _end_user_session():
+    """Pops only this feature's own keys. Never session.clear() - an admin who is
+    also signed in as a Jellyfin user in the same browser must not be logged out of
+    the admin panel by a visitor-side timeout."""
+    session.pop("portal_user", None)
+    session.pop("portal_user_last_seen", None)
+
+
+def current_user():
+    return session.get("portal_user")
+
+
+def user_login_required(f):
+    """Gate for visitor-facing routes. Reads `portal_user` and nothing else - in
+    particular, being the admin does not satisfy it, because the two are answers to
+    different questions and conflating them is how "admin implies user" quietly
+    becomes "user implies admin" later."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("portal_user"):
+            flash("Please sign in with your Jellyfin account first.", "error")
+            return redirect(url_for("user_login", next=request.full_path.rstrip("?")))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# Separate from _login_state on purpose: a burst of failed Jellyfin sign-ins must
+# not lock the admin out of their own panel, and vice versa. Same global (not
+# per-IP) shape and the same reasoning as the two counters it sits beside.
+_user_login_state = {"failures": 0, "locked_until": 0.0}
+USER_LOGIN_LOCKOUT_THRESHOLD = 10
+USER_LOGIN_LOCKOUT_SECONDS = 300
+
+
+def _user_login_locked():
+    return time.time() < _user_login_state["locked_until"]
+
+
+def _register_user_login_failure():
+    """Counts credential rejections only. An unreachable Jellyfin is deliberately
+    *not* counted: it isn't a failed guess, and letting an outage fill the counter
+    would lock everybody out for five minutes after the server came back."""
+    _user_login_state["failures"] += 1
+    if _user_login_state["failures"] >= USER_LOGIN_LOCKOUT_THRESHOLD:
+        _user_login_state["locked_until"] = time.time() + USER_LOGIN_LOCKOUT_SECONDS
+        _user_login_state["failures"] = 0
+
+
+def _register_user_login_success():
+    _user_login_state["failures"] = 0
+    _user_login_state["locked_until"] = 0.0
 
 
 def _require_totp(failure_message, redirect_endpoint):
@@ -428,6 +593,22 @@ def _report_rate_limited():
 
 def _register_report_submission():
     _report_state["count"] += 1
+
+
+def _report_login_required():
+    """Whether /report needs a signed-in Jellyfin user.
+
+    Gated on jellyfin_auth.is_enabled() as well as its own setting, deliberately: an
+    install that hasn't set up Jellyfin sign-in must behave exactly as it always
+    has, rather than having its report form silently become unreachable behind a
+    login that doesn't exist. Defaults to on once sign-in *is* enabled.
+
+    Worth being honest about the trade-off this makes, because it isn't free: while
+    Jellyfin is down, nobody who hasn't already signed in can sign in - so nobody
+    new can report the outage, which is one of the times a status page is most
+    useful. That's why it's a setting an admin can turn off, and why the admin page
+    says so in as many words rather than burying it."""
+    return jellyfin_auth.is_enabled() and db.get_setting("report_requires_login", "1") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -898,7 +1079,15 @@ def report_problem():
     being exercised, so a cross-site submission achieves nothing an attacker couldn't
     already do by POSTing directly), but it does need its own light anti-abuse:
     a honeypot field, a minimum-time-to-fill check, and a global rate limit
-    (see _report_rate_limited above)."""
+    (see _report_rate_limited above).
+
+    Optionally gated behind a signed-in Jellyfin user (see _report_login_required).
+    When it is, the CSRF exemption above no longer applies either - the form is then
+    exercising an authenticated identity, which is exactly the thing that exemption
+    was justified by the absence of."""
+    if _report_login_required() and not current_user():
+        flash("Please sign in with your Jellyfin account to report a problem.", "error")
+        return redirect(url_for("user_login", next=request.full_path.rstrip("?")))
     services = db.list_services()
     preselect_service_id = request.args.get("service_id", type=int)
     site_name = db.get_setting("site_name", "Server")
@@ -924,10 +1113,13 @@ def report_problem():
         contact = request.form.get("contact", "").strip()[:200]
         service_id = request.form.get("service_id", type=int)
         service = db.get_service(service_id) if service_id else None
-        db.create_problem_report(message[:2000], contact, service["id"] if service else None)
+        user = current_user()
+        db.create_problem_report(message[:2000], contact, service["id"] if service else None,
+                                  reporter_user=(user or {}).get("name", "")[:100])
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
-        notifications.notify("Problem reported", f"{prefix}{message[:200]}")
+        who = f" (from {user['name']})" if user else ""
+        notifications.notify("Problem reported", f"{prefix}{message[:200]}{who}")
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
@@ -972,6 +1164,87 @@ def admin_report_create_incident(rid):
     db.update_problem_report_status(rid, "resolved")
     flash("Incident created from report.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
+
+
+# ---------------------------------------------------------------------------
+# Visitor sign-in (Jellyfin-backed). Entirely separate from /admin/login below,
+# which is untouched by this feature.
+# ---------------------------------------------------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def user_login():
+    """Signs a visitor in against Jellyfin's own credentials.
+
+    The password is checked live, on every sign-in, and is never stored. The locally
+    cached user list is deliberately *not* an alternative path in here: it holds no
+    password material, so "validate against the cache instead" would mean accepting
+    any username that appears in it. When Jellyfin can't be reached, this refuses -
+    and says so, rather than claiming the password was wrong, which would send
+    someone off to reset a password that was fine. Sessions that already exist are
+    unaffected by that outage; see _enforce_user_session().
+
+    This route calls out to Jellyfin inline, which is the sanctioned exception to
+    the no-slow-I/O-in-a-request-handler rule (an explicit one-shot action whose
+    entire purpose is the answer) - and it's why the timeout is its own tunable
+    config value rather than the shared 5s used for background health checks."""
+    if not jellyfin_auth.is_enabled():
+        abort(404)
+    next_url = _safe_next_url(request.args.get("next") or request.form.get("next"))
+    if session.get("portal_user"):
+        return redirect(next_url or url_for("index"))
+
+    if request.method == "POST":
+        if _user_login_locked():
+            flash("Too many failed sign-ins. Try again in a few minutes.", "error")
+            return render_template("user_login.html", next_url=next_url)
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if not username or not password:
+            flash("Enter your Jellyfin username and password.", "error")
+            return render_template("user_login.html", next_url=next_url)
+
+        result = jellyfin_auth.authenticate(username, password)
+        if result["ok"]:
+            _register_user_login_success()
+            _start_user_session(result["user"])
+            _logger.info("Jellyfin user '%s' signed in", result["user"]["name"])
+            return redirect(next_url or url_for("index"))
+
+        reason = result.get("reason")
+        if reason == "unreachable":
+            # Not counted as a failed attempt - an outage isn't a guess, and letting
+            # it fill the lockout counter would lock everyone out for five minutes
+            # after Jellyfin came back.
+            flash("Can't reach Jellyfin right now, so sign-in isn't available. "
+                  "This isn't a problem with your password - please try again shortly.", "error")
+        elif reason == "disabled":
+            _register_user_login_failure()
+            flash("That Jellyfin account is disabled.", "error")
+        elif reason == "not_configured":
+            flash("Jellyfin sign-in isn't configured on this portal.", "error")
+        else:
+            _register_user_login_failure()
+            flash("Incorrect username or password.", "error")
+
+    return render_template("user_login.html", next_url=next_url)
+
+
+@app.route("/logout")
+def user_logout():
+    """Ends only the visitor session - see _end_user_session() for why this must not
+    be session.clear()."""
+    _end_user_session()
+    flash("You have been signed out.", "success")
+    return redirect(url_for("index"))
+
+
+def _safe_next_url(raw):
+    """Only ever a path on this site. A `next` parameter that can name another host
+    is an open redirect, and this one is reachable without any authentication at
+    all. Anything that isn't a single-slash-prefixed relative path is discarded
+    rather than sanitised - there's no legitimate case here for the difference."""
+    if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return None
+    return raw
 
 
 # ---------------------------------------------------------------------------
