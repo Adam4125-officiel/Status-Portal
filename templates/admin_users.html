@@ -102,16 +102,25 @@
 <h2 class="section-title">Cached Jellyfin users</h2>
 <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
   A local copy of Jellyfin's user list, refreshed on a schedule. It is <em>never</em> used
-  to check a password — sign-in always asks Jellyfin live. Its only job is to keep people
-  who are already signed in from being thrown out while Jellyfin is unreachable, and to
-  revoke the session of anyone who has since been removed or disabled there.
+  to check a password — sign-in always asks Jellyfin live. Its jobs are to keep people
+  who are already signed in from being thrown out while Jellyfin is unreachable, to
+  revoke the session of anyone removed or disabled in Jellyfin, and to hold your own
+  per-user decision below.
+</p>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
+  <strong>Everyone is allowed by default.</strong> Blocking someone here stops them
+  signing in to <em>this portal</em> and ends the session they're currently in, on their
+  next page load — it does nothing to their Jellyfin account. The block is remembered
+  across syncs, so it survives the user list being refreshed. To take away their Jellyfin
+  access instead, disable them in Jellyfin: the next sync picks that up on its own.
+  {% if blocked_count %}<br><strong>{{ blocked_count }}</strong> user(s) currently blocked.{% endif %}
 </p>
 
 {% if users %}
 <div class="admin-table">
   <table>
     <thead>
-      <tr><th>User</th><th>Jellyfin role</th><th>First seen</th><th>Last synced</th></tr>
+      <tr><th>User</th><th>Jellyfin role</th><th>Portal access</th><th>First seen</th><th>Last synced</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
@@ -121,6 +130,24 @@
           {% if u.is_disabled %}<span class="badge investigating">disabled</span>
           {% elif u.is_administrator %}<span class="badge monitoring">administrator</span>
           {% else %}<span class="badge resolved">user</span>{% endif %}
+        </td>
+        <td>
+          {% if u.is_disabled %}
+            <span class="badge investigating">no — disabled in Jellyfin</span>
+            <div class="field-hint" style="margin-top: 4px;">Re-enable them in Jellyfin; the next sync picks it up.</div>
+          {% elif u.portal_allowed %}
+            <form action="{{ url_for('admin_user_access', user_id=u.id) }}" method="POST" style="display:inline;">
+              <input type="hidden" name="allow" value="0">
+              <span class="badge resolved">allowed</span>
+              <button type="submit" class="btn secondary" style="padding:3px 9px; margin-left:6px;">Block</button>
+            </form>
+          {% else %}
+            <form action="{{ url_for('admin_user_access', user_id=u.id) }}" method="POST" style="display:inline;">
+              <input type="hidden" name="allow" value="1">
+              <span class="badge identified">blocked here</span>
+              <button type="submit" class="btn secondary" style="padding:3px 9px; margin-left:6px;">Allow</button>
+            </form>
+          {% endif %}
         </td>
         <td><span class="local-time" data-utc="{{ u.first_seen_at }}">{{ u.first_seen_at[:16].replace('T', ' ') }} UTC</span></td>
         <td><span class="local-time" data-utc="{{ u.last_synced_at }}">{{ u.last_synced_at[:16].replace('T', ' ') }} UTC</span></td>

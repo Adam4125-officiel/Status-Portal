@@ -134,6 +134,44 @@ no hard dependency between them; this can be built and shown flat first.
 different auth shapes, new parsing per app, and new UI sections on top of
 the existing `integrations.py` pattern.
 
+### Unified search across Jellyfin and Seerr (signed-in users only)
+One search box on the public page that queries **Jellyfin** and **Seerr**
+at the same time and merges the results, so a visitor asks "do we have X?"
+once instead of checking two places. Each result then offers the action that
+actually applies to it: already in the library → a direct link straight to
+that item in Jellyfin; not in the library → request it through Seerr without
+leaving the portal.
+
+**Sequenced after the calendar/downloads integration above**, not before —
+that work brings the Seerr and *Arr API surface into this codebase, and
+building search first would mean writing half of it twice.
+
+**Signed-in users only** (the Jellyfin auth built in v1.7.0 is exactly what
+makes this possible). Three reasons that restriction isn't arbitrary: the
+result set reveals your whole library to anyone who can load the page;
+requesting is a write action against Seerr and needs to be attributable to a
+person; and a search box wired to two external APIs is a free
+denial-of-service amplifier if it's open to the internet. Rate-limit it
+per session on top.
+
+Two things to decide before building:
+
+- **Whose Seerr account requests it.** Simplest is one shared Seerr API key,
+  with the portal recording which Jellyfin user asked — but then Seerr's own
+  approval queue can't tell them apart. Seerr can also import Jellyfin users,
+  in which case requesting *as* the matching Seerr user is possible and much
+  better. Worth checking which is true of the actual setup before choosing.
+- **Search has to stay off the request path's slow-I/O rule.** Unlike every
+  other outbound call in this app, a search genuinely cannot be answered from
+  a background-refreshed cache — the query is unknown until someone types it.
+  This would be the first *legitimate* live outbound call from a request
+  handler, so it needs its own short timeout and a clear "search is
+  unavailable right now" degradation, rather than quietly breaking the rule.
+
+**Priority:** Medium · **Effort:** L — two APIs, a merge/dedupe step (the
+same title from both sources must not appear twice), a write action, a new
+UI, and the auth/rate-limiting story above.
+
 ### Prowlarr per-indexer health
 Prowlarr's own API already reports each configured indexer's individual
 state (healthy / down / rate-limited), not just whether Prowlarr itself is

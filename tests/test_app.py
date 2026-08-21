@@ -3088,3 +3088,134 @@ def test_the_admin_reports_page_shows_who_filed_a_report(client, user_auth, monk
     client.get("/logout")
     _login(client)
     assert "adam" in client.get("/admin/reports").data.decode()
+
+
+# ---------------------------------------------------------------------------
+# Per-user portal access, at the route level
+# ---------------------------------------------------------------------------
+def test_blocking_a_user_ends_the_session_they_are_sitting_in(client, user_auth, monkeypatch):
+    """Blocking that only takes effect at the next sign-in would leave someone with
+    days of access left on their current session."""
+    _sign_in(client, monkeypatch)
+    assert "adam" in client.get("/").data.decode()
+    db.set_jellyfin_user_allowed("u1", False)
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_a_blocked_user_cannot_sign_in_again(client, user_auth, monkeypatch):
+    db.set_jellyfin_user_allowed("u1", False)
+    monkeypatch.setattr(app_module.jellyfin_auth.requests, "post",
+                        lambda url, **k: type("R", (), {
+                            "status_code": 200, "ok": True,
+                            "json": lambda self=None: {
+                                "User": {"Id": "u1", "Name": "adam",
+                                          "Policy": {"IsAdministrator": False, "IsDisabled": False}},
+                                "AccessToken": "tok"}})())
+    resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                       follow_redirects=True)
+    body = resp.data.decode()
+    assert "turned off by the administrator" in body
+    assert "Jellyfin account itself is unaffected" in body
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_the_admin_can_block_and_unblock_from_the_users_page(client, user_auth):
+    _login(client)
+    resp = client.post("/admin/users/u1/access", data={"allow": "0"}, follow_redirects=True)
+    assert "no longer sign in" in resp.data.decode()
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 0
+
+    resp = client.post("/admin/users/u1/access", data={"allow": "1"}, follow_redirects=True)
+    assert "now sign in" in resp.data.decode()
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+
+
+def test_blocking_requires_admin_login(client, user_auth):
+    assert client.post("/admin/users/u1/access", data={"allow": "0"}).status_code == 302
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+
+
+def test_blocking_an_unknown_user_is_rejected_cleanly(client, user_auth):
+    _login(client)
+    resp = client.post("/admin/users/nope/access", data={"allow": "0"}, follow_redirects=True)
+    assert "No such user" in resp.data.decode()
+
+
+def test_the_users_page_distinguishes_blocked_here_from_disabled_in_jellyfin(client, isolated_db):
+    """Two different facts, fixed in two different places - the page must not make
+    them look like the same thing."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "blockedhere"},
+                               {"id": "u2", "name": "offinjellyfin", "is_disabled": True}])
+    db.set_jellyfin_user_allowed("u1", False)
+    body = client.get("/admin/users").data.decode()
+    assert "blocked here" in body
+    assert "disabled in Jellyfin" in body
+
+
+# ---------------------------------------------------------------------------
+# The sign-in control in the fixed page-actions cluster
+# ---------------------------------------------------------------------------
+def test_the_sign_in_control_is_a_button_not_a_bare_link(client, user_auth):
+    body = client.get("/").data.decode()
+    assert 'class="page-actions"' in body
+    assert 'class="btn signin"' in body
+
+
+def test_the_sign_in_control_carries_the_current_page_as_next(client, user_auth):
+    """Signing in from a page should return you to it, not dump you on the index."""
+    body = client.get("/report").data.decode()
+    assert "next=%2Freport" in body or "next=/report" in body
+
+
+def test_a_signed_in_visitor_gets_a_user_chip_with_sign_out(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/").data.decode()
+    assert 'class="user-chip"' in body
+    assert "adam" in body
+    assert "Sign out" in body
+    assert 'class="btn signin"' not in body
+
+
+def test_the_sign_in_button_is_absent_on_the_sign_in_page(client, user_auth):
+    """Offering "Sign in" on the sign-in page is noise."""
+    assert 'class="btn signin"' not in client.get("/login").data.decode()
+
+
+def test_visitor_controls_never_appear_on_admin_pages(client, user_auth):
+    """Admin pages have their own nav; a visitor sign-in button there is confusing at
+    best and looks like a second way into the admin panel at worst."""
+    _login(client)
+    body = client.get("/admin/services").data.decode()
+    assert 'class="btn signin"' not in body
+    assert 'class="user-chip"' not in body
+
+
+def test_the_theme_toggle_still_renders_inside_the_cluster(client):
+    """It moved out of its own inline-positioned element - if the cluster ever stops
+    rendering it, the theme button silently disappears from every page."""
+    body = client.get("/").data.decode()
+    assert 'id="theme-toggle"' in body
+    assert body.index('class="page-actions"') < body.index('id="theme-toggle"')
+
+
+# ---------------------------------------------------------------------------
+# The reporter survives into an incident
+# ---------------------------------------------------------------------------
+def test_creating_an_incident_from_a_report_keeps_the_reporter(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("Playback stutters", "", None, reporter_user="adam")
+    client.post(f"/admin/reports/{rid}/create-incident", follow_redirects=True)
+    incident = db.list_incidents()[0]
+    assert 'Reported by Jellyfin user "adam"' in incident["description"]
+    assert "Playback stutters" in incident["description"]
+
+
+def test_an_anonymous_report_says_so_in_the_incident(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("Something broke")
+    client.post(f"/admin/reports/{rid}/create-incident", follow_redirects=True)
+    assert "Reported anonymously" in db.list_incidents()[0]["description"]

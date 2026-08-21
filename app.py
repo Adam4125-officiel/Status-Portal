@@ -1159,7 +1159,13 @@ def admin_report_create_incident(rid):
         return redirect(url_for("admin_reports"))
     service_ids = [report["service_id"]] if report["service_id"] else []
     title = report["message"][:80] + ("…" if len(report["message"]) > 80 else "")
-    description = f'Reported via the public "Report a problem" form.\n\n{report["message"]}'
+    # Carry the reporter into the incident. Without this the one place the admin
+    # acts on a report is the one place it loses who sent it, which is exactly when
+    # "who do I go back to about this" matters.
+    source = (f'Reported by Jellyfin user "{report["reporter_user"]}" via the public '
+              '"Report a problem" form.' if report["reporter_user"]
+              else 'Reported anonymously via the public "Report a problem" form.')
+    description = f'{source}\n\n{report["message"]}'
     iid = db.create_incident({"title": title, "description": description, "status": "investigating"}, service_ids)
     db.update_problem_report_status(rid, "resolved")
     flash("Incident created from report.", "success")
@@ -1219,6 +1225,13 @@ def user_login():
         elif reason == "disabled":
             _register_user_login_failure()
             flash("That Jellyfin account is disabled.", "error")
+        elif reason == "not_allowed":
+            # Correct credentials, refused by this portal's own access list. Worded
+            # so the person knows it isn't their password or their Jellyfin account -
+            # neither of which they can fix to get in here.
+            _register_user_login_failure()
+            flash("Your access to this portal has been turned off by the administrator. "
+                  "Your Jellyfin account itself is unaffected.", "error")
         elif reason == "not_configured":
             flash("Jellyfin sign-in isn't configured on this portal.", "error")
         else:
@@ -2291,6 +2304,8 @@ def admin_users():
                                 "user_session_timeout_hours", str(DEFAULT_USER_SESSION_TIMEOUT_HOURS)),
                             max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
                             users=db.list_jellyfin_users(),
+                            blocked_count=sum(1 for u in db.list_jellyfin_users()
+                                              if not u["portal_allowed"]),
                             sync_task_name=jellyfin_auth.TASK_NAME,
                             active="users")
 
@@ -2306,6 +2321,30 @@ def admin_users_settings():
     db.set_setting("user_session_timeout_hours",
                     timeout_hours if timeout_hours.isdigit() else str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
     flash("User account settings updated.", "success")
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/<user_id>/access", methods=["POST"])
+@login_required
+def admin_user_access(user_id):
+    """Blocks or unblocks one Jellyfin user's access to *this portal*. Never touches
+    their Jellyfin account - this portal has no business disabling someone's media
+    server login, and an admin who wants that does it in Jellyfin (where the next
+    sync will pick it up on its own).
+
+    Takes effect immediately: _enforce_user_session re-checks this on every request,
+    so blocking someone ends the session they are sitting in rather than waiting for
+    it to expire."""
+    user = db.get_jellyfin_user(user_id)
+    if not user:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    allow = request.form.get("allow") == "1"
+    db.set_jellyfin_user_allowed(user_id, allow)
+    _logger.info("Portal access %s for Jellyfin user '%s'",
+                  "granted" if allow else "blocked", user["name"])
+    flash(f"{user['name']} can {'now sign in' if allow else 'no longer sign in'} to this portal.",
+          "success")
     return redirect(url_for("admin_users"))
 
 

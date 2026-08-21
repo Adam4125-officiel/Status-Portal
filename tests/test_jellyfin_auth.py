@@ -47,6 +47,12 @@ def _jf_api_user(uid="u1", name="adam", admin=False, disabled=False):
             "Policy": {"IsAdministrator": admin, "IsDisabled": disabled}}
 
 
+def _jf_user(uid="u1", name="adam", admin=False, disabled=False):
+    """The *normalised* shape db.replace_jellyfin_users() takes, as opposed to
+    _jf_api_user above, which is what Jellyfin's API actually returns."""
+    return {"id": uid, "name": name, "is_administrator": admin, "is_disabled": disabled}
+
+
 # ---------------------------------------------------------------------------
 # Which Jellyfin, and is the feature on
 # ---------------------------------------------------------------------------
@@ -347,3 +353,97 @@ def test_status_summary_reports_why_the_feature_is_off(isolated_db):
     assert summary["integration"] is None
     assert summary["cached_users"] == 0
     assert summary["synced_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Per-user portal access (admin-owned, separate from Jellyfin's own IsDisabled)
+# ---------------------------------------------------------------------------
+def test_everyone_is_allowed_by_default(isolated_db):
+    """Users arrive by being synced from Jellyfin, so requiring individual approval
+    would make the feature tedious for the normal case."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+    assert jellyfin_auth.portal_access_allowed("u1") is True
+
+
+def test_an_unknown_user_is_allowed(isolated_db):
+    """Someone can legitimately authenticate before ever appearing in the cache (they
+    were created in Jellyfin since the last sync). Absence of a row is absence of a
+    decision, not a refusal."""
+    assert jellyfin_auth.portal_access_allowed("never-seen") is True
+
+
+def test_blocking_a_user_refuses_sign_in_despite_correct_credentials(jellyfin_integration, monkeypatch):
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    db.set_jellyfin_user_allowed("u1", False)
+    _auth_response(monkeypatch, _Response(200, {"User": _jf_api_user("u1", "adam"),
+                                                 "AccessToken": "tok"}))
+    result = jellyfin_auth.authenticate("adam", "hunter2")
+    assert result["ok"] is False
+    assert result["reason"] == "not_allowed"
+
+
+def test_not_allowed_is_reported_separately_from_disabled(jellyfin_integration, monkeypatch):
+    """They're fixed in completely different places - one here, one in Jellyfin - so
+    collapsing them into one message would send an admin to the wrong screen."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam", disabled=True)])
+    db.set_jellyfin_user_allowed("u1", False)
+    _auth_response(monkeypatch, _Response(200, {"User": _jf_api_user("u1", "adam", disabled=True),
+                                                 "AccessToken": "tok"}))
+    # Jellyfin's own state is checked first: it's the more fundamental fact, and the
+    # admin can't undo it from this portal.
+    assert jellyfin_auth.authenticate("adam", "x")["reason"] == "disabled"
+
+
+def test_unblocking_restores_access(jellyfin_integration, monkeypatch):
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    db.set_jellyfin_user_allowed("u1", False)
+    db.set_jellyfin_user_allowed("u1", True)
+    _auth_response(monkeypatch, _Response(200, {"User": _jf_api_user("u1", "adam"),
+                                                 "AccessToken": "tok"}))
+    assert jellyfin_auth.authenticate("adam", "hunter2")["ok"] is True
+
+
+def test_a_block_survives_the_next_sync(isolated_db):
+    """The trap this feature has: the sync is a full delete-and-reinsert, so without
+    carrying the flag across, blocking someone would silently un-block them within
+    the hour."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam"), _jf_user("u2", "sam")])
+    db.set_jellyfin_user_allowed("u1", False)
+    db.replace_jellyfin_users([_jf_user("u1", "adam"), _jf_user("u2", "sam")])
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 0
+    assert db.get_jellyfin_user("u2")["portal_allowed"] == 1
+
+
+def test_a_block_survives_a_rename_in_jellyfin(isolated_db):
+    """Tracked by Jellyfin's stable user id, not the username - so renaming yourself
+    is not a way out of a block."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    db.set_jellyfin_user_allowed("u1", False)
+    db.replace_jellyfin_users([_jf_user("u1", "adam-renamed")])
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 0
+
+
+def test_a_user_deleted_and_recreated_in_jellyfin_starts_allowed(isolated_db):
+    """A different Jellyfin account is a different user, even with the same name -
+    the block was against an id, and that id is gone."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    db.set_jellyfin_user_allowed("u1", False)
+    db.replace_jellyfin_users([_jf_user("u2", "adam")])
+    assert db.get_jellyfin_user("u2")["portal_allowed"] == 1
+
+
+def test_blocking_invalidates_an_existing_session(isolated_db):
+    """"Disabled" that leaves someone signed in for another week isn't disabled."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam")])
+    assert jellyfin_auth.session_user_still_valid("u1") is True
+    db.set_jellyfin_user_allowed("u1", False)
+    assert jellyfin_auth.session_user_still_valid("u1") is False
+
+
+def test_jellyfin_disabling_still_invalidates_independently(isolated_db):
+    """The two mechanisms have to work separately - a user allowed here but disabled
+    in Jellyfin is still out."""
+    db.replace_jellyfin_users([_jf_user("u1", "adam", disabled=True)])
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+    assert jellyfin_auth.session_user_still_valid("u1") is False

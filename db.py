@@ -312,6 +312,12 @@ def init_db():
     # the admin, and it has to stay readable for a user who was later removed from
     # Jellyfin entirely.
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
+    # Whether this portal lets the user sign in, independently of whether Jellyfin
+    # does. On by default: users appear here by being synced from Jellyfin, and
+    # having to individually approve each one would make the feature tedious for the
+    # normal case. Needs _ensure_column rather than living in the CREATE TABLE above
+    # because jellyfin_users already exists on any install running 1.7.0-rc.1.
+    _ensure_column(conn, "jellyfin_users", "portal_allowed", "INTEGER NOT NULL DEFAULT 1")
     conn.commit()
 
     # Write-ahead logging. SQLite's default rollback journal takes a database-wide
@@ -1411,16 +1417,19 @@ def replace_jellyfin_users(users):
     conn = get_db()
     try:
         with conn:
-            existing = {r["id"]: r["first_seen_at"]
-                        for r in conn.execute("SELECT id, first_seen_at FROM jellyfin_users").fetchall()}
+            existing = {r["id"]: r for r in
+                        conn.execute("SELECT id, first_seen_at, portal_allowed FROM jellyfin_users").fetchall()}
             conn.execute("DELETE FROM jellyfin_users")
             conn.executemany("""
                 INSERT INTO jellyfin_users (id, name, name_lower, is_administrator, is_disabled,
-                                             first_seen_at, last_synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                             first_seen_at, last_synced_at, portal_allowed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, [(u["id"], u["name"], u["name"].strip().lower(),
                    int(bool(u.get("is_administrator"))), int(bool(u.get("is_disabled"))),
-                   existing.get(u["id"], stamp), stamp) for u in users])
+                   existing[u["id"]]["first_seen_at"] if u["id"] in existing else stamp,
+                   stamp,
+                   existing[u["id"]]["portal_allowed"] if u["id"] in existing else 1)
+                  for u in users])
     finally:
         conn.close()
     return len(users)
@@ -1446,6 +1455,18 @@ def get_jellyfin_user_by_name(name):
                         ((name or "").strip().lower(),)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def set_jellyfin_user_allowed(user_id, allowed):
+    """Blocks or unblocks one user's access to *this portal*, leaving their Jellyfin
+    account completely untouched. Deliberately a separate fact from is_disabled: that
+    one mirrors Jellyfin and is overwritten by every sync, this one is the admin's own
+    decision and is carried across syncs by replace_jellyfin_users()."""
+    conn = get_db()
+    conn.execute("UPDATE jellyfin_users SET portal_allowed=? WHERE id=?",
+                  (int(bool(allowed)), user_id))
+    conn.commit()
+    conn.close()
 
 
 def count_jellyfin_users():

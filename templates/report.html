@@ -11,10 +11,7 @@
       {% endif %}
       {{ site_name }}
     </div>
-    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); display: flex; align-items: center; gap: 12px;">
-      {% if portal_user %}<span title="Signed in with your Jellyfin account">👤 {{ portal_user.name }}</span>{% endif %}
-      <a href="{{ url_for('index') }}">← Back to status</a>
-    </div>
+    <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
   </div>
 
   <div class="admin-header">

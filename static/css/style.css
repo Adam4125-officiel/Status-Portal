@@ -71,6 +71,69 @@
 }
 .theme-toggle:hover { border-color: var(--brand-dim); color: var(--text-primary); }
 
+/* ---------------- Fixed page-actions cluster (top right) ----------------
+   The theme toggle used to be positioned on its own with inline styles. It now
+   shares a fixed cluster with the visitor sign-in control, so the two can't
+   overlap and both follow the page as it scrolls - the sign-in link was
+   previously a plain hyperlink buried in the topbar and was easy to miss
+   entirely, which is the whole reason this exists. */
+.page-actions {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 4px 6px 4px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 46vw;
+}
+.user-chip__name {
+  font-weight: 600;
+  color: var(--text-primary);
+  /* A long Jellyfin username must shrink rather than push the sign-out button
+     off the edge of a phone screen. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-chip__out {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 20px;
+  padding: 3px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.user-chip__out:hover { border-color: var(--brand-dim); color: var(--text-primary); text-decoration: none; }
+.btn.signin {
+  border-radius: 20px;
+  padding: 6px 16px;
+  font-size: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 560px) {
+  /* The label is what makes it readable as a button; keep it, and let the
+     username chip give up its width instead. */
+  .user-chip { padding-left: 10px; font-size: 11px; }
+  .user-chip__name { max-width: 26vw; }
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -108,6 +171,20 @@ a:hover { text-decoration: underline; }
   gap: 16px;
   flex-wrap: wrap;
   margin-bottom: 28px;
+  /* Keeps the topbar's right-hand content out from under the fixed .page-actions
+     cluster, which floats over the page. Reserved for the widest state (a username
+     chip plus a sign-out button plus the theme toggle); it collapses to just the
+     toggle's width on narrow screens, where the cluster is smaller and the topbar
+     wraps anyway. Without this the "next refresh in Ns" text sits behind the
+     sign-in button - visible immediately in a browser, invisible to every
+     route-level test. */
+  padding-right: 235px;
+}
+body.no-visitor-controls .topbar { padding-right: 46px; }
+
+@media (max-width: 700px) {
+  .topbar { padding-right: 0; padding-top: 40px; }
+  body.no-visitor-controls .topbar { padding-right: 0; }
 }
 
 .brand {

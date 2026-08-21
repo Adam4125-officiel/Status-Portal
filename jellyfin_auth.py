@@ -29,7 +29,9 @@ would not be degraded authentication, it would be none. So:
   the "reduced functionality" mode: nobody new gets in, everybody already in stays
   in.
 - **An empty cache means "no information", not "no users".** A session is only ever
-  revoked when the cache is populated *and* the user is absent or disabled in it.
+  revoked when the cache is populated *and* the user is absent, disabled in Jellyfin,
+  or blocked here by the admin (a separate, admin-owned flag - see
+  portal_access_allowed).
   A failed sync leaves the previous list completely intact (see
   db.replace_jellyfin_users), so one unreachable poll can never lock out the world.
 
@@ -249,6 +251,14 @@ def authenticate(username, password):
     user = _normalise_user(raw_user)
     if user["is_disabled"]:
         return {"ok": False, "reason": "disabled"}
+    if not portal_access_allowed(user["id"]):
+        # Jellyfin was happy; this portal is not. Reported separately from "disabled"
+        # so the admin reading the log (and the person reading the screen) can tell
+        # "your Jellyfin account is off" apart from "your access here was revoked" -
+        # they're fixed in completely different places.
+        _logger.info("Refused sign-in for Jellyfin user '%s' - access to this portal is blocked",
+                      user["name"])
+        return {"ok": False, "reason": "not_allowed"}
     return {"ok": True, "user": user}
 
 
@@ -266,6 +276,17 @@ def _revoke_token(base_url, token):
         _logger.info("Could not revoke the short-lived Jellyfin token after sign-in: %s", e)
 
 
+def portal_access_allowed(user_id):
+    """Whether this portal lets the user in, independently of what Jellyfin thinks.
+
+    Unknown users are allowed. A user can legitimately authenticate before ever
+    appearing in the cache (they were created in Jellyfin since the last sync), and
+    the default for this flag is "on" anyway - so absence of a row is absence of a
+    decision, not a refusal."""
+    row = db.get_jellyfin_user(user_id)
+    return True if row is None else bool(row["portal_allowed"])
+
+
 def session_user_still_valid(user_id):
     """Whether an already-signed-in user should keep their session, checked against
     the local cache only - never against Jellyfin, so an outage never signs anyone
@@ -281,4 +302,7 @@ def session_user_still_valid(user_id):
     row = db.get_jellyfin_user(user_id)
     if row is None:
         return False
-    return not row["is_disabled"]
+    # Blocking a user takes effect on their very next request, not whenever their
+    # session happens to expire - "disabled" that leaves someone signed in for
+    # another week isn't disabled.
+    return not row["is_disabled"] and bool(row["portal_allowed"])
