@@ -34,6 +34,51 @@ safely is the real work. Treat it with the same care as the self-updater,
 not as a quick add — it's the riskiest idea in this document, not the
 easiest.
 
+**Where it should live**: see "Updater quality-of-life" below — the argument
+there is that someone reaching for a restore is usually recovering from
+something, and will look on the About page next to rollback rather than in
+Settings. Same feature, one implementation.
+
+### Updater quality-of-life: release notes in the app, and restore from a backup zip
+Two related improvements to `/admin/about`, which today tells you *that* an
+update exists but nothing about what's in it, and can roll code back but not
+data.
+
+**Show the changelog.** The GitHub releases API already returns each
+release's `body` (the changelog written at release time) in the same
+response `updater.py` parses for the version and download URL — so surfacing
+"what's in the update you're being offered" costs one extra field, not one
+extra request. Worth showing **both**: the notes for the version you're
+running and the notes for the version on offer, so "should I take this?" is
+answerable without leaving the page. If several releases have accumulated,
+showing the notes for each version *between* the two is the more useful
+version of this, and needs the releases list rather than just the latest —
+which `updater.py` already fetches. The body is Markdown and arrives from
+the network, so it must be rendered through something escaping-safe rather
+than dropped into the page as HTML — the existing `richtext` filter is the
+obvious starting point, and deliberately supports far less than Markdown.
+
+**Restore the database from a backup zip.** The counterpart to the existing
+"download a backup" button, offered where the other recovery machinery
+already lives instead of buried in Settings. **This is the same feature as
+"Restore from backup" above** — see that entry for the safety machinery it
+needs (validate the upload really is a SQLite database before touching
+anything, snapshot the *current* database first, atomic replace, restart the
+process, step-up 2FA). Treat this entry as "and put it on the About page
+next to rollback, where someone recovering from a bad update will actually
+look for it", not as a second, simpler implementation.
+
+Worth keeping the two kinds of backup distinct in the UI while doing it,
+because conflating them would be a genuinely bad mistake: `updater.py`'s
+backups are of **application code**, for rolling back a bad update, and
+contain no data; the Settings backup button produces a **database** zip and
+contains nothing else. Neither can restore the other.
+
+**Priority:** Medium-High for the changelog (small, and it improves every
+future update decision) · Medium for the restore half · **Effort:** S for
+the changelog; S-M for the restore, all of which is in the risk of
+assembling it rather than the amount of code.
+
 ### External internet connectivity check
 Pings a fixed external target (1.1.1.1 by default, ideally configurable) on
 the same schedule as service health checks. If it fails, the public page can
@@ -150,19 +195,33 @@ default so today's single-port behavior is unchanged.
 already decided; it's mostly wiring a second listener and one
 `before_request` gate.
 
-### Jellyfin-backed user permissions
-Uses Jellyfin's own user accounts as an identity source, so a logged-in
-Jellyfin user could see personalized content on the public page (e.g.
-Tailscale join instructions) instead of everyone seeing the same static Info
-page. A genuinely bigger change: it adds a second authentication path
-alongside the current single-admin-password login, plus a
-permissions/visibility model per piece of content — worth a dedicated design
-conversation before any code, since it touches how content is modeled
-everywhere, not just one page.
+### Jellyfin-backed user permissions — auth layer DONE (v1.7.0), visibility model still open
+The **authentication half is built** (2026-08-21): visitors sign in with
+their Jellyfin username and password, backed by a scheduled task that caches
+Jellyfin's user list locally so an outage never signs anybody out. See
+CLAUDE.md → "Jellyfin-backed user accounts" for the design, and the
+`/admin/users` page for the settings. The session already carries the pieces
+a permissions model needs — the Jellyfin user id, the display name, and
+whether Jellyfin considers them an administrator (stored deliberately, read
+by nothing yet).
 
-**Priority:** Medium · **Effort:** L — new auth path, new permissions model,
-and it's what the Radarr/Prowlarr/qBittorrent integration above would
-ideally build on rather than duplicate later.
+**What's left is the permissions/visibility model itself**, which was
+correctly scoped out of that pass rather than rushed into it: a way to mark a
+piece of content (an Info page block, a service card, an announcement, a
+service link) as visible only to signed-in users, or only to particular
+Jellyfin accounts. That's the part that "touches how content is modeled
+everywhere, not just one page", and it needs its own design conversation —
+in particular whether visibility is per-item-per-user, per-item-per-group,
+or just a three-way public/signed-in/admin flag, which is very likely enough
+and vastly cheaper than the other two.
+
+The first concrete use case remains the original one: Tailscale join
+instructions shown only to people who actually have an account.
+
+**Priority:** Medium · **Effort:** M for a three-way visibility flag on the
+existing content types; L if per-user rules are genuinely wanted. It is also
+what the Radarr/Prowlarr/qBittorrent integration above would build on to
+scope "requested items" and "active downloads" per account.
 
 ### Linux-native `monitoring.py` backend/fork
 Almost everything in this app is already OS-agnostic — services, incidents,
@@ -193,8 +252,15 @@ genuinely more work, not more of the same. **Restore from backup** is the
 one item worth flagging out of proportion to its Medium priority: it's the
 riskiest thing in this document precisely because its counterpart (export)
 was so easy — don't let that make restore feel like a quick add too. Of the
-three architectural carry-overs, **admin-on-a-separate-port** is the only
-one with an implementation shape already fully decided — the other two
-(Jellyfin auth, Linux fork) are genuinely open design questions, not just
-bigger builds, and worth treating that way rather than scheduling them like
-a normal feature.
+three architectural carry-overs, **Jellyfin auth's authentication half is now
+built** (v1.7.0) and only its visibility model is still an open design
+question; **admin-on-a-separate-port** has an implementation shape already
+fully decided; and the **Linux fork** remains a genuinely open question worth
+treating as such rather than scheduling like a normal feature.
+
+Two things v1.7.0 added that later work should build on rather than
+reinvent: the **scheduled-task framework** (`scheduler.py`) means anything
+recurring — the *Arr version checker and the stuck-download alert above, a
+cleanup job, a cache warmer — is a `register()` call rather than another
+background thread; and the **visitor session** means anything that wants to
+know who is looking at the page already has an answer.

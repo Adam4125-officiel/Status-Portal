@@ -28,6 +28,9 @@ whatever you're touching. Do not skim the whole file — that's how rules get mi
 9. New module-level cache → reset it in `tests/conftest.py`, and clear it in that
    module's `clear_caches()`.
 10. Entity picker → checkbox list, never `<select multiple>`.
+11. `session["logged_in"]` is set in **one** function (`_start_admin_session`). The
+    Jellyfin visitor session is a separate identity and must never write it.
+12. A recurring job is a `scheduler.register()` call, not a fourth `while True` thread.
 
 **Most of those are enforced by `tests/test_conventions.py`.** It runs in a fraction
 of a second and its failure messages name the file and the fix. Run it early rather
@@ -88,6 +91,9 @@ have bitten someone on exactly that change.
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
+| A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
+| Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
+| A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
@@ -1070,6 +1076,143 @@ DB-backed Settings pages, not a code edit.
   must be **ISO-8601 strings** - caches that stamp themselves with `time.time()`
   floats convert at the boundary (`monitoring._as_iso()`), because `local_time.js`
   leaves anything `new Date()` can't parse showing its fallback text.
+
+## Scheduled tasks (`scheduler.py`, `/admin/tasks`) — added 2026-08-21, v1.7.0
+
+- **A new recurring job is a `scheduler.register()` call, not a fourth background
+  thread.** This app had three hardcoded loops (health checks, resource polling, the
+  Discord bot) before this existed, each with its cadence baked in. The framework is
+  what stops a fourth appearing every time something needs a different schedule, an
+  on/off switch or a "run it now" button.
+- **The code owns the registry; the database owns the settings.** `register()` is
+  called at import time by whichever module owns the job (`jellyfin_auth.py` is the
+  first); the `scheduled_tasks` table holds only what an admin can change plus the
+  outcome of the last run. Adding a task therefore needs **no migration** — the row
+  is created lazily on first use via `INSERT OR IGNORE`, which is also what stops a
+  restart resetting an admin's saved schedule back to the registry defaults.
+- **A task is a plain callable returning a short message.** It signals "nothing to
+  do, and that isn't a failure" by raising `scheduler.TaskSkipped` (recorded as
+  `skipped`) and failure by raising anything else (recorded as `failed`, logged with
+  its traceback). Don't add a base class; there is nothing for one to hold.
+- **Every due task runs in its own short-lived thread**, so a slow or hung task
+  delays only itself. The per-task lock is what keeps that bounded: a task never
+  overlaps itself, so a hung task costs exactly one stuck thread rather than a new
+  one every tick. "Run now" on a task that's already running reports `busy` and
+  **records nothing** — the run in progress writes the real result, and stamping
+  `last_run_at` for a run that never happened would corrupt the schedule.
+- **A failed run still stamps `last_run_at`.** An interval schedule is measured from
+  it, so leaving it alone on failure would make a permanently-failing task retry on
+  every single scheduler tick instead of on its next scheduled run.
+- **`next_run_at` is derived from the stored `last_run_at`, never tracked in
+  memory.** That's what makes a daily task missed while the portal was down run on
+  the next tick after it comes back, rather than silently skipping a day. A
+  never-run *interval* task is due immediately; a never-run *daily* task is due at
+  its next HH:MM (firing a 03:00 job the instant the portal first starts at 14:00
+  would be surprising, not helpful).
+- **`record_task_run()` and `update_task_schedule()` are `UPDATE` statements**, so
+  they silently write nothing on a task whose row was never materialised. Both are
+  reached through `scheduler.run_task()`/`scheduler.save_schedule()`, which ensure
+  the row first — **don't call the `db.` functions directly from a route.** This bit
+  twice while the framework was being written, both times as "the action appeared to
+  work and recorded nothing".
+- **Schedules are interval-or-daily, deliberately not cron.** Cron means either a
+  new dependency in a project with five, or a hand-rolled parser with its own bug
+  surface, and buys nothing the two modes cover. If cron is ever genuinely wanted,
+  add it as a third `schedule_kind` rather than replacing these.
+- **Daily times are UTC**, matching everything else this app stores, and the form
+  says so. A schedule that silently shifted with daylight saving would be worse than
+  one you convert once.
+- `config.SCHEDULER_TICK_SECONDS` (30s) is the granularity floor — a task set to
+  "every 5 minutes" can only be as punctual as the tick allows. It's a check
+  interval, hence an env var; everything per-task is a DB row.
+
+## Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0
+
+A second identity alongside the single admin: visitors sign in with their Jellyfin
+username and password. **Off by default** — enabling it puts a login form on the
+public page, which has to be a deliberate choice.
+
+- **The admin login is untouched, and the separation is structural, not a
+  convention.** `session["logged_in"]` is written in exactly one function
+  (`_start_admin_session`) and nothing in the visitor flow can reach it;
+  `login_required` reads only `logged_in`, `user_login_required` reads only
+  `portal_user`; separate lockout counters, separate timeouts, separate logout
+  routes. **Four checks in `tests/test_conventions.py` enforce this** — if you find
+  yourself wanting to share a helper between the two paths, that's the thing not to
+  do. A signed-in Jellyfin user is a visitor with a name, not a lesser admin.
+- **`_end_user_session()` pops its own keys and must never be `session.clear()`** —
+  an admin who is also signed in as a Jellyfin user in the same browser must not be
+  logged out of the admin panel by a visitor-side timeout. (`admin_logout` still
+  clears everything, which is correct in that direction and was left alone.)
+- **`jellyfin_admin` in the session is groundwork, read by nothing.** Being an
+  administrator in Jellyfin says nothing about this portal. It's stored for the
+  per-content visibility feature on the ROADMAP; if you start reading it, make that
+  an explicit feature rather than an implicit privilege.
+- **The cached user list can never authenticate anybody.** Jellyfin doesn't expose
+  password hashes over its API, so there is no material to check a password against
+  offline — accepting a username that merely appears in the cache would be no
+  authentication at all. Sign-in is therefore **always** a live call to Jellyfin.
+  This is the single most important thing not to "improve" here.
+- **What the cache is actually for**: keeping already-signed-in visitors valid while
+  Jellyfin is unreachable, and revoking the session of anyone since removed or
+  disabled there. `_enforce_user_session` checks it on every request and **never
+  contacts Jellyfin** — an outage must not sign anybody out.
+- **An empty cache means "no information", not "no users".**
+  `session_user_still_valid()` returns True when the list has never been synced;
+  otherwise the very first sign-in, before any sync had run, would be thrown away on
+  the next request. Likewise `sync_users()` refuses an empty user list from Jellyfin
+  (far more likely a proxy answering with a 200 than a Jellyfin with zero users) and
+  a failed sync leaves the previous list completely intact.
+- **"Unreachable" must never be reported as "wrong password"**, and must not count
+  towards the lockout. Telling someone their password is wrong when the server is
+  merely down sends them off to reset a password that was fine; letting an outage
+  fill the counter locks everyone out for five minutes after Jellyfin comes back.
+- **Neither the password nor the Jellyfin access token goes in the session.** The
+  Flask cookie is signed but *not* encrypted, so anything in it is readable by
+  whoever holds it. The access token is used once — to revoke itself via
+  `/Sessions/Logout` — which also stops the portal accumulating a dead device entry
+  per sign-in in Jellyfin's own device list. `DEVICE_ID` is fixed for the same
+  reason; don't randomise it.
+- **`jellyfin_auth.py` owns every Jellyfin call involving identity; `integrations.py`
+  stays read-only health/log checks.** That line is why `fetch_users()` lives here
+  rather than next to `fetch_jellyfin_sessions()`. The *configuration* is still
+  shared: the server URL and API key come from an ordinary Jellyfin integration row
+  (`jellyfin_auth_integration_id` picks which, when there are several), so there is
+  exactly one answer in the admin panel to "where is your Jellyfin". A stored id
+  pointing at a deleted or disabled integration resolves to `None` and disables the
+  feature rather than silently falling back to some *other* Jellyfin.
+- **`config.JELLYFIN_AUTH_TIMEOUT_SECONDS` is separate from `integrations.TIMEOUT`
+  on purpose** — same precedent as `BYPARR_TIMEOUT_SECONDS`, different pressure: a
+  person is waiting on a sign-in, and a Jellyfin busy transcoding answers
+  `/Users/AuthenticateByName` more slowly than `/System/Info`. Too low and a valid
+  password looks like an outage.
+- **The `/report` gate (`report_requires_login`) only takes effect while sign-in is
+  enabled.** Otherwise enabling the default would make the report form unreachable
+  behind a login that doesn't exist on every install that never set this up.
+  **Known trade-off, stated in the admin UI rather than buried**: while Jellyfin is
+  down, nobody who hasn't already signed in can sign in, so nobody new can report
+  the outage — which is one of the times a status page matters most. The setting is
+  the escape hatch; don't quietly remove it.
+- **`_csrf_required_for()` replaced the bare `/admin/` prefix check.** Everything
+  under `/admin/` still always applies. Beyond that: `/login` unconditionally (a
+  cross-site POST to it is session fixation), and `/report` **only while somebody is
+  signed in** — its exemption was justified by exercising no authenticated
+  privilege, which stops being true once reports are attributable, while no-JS
+  anonymous reporting keeps working on installs without sign-in. A new public POST
+  route means a deliberate decision in that function; the convention test reads it.
+- **`_safe_next_url()` exists because `/login` is reachable with no authentication
+  at all** — an open redirect there is a phishing primitive. Anything not a
+  single-slash relative path is discarded rather than sanitised.
+- **Security note worth repeating to the user, not just the code**: enabling this
+  publishes a Jellyfin login form wherever the portal is reachable. That's the
+  actual risk of the feature, and it's why it's off by default.
+- **What is and isn't verified**: every flow was exercised live against a *stand-in*
+  Jellyfin HTTP server built from Jellyfin's documented response shapes — sign-in,
+  wrong password, disabled account, outage behaviour, session revocation, restart
+  survival — plus a real Chromium run of every new page. **No real Jellyfin instance
+  exists in this sandbox**, so the exact response shapes of `/Users` and
+  `/Users/AuthenticateByName` are unconfirmed against a running server. See
+  `docs/HISTORY.md`.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

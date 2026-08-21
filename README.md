@@ -29,6 +29,17 @@ touching the HTML.
   admin-configurable number of days (a still-open incident is never hidden), with a
   "Load more" button to page through full history — plus a "maintenance history"
   section (ended windows, never shown publicly before) with the same paging
+- **Scheduled tasks** — a dedicated admin page for the portal's own recurring
+  background jobs: each has an enable/disable toggle, a configurable schedule (every
+  N minutes, or daily at a fixed time), a "Run now" button, and its last result
+  (success/failure and the error message) with the next run time. A failing task is
+  recorded and retried on its next run — it never takes the portal down or stops the
+  other tasks
+- Optional **Jellyfin-backed sign-in for visitors** (off by default) — people log in
+  with their Jellyfin username and password, checked against Jellyfin itself, and the
+  user list is cached locally by a scheduled task so a Jellyfin outage never signs
+  anyone out. Completely separate from your admin login: a signed-in Jellyfin user is
+  never an admin and can't reach `/admin` at all
 - A public **"Report a problem" form**, separate from the incident/maintenance
   system — visitors can flag something wrong (optionally tied to a specific
   service), landing in an admin Reports page with an unread-count badge and a
@@ -454,6 +465,88 @@ yet exercised for real. If something doesn't work as expected, check the server 
 first — every failure (bad token, sync error, a channel it can't access) is logged
 there, and to `instance/logs/app.log`.
 
+### Scheduled tasks
+
+`/admin/tasks` is where the portal's own recurring background jobs live — modelled on
+Jellyfin's own Scheduled Tasks page, and built as a general framework so future jobs
+slot in without a new page each time.
+
+Each task shows its **last run** (when, whether it succeeded, how long it took, and
+the error message if it failed) and its **next scheduled run**, and gives you:
+
+- an **enable/disable** toggle — a disabled task never runs on its own, but "Run now"
+  still works;
+- a **schedule**: either *every N minutes* or *once a day at a fixed time* (in UTC,
+  because everything this portal stores is in UTC — a schedule that silently shifted
+  with daylight saving would be worse than converting once);
+- **Run now**, to force a run immediately without waiting for the next slot.
+
+A task that fails is recorded here with its error and retried on its **next scheduled
+run** — it never crashes the scheduler, and never blocks the other tasks (each run
+gets its own thread). A task also never runs twice at once: hitting "Run now" while
+it's already running tells you so instead of starting a second copy.
+
+Everything is stored in the database, so schedules, on/off states and run history all
+survive a restart.
+
+There's one task today: **Jellyfin user sync** (below). Others will use the same page.
+
+### Jellyfin sign-in for visitors (optional, off by default)
+
+Lets people sign in to the **public** page with their **Jellyfin** username and
+password. This is entirely separate from your own admin login — a signed-in Jellyfin
+user is a visitor with a name, not a junior admin, and cannot reach any page under
+`/admin`.
+
+**Setting it up** (Settings is at `/admin/users`):
+
+1. Add a **Jellyfin integration** under Integrations if you don't already have one —
+   that's where the server URL and API key live. There's deliberately no second copy
+   of them, so there's only ever one answer to "where is your Jellyfin". (Get an API
+   key from Jellyfin: Dashboard → API Keys → +.)
+2. Go to **User accounts**, tick *"Allow visitors to sign in with their Jellyfin
+   account"*, and save. If you have more than one Jellyfin integration, pick which
+   one to authenticate against.
+3. Go to **Scheduled tasks** and hit **Run now** on *Jellyfin user sync* to populate
+   the user list immediately (otherwise it happens on its own within the hour).
+
+A **Sign in** link then appears on the public page.
+
+**What happens when Jellyfin is down** — worth understanding before you turn this on,
+because it isn't quite what "cached user list" sounds like:
+
+- **Signing in always asks Jellyfin.** The cached list is *never* used to check a
+  password, because Jellyfin doesn't hand out password hashes over its API — there's
+  simply nothing to check one against locally. Anything else would mean letting
+  anyone in who types a username that appears in the list.
+- **So a *new* sign-in during an outage is refused**, with a message that says the
+  server can't be reached — not "wrong password", which would send you off resetting
+  a password that was fine.
+- **Everyone already signed in stays signed in.** Sessions are validated against the
+  local cache, never against Jellyfin, so an outage never signs anybody out. Nobody
+  new gets in; everybody already in stays in.
+- **A failed sync changes nothing.** The previous user list is kept and the task
+  retries on its next run.
+
+**Removing someone's access**: delete or disable their account in Jellyfin. The next
+sync picks it up, and their session on this portal ends on their next page load.
+
+**What's stored**: a Jellyfin user's id, display name, and whether Jellyfin considers
+them an administrator (kept as groundwork for future per-content visibility — it
+grants nothing today). Passwords are passed straight to Jellyfin and never stored.
+The access token Jellyfin returns at sign-in is immediately revoked and never kept,
+so this portal doesn't pile up device entries in your Jellyfin dashboard.
+
+**Gating "Report a problem"**: also on the User accounts page, *"Require a signed-in
+Jellyfin user to submit a Report a problem"* (on by default, but only in effect once
+sign-in is enabled — an install without Jellyfin sign-in behaves exactly as before).
+Reports then carry the reporter's Jellyfin username, shown in the admin Reports list.
+
+⚠️ **The catch, stated plainly**: with that gate on, if Jellyfin is down, someone who
+has never signed in can't sign in — so they can't report the outage either, which is
+one of the moments a status page is most useful. If you'd rather take the spam risk
+than lose reports during an outage, turn the gate off; it's a single checkbox.
+
 ### Two-factor authentication (optional, confirmed working)
 
 `/admin/2fa` adds TOTP-based two-factor authentication to the admin login — works
@@ -527,6 +620,8 @@ read it via `python-dotenv`) or as real env vars. See `.env.example`.
 | `PORTAL_DISCORD_BOT_REFRESH_SECONDS` | `300` | How often the bot updates its presence / edits its tracked status messages |
 | `PORTAL_DISCORD_BOT_GUILD_ID` | *(blank = global sync)* | Set to your server's ID for instant slash-command registration on a single-server bot |
 | `PORTAL_BYPARR_TIMEOUT_SECONDS` | `30` | HTTP timeout for the Byparr integration's `/health` check specifically — it solves a real Cloudflare challenge before responding, so it needs longer than every other integration's 5s timeout |
+| `PORTAL_SCHEDULER_TICK_SECONDS` | `30` | How often the scheduler looks for due tasks — the granularity floor for every task schedule. Each task's own schedule is set in the browser at `/admin/tasks`, not here |
+| `PORTAL_JELLYFIN_AUTH_TIMEOUT_SECONDS` | `10` | HTTP timeout for the Jellyfin calls behind user accounts (the user list, and checking a password at sign-in). Longer than the 5s used for read-only health checks because someone is waiting on it — raise it if valid logins are reported as "couldn't reach Jellyfin" |
 | `PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` | `21600` (6h) | How often the background thread asks GitHub whether there's a new release |
 | `PORTAL_ENABLE_INAPP_UPDATE` | `true` | Set `false` to remove the admin panel's "Update now" button entirely (`update.py` over SSH still works) |
 
@@ -572,6 +667,16 @@ pages instead of default framework ones, and optional `ProxyFix` support
 replaces putting a real reverse proxy/WAF/TLS in front if you expose this beyond a
 VPN - it just means the app itself isn't the weak link.
 
+**If you turn on Jellyfin sign-in** (Settings → User accounts), be aware of exactly
+what that does: it publishes a **Jellyfin login form** wherever this portal is
+reachable. On a LAN or Tailscale that's fine; on the open internet you are now
+accepting Jellyfin credentials over whatever transport this portal is served on, so
+the TLS advice below stops being optional. Passwords are only ever passed straight
+through to Jellyfin and are never stored, logged, or put in the session cookie — but
+that doesn't help if the connection itself is plaintext. It's off by default for
+this reason. Failed sign-ins are rate-limited separately from the admin login, so
+neither can lock the other out.
+
 **If you're considering exposing this beyond a private network** (Tailscale/LAN),
 two things worth doing first:
 
@@ -598,6 +703,8 @@ status-portal/
   docs/HISTORY.md          # archived post-mortems + what's been verified on real hardware
   VERSION                  # the single source of truth for the running version
   app.py                  # Flask routes (public + admin)
+  scheduler.py            # generic recurring-task framework (registry + runner)
+  jellyfin_auth.py        # Jellyfin as an identity source: user sync + sign-in
   serve_waitress.py       # run this in production (instead of app.py)
   update.py                # standalone updater CLI - works without the web UI
   updater.py               # the shared update logic (used by update.py AND the admin button)

@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-08-11.
+Rough chronological range: 2026-07-22 through 2026-08-21.
 
 ---
 
@@ -522,6 +522,85 @@ confirmed fix. If it recurs, that's the thing to say: the remaining candidate is
 simply the host being CPU-starved, which no amount of application tuning fixes.
 
 ---
+
+## Scheduled tasks and Jellyfin user accounts (v1.7.0, 2026-08-21)
+
+### The two silent no-op writes
+
+Both bugs the test suite caught while the scheduler framework was being written were
+the same shape, and neither would have raised anything. `record_task_run()` and
+`update_task_schedule()` are `UPDATE` statements; a task whose row had never been
+materialised (because nobody had opened its settings page yet) simply had nothing
+updated. So "Run now" ran the task correctly, reported success, and recorded no
+result at all — and saving a schedule appeared to save and changed nothing.
+
+Both now go through `scheduler.run_task()` / `scheduler.save_schedule()`, which
+ensure the row exists first. The lesson worth keeping: in a schema where rows are
+created lazily, every `UPDATE` needs to know who guarantees the row.
+
+### A convention test that fired on the comment explaining the convention
+
+`test_the_visitor_session_helper_never_touches_admin_session_keys` checks that
+`_end_user_session()` doesn't call `session.clear()`. Its first version searched the
+unparsed function — including the docstring, which says *"Never session.clear() —
+an admin who is also signed in..."*. The test failed on the sentence explaining why
+it must not happen.
+
+Fixed by stripping the docstring before inspecting. This is exactly the false
+positive `CLAUDE.md` warns about: a check that fires on correct code teaches people
+to ignore the file it lives in.
+
+### What "fall back to the cached user list" could and couldn't mean
+
+The original brief asked for authentication to "fall back to the cached user list"
+when Jellyfin is unreachable. That turned out not to be implementable as stated, and
+the reasoning is worth keeping because it will come up again:
+
+Jellyfin does not expose password hashes over its API (and must not), so the cached
+list contains no material to verify a password against. "Falling back" to it could
+only mean accepting any username that appears in it — which is not degraded
+authentication, it is none.
+
+What was built instead: sign-in always requires a live answer from Jellyfin, and an
+outage refuses *new* sign-ins while leaving every *existing* session working
+(validated against the cache, never against Jellyfin). Nobody new gets in, everybody
+already in stays in.
+
+The awkward consequence, flagged rather than hidden: with `/report` gated behind
+sign-in, a visitor who has never signed in cannot report an outage *during* that
+outage. Hence `report_requires_login` being a setting an admin can turn off, and the
+admin page saying so explicitly.
+
+### Verification record — sandbox, 2026-08-21
+
+Exercised against a **stand-in Jellyfin** — a small HTTP server implementing
+`/Users`, `/Users/AuthenticateByName` and `/Sessions/Logout` from Jellyfin's
+documented response shapes — because no real Jellyfin exists in this sandbox:
+
+- user sync populating the cache (3 users, including a disabled one);
+- sign-in with a correct password, a wrong password, and a disabled account;
+- the short-lived access token being revoked immediately (observed arriving at the
+  stand-in server's `/Sessions/Logout`);
+- a signed-in visitor refused on `/admin`, `/admin/services`, `/admin/settings`,
+  `/admin/users`, `/admin/tasks`, `/admin/resources`;
+- authenticated reporting, with the reporter's Jellyfin username recorded on the row;
+- **Jellyfin taken down mid-session**: the signed-in session survived repeated
+  requests, a new sign-in was refused with the "can't reach Jellyfin" message rather
+  than a password error, and a sync attempt during the outage failed while leaving
+  all 3 cached users intact;
+- a user removed from Jellyfin losing their session on the next request after a sync;
+- **a real process restart** against the same database: the signed-in session and the
+  task's schedule and last-run history both survived.
+
+Also driven through a real Chromium (Playwright), which is what confirmed
+`static/js/csrf.js` actually injects the token into the two new forms — `/login` is
+CSRF-protected, so had it not, nobody could have signed in from a browser at all
+while every curl-based test still passed. No console errors on any new page.
+
+**Not verified**: any real Jellyfin instance. The response shapes of `/Users` and
+`/Users/AuthenticateByName` come from Jellyfin's API documentation, not from
+observing a running server, and the `Authorization` / `X-Emby-Authorization` header
+pair is belt-and-braces for older builds rather than something confirmed necessary.
 
 ## Release history notes
 
