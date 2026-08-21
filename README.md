@@ -528,8 +528,20 @@ because it isn't quite what "cached user list" sounds like:
 - **A failed sync changes nothing.** The previous user list is kept and the task
   retries on its next run.
 
-**Removing someone's access**: delete or disable their account in Jellyfin. The next
-sync picks it up, and their session on this portal ends on their next page load.
+**Removing someone's access** — two separate ways, for two different situations:
+
+- **Block them from this portal only** (User accounts → the user list → *Block*).
+  Everyone is allowed by default; blocking someone stops them signing in here and
+  ends the session they're currently in, on their next page load. Their Jellyfin
+  account is untouched — they can still watch things, they just can't use this
+  portal. The block is remembered across user-list syncs, and follows the account
+  rather than the name, so renaming themselves in Jellyfin doesn't get them back in.
+- **Disable or delete them in Jellyfin.** The next sync picks that up on its own and
+  their portal session ends the same way. Use this when you want their *media*
+  access gone too.
+
+The user list shows which of the two applies to each person, since they're fixed in
+different places.
 
 **What's stored**: a Jellyfin user's id, display name, and whether Jellyfin considers
 them an administrator (kept as groundwork for future per-content visibility — it

@@ -1173,6 +1173,27 @@ public page, which has to be a deliberate choice.
   `/Sessions/Logout` — which also stops the portal accumulating a dead device entry
   per sign-in in Jellyfin's own device list. `DEVICE_ID` is fixed for the same
   reason; don't randomise it.
+- **Per-user portal access (`jellyfin_users.portal_allowed`) is the admin's own
+  decision and must never be confused with Jellyfin's `is_disabled`.** One mirrors
+  Jellyfin and is overwritten by every sync; the other is set here and **has to be
+  carried across the sync**, because `replace_jellyfin_users()` is a full
+  delete-and-reinsert — forget that and blocking someone silently un-blocks them
+  within the hour. Carried by Jellyfin's stable user id, so a rename is not a way
+  out of a block, while a genuinely new account reusing an old name starts allowed.
+  Enforced in **two** places that must stay in step: `authenticate()` (refuses a new
+  sign-in, with its own `not_allowed` reason distinct from `disabled`) and
+  `session_user_still_valid()` (ends the session they're already in, on the next
+  request — a block that waits for expiry isn't a block). Unknown user = allowed:
+  absence of a row is absence of a decision, not a refusal.
+- **The visitor sign-in control lives in the fixed `.page-actions` cluster in
+  `base.html`**, sharing it with the theme toggle so the two can't overlap. It is
+  rendered only on non-`/admin/` pages and never on the sign-in page itself.
+  **`.topbar` reserves horizontal padding for that cluster** (and `body` carries a
+  `no-visitor-controls` class when the cluster is just the theme toggle, so the
+  reservation matches). Skip that and the topbar's right-hand text renders *behind*
+  the button — which looks fine in every route-level test and is obvious the moment
+  you open a browser. If you add anything else to the cluster, re-check the
+  reservation at a phone width too.
 - **`jellyfin_auth.py` owns every Jellyfin call involving identity; `integrations.py`
   stays read-only health/log checks.** That line is why `fetch_users()` lives here
   rather than next to `fetch_jellyfin_sessions()`. The *configuration* is still

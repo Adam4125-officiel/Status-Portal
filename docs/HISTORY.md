@@ -571,6 +571,37 @@ sign-in, a visitor who has never signed in cannot report an outage *during* that
 outage. Hence `report_requires_login` being a setting an admin can turn off, and the
 admin page saying so explicitly.
 
+### First real-Jellyfin feedback on rc.1 (2026-08-21)
+
+The integration itself worked first time against Adam's real Jellyfin — the part
+that could only be guessed at in this sandbox (the `/Users` and
+`/Users/AuthenticateByName` response shapes) turned out to be right. Three things
+came back from actually using it:
+
+**The sign-in link was invisible.** It was a plain text hyperlink in the topbar, in
+the same faint monospace as "next refresh in 60s", and it scrolled away. Replaced
+with a solid pill button in a fixed cluster shared with the theme toggle.
+
+That change then produced a bug that only a browser could show: the fixed cluster
+rendered *on top of* the topbar's right-hand text. Every route-level test passed,
+because the HTML was perfectly correct — the elements just occupied the same
+pixels. Fixed by reserving padding on `.topbar`, and verified with a scripted
+bounding-rect overlap check at both desktop and phone widths rather than by
+squinting at a screenshot. Worth remembering as the general shape: **route tests
+cannot see layout at all**, and "it renders" is not "it's readable".
+
+**"Report with the username" was already built.** Verified live before writing any
+code — a signed-in user's report stored and displayed their Jellyfin username
+correctly. It just wasn't obvious in a seven-column table. The genuine gap was
+next door: "create incident from this report" dropped the reporter entirely, so the
+one action an admin takes on a report was the one place the attribution vanished.
+
+**Per-user blocking** was a new request, and its one real trap is worth recording
+because it would have been silent: `replace_jellyfin_users()` is a full
+delete-and-reinsert, so an admin-set flag that isn't explicitly carried across the
+sync gets wiped on the next run — blocking someone, then finding them able to sign
+in again an hour later, with nothing in any log to explain it.
+
 ### Verification record — sandbox, 2026-08-21
 
 Exercised against a **stand-in Jellyfin** — a small HTTP server implementing
