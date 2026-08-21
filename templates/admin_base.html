@@ -11,8 +11,10 @@
     <a href="{{ url_for('admin_reports') }}" class="{{ 'active' if active == 'reports' }}">Reports{% if unread_reports_count %} <span class="nav-badge">{{ unread_reports_count }}</span>{% endif %}</a>
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
     <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources</a>
+    <a href="{{ url_for('admin_tasks') }}" class="{{ 'active' if active == 'tasks' }}">Scheduled tasks</a>
     <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
+    <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
     <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord Bot</a>
     <a href="{{ url_for('admin_about') }}" class="{{ 'active' if active == 'about' }}">About{% if update_available %} <span class="nav-badge">1</span>{% endif %}</a>

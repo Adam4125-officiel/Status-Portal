@@ -55,7 +55,7 @@
               check pending
             {% else %}&nbsp;{% endif %}
           </span>
-          {% if s.show_report_button %}<a class="service-card__link" href="{{ url_for('report_problem', service_id=s.id) }}" title="Report a problem with {{ s.name }}">Report ⚑</a>{% endif %}
+          {% if s.show_report_button %}<a class="service-card__link" href="{{ url_for('report_problem', service_id=s.id) }}" title="{{ 'Sign in with your Jellyfin account to report a problem with ' ~ s.name if report_needs_login and not portal_user else 'Report a problem with ' ~ s.name }}">Report ⚑</a>{% endif %}
           {% if s.url %}<a class="service-card__link" href="{{ s.url }}" target="_blank" rel="noopener">Open →</a>{% endif %}
         </div>
       </div>

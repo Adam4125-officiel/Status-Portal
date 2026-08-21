@@ -4,6 +4,7 @@ import db
 import app as app_module
 import integrations as integrations_module
 import monitoring as monitoring_module
+import scheduler as scheduler_module
 import updater as updater_module
 
 
@@ -30,9 +31,12 @@ def _reset_module_state():
     app_module._login_state["locked_until"] = 0.0
     app_module._report_state["count"] = 0
     app_module._report_state["window_start"] = 0.0
+    app_module._user_login_state["failures"] = 0
+    app_module._user_login_state["locked_until"] = 0.0
     # Modules that own their own clearing.
     integrations_module.clear_caches()
     monitoring_module.clear_caches()
+    scheduler_module.clear_caches()
     updater_module.clear_update_cache()
 
 

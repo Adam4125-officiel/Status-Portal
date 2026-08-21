@@ -696,3 +696,312 @@ def test_public_integrations_by_service_matches_the_per_service_filter(isolated_
     assert [i["id"] for i in grouped[sid]] == [shown]
     assert other not in grouped
     assert grouped[sid] == db.list_integrations_for_service(sid)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled task rows
+# ---------------------------------------------------------------------------
+def test_ensure_task_row_is_idempotent_and_never_overwrites(isolated_db):
+    db.ensure_task_row("t", {"enabled": 1, "schedule_kind": "interval",
+                              "interval_minutes": 60, "daily_at": "03:00"})
+    db.update_task_schedule("t", False, "daily", 15, "07:45")
+    # A restart re-registers the task, calling ensure_task_row again with the
+    # registry defaults - the admin's saved settings must survive that.
+    db.ensure_task_row("t", {"enabled": 1, "schedule_kind": "interval",
+                              "interval_minutes": 60, "daily_at": "03:00"})
+    row = db.get_task_row("t")
+    assert (row["enabled"], row["schedule_kind"], row["interval_minutes"], row["daily_at"]) \
+        == (0, "daily", 15, "07:45")
+
+
+def test_update_task_schedule_rejects_an_unknown_kind(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "cron", 60, "03:00")
+    assert db.get_task_row("t")["schedule_kind"] == "interval"
+
+
+def test_update_task_schedule_clamps_the_interval_to_at_least_one_minute(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "interval", 0, "03:00")
+    assert db.get_task_row("t")["interval_minutes"] == 1
+
+
+def test_record_task_run_leaves_the_schedule_alone(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "daily", 30, "05:00")
+    db.record_task_run("t", "failed", "went wrong", 12, "manual")
+    row = db.get_task_row("t")
+    assert (row["last_status"], row["last_message"], row["last_duration_ms"], row["last_trigger"]) \
+        == ("failed", "went wrong", 12, "manual")
+    assert (row["schedule_kind"], row["interval_minutes"], row["daily_at"]) == ("daily", 30, "05:00")
+
+
+# ---------------------------------------------------------------------------
+# The cached Jellyfin user list
+# ---------------------------------------------------------------------------
+def _jf_user(uid, name, admin=False, disabled=False):
+    return {"id": uid, "name": name, "is_administrator": admin, "is_disabled": disabled}
+
+
+def test_replace_jellyfin_users_stores_and_looks_up_case_insensitively(isolated_db):
+    db.replace_jellyfin_users([_jf_user("abc", "Adam"), _jf_user("def", "Someone", admin=True)])
+    assert db.count_jellyfin_users() == 2
+    assert db.get_jellyfin_user_by_name("adam")["id"] == "abc"
+    assert db.get_jellyfin_user_by_name("  ADAM  ")["id"] == "abc"
+    assert db.get_jellyfin_user("def")["is_administrator"] == 1
+
+
+def test_replace_jellyfin_users_is_a_full_replace(isolated_db):
+    db.replace_jellyfin_users([_jf_user("a", "A"), _jf_user("b", "B")])
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    assert [u["id"] for u in db.list_jellyfin_users()] == ["a"]
+    assert db.get_jellyfin_user_by_name("B") is None
+
+
+def test_first_seen_at_is_preserved_across_syncs(isolated_db):
+    """It has to keep meaning "when this portal first saw this account" rather than
+    quietly becoming "when the last sync ran"."""
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    first_seen = db.get_jellyfin_user("a")["first_seen_at"]
+    db.replace_jellyfin_users([_jf_user("a", "A renamed")])
+    row = db.get_jellyfin_user("a")
+    assert row["first_seen_at"] == first_seen
+    assert row["name"] == "A renamed"
+    assert row["last_synced_at"] >= first_seen
+
+
+def test_a_rename_is_tracked_by_id_not_by_name(isolated_db):
+    """Jellyfin's user GUID is stable across a rename; the username is not - which
+    is exactly why the cache is keyed by id."""
+    db.replace_jellyfin_users([_jf_user("a", "OldName")])
+    db.replace_jellyfin_users([_jf_user("a", "NewName")])
+    assert db.count_jellyfin_users() == 1
+    assert db.get_jellyfin_user_by_name("oldname") is None
+    assert db.get_jellyfin_user_by_name("newname")["id"] == "a"
+
+
+def test_synced_at_distinguishes_never_synced_from_synced_and_empty(isolated_db):
+    """An empty cache must never be readable as "this user does not exist"."""
+    assert db.jellyfin_users_synced_at() is None
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    assert db.jellyfin_users_synced_at() is not None
+
+
+def test_problem_reports_record_their_reporter(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam")
+    assert db.get_problem_report(rid)["reporter_user"] == "adam"
+    anon = db.create_problem_report("also broken")
+    assert db.get_problem_report(anon)["reporter_user"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Report replies and per-user report history
+# ---------------------------------------------------------------------------
+def test_reports_are_scoped_to_their_own_reporter(isolated_db):
+    """The one that must never regress: a signed-in user sees their reports and
+    nobody else's."""
+    db.create_problem_report("mine", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.create_problem_report("theirs", "", None, reporter_user="sam", reporter_user_id="u2")
+    mine = db.list_reports_for_user("u1")
+    assert [r["message"] for r in mine] == ["mine"]
+
+
+def test_a_blank_user_id_matches_nothing(isolated_db):
+    """Every anonymous report has reporter_user_id = '', so a caller passing an empty
+    id must get nothing rather than the whole anonymous pile."""
+    db.create_problem_report("anonymous one")
+    db.create_problem_report("anonymous two")
+    assert db.list_reports_for_user("") == []
+    assert db.list_reports_for_user(None) == []
+    assert db.count_unseen_replies("") == 0
+    assert db.mark_replies_seen("") == 0
+
+
+def test_a_message_is_stored_trimmed_and_starts_unseen(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "  Looking into it now.  ")
+    messages = db.list_report_messages(rid)
+    assert [(m["author"], m["body"], m["seen"]) for m in messages] \
+        == [("admin", "Looking into it now.", 0)]
+    assert db.count_unseen_replies("u1") == 1
+
+
+def test_an_empty_message_is_ignored(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert db.add_report_message(rid, "admin", "   ") is None
+    assert db.add_report_message(rid, "admin", "") is None
+    assert db.list_report_messages(rid) == []
+
+
+def test_an_unknown_author_is_refused(isolated_db):
+    """`author` decides who a message is addressed to and who it counts as unread
+    for - a third value would be counted by nobody and shown to nobody."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert db.add_report_message(rid, "somebody-else", "hello") is None
+    assert db.list_report_messages(rid) == []
+
+
+def test_a_thread_keeps_both_sides_in_order(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "Can you still reproduce it?")
+    db.add_report_message(rid, "user", "Yes, just now.")
+    db.add_report_message(rid, "admin", "Thanks, looking again.")
+    assert [m["author"] for m in db.list_report_messages(rid)] == ["admin", "user", "admin"]
+
+
+def test_marking_the_admins_messages_seen_clears_the_users_count(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "Fixed.")
+    assert db.mark_replies_seen("u1") == 1
+    assert db.count_unseen_replies("u1") == 0
+    # Nothing left to mark, so a second visit writes nothing at all.
+    assert db.mark_replies_seen("u1") == 0
+
+
+def test_a_users_own_messages_never_count_as_unread_for_themselves(isolated_db):
+    """Every message has exactly one intended reader - your own reply is not news
+    to you."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "user", "Still broken.")
+    assert db.count_unseen_replies("u1") == 0
+    assert db.count_unseen_user_messages() == 1
+
+
+def test_the_admin_count_covers_every_reporter(isolated_db):
+    """It backs the admin nav badge, which isn't scoped to any one user."""
+    a = db.create_problem_report("a", "", None, reporter_user="adam", reporter_user_id="u1")
+    b = db.create_problem_report("b", "", None, reporter_user="sam", reporter_user_id="u2")
+    db.add_report_message(a, "user", "one")
+    db.add_report_message(b, "user", "two")
+    db.add_report_message(a, "admin", "not counted here")
+    assert db.count_unseen_user_messages() == 2
+    db.mark_report_messages_seen([a, b], "user")
+    assert db.count_unseen_user_messages() == 0
+
+
+def test_marking_seen_only_touches_the_named_author(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "from the admin")
+    db.add_report_message(rid, "user", "from the user")
+    db.mark_report_messages_seen([rid], "user")
+    seen = {m["author"]: m["seen"] for m in db.list_report_messages(rid)}
+    assert seen == {"admin": 0, "user": 1}
+
+
+def test_attach_report_messages_groups_by_report(isolated_db):
+    a = db.create_problem_report("a", "", None, reporter_user="adam", reporter_user_id="u1")
+    b = db.create_problem_report("b", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(a, "admin", "about a")
+    reports = db.attach_report_messages(db.list_reports_for_user("u1"))
+    by_id = {r["id"]: r for r in reports}
+    assert [m["body"] for m in by_id[a]["messages"]] == ["about a"]
+    assert by_id[b]["messages"] == []
+
+
+def test_attach_report_messages_handles_an_empty_list(isolated_db):
+    """An IN () with no placeholders is a syntax error, so the empty case has to
+    short-circuit rather than build a query."""
+    assert db.attach_report_messages([]) == []
+
+
+def test_deleting_a_report_removes_its_messages(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "hello")
+    db.delete_problem_report(rid)
+    assert db.list_report_messages(rid) == []
+
+
+def test_replies_written_before_threads_existed_are_backfilled(isolated_db):
+    """A 1.7.0-rc.2/rc.3 install has its replies in the old single admin_reply column;
+    updating must not make somebody's existing conversation vanish."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    conn = db.get_db()
+    conn.execute("UPDATE problem_reports SET admin_reply=?, replied_at=?, reply_seen=1 WHERE id=?",
+                  ("A reply from before the update", "2026-08-20T10:00:00+00:00", rid))
+    conn.commit()
+    conn.close()
+    conn = db.get_db()
+    conn.execute("DELETE FROM report_messages")
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+    messages = db.list_report_messages(rid)
+    assert [(m["author"], m["body"], m["seen"]) for m in messages] \
+        == [("admin", "A reply from before the update", 1)]
+
+    # Idempotent: running init_db() again must not duplicate it.
+    db.init_db()
+    assert len(db.list_report_messages(rid)) == 1
+
+
+def test_a_linked_incident_is_reported_with_its_current_status(isolated_db):
+    rid = db.create_problem_report("down", "", None, reporter_user="adam", reporter_user_id="u1")
+    iid = db.create_incident({"title": "Jellyfin unreachable", "description": "",
+                               "status": "investigating"})
+    db.set_problem_report_incident(rid, iid)
+    report = db.list_reports_for_user("u1")[0]
+    assert report["incident_title"] == "Jellyfin unreachable"
+    assert report["incident_status"] == "investigating"
+
+    db.update_incident(iid, {"title": "Jellyfin unreachable", "description": "",
+                              "status": "resolved", "service_id": None})
+    assert db.list_reports_for_user("u1")[0]["incident_status"] == "resolved"
+
+
+def test_a_deleted_incident_leaves_the_report_listable(isolated_db):
+    """There's no FK to null the column out, so the LEFT JOIN has to cope."""
+    rid = db.create_problem_report("down", "", None, reporter_user="adam", reporter_user_id="u1")
+    iid = db.create_incident({"title": "Gone", "description": "", "status": "investigating"})
+    db.set_problem_report_incident(rid, iid)
+    db.delete_incident(iid)
+    report = db.list_reports_for_user("u1")[0]
+    assert report["incident_id"] == iid
+    assert report["incident_title"] is None
+
+
+def test_reports_follow_a_rename_because_they_key_off_the_user_id(isolated_db):
+    """reporter_user is for display and freezes at submission time; reporter_user_id
+    is what "my reports" looks up by."""
+    db.create_problem_report("old", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.create_problem_report("new", "", None, reporter_user="adam-renamed", reporter_user_id="u1")
+    assert len(db.list_reports_for_user("u1")) == 2
+
+
+# ---------------------------------------------------------------------------
+# User preferences
+# ---------------------------------------------------------------------------
+def test_preferences_default_without_a_stored_row(isolated_db):
+    assert db.get_user_preferences("u1") == {"theme": "auto", "contact": ""}
+    assert db.get_user_preferences("") == {"theme": "auto", "contact": ""}
+
+
+def test_preferences_round_trip(isolated_db):
+    db.set_user_preferences("u1", theme="light", contact="adam@example.invalid")
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "adam@example.invalid"}
+
+
+def test_setting_only_the_theme_leaves_the_contact_alone(isolated_db):
+    """The toggle button's endpoint only knows about the theme and must not be able
+    to blank out anything else."""
+    db.set_user_preferences("u1", theme="dark", contact="keep me")
+    db.set_user_preferences("u1", theme="light")
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+
+
+def test_an_unknown_theme_is_ignored_rather_than_stored(isolated_db):
+    db.set_user_preferences("u1", theme="rainbow")
+    assert db.get_user_preferences("u1")["theme"] == "auto"
+    db.set_user_preferences("u1", theme="dark")
+    db.set_user_preferences("u1", theme="nonsense")
+    assert db.get_user_preferences("u1")["theme"] == "dark"
+
+
+def test_preferences_are_untouched_by_a_user_sync(isolated_db):
+    """The reason preferences live in their own table: replace_jellyfin_users() is a
+    full delete-and-reinsert, and anything stored there has to be explicitly carried
+    across or it's silently wiped."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", theme="light", contact="me@example.invalid")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}

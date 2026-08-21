@@ -31,6 +31,11 @@ services:
       - PORTAL_DISCORD_BOT_REFRESH_SECONDS=${PORTAL_DISCORD_BOT_REFRESH_SECONDS:-300}
       - PORTAL_DISCORD_BOT_GUILD_ID=${PORTAL_DISCORD_BOT_GUILD_ID:-}
       - PORTAL_BYPARR_TIMEOUT_SECONDS=${PORTAL_BYPARR_TIMEOUT_SECONDS:-30}
+      # Scheduled tasks and Jellyfin-backed user accounts. Everything else about
+      # these two features (which tasks run, on what schedule, whether Jellyfin
+      # sign-in is enabled) is an admin setting in the database, not an env var.
+      - PORTAL_SCHEDULER_TICK_SECONDS=${PORTAL_SCHEDULER_TICK_SECONDS:-30}
+      - PORTAL_JELLYFIN_AUTH_TIMEOUT_SECONDS=${PORTAL_JELLYFIN_AUTH_TIMEOUT_SECONDS:-10}
       - PORTAL_UPDATE_CHECK_INTERVAL_SECONDS=${PORTAL_UPDATE_CHECK_INTERVAL_SECONDS:-21600}
       - PORTAL_ENABLE_INAPP_UPDATE=${PORTAL_ENABLE_INAPP_UPDATE:-true}
     volumes:

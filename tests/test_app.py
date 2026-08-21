@@ -8,9 +8,11 @@ import zipfile
 
 import pyotp
 import pytest
+from werkzeug.security import generate_password_hash
 
 import app as app_module
 import db
+import scheduler
 import twofactor
 import updater
 
@@ -2604,3 +2606,911 @@ def test_static_asset_list_covers_new_files_automatically(client, tmp_path, monk
         assert all("?v=" in u for u in urls)
     finally:
         os.remove(new_file)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks admin page (/admin/tasks) - the framework itself is covered in
+# tests/test_scheduler.py; these are the route-level checks.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def demo_task(isolated_db):
+    """A throwaway task registered into the real registry for the duration of one
+    test, so the routes can be exercised without depending on the Jellyfin sync
+    task's own behaviour."""
+    saved = dict(scheduler._registry)
+    scheduler._registry.clear()
+    scheduler.clear_caches()
+    calls = []
+    scheduler.register("demo_task", "Demo task", "Does nothing in particular.",
+                       lambda: (calls.append(1), "did nothing")[1],
+                       default_interval_minutes=45)
+    yield calls
+    scheduler._registry.clear()
+    scheduler._registry.update(saved)
+    scheduler.clear_caches()
+
+
+def test_admin_tasks_requires_login(client, demo_task):
+    assert client.get("/admin/tasks").status_code == 302
+    assert client.post("/admin/tasks/demo_task/run").status_code == 302
+    assert client.post("/admin/tasks/demo_task/save").status_code == 302
+    assert not demo_task, "an unauthenticated POST actually ran the task"
+
+
+def test_admin_tasks_page_lists_registered_tasks(client, demo_task):
+    _login(client)
+    resp = client.get("/admin/tasks")
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Demo task" in body
+    assert "Does nothing in particular." in body
+    assert "no runs recorded yet" in body
+
+
+def test_run_now_executes_the_task_and_reports_the_result(client, demo_task):
+    _login(client)
+    resp = client.post("/admin/tasks/demo_task/run", follow_redirects=True)
+    assert resp.status_code == 200
+    assert demo_task == [1], "the task did not actually run"
+    assert "did nothing" in resp.data.decode()
+    row = db.get_task_row("demo_task")
+    assert row["last_status"] == "success"
+    assert row["last_trigger"] == "manual"
+
+
+def test_run_now_on_a_failing_task_reports_the_failure_without_a_500(client, isolated_db):
+    saved = dict(scheduler._registry)
+    scheduler._registry.clear()
+    scheduler.clear_caches()
+    scheduler.register("boom_task", "Boom", "Always fails.",
+                       lambda: (_ for _ in ()).throw(RuntimeError("kaboom")))
+    try:
+        _login(client)
+        resp = client.post("/admin/tasks/boom_task/run", follow_redirects=True)
+        assert resp.status_code == 200
+        assert "kaboom" in resp.data.decode()
+        assert db.get_task_row("boom_task")["last_status"] == "failed"
+    finally:
+        scheduler._registry.clear()
+        scheduler._registry.update(saved)
+        scheduler.clear_caches()
+
+
+def test_saving_a_schedule_persists_it_without_looking_like_a_run(client, demo_task):
+    """Saving settings must never touch last_run_at - that would both fake a run
+    that didn't happen and silently push the next one an interval into the future."""
+    _login(client)
+    client.post("/admin/tasks/demo_task/run")
+    before = db.get_task_row("demo_task")["last_run_at"]
+
+    client.post("/admin/tasks/demo_task/save", data={
+        "enabled": "on", "schedule_kind": "daily", "interval_minutes": "90", "daily_at": "04:15"})
+    row = db.get_task_row("demo_task")
+    assert (row["schedule_kind"], row["daily_at"], row["interval_minutes"]) == ("daily", "04:15", 90)
+    assert row["last_run_at"] == before
+
+
+def test_unchecking_enabled_disables_the_task(client, demo_task):
+    _login(client)
+    client.post("/admin/tasks/demo_task/save", data={
+        "schedule_kind": "interval", "interval_minutes": "45", "daily_at": "03:00"})
+    assert db.get_task_row("demo_task")["enabled"] == 0
+    assert scheduler.next_run_at(scheduler.get_task("demo_task")) is None
+
+
+def test_unknown_task_names_are_rejected_rather_than_500ing(client, demo_task):
+    _login(client)
+    for path in ("/admin/tasks/nope/run", "/admin/tasks/nope/save"):
+        resp = client.post(path, follow_redirects=True)
+        assert resp.status_code == 200
+        assert "No such scheduled task." in resp.data.decode()
+
+
+# ---------------------------------------------------------------------------
+# User accounts admin page (/admin/users) - the Jellyfin side is covered in
+# tests/test_jellyfin_auth.py; these are the route-level checks.
+# ---------------------------------------------------------------------------
+def _jellyfin_integration():
+    return db.create_integration({"name": "Jellyfin", "kind": "jellyfin",
+                                   "base_url": "http://jellyfin.invalid", "api_key": "k",
+                                   "enabled": 1, "service_id": None,
+                                   "show_on_public": 0, "auto_incident": 0})
+
+
+def test_admin_users_page_requires_login(client):
+    assert client.get("/admin/users").status_code == 302
+    assert client.post("/admin/users/settings").status_code == 302
+
+
+def test_admin_users_page_explains_why_sign_in_is_off(client):
+    _login(client)
+    body = client.get("/admin/users").data.decode()
+    assert "Sign-in is off" in body
+    assert "never been synced" in body
+
+
+def test_admin_users_page_warns_when_enabled_without_an_integration(client):
+    _login(client)
+    db.set_setting("jellyfin_auth_enabled", "1")
+    body = client.get("/admin/users").data.decode()
+    assert "Switched on, but not usable" in body
+
+
+def test_saving_user_settings_persists_them(client):
+    _login(client)
+    iid = _jellyfin_integration()
+    client.post("/admin/users/settings", data={
+        "jellyfin_auth_enabled": "on", "jellyfin_auth_integration_id": str(iid),
+        "report_requires_login": "on", "user_session_timeout_hours": "48"})
+    assert db.get_setting("jellyfin_auth_enabled") == "1"
+    assert db.get_setting("jellyfin_auth_integration_id") == str(iid)
+    assert db.get_setting("report_requires_login") == "1"
+    assert db.get_setting("user_session_timeout_hours") == "48"
+    assert app_module.jellyfin_auth.is_enabled() is True
+
+
+def test_unchecking_the_toggles_turns_them_off(client):
+    _login(client)
+    _jellyfin_integration()
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.set_setting("report_requires_login", "1")
+    client.post("/admin/users/settings", data={"user_session_timeout_hours": "48"})
+    assert db.get_setting("jellyfin_auth_enabled") == "0"
+    assert db.get_setting("report_requires_login") == "0"
+
+
+def test_a_non_numeric_session_timeout_falls_back_to_the_default(client):
+    _login(client)
+    client.post("/admin/users/settings", data={"user_session_timeout_hours": "banana"})
+    assert db.get_setting("user_session_timeout_hours") == str(
+        app_module.DEFAULT_USER_SESSION_TIMEOUT_HOURS)
+
+
+def test_the_cached_user_list_is_shown(client):
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"},
+                               {"id": "u2", "name": "sam", "is_administrator": True},
+                               {"id": "u3", "name": "old", "is_disabled": True}])
+    body = client.get("/admin/users").data.decode()
+    assert "adam" in body and "sam" in body
+    assert "administrator" in body and "disabled" in body
+
+
+# ---------------------------------------------------------------------------
+# Jellyfin-backed visitor sign-in (/login, /logout) and the /report gate.
+#
+# The single most important property in this section is isolation: a signed-in
+# Jellyfin user is a visitor with a name, never a lesser admin. Several tests below
+# exist only to pin that down.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def user_auth(isolated_db):
+    """Jellyfin sign-in switched on, with a cached user list already populated."""
+    db.create_integration({"name": "Jellyfin", "kind": "jellyfin",
+                            "base_url": "http://jellyfin.invalid", "api_key": "k",
+                            "enabled": 1, "service_id": None,
+                            "show_on_public": 0, "auto_incident": 0})
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    return None
+
+
+def _auth_returns(monkeypatch, result):
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate", lambda u, p: result)
+
+
+def _sign_in(client, monkeypatch, name="adam", uid="u1", admin=False):
+    _auth_returns(monkeypatch, {"ok": True, "user": {"id": uid, "name": name,
+                                                      "is_administrator": admin,
+                                                      "is_disabled": False}})
+    return client.post("/login", data={"username": name, "password": "pw"})
+
+
+def test_the_sign_in_page_is_absent_entirely_when_the_feature_is_off(client):
+    assert client.get("/login").status_code == 404
+    assert client.post("/login", data={"username": "a", "password": "b"}).status_code == 404
+
+
+def test_the_public_page_shows_no_sign_in_link_when_the_feature_is_off(client):
+    assert "Sign in" not in client.get("/").data.decode()
+
+
+def test_the_public_page_offers_sign_in_when_enabled(client, user_auth):
+    body = client.get("/").data.decode()
+    assert "Sign in" in body
+    assert "/login" in body
+
+
+def test_a_valid_sign_in_creates_a_visitor_session(client, user_auth, monkeypatch):
+    resp = _sign_in(client, monkeypatch)
+    assert resp.status_code == 302
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["name"] == "adam"
+        assert sess["portal_user"]["id"] == "u1"
+    assert "adam" in client.get("/").data.decode()
+
+
+def test_signing_in_never_creates_an_admin_session(client, user_auth, monkeypatch):
+    """The property the whole design rests on."""
+    _sign_in(client, monkeypatch)
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+    assert client.get("/admin/services").status_code == 302
+    assert client.get("/admin/settings").status_code == 302
+    assert client.get("/admin/users").status_code == 302
+
+
+def test_a_jellyfin_administrator_is_still_not_a_portal_admin(client, user_auth, monkeypatch):
+    """Being an administrator *in Jellyfin* says nothing about this portal. The flag
+    is stored as groundwork for per-content visibility and must not be a back door."""
+    _sign_in(client, monkeypatch, admin=True)
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["jellyfin_admin"] is True
+        assert "logged_in" not in sess
+    assert client.get("/admin/services").status_code == 302
+
+
+def test_no_password_or_token_is_ever_stored_in_the_session(client, user_auth, monkeypatch):
+    _auth_returns(monkeypatch, {"ok": True, "user": {"id": "u1", "name": "adam",
+                                                      "is_administrator": False,
+                                                      "is_disabled": False}})
+    client.post("/login", data={"username": "adam", "password": "s3cretpw"})
+    with client.session_transaction() as sess:
+        assert "s3cretpw" not in repr(dict(sess))
+        assert set(sess["portal_user"]) == {"id", "name", "jellyfin_admin", "authenticated_at"}
+
+
+def test_a_wrong_password_is_reported_as_such(client, user_auth, monkeypatch):
+    _auth_returns(monkeypatch, {"ok": False, "reason": "invalid"})
+    resp = client.post("/login", data={"username": "adam", "password": "no"},
+                       follow_redirects=True)
+    assert "Incorrect username or password" in resp.data.decode()
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_an_unreachable_jellyfin_says_so_instead_of_blaming_the_password(client, user_auth, monkeypatch):
+    """Telling someone their password is wrong when the server is down sends them off
+    to reset a password that was fine."""
+    _auth_returns(monkeypatch, {"ok": False, "reason": "unreachable", "error": "refused"})
+    resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                       follow_redirects=True)
+    body = resp.data.decode()
+    assert "Can&#39;t reach Jellyfin" in body or "Can't reach Jellyfin" in body
+    assert "isn&#39;t a problem with your password" in body or "isn't a problem with your password" in body
+    assert "Incorrect" not in body
+
+
+def test_an_outage_does_not_count_towards_the_lockout(client, user_auth, monkeypatch):
+    """Otherwise an outage fills the counter and locks everybody out for five
+    minutes after Jellyfin comes back."""
+    _auth_returns(monkeypatch, {"ok": False, "reason": "unreachable", "error": "refused"})
+    for _ in range(app_module.USER_LOGIN_LOCKOUT_THRESHOLD + 2):
+        client.post("/login", data={"username": "adam", "password": "pw"})
+    assert app_module._user_login_locked() is False
+    assert _sign_in(client, monkeypatch).status_code == 302
+
+
+def test_repeated_wrong_passwords_trigger_a_lockout(client, user_auth, monkeypatch):
+    _auth_returns(monkeypatch, {"ok": False, "reason": "invalid"})
+    for _ in range(app_module.USER_LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/login", data={"username": "adam", "password": "no"})
+    assert app_module._user_login_locked() is True
+    resp = client.post("/login", data={"username": "adam", "password": "no"},
+                       follow_redirects=True)
+    assert "Too many failed sign-ins" in resp.data.decode()
+
+
+def test_the_visitor_lockout_does_not_lock_the_admin_out(client, user_auth, monkeypatch):
+    """Two separate counters, for exactly this reason."""
+    _auth_returns(monkeypatch, {"ok": False, "reason": "invalid"})
+    for _ in range(app_module.USER_LOGIN_LOCKOUT_THRESHOLD + 1):
+        client.post("/login", data={"username": "adam", "password": "no"})
+    assert app_module._user_login_locked() is True
+    assert app_module._login_locked() is False
+    _login(client)
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_the_admin_lockout_does_not_lock_visitors_out(client, user_auth, monkeypatch):
+    db.set_setting("admin_password_hash", generate_password_hash("realpassword"))
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/admin/login", data={"password": "wrong"})
+    assert app_module._login_locked() is True
+    assert app_module._user_login_locked() is False
+    assert _sign_in(client, monkeypatch).status_code == 302
+
+
+def test_a_disabled_account_is_refused(client, user_auth, monkeypatch):
+    _auth_returns(monkeypatch, {"ok": False, "reason": "disabled"})
+    resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                       follow_redirects=True)
+    assert "disabled" in resp.data.decode()
+
+
+def test_signing_out_ends_only_the_visitor_session(client, user_auth, monkeypatch):
+    """An admin signed in as a Jellyfin user in the same browser must not be logged
+    out of the admin panel by clicking "Sign out" on the public page."""
+    _login(client)
+    _sign_in(client, monkeypatch)
+    client.get("/logout")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+        assert sess.get("logged_in") is True
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_a_signed_in_visitor_is_redirected_away_from_the_sign_in_page(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    assert client.get("/login").status_code == 302
+
+
+def test_the_next_parameter_cannot_redirect_off_site(client, user_auth, monkeypatch):
+    """This route is reachable with no authentication at all, so an open redirect
+    here is a phishing primitive."""
+    for hostile in ("https://evil.invalid/x", "//evil.invalid/x"):
+        _auth_returns(monkeypatch, {"ok": True, "user": {"id": "u1", "name": "adam",
+                                                          "is_administrator": False,
+                                                          "is_disabled": False}})
+        resp = client.post("/login", data={"username": "adam", "password": "pw",
+                                            "next": hostile})
+        assert "evil.invalid" not in resp.headers["Location"]
+        client.get("/logout")
+
+
+def test_a_relative_next_parameter_is_honoured(client, user_auth, monkeypatch):
+    _auth_returns(monkeypatch, {"ok": True, "user": {"id": "u1", "name": "adam",
+                                                      "is_administrator": False,
+                                                      "is_disabled": False}})
+    resp = client.post("/login", data={"username": "adam", "password": "pw", "next": "/report"})
+    assert resp.headers["Location"] == "/report"
+
+
+# ---- Session revocation via the cached user list ----
+def test_a_user_removed_from_jellyfin_loses_their_session(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.replace_jellyfin_users([{"id": "someone-else", "name": "sam"}])
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_a_user_disabled_in_jellyfin_loses_their_session(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam", "is_disabled": True}])
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_an_outage_never_signs_an_existing_visitor_out(client, user_auth, monkeypatch):
+    """The whole "reduced functionality" story: nobody new gets in, everybody already
+    in stays in. Session validity is checked against the local cache, never Jellyfin."""
+    _sign_in(client, monkeypatch)
+
+    def unreachable(*a, **k):
+        raise AssertionError("Jellyfin must never be contacted to validate a session")
+
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate", unreachable)
+    for _ in range(3):
+        assert client.get("/").status_code == 200
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["name"] == "adam"
+
+
+def test_an_idle_visitor_session_expires(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_setting("user_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["portal_user_last_seen"] = time.time() - 7200
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_a_zero_visitor_timeout_means_no_idle_expiry(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_setting("user_session_timeout_hours", "0")
+    with client.session_transaction() as sess:
+        sess["portal_user_last_seen"] = time.time() - 86400 * 20
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["name"] == "adam"
+
+
+def test_an_expiring_visitor_session_does_not_touch_the_admin_session(client, user_auth, monkeypatch):
+    _login(client)
+    _sign_in(client, monkeypatch)
+    db.set_setting("user_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["portal_user_last_seen"] = time.time() - 7200
+    client.get("/")
+    assert client.get("/admin/services").status_code == 200
+
+
+# ---- /report gating (Part 4) ----
+def test_report_stays_open_to_everyone_when_sign_in_is_not_enabled(client):
+    """An install that hasn't set up Jellyfin sign-in must behave exactly as before -
+    the gate must never make the form unreachable behind a login that doesn't exist."""
+    assert db.get_setting("report_requires_login", "1") == "1"
+    assert client.get("/report").status_code == 200
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60  # clear the min-fill-time check
+    resp = client.post("/report", data={"message": "something is broken"},
+                       follow_redirects=True)
+    assert "your report has been submitted" in resp.data.decode()
+    assert len(db.list_problem_reports()) == 1
+
+
+def test_report_requires_sign_in_once_the_feature_is_on(client, user_auth):
+    resp = client.get("/report")
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+    resp = client.post("/report", data={"message": "broken"}, follow_redirects=True)
+    assert "sign in" in resp.data.decode().lower()
+    assert db.list_problem_reports() == []
+
+
+def test_a_signed_in_visitor_can_report_and_is_recorded_as_the_reporter(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    client.get("/report")
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    resp = client.post("/report", data={"message": "buffering constantly"},
+                       follow_redirects=True)
+    assert "your report has been submitted" in resp.data.decode()
+    report = db.list_problem_reports()[0]
+    assert report["reporter_user"] == "adam"
+
+
+def test_the_gate_can_be_turned_off_so_outage_reports_still_work(client, user_auth):
+    """The escape hatch for the awkward interaction this feature has with itself: if
+    Jellyfin is down, nobody who hasn't already signed in can sign in, so nobody new
+    could otherwise report the outage."""
+    db.set_setting("report_requires_login", "0")
+    assert client.get("/report").status_code == 200
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    resp = client.post("/report", data={"message": "jellyfin is down"},
+                       follow_redirects=True)
+    assert "your report has been submitted" in resp.data.decode()
+    assert db.list_problem_reports()[0]["reporter_user"] == ""
+
+
+def test_the_report_gate_redirects_back_to_the_right_service(client, user_auth):
+    resp = client.get("/report?service_id=3")
+    assert "service_id%3D3" in resp.headers["Location"] or "service_id=3" in resp.headers["Location"]
+
+
+def test_the_admin_reports_page_shows_who_filed_a_report(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.create_problem_report("something", "", None, reporter_user="adam")
+    client.get("/logout")
+    _login(client)
+    assert "adam" in client.get("/admin/reports").data.decode()
+
+
+# ---------------------------------------------------------------------------
+# Per-user portal access, at the route level
+# ---------------------------------------------------------------------------
+def test_blocking_a_user_ends_the_session_they_are_sitting_in(client, user_auth, monkeypatch):
+    """Blocking that only takes effect at the next sign-in would leave someone with
+    days of access left on their current session."""
+    _sign_in(client, monkeypatch)
+    assert "adam" in client.get("/").data.decode()
+    db.set_jellyfin_user_allowed("u1", False)
+    client.get("/")
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_a_blocked_user_cannot_sign_in_again(client, user_auth, monkeypatch):
+    db.set_jellyfin_user_allowed("u1", False)
+    monkeypatch.setattr(app_module.jellyfin_auth.requests, "post",
+                        lambda url, **k: type("R", (), {
+                            "status_code": 200, "ok": True,
+                            "json": lambda self=None: {
+                                "User": {"Id": "u1", "Name": "adam",
+                                          "Policy": {"IsAdministrator": False, "IsDisabled": False}},
+                                "AccessToken": "tok"}})())
+    resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                       follow_redirects=True)
+    body = resp.data.decode()
+    assert "turned off by the administrator" in body
+    assert "Jellyfin account itself is unaffected" in body
+    with client.session_transaction() as sess:
+        assert "portal_user" not in sess
+
+
+def test_the_admin_can_block_and_unblock_from_the_users_page(client, user_auth):
+    _login(client)
+    resp = client.post("/admin/users/u1/access", data={"allow": "0"}, follow_redirects=True)
+    assert "no longer sign in" in resp.data.decode()
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 0
+
+    resp = client.post("/admin/users/u1/access", data={"allow": "1"}, follow_redirects=True)
+    assert "now sign in" in resp.data.decode()
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+
+
+def test_blocking_requires_admin_login(client, user_auth):
+    assert client.post("/admin/users/u1/access", data={"allow": "0"}).status_code == 302
+    assert db.get_jellyfin_user("u1")["portal_allowed"] == 1
+
+
+def test_blocking_an_unknown_user_is_rejected_cleanly(client, user_auth):
+    _login(client)
+    resp = client.post("/admin/users/nope/access", data={"allow": "0"}, follow_redirects=True)
+    assert "No such user" in resp.data.decode()
+
+
+def test_the_users_page_distinguishes_blocked_here_from_disabled_in_jellyfin(client, isolated_db):
+    """Two different facts, fixed in two different places - the page must not make
+    them look like the same thing."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "blockedhere"},
+                               {"id": "u2", "name": "offinjellyfin", "is_disabled": True}])
+    db.set_jellyfin_user_allowed("u1", False)
+    body = client.get("/admin/users").data.decode()
+    assert "blocked here" in body
+    assert "disabled in Jellyfin" in body
+
+
+# ---------------------------------------------------------------------------
+# The sign-in control in the fixed page-actions cluster
+# ---------------------------------------------------------------------------
+def test_the_sign_in_control_is_a_button_not_a_bare_link(client, user_auth):
+    body = client.get("/").data.decode()
+    assert 'class="page-actions"' in body
+    assert 'class="btn signin"' in body
+
+
+def test_the_sign_in_control_carries_the_current_page_as_next(client, user_auth):
+    """Signing in from a page should return you to it, not dump you on the index."""
+    body = client.get("/report").data.decode()
+    assert "next=%2Freport" in body or "next=/report" in body
+
+
+def test_a_signed_in_visitor_gets_a_user_chip_with_sign_out(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/").data.decode()
+    assert 'class="user-chip"' in body
+    assert "adam" in body
+    assert "Sign out" in body
+    assert 'class="btn signin"' not in body
+
+
+def test_the_sign_in_button_is_absent_on_the_sign_in_page(client, user_auth):
+    """Offering "Sign in" on the sign-in page is noise."""
+    assert 'class="btn signin"' not in client.get("/login").data.decode()
+
+
+def test_visitor_controls_never_appear_on_admin_pages(client, user_auth):
+    """Admin pages have their own nav; a visitor sign-in button there is confusing at
+    best and looks like a second way into the admin panel at worst."""
+    _login(client)
+    body = client.get("/admin/services").data.decode()
+    assert 'class="btn signin"' not in body
+    assert 'class="user-chip"' not in body
+
+
+def test_the_theme_toggle_still_renders_inside_the_cluster(client):
+    """It moved out of its own inline-positioned element - if the cluster ever stops
+    rendering it, the theme button silently disappears from every page."""
+    body = client.get("/").data.decode()
+    assert 'id="theme-toggle"' in body
+    assert body.index('class="page-actions"') < body.index('id="theme-toggle"')
+
+
+# ---------------------------------------------------------------------------
+# The reporter survives into an incident
+# ---------------------------------------------------------------------------
+def test_creating_an_incident_from_a_report_keeps_the_reporter(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("Playback stutters", "", None, reporter_user="adam")
+    client.post(f"/admin/reports/{rid}/create-incident", follow_redirects=True)
+    incident = db.list_incidents()[0]
+    assert 'Reported by Jellyfin user "adam"' in incident["description"]
+    assert "Playback stutters" in incident["description"]
+
+
+def test_an_anonymous_report_says_so_in_the_incident(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("Something broke")
+    client.post(f"/admin/reports/{rid}/create-incident", follow_redirects=True)
+    assert "Reported anonymously" in db.list_incidents()[0]["description"]
+
+
+# ---------------------------------------------------------------------------
+# The signed-in user's own account page (/account)
+# ---------------------------------------------------------------------------
+def _file_report(client, message="something is broken"):
+    client.get("/report")
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    return client.post("/report", data={"message": message}, follow_redirects=True)
+
+
+def test_the_account_page_requires_a_signed_in_visitor(client, user_auth):
+    resp = client.get("/account")
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+
+def test_being_the_admin_does_not_grant_the_account_page(client, user_auth):
+    """user_login_required reads portal_user and nothing else - the admin session is a
+    different identity, not a superset of this one."""
+    _login(client)
+    assert client.get("/account").status_code == 302
+
+
+def test_the_account_page_shows_the_signed_in_user(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "Your account" in body
+    assert "adam" in body
+
+
+def test_the_username_in_the_chip_links_to_the_account_page(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    body = client.get("/").data.decode()
+    assert 'href="/account"' in body
+
+
+def test_a_user_sees_their_own_report_and_its_status(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Playback keeps buffering")
+    body = client.get("/account").data.decode()
+    assert "Playback keeps buffering" in body
+    assert "Waiting to be looked at" in body
+
+
+def test_a_user_never_sees_someone_elses_report(client, user_auth, monkeypatch):
+    """The security property of this whole page."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    db.create_problem_report("sam's private report", "", None,
+                             reporter_user="sam", reporter_user_id="u2")
+    db.create_problem_report("an anonymous report")
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "sam's private report" not in body
+    assert "an anonymous report" not in body
+
+
+def test_the_status_wording_is_aimed_at_the_reporter(client, user_auth, monkeypatch):
+    """"new"/"reviewed" are triage words that mean nothing to the person waiting."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "reviewed")
+    assert "Being looked into" in client.get("/account").data.decode()
+
+
+def test_an_admin_reply_is_shown_to_the_reporter(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+
+    _login(client)
+    client.post(f"/admin/reports/{rid}/reply", data={"reply": "Restarted the transcoder."})
+    client.get("/admin/logout")
+
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "Restarted the transcoder." in body
+    assert "The admin" in body
+
+
+def test_an_unread_reply_puts_a_dot_on_the_chip_and_opening_the_page_clears_it(client, user_auth, monkeypatch):
+    """Without the dot nobody knows to go and look, which makes replying pointless."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.add_report_message(rid, "admin", "Answered.")
+
+    assert "user-chip__dot" in client.get("/").data.decode()
+    client.get("/account")
+    assert "user-chip__dot" not in client.get("/").data.decode()
+
+
+def test_a_linked_incident_is_shown_on_the_account_page(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Jellyfin is down")
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+
+    _login(client)
+    client.post(f"/admin/reports/{rid}/create-incident")
+    client.get("/admin/logout")
+
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "An incident was opened from this report" in body
+    assert "investigating" in body
+
+
+def test_saving_preferences_persists_them(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    resp = client.post("/account", data={"theme": "light", "contact": "me@example.invalid"},
+                       follow_redirects=True)
+    assert "settings have been saved" in resp.data.decode()
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
+
+
+def test_an_explicit_theme_is_rendered_into_the_html_tag(client, user_auth, monkeypatch):
+    """So a device that has never seen this portal doesn't flash the wrong colours
+    before any JavaScript runs."""
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="light")
+    assert 'data-server-theme="light"' in client.get("/").data.decode()
+
+
+# The bare string "data-server-theme" also appears inside the inline FOUC script,
+# which reads the attribute - so these assert on the *attribute* form specifically
+# (the script uses single quotes), not on the name appearing anywhere in the page.
+def test_auto_renders_no_server_theme_attribute(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="auto")
+    assert 'data-server-theme="' not in client.get("/").data.decode()
+
+
+def test_a_signed_out_visitor_gets_no_server_theme(client, user_auth):
+    assert 'data-server-theme="' not in client.get("/").data.decode()
+
+
+def test_the_theme_endpoint_updates_only_the_theme(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", theme="dark", contact="keep me")
+    resp = client.post("/account/theme", data={"theme": "light"})
+    assert resp.status_code == 204
+    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+
+
+def test_the_theme_endpoint_requires_a_signed_in_visitor(client, user_auth):
+    assert client.post("/account/theme", data={"theme": "light"}).status_code == 302
+
+
+def test_the_saved_flag_is_passed_through_for_the_local_sync(client, user_auth, monkeypatch):
+    """account.js only syncs this browser's stored theme right after a save - the flag
+    is how it knows, and without it the setting appears to do nothing on the very
+    device it was changed from."""
+    _sign_in(client, monkeypatch)
+    assert 'data-just-saved="1"' in client.get("/account?saved=1").data.decode()
+    assert 'data-just-saved="0"' in client.get("/account").data.decode()
+
+
+def test_the_report_form_prefills_the_saved_contact(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", contact="adam@example.invalid")
+    assert 'value="adam@example.invalid"' in client.get("/report").data.decode()
+
+
+# ---- The admin side of replying ----
+def test_replying_to_an_anonymous_report_warns_that_nobody_will_see_it(client, isolated_db):
+    _login(client)
+    rid = db.create_problem_report("anonymous complaint")
+    resp = client.post(f"/admin/reports/{rid}/reply", data={"reply": "hello?"},
+                       follow_redirects=True)
+    assert "nobody can see it" in resp.data.decode()
+
+
+def test_replying_requires_admin_login(client, isolated_db):
+    rid = db.create_problem_report("x", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert client.post(f"/admin/reports/{rid}/reply", data={"reply": "sneaky"}).status_code == 302
+    assert db.get_problem_report(rid)["admin_reply"] == ""
+
+
+def test_replying_to_a_missing_report_is_rejected_cleanly(client, isolated_db):
+    _login(client)
+    resp = client.post("/admin/reports/9999/reply", data={"reply": "x"}, follow_redirects=True)
+    assert "Report not found" in resp.data.decode()
+
+
+def test_the_admin_list_shows_whether_a_reply_has_been_read(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    client.get("/logout")
+    _login(client)
+    client.post(f"/admin/reports/{rid}/reply", data={"reply": "On it."})
+    assert "unread" in client.get("/admin/reports").data.decode()
+
+    client.get("/admin/logout")
+    _sign_in(client, monkeypatch)
+    client.get("/account")
+    client.get("/logout")
+    _login(client)
+    body = client.get("/admin/reports").data.decode()
+    assert "· read" in body or "read</div>" in body
+
+
+# ---- The reporter's side of the conversation ----
+def test_a_user_can_reply_to_their_own_report(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Subtitles are off")
+    rid = db.list_problem_reports()[0]["id"]
+    db.add_report_message(rid, "admin", "Which show?")
+
+    resp = client.post(f"/account/reports/{rid}/reply",
+                       data={"body": "Any of them, since yesterday."}, follow_redirects=True)
+    assert "Your reply has been sent" in resp.data.decode()
+    assert [m["author"] for m in db.list_report_messages(rid)] == ["admin", "user"]
+    assert "Any of them, since yesterday." in client.get("/account").data.decode()
+
+
+def test_a_user_cannot_reply_to_someone_elses_report(client, user_auth, monkeypatch):
+    """Ownership is checked against the report's stored user id, and a report that
+    isn't yours answers exactly like one that doesn't exist - "that exists but isn't
+    yours" is itself information about other people's reports."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    rid = db.create_problem_report("sam's report", "", None,
+                                    reporter_user="sam", reporter_user_id="u2")
+    _sign_in(client, monkeypatch)
+    resp = client.post(f"/account/reports/{rid}/reply", data={"body": "butting in"},
+                       follow_redirects=True)
+    assert "could not be found" in resp.data.decode()
+    assert db.list_report_messages(rid) == []
+
+
+def test_replying_to_a_nonexistent_report_looks_identical(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    resp = client.post("/account/reports/9999/reply", data={"body": "hello"},
+                       follow_redirects=True)
+    assert "could not be found" in resp.data.decode()
+
+
+def test_an_empty_user_reply_is_rejected(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    resp = client.post(f"/account/reports/{rid}/reply", data={"body": "   "},
+                       follow_redirects=True)
+    assert "Write something first" in resp.data.decode()
+    assert db.list_report_messages(rid) == []
+
+
+def test_replying_requires_a_signed_in_visitor(client, user_auth):
+    rid = db.create_problem_report("x", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert client.post(f"/account/reports/{rid}/reply", data={"body": "hi"}).status_code == 302
+    assert db.list_report_messages(rid) == []
+
+
+def test_a_user_reply_shows_up_on_the_admin_nav_badge(client, user_auth, monkeypatch):
+    """Without this the admin never learns anybody answered, and the conversation is
+    one-directional in practice."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "reviewed")  # no longer "new", so the badge is 0
+    client.post(f"/account/reports/{rid}/reply", data={"body": "Still happening."})
+    client.get("/logout")
+
+    _login(client)
+    assert db.count_unseen_user_messages() == 1
+    assert "nav-badge" in client.get("/admin/services").data.decode()
+    # Opening the Reports page is what clears it.
+    client.get("/admin/reports")
+    assert db.count_unseen_user_messages() == 0
+
+
+def test_a_user_reply_does_not_reopen_a_closed_report(client, user_auth, monkeypatch):
+    """A status changing itself underneath the admin would be surprising; the unread
+    badge is the signal, and reopening is their call."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "resolved")
+    client.post(f"/account/reports/{rid}/reply", data={"body": "It's back."})
+    assert db.get_problem_report(rid)["status"] == "resolved"
+
+
+def test_the_thread_shows_both_sides_to_the_reporter(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.add_report_message(rid, "admin", "Looking now.")
+    client.post(f"/account/reports/{rid}/reply", data={"body": "Thanks!"})
+    body = client.get("/account").data.decode()
+    assert "Looking now." in body and "Thanks!" in body
+    assert "The admin" in body and "You" in body

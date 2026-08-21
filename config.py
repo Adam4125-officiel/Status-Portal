@@ -163,6 +163,25 @@ DISCORD_BOT_GUILD_ID = os.environ.get("PORTAL_DISCORD_BOT_GUILD_ID", "").strip()
 BYPARR_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_BYPARR_TIMEOUT_SECONDS", "30"))
 
 # ---------------------------------------------------------------------------
+# Scheduled tasks (see scheduler.py) and Jellyfin-backed user accounts
+# ---------------------------------------------------------------------------
+# How often the scheduler wakes up to look for due tasks. This is the *granularity*
+# of every schedule, not a schedule itself: a task set to "every 5 minutes" can only
+# be as punctual as this value allows. A check interval, so per this project's config
+# split it's an env var - what each task's own schedule is, and whether it's enabled
+# at all, are routine admin toggles and live in the database instead.
+SCHEDULER_TICK_SECONDS = int(os.environ.get("PORTAL_SCHEDULER_TICK_SECONDS", "30"))
+
+# HTTP timeout for the two Jellyfin calls that back user accounts (fetching the user
+# list, and validating a username/password at sign-in). Deliberately its own value
+# rather than the 5s integrations.TIMEOUT every read-only health check shares - same
+# reasoning as BYPARR_TIMEOUT_SECONDS above, applied to a different pressure: a
+# person is sitting there waiting for this one, and a Jellyfin busy transcoding can
+# take noticeably longer to answer an authentication request than it does to answer
+# /System/Info. Too low and a valid password looks like an outage.
+JELLYFIN_AUTH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_JELLYFIN_AUTH_TIMEOUT_SECONDS", "10"))
+
+# ---------------------------------------------------------------------------
 # Self-update (see updater.py / update.py)
 # ---------------------------------------------------------------------------
 # How often the background thread re-asks GitHub what the latest release is. This

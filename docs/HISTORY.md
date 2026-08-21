@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-08-11.
+Rough chronological range: 2026-07-22 through 2026-08-21.
 
 ---
 
@@ -522,6 +522,176 @@ confirmed fix. If it recurs, that's the thing to say: the remaining candidate is
 simply the host being CPU-starved, which no amount of application tuning fixes.
 
 ---
+
+## Scheduled tasks and Jellyfin user accounts (v1.7.0, 2026-08-21)
+
+### The two silent no-op writes
+
+Both bugs the test suite caught while the scheduler framework was being written were
+the same shape, and neither would have raised anything. `record_task_run()` and
+`update_task_schedule()` are `UPDATE` statements; a task whose row had never been
+materialised (because nobody had opened its settings page yet) simply had nothing
+updated. So "Run now" ran the task correctly, reported success, and recorded no
+result at all — and saving a schedule appeared to save and changed nothing.
+
+Both now go through `scheduler.run_task()` / `scheduler.save_schedule()`, which
+ensure the row exists first. The lesson worth keeping: in a schema where rows are
+created lazily, every `UPDATE` needs to know who guarantees the row.
+
+### A convention test that fired on the comment explaining the convention
+
+`test_the_visitor_session_helper_never_touches_admin_session_keys` checks that
+`_end_user_session()` doesn't call `session.clear()`. Its first version searched the
+unparsed function — including the docstring, which says *"Never session.clear() —
+an admin who is also signed in..."*. The test failed on the sentence explaining why
+it must not happen.
+
+Fixed by stripping the docstring before inspecting. This is exactly the false
+positive `CLAUDE.md` warns about: a check that fires on correct code teaches people
+to ignore the file it lives in.
+
+### What "fall back to the cached user list" could and couldn't mean
+
+The original brief asked for authentication to "fall back to the cached user list"
+when Jellyfin is unreachable. That turned out not to be implementable as stated, and
+the reasoning is worth keeping because it will come up again:
+
+Jellyfin does not expose password hashes over its API (and must not), so the cached
+list contains no material to verify a password against. "Falling back" to it could
+only mean accepting any username that appears in it — which is not degraded
+authentication, it is none.
+
+What was built instead: sign-in always requires a live answer from Jellyfin, and an
+outage refuses *new* sign-ins while leaving every *existing* session working
+(validated against the cache, never against Jellyfin). Nobody new gets in, everybody
+already in stays in.
+
+The awkward consequence, flagged rather than hidden: with `/report` gated behind
+sign-in, a visitor who has never signed in cannot report an outage *during* that
+outage. Hence `report_requires_login` being a setting an admin can turn off, and the
+admin page saying so explicitly.
+
+### First real-Jellyfin feedback on rc.1 (2026-08-21)
+
+The integration itself worked first time against Adam's real Jellyfin — the part
+that could only be guessed at in this sandbox (the `/Users` and
+`/Users/AuthenticateByName` response shapes) turned out to be right. Three things
+came back from actually using it:
+
+**The sign-in link was invisible.** It was a plain text hyperlink in the topbar, in
+the same faint monospace as "next refresh in 60s", and it scrolled away. Replaced
+with a solid pill button in a fixed cluster shared with the theme toggle.
+
+That change then produced a bug that only a browser could show: the fixed cluster
+rendered *on top of* the topbar's right-hand text. Every route-level test passed,
+because the HTML was perfectly correct — the elements just occupied the same
+pixels. Fixed by reserving padding on `.topbar`, and verified with a scripted
+bounding-rect overlap check at both desktop and phone widths rather than by
+squinting at a screenshot. Worth remembering as the general shape: **route tests
+cannot see layout at all**, and "it renders" is not "it's readable".
+
+**"Report with the username" was already built.** Verified live before writing any
+code — a signed-in user's report stored and displayed their Jellyfin username
+correctly. It just wasn't obvious in a seven-column table. The genuine gap was
+next door: "create incident from this report" dropped the reporter entirely, so the
+one action an admin takes on a report was the one place the attribution vanished.
+
+**Per-user blocking** was a new request, and its one real trap is worth recording
+because it would have been silent: `replace_jellyfin_users()` is a full
+delete-and-reinsert, so an admin-set flag that isn't explicitly carried across the
+sync gets wiped on the next run — blocking someone, then finding them able to sign
+in again an hour later, with nothing in any log to explain it.
+
+### The account page, and two bugs only a screenshot could find (2026-08-21)
+
+Adam's feedback after end-to-end testing rc.2 was that a report went into a black
+hole — no way to see whether anyone had looked at it, what came of it, or to hear
+anything back. Hence `/account`.
+
+Almost all of it surfaces facts that already existed in the database. Worth
+recording because it's a recurring shape in this project: the feature that felt
+missing wasn't missing data, it was missing *visibility* of data the admin could
+already see.
+
+**The theme preference was the genuinely hard part**, and not for any reason visible
+in the requirement. It has three inputs (this browser's `localStorage`, the account
+preference, the OS) and — because of the anti-flash script — *two* independent
+implementations of the precedence order. The failure modes are all quiet:
+
+- If the inline script and `theme.js` disagree, the page loads in one colour and
+  switches a moment later.
+- If `localStorage` outranks the account preference (which it must — it's the more
+  recent deliberate action on that device), then saving "Light" on the account page
+  changes every other device and visibly *not* the one you're sitting at. That is
+  the most confusing possible outcome, and it's the default behaviour unless
+  something explicitly syncs the local value after a save.
+- If "Auto" doesn't *remove* the local override, it keeps whatever was last toggled
+  on that device forever, which is not what "auto" means.
+
+All three were driven through a real browser across seven scenarios rather than
+reasoned about.
+
+**Two bugs a screenshot caught and the test suite could not**, both in the same
+render: the admin reply textarea kept the browser's default white background,
+unreadable in dark mode, because the shared input styling is scoped to `.field` —
+a block-level form row, the wrong shape for a control sitting in a table cell. And
+the reports table's timestamp was raw UTC, never having used the `local-time`
+conversion every other timestamp in the app goes through. Both had passed every
+route-level test, which asserts on content and cannot see colour or layout at all.
+
+### One column, then a table: the report reply (2026-08-21)
+
+The reply shipped in rc.3 as a single `admin_reply` column, which was exactly right
+for what was asked ("let the admin answer") and exactly wrong the moment the next
+request arrived ("let the user reply back"). Replacing it with a `report_messages`
+thread was the obvious fix; two details were not:
+
+- **The old column had to be backfilled, not abandoned.** rc.2 and rc.3 were running
+  on a real server with real replies in that column. Dropping it would have silently
+  deleted somebody's conversation on update. It's seeded into the thread by an
+  idempotent one-time insert in `init_db()`, the same shape as the two
+  multi-service backfills that predate it, and the column is left in place unread.
+- **The admin needed an unread signal too.** The single-reply version only ever had
+  one direction to notify, so only the user had a badge. Making it two-way without
+  adding the admin's half would have produced a conversation where the admin never
+  learns anyone answered — which is worse than no reply feature at all, because the
+  user reasonably assumes their message was received.
+
+Also worth noting for its own sake: editing was dropped in the move. The single
+column allowed rewriting a reply in place, which meant the other side could be
+looking at text that no longer existed. Append-only is the correct shape for a
+conversation; a correction is just another message.
+
+### Verification record — sandbox, 2026-08-21
+
+Exercised against a **stand-in Jellyfin** — a small HTTP server implementing
+`/Users`, `/Users/AuthenticateByName` and `/Sessions/Logout` from Jellyfin's
+documented response shapes — because no real Jellyfin exists in this sandbox:
+
+- user sync populating the cache (3 users, including a disabled one);
+- sign-in with a correct password, a wrong password, and a disabled account;
+- the short-lived access token being revoked immediately (observed arriving at the
+  stand-in server's `/Sessions/Logout`);
+- a signed-in visitor refused on `/admin`, `/admin/services`, `/admin/settings`,
+  `/admin/users`, `/admin/tasks`, `/admin/resources`;
+- authenticated reporting, with the reporter's Jellyfin username recorded on the row;
+- **Jellyfin taken down mid-session**: the signed-in session survived repeated
+  requests, a new sign-in was refused with the "can't reach Jellyfin" message rather
+  than a password error, and a sync attempt during the outage failed while leaving
+  all 3 cached users intact;
+- a user removed from Jellyfin losing their session on the next request after a sync;
+- **a real process restart** against the same database: the signed-in session and the
+  task's schedule and last-run history both survived.
+
+Also driven through a real Chromium (Playwright), which is what confirmed
+`static/js/csrf.js` actually injects the token into the two new forms — `/login` is
+CSRF-protected, so had it not, nobody could have signed in from a browser at all
+while every curl-based test still passed. No console errors on any new page.
+
+**Not verified**: any real Jellyfin instance. The response shapes of `/Users` and
+`/Users/AuthenticateByName` come from Jellyfin's API documentation, not from
+observing a running server, and the `Authorization` / `X-Emby-Authorization` header
+pair is belt-and-braces for older builds rather than something confirmed necessary.
 
 ## Release history notes
 

@@ -242,6 +242,85 @@ def init_db():
         )
     """)
 
+    # Generic scheduled-task framework (see scheduler.py). One row per *registered*
+    # task, keyed by the registry name rather than an autoincrement id: the code is
+    # the source of truth for which tasks exist, this table only holds the parts an
+    # admin can change plus the outcome of the last run. A row is created lazily the
+    # first time a task is looked at (scheduler._row), so adding a task to the
+    # registry needs no migration; a row whose task is later removed from the code
+    # simply stops being listed, which is harmless.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            schedule_kind TEXT NOT NULL DEFAULT 'interval',  -- interval | daily
+            interval_minutes INTEGER NOT NULL DEFAULT 60,
+            daily_at TEXT NOT NULL DEFAULT '03:00',          -- HH:MM, UTC
+            last_run_at TEXT,
+            last_status TEXT,                                -- success | failed | skipped
+            last_message TEXT NOT NULL DEFAULT '',
+            last_duration_ms INTEGER,
+            last_trigger TEXT NOT NULL DEFAULT ''            -- schedule | manual
+        )
+    """)
+
+    # The locally cached Jellyfin user list (see jellyfin_auth.py). Keyed by
+    # Jellyfin's own user GUID, which is stable across renames - a username is not.
+    # This is a *cache of an external system*, deliberately persisted in SQLite
+    # rather than held in memory: it has to survive a restart, because it is what
+    # keeps already-signed-in users valid while Jellyfin is unreachable.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS jellyfin_users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            name_lower TEXT NOT NULL,
+            is_administrator INTEGER NOT NULL DEFAULT 0,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TEXT NOT NULL,
+            last_synced_at TEXT NOT NULL
+        )
+    """)
+
+    # The back-and-forth on a problem report. Replaces the single admin_reply column
+    # on problem_reports, which could only ever hold one message from one side - that
+    # column is left in place (nothing is ever dropped here) and is backfilled into
+    # this table below, but nothing reads it any more.
+    #
+    # `author` is 'admin' or 'user'. `seen` means "seen by the other party", which is
+    # unambiguous because every message has exactly one intended reader: the admin
+    # writes to the reporter, the reporter writes to the admin.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS report_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL,
+            author TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            seen INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (report_id) REFERENCES problem_reports (id) ON DELETE CASCADE
+        )
+    """)
+
+    # Per-user settings the *user* chooses about themselves, as opposed to
+    # jellyfin_users, which mirrors Jellyfin (plus the one admin-owned decision,
+    # portal_allowed, that predates this table). Deliberately its own table rather
+    # than more columns on jellyfin_users: that one is rewritten wholesale by every
+    # sync, so anything stored there has to be explicitly carried across
+    # replace_jellyfin_users() or it is silently wiped within the hour. Keeping
+    # user-owned data out of it means future preferences can't fall into that trap.
+    #
+    # Rows are keyed by Jellyfin's stable user id and are deliberately NOT deleted
+    # when a user disappears from Jellyfin - if the account comes back (or the sync
+    # was simply wrong for a poll), their settings are still here.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id TEXT PRIMARY KEY,
+            theme TEXT NOT NULL DEFAULT 'auto',   -- auto | dark | light
+            contact TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
     # Retrofit columns added after a table already existed in some earlier version of
@@ -267,6 +346,31 @@ def init_db():
     # explicit per-service opt-in to also show them on the public card.
     _ensure_column(conn, "services", "show_run_target_public", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "show_dependencies_public", "INTEGER NOT NULL DEFAULT 0")
+    # Which signed-in Jellyfin user filed a problem report ('' for an anonymous one,
+    # which is still the only possibility on an install that hasn't enabled
+    # Jellyfin-backed auth). Stored as the username, not the user id: it's shown to
+    # the admin, and it has to stay readable for a user who was later removed from
+    # Jellyfin entirely.
+    _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
+    # Whether this portal lets the user sign in, independently of whether Jellyfin
+    # does. On by default: users appear here by being synced from Jellyfin, and
+    # having to individually approve each one would make the feature tedious for the
+    # normal case. Needs _ensure_column rather than living in the CREATE TABLE above
+    # because jellyfin_users already exists on any install running 1.7.0-rc.1.
+    _ensure_column(conn, "jellyfin_users", "portal_allowed", "INTEGER NOT NULL DEFAULT 1")
+    # Who filed a report, by Jellyfin's stable user id - reporter_user (the name) is
+    # kept alongside it for *display*, because it has to stay readable for someone
+    # later removed from Jellyfin entirely. The id is what "show me my reports" looks
+    # up by, so renaming yourself in Jellyfin doesn't orphan your own report history.
+    _ensure_column(conn, "problem_reports", "reporter_user_id", "TEXT NOT NULL DEFAULT ''")
+    # The admin's reply, and whether the reporter has seen it yet.
+    _ensure_column(conn, "problem_reports", "admin_reply", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "problem_reports", "replied_at", "TEXT")
+    _ensure_column(conn, "problem_reports", "reply_seen", "INTEGER NOT NULL DEFAULT 0")
+    # Set when an admin turns a report into an incident, so the reporter can be shown
+    # what came of it. No FK constraint: _ensure_column can't add one to an existing
+    # table, so a deleted incident is handled by the LEFT JOIN reading it instead.
+    _ensure_column(conn, "problem_reports", "incident_id", "INTEGER")
     conn.commit()
 
     # Write-ahead logging. SQLite's default rollback journal takes a database-wide
@@ -322,6 +426,14 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_service_dependencies_service ON service_dependencies (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_service ON problem_reports (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_integrations_service ON integrations (service_id)",
+        # Login looks a user up by name, not by id (the id is what Jellyfin returns
+        # *after* a successful authentication). Small table, but this is the one
+        # query on the sign-in path, and an index costs nothing here.
+        "CREATE INDEX IF NOT EXISTS idx_jellyfin_users_name_lower ON jellyfin_users (name_lower)",
+        # Backs "show me my own reports" on the account page, which runs on every
+        # visit by a signed-in user.
+        "CREATE INDEX IF NOT EXISTS idx_problem_reports_reporter ON problem_reports (reporter_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_report_messages_report ON report_messages (report_id)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -341,6 +453,17 @@ def init_db():
         INSERT INTO incident_services (incident_id, service_id)
         SELECT id, service_id FROM incidents
         WHERE service_id IS NOT NULL AND id NOT IN (SELECT DISTINCT incident_id FROM incident_services)
+    """)
+    # Replies written before report_messages existed (1.7.0-rc.2/rc.3) live in the
+    # single admin_reply column. Seed them as the first message of their thread so
+    # nobody's existing conversation vanishes when they update. Idempotent via the
+    # NOT IN guard, same shape as the two backfills above - safe to re-run on every
+    # startup forever.
+    conn.execute("""
+        INSERT INTO report_messages (report_id, author, body, created_at, seen)
+        SELECT id, 'admin', admin_reply, COALESCE(replied_at, created_at), reply_seen
+        FROM problem_reports
+        WHERE admin_reply != '' AND id NOT IN (SELECT DISTINCT report_id FROM report_messages)
     """)
     conn.commit()
 
@@ -1207,12 +1330,13 @@ def delete_discord_status_message(channel_id):
 # ---------- Problem reports ----------
 # A visitor-submitted bug/issue report, separate from the admin-authored
 # incidents/maintenance system entirely - see app.py's public /report route.
-def create_problem_report(message, contact="", service_id=None):
+def create_problem_report(message, contact="", service_id=None, reporter_user="", reporter_user_id=""):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO problem_reports (message, contact, service_id, status, created_at)
-        VALUES (?, ?, ?, 'new', ?)
-    """, (message, contact, service_id, now_iso()))
+        INSERT INTO problem_reports (message, contact, service_id, status, created_at,
+                                      reporter_user, reporter_user_id)
+        VALUES (?, ?, ?, 'new', ?, ?, ?)
+    """, (message, contact, service_id, now_iso(), reporter_user, reporter_user_id))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -1276,5 +1400,358 @@ def update_problem_report_status(rid, status):
 def delete_problem_report(rid):
     conn = get_db()
     conn.execute("DELETE FROM problem_reports WHERE id=?", (rid,))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Scheduled tasks (see scheduler.py) ----------
+# The registry in scheduler.py decides which tasks *exist*; these functions only
+# store the parts an admin can change (enabled, schedule) and the outcome of the
+# last run, so that both survive a restart - the whole point of the table.
+SCHEDULE_KINDS = ("interval", "daily")
+TASK_STATUSES = ("success", "failed", "skipped")
+
+
+def ensure_task_row(name, defaults):
+    """Creates the row for a task the first time it's seen, using the registry's
+    declared defaults. Idempotent: INSERT OR IGNORE, so an existing row (with the
+    admin's own schedule in it) is never reset by a later restart."""
+    conn = get_db()
+    conn.execute("""
+        INSERT OR IGNORE INTO scheduled_tasks (name, enabled, schedule_kind, interval_minutes, daily_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (name, int(defaults.get("enabled", 1)), defaults.get("schedule_kind", "interval"),
+          int(defaults.get("interval_minutes", 60)), defaults.get("daily_at", "03:00")))
+    conn.commit()
+    conn.close()
+
+
+def get_task_row(name):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM scheduled_tasks WHERE name=?", (name,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_task_rows():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM scheduled_tasks ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_task_schedule(name, enabled, schedule_kind, interval_minutes, daily_at):
+    """Only ever touches the admin-editable columns - never last_run_at/last_status.
+    Saving a schedule must not look like the task just ran, and must not reset the
+    clock that decides when it next will."""
+    if schedule_kind not in SCHEDULE_KINDS:
+        schedule_kind = "interval"
+    conn = get_db()
+    conn.execute("""
+        UPDATE scheduled_tasks SET enabled=?, schedule_kind=?, interval_minutes=?, daily_at=?
+        WHERE name=?
+    """, (int(bool(enabled)), schedule_kind, max(1, int(interval_minutes)), daily_at, name))
+    conn.commit()
+    conn.close()
+
+
+def record_task_run(name, status, message="", duration_ms=None, trigger="schedule", ran_at=None):
+    """Written after *every* completed attempt, successful or not. A failed run still
+    stamps last_run_at on purpose: an interval schedule is measured from it, so
+    leaving it unchanged on failure would make a permanently-failing task retry on
+    every single scheduler tick instead of on its next scheduled run."""
+    conn = get_db()
+    conn.execute("""
+        UPDATE scheduled_tasks SET last_run_at=?, last_status=?, last_message=?,
+               last_duration_ms=?, last_trigger=? WHERE name=?
+    """, (ran_at or now_iso(), status, message or "", duration_ms, trigger, name))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Cached Jellyfin user list (see jellyfin_auth.py) ----------
+def replace_jellyfin_users(users):
+    """Full replace, in one transaction, of the locally cached Jellyfin user list.
+
+    Only ever called after a *successful* fetch - a failed sync must leave the
+    previous list completely intact, since that list is what keeps already
+    signed-in users valid while Jellyfin is unreachable. Doing it in a single
+    transaction is what stops a crash mid-write leaving a half-populated list,
+    which would look exactly like "most of your users were deleted".
+
+    first_seen_at is preserved for a user that already exists, so it keeps meaning
+    "when this portal first saw this account" rather than "when the last sync ran".
+    """
+    stamp = now_iso()
+    conn = get_db()
+    try:
+        with conn:
+            existing = {r["id"]: r for r in
+                        conn.execute("SELECT id, first_seen_at, portal_allowed FROM jellyfin_users").fetchall()}
+            conn.execute("DELETE FROM jellyfin_users")
+            conn.executemany("""
+                INSERT INTO jellyfin_users (id, name, name_lower, is_administrator, is_disabled,
+                                             first_seen_at, last_synced_at, portal_allowed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [(u["id"], u["name"], u["name"].strip().lower(),
+                   int(bool(u.get("is_administrator"))), int(bool(u.get("is_disabled"))),
+                   existing[u["id"]]["first_seen_at"] if u["id"] in existing else stamp,
+                   stamp,
+                   existing[u["id"]]["portal_allowed"] if u["id"] in existing else 1)
+                  for u in users])
+    finally:
+        conn.close()
+    return len(users)
+
+
+def list_jellyfin_users():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM jellyfin_users ORDER BY name COLLATE NOCASE").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_jellyfin_user(user_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM jellyfin_users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_jellyfin_user_by_name(name):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM jellyfin_users WHERE name_lower=?",
+                        ((name or "").strip().lower(),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_jellyfin_user_allowed(user_id, allowed):
+    """Blocks or unblocks one user's access to *this portal*, leaving their Jellyfin
+    account completely untouched. Deliberately a separate fact from is_disabled: that
+    one mirrors Jellyfin and is overwritten by every sync, this one is the admin's own
+    decision and is carried across syncs by replace_jellyfin_users()."""
+    conn = get_db()
+    conn.execute("UPDATE jellyfin_users SET portal_allowed=? WHERE id=?",
+                  (int(bool(allowed)), user_id))
+    conn.commit()
+    conn.close()
+
+
+def count_jellyfin_users():
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM jellyfin_users").fetchone()[0]
+    conn.close()
+    return count
+
+
+def jellyfin_users_synced_at():
+    """When the cached list was last refreshed (max last_synced_at), or None if it
+    has never been populated. Distinguishing "never synced" from "synced and empty"
+    matters: an empty cache must never be read as "this user doesn't exist"."""
+    conn = get_db()
+    row = conn.execute("SELECT MAX(last_synced_at) FROM jellyfin_users").fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+
+# ---------- Problem report replies and per-user report history ----------
+# What turns the report form from a black hole into a conversation: the admin can
+# answer, and the reporter can see the answer plus what became of their report.
+REPORT_AUTHORS = ("admin", "user")
+
+
+def add_report_message(report_id, author, body):
+    """Appends one message to a report's thread. Returns its id, or None if there was
+    nothing to add - an empty message is silently ignored rather than stored, since
+    both sides' forms can be submitted blank by accident.
+
+    Messages are append-only on purpose. The previous single-reply design allowed
+    editing, which meant the other party could be looking at text that no longer
+    existed; a conversation where earlier messages can change under you is worse than
+    one where a correction is just another message."""
+    body = (body or "").strip()
+    if not body or author not in REPORT_AUTHORS:
+        return None
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO report_messages (report_id, author, body, created_at, seen)
+        VALUES (?, ?, ?, ?, 0)
+    """, (report_id, author, body, now_iso()))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def list_report_messages(report_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM report_messages WHERE report_id=? ORDER BY created_at, id
+    """, (report_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def attach_report_messages(reports):
+    """Fills in each report's `messages` list in one query rather than one per report -
+    both the admin list and a user's account page render every thread on the page."""
+    reports = list(reports)
+    if not reports:
+        return reports
+    ids = [r["id"] for r in reports]
+    placeholders = ",".join("?" * len(ids))
+    conn = get_db()
+    rows = conn.execute(f"""
+        SELECT * FROM report_messages WHERE report_id IN ({placeholders})
+        ORDER BY created_at, id
+    """, ids).fetchall()
+    conn.close()
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["report_id"], []).append(dict(r))
+    for report in reports:
+        report["messages"] = grouped.get(report["id"], [])
+    return reports
+
+
+def mark_report_messages_seen(report_ids, author):
+    """Marks messages written by `author` as seen, for the given reports. Called when
+    the *other* side opens the page - the admin reading /admin/reports marks the
+    user's messages, and a user opening their account page marks the admin's.
+
+    Returns how many rows changed so a caller can skip follow-up work when there was
+    nothing to mark, which is the common case on a page read far more than written."""
+    report_ids = list(report_ids)
+    if not report_ids or author not in REPORT_AUTHORS:
+        return 0
+    placeholders = ",".join("?" * len(report_ids))
+    conn = get_db()
+    cur = conn.execute(f"""
+        UPDATE report_messages SET seen=1
+        WHERE seen=0 AND author=? AND report_id IN ({placeholders})
+    """, [author] + report_ids)
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+    return changed
+
+
+def set_problem_report_incident(rid, incident_id):
+    """Links a report to the incident an admin raised from it, so the reporter can be
+    told what came of it rather than just seeing the report marked resolved."""
+    conn = get_db()
+    conn.execute("UPDATE problem_reports SET incident_id=? WHERE id=?", (incident_id, rid))
+    conn.commit()
+    conn.close()
+
+
+def list_reports_for_user(user_id):
+    """One signed-in user's own reports, newest first, with the linked incident's
+    current title/status where there is one.
+
+    Scoped by Jellyfin's stable user id and nothing else. A blank user_id must never
+    match anything: every anonymous report has reporter_user_id = '', so a caller
+    that passed an empty id would otherwise be handed every anonymous report in the
+    database. The guard is here rather than in the route so it can't be forgotten by
+    a second caller later.
+
+    LEFT JOIN so a report whose incident was deleted still lists, with no incident
+    attached - there's no FK to null it out for us."""
+    if not user_id:
+        return []
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT r.*, i.title AS incident_title, i.status AS incident_status
+        FROM problem_reports r
+        LEFT JOIN incidents i ON i.id = r.incident_id
+        WHERE r.reporter_user_id = ?
+        ORDER BY r.created_at DESC
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [_attach_report_service(dict(r)) for r in rows]
+
+
+def count_unseen_replies(user_id):
+    """Admin messages this user hasn't read yet - backs the dot on the sign-in chip,
+    which is the only thing that tells someone an answer is waiting."""
+    if not user_id:
+        return 0
+    conn = get_db()
+    count = conn.execute("""
+        SELECT COUNT(*) FROM report_messages m
+        JOIN problem_reports r ON r.id = m.report_id
+        WHERE r.reporter_user_id = ? AND m.author = 'admin' AND m.seen = 0
+    """, (user_id,)).fetchone()[0]
+    conn.close()
+    return count
+
+
+def count_unseen_user_messages():
+    """Replies from reporters the admin hasn't read yet, feeding the admin nav's
+    Reports badge. Without this the admin has no way of knowing somebody answered -
+    which would make the whole two-way conversation pointless, since only one side
+    would ever notice a new message."""
+    conn = get_db()
+    count = conn.execute("""
+        SELECT COUNT(*) FROM report_messages WHERE author = 'user' AND seen = 0
+    """).fetchone()[0]
+    conn.close()
+    return count
+
+
+def mark_replies_seen(user_id):
+    """Called when a user opens their account page: marks the admin's messages on
+    *their own* reports as read, and nothing else."""
+    if not user_id:
+        return 0
+    conn = get_db()
+    cur = conn.execute("""
+        UPDATE report_messages SET seen=1
+        WHERE seen=0 AND author='admin' AND report_id IN (
+            SELECT id FROM problem_reports WHERE reporter_user_id = ?
+        )
+    """, (user_id,))
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+    return changed
+
+
+# ---------- Per-user preferences (user-owned, unlike jellyfin_users) ----------
+USER_THEMES = ("auto", "dark", "light")
+DEFAULT_USER_PREFERENCES = {"theme": "auto", "contact": ""}
+
+
+def get_user_preferences(user_id):
+    """Always returns a complete dict, so callers never branch on "has this user ever
+    saved anything". An unrecognised stored theme falls back to the default rather
+    than being handed to a template that will render it into an HTML attribute."""
+    prefs = dict(DEFAULT_USER_PREFERENCES)
+    if not user_id:
+        return prefs
+    conn = get_db()
+    row = conn.execute("SELECT * FROM user_preferences WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    if row:
+        prefs["theme"] = row["theme"] if row["theme"] in USER_THEMES else "auto"
+        prefs["contact"] = row["contact"] or ""
+    return prefs
+
+
+def set_user_preferences(user_id, theme=None, contact=None):
+    """Upsert. Only the named fields are written, so a caller that only knows about
+    the theme (the toggle button's endpoint) can't blank out the contact."""
+    if not user_id:
+        return
+    current = get_user_preferences(user_id)
+    theme = theme if theme in USER_THEMES else current["theme"]
+    contact = current["contact"] if contact is None else contact
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO user_preferences (user_id, theme, contact, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, contact=excluded.contact,
+                                            updated_at=excluded.updated_at
+    """, (user_id, theme, contact, now_iso()))
     conn.commit()
     conn.close()

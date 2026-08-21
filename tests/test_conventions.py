@@ -191,25 +191,118 @@ def test_status_maps_cover_every_status_including_slow(module, constant):
 # CSRF coverage
 # ---------------------------------------------------------------------------
 def test_every_post_route_is_csrf_covered_or_a_known_public_exception():
-    """CLAUDE.md: CSRF protection is a before_request hook keyed on
-    request.path.startswith("/admin/"), not per-route wiring. That's what makes a new
-    admin route protected for free - and it's also why a POST route added *outside*
-    /admin/ silently gets no protection at all.
+    """CLAUDE.md: CSRF protection is a before_request hook, not per-route wiring.
+    That's what makes a new admin route protected for free - and it's also why a POST
+    route added *outside* /admin/ silently gets no protection at all.
 
-    /report is the one deliberate exception (a public form exercising no authenticated
-    privilege, with its own honeypot/timing/rate-limit anti-abuse instead). Adding a
-    second one is a decision to make on purpose, which is what this test forces."""
+    The hook delegates to app._csrf_required_for(path, method), which covers
+    everything under /admin/ plus an explicit set of public paths. /report is the one
+    remaining deliberate exception, and only while nobody is signed in: its original
+    justification was that it exercises no authenticated privilege, which stops being
+    true once a report is attributable to a Jellyfin user, so it becomes protected
+    exactly then (see report_problem() and _report_login_required()).
+
+    Adding a second unprotected public POST route is a decision to make on purpose,
+    which is what this test forces."""
     public_post_exceptions = {"/report"}
-    unprotected = {
-        rule.rule for rule in app_module.app.url_map.iter_rules()
-        if "POST" in rule.methods
-        and not rule.rule.startswith("/admin/")
-        and rule.rule not in public_post_exceptions
-    }
+    unprotected = set()
+    with app_module.app.test_request_context("/"):
+        for rule in app_module.app.url_map.iter_rules():
+            if "POST" not in rule.methods or rule.rule in public_post_exceptions:
+                continue
+            if not app_module._csrf_required_for(rule.rule, "POST"):
+                unprotected.add(rule.rule)
     assert not unprotected, (
-        f"POST routes outside /admin/ with no CSRF protection: {sorted(unprotected)}. "
-        "Either move the route under /admin/, or add it to public_post_exceptions here "
-        "with its own anti-abuse measures (see report_problem()).")
+        f"POST routes with no CSRF protection: {sorted(unprotected)}. "
+        "Either move the route under /admin/, add it to _CSRF_PROTECTED_PUBLIC_PATHS "
+        "in app.py, or add it to public_post_exceptions here with its own anti-abuse "
+        "measures (see report_problem()).")
+
+
+def test_the_report_form_becomes_csrf_protected_once_a_user_is_signed_in():
+    """The other half of the exception above: /report's exemption is conditional, and
+    a change that made it unconditional again would silently leave an authenticated
+    form cross-postable."""
+    with app_module.app.test_request_context("/report", method="POST"):
+        assert app_module._csrf_required_for("/report", "POST") is False
+    with app_module.app.test_request_context("/report", method="POST") as ctx:
+        ctx.session["portal_user"] = {"id": "u1", "name": "someone"}
+        assert app_module._csrf_required_for("/report", "POST") is True
+
+
+# ---------------------------------------------------------------------------
+# Admin and visitor sessions must stay separate
+# ---------------------------------------------------------------------------
+def test_only_the_admin_session_helper_ever_sets_logged_in():
+    """The structural guarantee behind "a Jellyfin user is never an admin": the
+    `logged_in` session key is written in exactly one function. If a second place
+    starts setting it, the isolation stops being structural and becomes something
+    someone has to remember, which is how this class of bug happens."""
+    tree = ast.parse(_read("app.py"))
+    setters = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                    and target.value.id == "session"
+                    and isinstance(target.slice, ast.Constant) and target.slice.value == "logged_in"):
+                parent = next((f.name for f in ast.walk(tree)
+                               if isinstance(f, ast.FunctionDef)
+                               and any(n is node for n in ast.walk(f))), "<module>")
+                setters.add(parent)
+    assert setters == {"_start_admin_session"}, (
+        f"session['logged_in'] is set in {sorted(setters)}; it must only ever be set in "
+        "_start_admin_session(). The admin session and the Jellyfin visitor session are "
+        "separate identities - see app.py's 'Visitor sessions' section.")
+
+
+def test_the_visitor_session_helper_never_touches_admin_session_keys():
+    """Same guarantee from the other direction."""
+    tree = ast.parse(_read("app.py"))
+    for name in ("_start_user_session", "_end_user_session"):
+        func = next((n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == name), None)
+        assert func is not None, f"{name}() not found in app.py - was it renamed?"
+        # Strip the docstring before inspecting: these functions *explain* the rule
+        # in prose, and a check that fires on the comment describing it is exactly
+        # the kind of false positive that teaches people to ignore this file.
+        body = [n for n in func.body
+                if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                        and isinstance(n.value.value, str))]
+        code = ast.unparse(ast.Module(body=body, type_ignores=[]))
+        for forbidden in ("logged_in", "awaiting_totp", "csrf_token"):
+            assert forbidden not in code, (
+                f"{name}() references the admin session key '{forbidden}'. The visitor "
+                "session must only ever read and write its own keys.")
+        assert "session.clear" not in code, (
+            f"{name}() calls session.clear(), which would sign an admin out of the admin "
+            "panel as a side effect of a visitor-side action. Pop the visitor keys instead.")
+
+
+def test_admin_routes_are_all_gated_by_the_admin_decorator():
+    """Every view under /admin/ must carry @login_required (which reads `logged_in`
+    and nothing else), so no amount of getting the visitor flow wrong can expose an
+    admin page. The two login pages are the deliberate exceptions - they're how you
+    get a session in the first place."""
+    tree = ast.parse(_read("app.py"))
+    exempt = {"admin_login", "admin_logout"}
+    missing = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        routes = [d for d in node.decorator_list
+                  if isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "route"
+                  and d.args and isinstance(d.args[0], ast.Constant)
+                  and str(d.args[0].value).startswith("/admin/")]
+        if not routes or node.name in exempt:
+            continue
+        names = {d.id for d in node.decorator_list if isinstance(d, ast.Name)}
+        if "login_required" not in names:
+            missing.append(node.name)
+    assert not missing, (
+        f"Admin routes with no @login_required: {missing}. Every /admin/ view needs it - "
+        "it is what keeps a signed-in Jellyfin visitor out of the admin panel.")
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +379,7 @@ def test_every_module_level_cache_is_reset_between_tests():
     cleared_by_helper = {
         "monitoring.py": _read("monitoring.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "integrations.py": _read("integrations.py").split("def clear_caches")[-1].split("\ndef ")[0],
+        "scheduler.py": _read("scheduler.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "updater.py": _read("updater.py").split("def clear_update_cache")[-1].split("\ndef ")[0],
     }
     missing = []

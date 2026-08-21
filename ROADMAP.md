@@ -34,6 +34,51 @@ safely is the real work. Treat it with the same care as the self-updater,
 not as a quick add — it's the riskiest idea in this document, not the
 easiest.
 
+**Where it should live**: see "Updater quality-of-life" below — the argument
+there is that someone reaching for a restore is usually recovering from
+something, and will look on the About page next to rollback rather than in
+Settings. Same feature, one implementation.
+
+### Updater quality-of-life: release notes in the app, and restore from a backup zip
+Two related improvements to `/admin/about`, which today tells you *that* an
+update exists but nothing about what's in it, and can roll code back but not
+data.
+
+**Show the changelog.** The GitHub releases API already returns each
+release's `body` (the changelog written at release time) in the same
+response `updater.py` parses for the version and download URL — so surfacing
+"what's in the update you're being offered" costs one extra field, not one
+extra request. Worth showing **both**: the notes for the version you're
+running and the notes for the version on offer, so "should I take this?" is
+answerable without leaving the page. If several releases have accumulated,
+showing the notes for each version *between* the two is the more useful
+version of this, and needs the releases list rather than just the latest —
+which `updater.py` already fetches. The body is Markdown and arrives from
+the network, so it must be rendered through something escaping-safe rather
+than dropped into the page as HTML — the existing `richtext` filter is the
+obvious starting point, and deliberately supports far less than Markdown.
+
+**Restore the database from a backup zip.** The counterpart to the existing
+"download a backup" button, offered where the other recovery machinery
+already lives instead of buried in Settings. **This is the same feature as
+"Restore from backup" above** — see that entry for the safety machinery it
+needs (validate the upload really is a SQLite database before touching
+anything, snapshot the *current* database first, atomic replace, restart the
+process, step-up 2FA). Treat this entry as "and put it on the About page
+next to rollback, where someone recovering from a bad update will actually
+look for it", not as a second, simpler implementation.
+
+Worth keeping the two kinds of backup distinct in the UI while doing it,
+because conflating them would be a genuinely bad mistake: `updater.py`'s
+backups are of **application code**, for rolling back a bad update, and
+contain no data; the Settings backup button produces a **database** zip and
+contains nothing else. Neither can restore the other.
+
+**Priority:** Medium-High for the changelog (small, and it improves every
+future update decision) · Medium for the restore half · **Effort:** S for
+the changelog; S-M for the restore, all of which is in the risk of
+assembling it rather than the amount of code.
+
 ### External internet connectivity check
 Pings a fixed external target (1.1.1.1 by default, ideally configurable) on
 the same schedule as service health checks. If it fails, the public page can
@@ -57,6 +102,55 @@ web UIs to know if anything's behind.
 **Priority:** Medium · **Effort:** M — the version-comparison logic in
 `updater.py` is already there to reuse, but each app has its own
 releases API/format to query and parse.
+
+### Per-user notifications: Discord DM and email
+The portal already notifies *the admin* (Discord webhook, ntfy). This is the
+other direction: telling **the person who asked** when something they care
+about happens — their problem report got a reply or was turned into an
+incident, a request they made moved on, or maintenance is starting on a
+service they use.
+
+Two delivery channels, and the interesting part is **where the addresses come
+from**. Seerr already holds an email address and a Discord user ID for each of
+its users, entered once by them. Reading those rather than asking again is the
+difference between "set up notifications" being a chore and being invisible.
+So:
+
+1. If the signed-in Jellyfin user matches a Seerr user with contact details
+   already filled in, use those.
+2. If not, ask on the account page (which already has a contact field to grow
+   into) — and offer to **push it back to Seerr**, so the user enters it once
+   for both systems rather than maintaining two copies that drift.
+
+Worth deciding before building:
+
+- **Matching a Jellyfin user to a Seerr user.** Seerr can import Jellyfin
+  accounts, in which case there's a real link to follow; if it hasn't, matching
+  on email or username is guesswork and should probably just fall back to
+  asking. Getting this wrong means sending someone else's notifications to the
+  wrong person, so it should fail closed.
+- **Writing back to Seerr is the first time this portal would modify another
+  service.** Everything today is read-only except Jellyfin authentication.
+  That's a real line to cross deliberately, with the user's explicit consent in
+  the UI, not a silent sync.
+- **Per-event opt-in, per user.** Nobody wants a DM for every maintenance
+  window on every service. The natural granularity is "things about my own
+  reports" (almost always wanted) versus "anything about services I use"
+  (usually not), so default the first on and the second off.
+- **Sending is outbound I/O and belongs in a scheduled task or the existing
+  background thread**, never inline in the request that triggered it — the same
+  rule every other outbound call in this app follows.
+
+Email needs the SMTP configuration block described in "Email notifications"
+below; the Discord DM path needs `discord_bot.py` to DM a user, which is a
+different code path from its current guild/channel posting (the same one the
+Seerr approval alert further down needs, so build it once).
+
+**Priority:** Medium-High · **Effort:** L — two delivery channels, a matching
+problem with a real failure mode, a write-back to another service, and a
+per-user preferences surface. Best split: Discord DM first (the bot is already
+there), email second (needs the SMTP config below), Seerr contact reuse last,
+since it's the only part that can be wrong in a way that matters.
 
 ### Email notifications
 A third notification channel alongside the existing Discord webhook and
@@ -88,6 +182,44 @@ no hard dependency between them; this can be built and shown flat first.
 **Priority:** Medium-High · **Effort:** L — three integrations with two
 different auth shapes, new parsing per app, and new UI sections on top of
 the existing `integrations.py` pattern.
+
+### Unified search across Jellyfin and Seerr (signed-in users only)
+One search box on the public page that queries **Jellyfin** and **Seerr**
+at the same time and merges the results, so a visitor asks "do we have X?"
+once instead of checking two places. Each result then offers the action that
+actually applies to it: already in the library → a direct link straight to
+that item in Jellyfin; not in the library → request it through Seerr without
+leaving the portal.
+
+**Sequenced after the calendar/downloads integration above**, not before —
+that work brings the Seerr and *Arr API surface into this codebase, and
+building search first would mean writing half of it twice.
+
+**Signed-in users only** (the Jellyfin auth built in v1.7.0 is exactly what
+makes this possible). Three reasons that restriction isn't arbitrary: the
+result set reveals your whole library to anyone who can load the page;
+requesting is a write action against Seerr and needs to be attributable to a
+person; and a search box wired to two external APIs is a free
+denial-of-service amplifier if it's open to the internet. Rate-limit it
+per session on top.
+
+Two things to decide before building:
+
+- **Whose Seerr account requests it.** Simplest is one shared Seerr API key,
+  with the portal recording which Jellyfin user asked — but then Seerr's own
+  approval queue can't tell them apart. Seerr can also import Jellyfin users,
+  in which case requesting *as* the matching Seerr user is possible and much
+  better. Worth checking which is true of the actual setup before choosing.
+- **Search has to stay off the request path's slow-I/O rule.** Unlike every
+  other outbound call in this app, a search genuinely cannot be answered from
+  a background-refreshed cache — the query is unknown until someone types it.
+  This would be the first *legitimate* live outbound call from a request
+  handler, so it needs its own short timeout and a clear "search is
+  unavailable right now" degradation, rather than quietly breaking the rule.
+
+**Priority:** Medium · **Effort:** L — two APIs, a merge/dedupe step (the
+same title from both sources must not appear twice), a write action, a new
+UI, and the auth/rate-limiting story above.
 
 ### Prowlarr per-indexer health
 Prowlarr's own API already reports each configured indexer's individual
@@ -146,23 +278,53 @@ on — was already identified as the right shape, over splitting into two
 separate Flask apps. Needs a new `PORTAL_ADMIN_PORT` config value, unset by
 default so today's single-port behavior is unchanged.
 
-**Priority:** Medium-High · **Effort:** S-M — the implementation shape is
+**Deferred from the v1.7.0 session (2026-08-21)** and explicitly kept for
+later, having been considered and scheduled out rather than forgotten: it was
+scoped alongside the Jellyfin auth work and deliberately not bundled with it,
+since a port-level access gate and a brand-new authentication path are two
+access-control changes and shipping both together means not knowing which one
+broke anything. It remains the **next candidate** — the only architectural
+item here whose implementation shape is already fully settled.
+
+One wrinkle worth knowing before starting: **cookies are not scoped by port**,
+so a session cookie set on the public port is sent to the admin port as well.
+The split therefore buys *network-level* separation (expose, firewall or
+tunnel the two independently), which is the actual goal — not session
+isolation. Don't let anyone assume otherwise. Also note `app.run()` binds a
+single port, so the dev entry point and `serve_waitress.py` would diverge in
+behaviour unless that's handled deliberately.
+
+**Priority:** High (next up) · **Effort:** S-M — the implementation shape is
 already decided; it's mostly wiring a second listener and one
 `before_request` gate.
 
-### Jellyfin-backed user permissions
-Uses Jellyfin's own user accounts as an identity source, so a logged-in
-Jellyfin user could see personalized content on the public page (e.g.
-Tailscale join instructions) instead of everyone seeing the same static Info
-page. A genuinely bigger change: it adds a second authentication path
-alongside the current single-admin-password login, plus a
-permissions/visibility model per piece of content — worth a dedicated design
-conversation before any code, since it touches how content is modeled
-everywhere, not just one page.
+### Jellyfin-backed user permissions — auth layer DONE (v1.7.0), visibility model still open
+The **authentication half is built** (2026-08-21): visitors sign in with
+their Jellyfin username and password, backed by a scheduled task that caches
+Jellyfin's user list locally so an outage never signs anybody out. See
+CLAUDE.md → "Jellyfin-backed user accounts" for the design, and the
+`/admin/users` page for the settings. The session already carries the pieces
+a permissions model needs — the Jellyfin user id, the display name, and
+whether Jellyfin considers them an administrator (stored deliberately, read
+by nothing yet).
 
-**Priority:** Medium · **Effort:** L — new auth path, new permissions model,
-and it's what the Radarr/Prowlarr/qBittorrent integration above would
-ideally build on rather than duplicate later.
+**What's left is the permissions/visibility model itself**, which was
+correctly scoped out of that pass rather than rushed into it: a way to mark a
+piece of content (an Info page block, a service card, an announcement, a
+service link) as visible only to signed-in users, or only to particular
+Jellyfin accounts. That's the part that "touches how content is modeled
+everywhere, not just one page", and it needs its own design conversation —
+in particular whether visibility is per-item-per-user, per-item-per-group,
+or just a three-way public/signed-in/admin flag, which is very likely enough
+and vastly cheaper than the other two.
+
+The first concrete use case remains the original one: Tailscale join
+instructions shown only to people who actually have an account.
+
+**Priority:** Medium · **Effort:** M for a three-way visibility flag on the
+existing content types; L if per-user rules are genuinely wanted. It is also
+what the Radarr/Prowlarr/qBittorrent integration above would build on to
+scope "requested items" and "active downloads" per account.
 
 ### Linux-native `monitoring.py` backend/fork
 Almost everything in this app is already OS-agnostic — services, incidents,
@@ -193,8 +355,15 @@ genuinely more work, not more of the same. **Restore from backup** is the
 one item worth flagging out of proportion to its Medium priority: it's the
 riskiest thing in this document precisely because its counterpart (export)
 was so easy — don't let that make restore feel like a quick add too. Of the
-three architectural carry-overs, **admin-on-a-separate-port** is the only
-one with an implementation shape already fully decided — the other two
-(Jellyfin auth, Linux fork) are genuinely open design questions, not just
-bigger builds, and worth treating that way rather than scheduling them like
-a normal feature.
+three architectural carry-overs, **Jellyfin auth's authentication half is now
+built** (v1.7.0) and only its visibility model is still an open design
+question; **admin-on-a-separate-port** has an implementation shape already
+fully decided; and the **Linux fork** remains a genuinely open question worth
+treating as such rather than scheduling like a normal feature.
+
+Two things v1.7.0 added that later work should build on rather than
+reinvent: the **scheduled-task framework** (`scheduler.py`) means anything
+recurring — the *Arr version checker and the stuck-download alert above, a
+cleanup job, a cache warmer — is a `register()` call rather than another
+background thread; and the **visitor session** means anything that wants to
+know who is looking at the page already has an answer.
