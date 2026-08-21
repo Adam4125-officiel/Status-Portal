@@ -2703,3 +2703,73 @@ def test_unknown_task_names_are_rejected_rather_than_500ing(client, demo_task):
         resp = client.post(path, follow_redirects=True)
         assert resp.status_code == 200
         assert "No such scheduled task." in resp.data.decode()
+
+
+# ---------------------------------------------------------------------------
+# User accounts admin page (/admin/users) - the Jellyfin side is covered in
+# tests/test_jellyfin_auth.py; these are the route-level checks.
+# ---------------------------------------------------------------------------
+def _jellyfin_integration():
+    return db.create_integration({"name": "Jellyfin", "kind": "jellyfin",
+                                   "base_url": "http://jellyfin.invalid", "api_key": "k",
+                                   "enabled": 1, "service_id": None,
+                                   "show_on_public": 0, "auto_incident": 0})
+
+
+def test_admin_users_page_requires_login(client):
+    assert client.get("/admin/users").status_code == 302
+    assert client.post("/admin/users/settings").status_code == 302
+
+
+def test_admin_users_page_explains_why_sign_in_is_off(client):
+    _login(client)
+    body = client.get("/admin/users").data.decode()
+    assert "Sign-in is off" in body
+    assert "never been synced" in body
+
+
+def test_admin_users_page_warns_when_enabled_without_an_integration(client):
+    _login(client)
+    db.set_setting("jellyfin_auth_enabled", "1")
+    body = client.get("/admin/users").data.decode()
+    assert "Switched on, but not usable" in body
+
+
+def test_saving_user_settings_persists_them(client):
+    _login(client)
+    iid = _jellyfin_integration()
+    client.post("/admin/users/settings", data={
+        "jellyfin_auth_enabled": "on", "jellyfin_auth_integration_id": str(iid),
+        "report_requires_login": "on", "user_session_timeout_hours": "48"})
+    assert db.get_setting("jellyfin_auth_enabled") == "1"
+    assert db.get_setting("jellyfin_auth_integration_id") == str(iid)
+    assert db.get_setting("report_requires_login") == "1"
+    assert db.get_setting("user_session_timeout_hours") == "48"
+    assert app_module.jellyfin_auth.is_enabled() is True
+
+
+def test_unchecking_the_toggles_turns_them_off(client):
+    _login(client)
+    _jellyfin_integration()
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.set_setting("report_requires_login", "1")
+    client.post("/admin/users/settings", data={"user_session_timeout_hours": "48"})
+    assert db.get_setting("jellyfin_auth_enabled") == "0"
+    assert db.get_setting("report_requires_login") == "0"
+
+
+def test_a_non_numeric_session_timeout_falls_back_to_the_default(client):
+    _login(client)
+    client.post("/admin/users/settings", data={"user_session_timeout_hours": "banana"})
+    assert db.get_setting("user_session_timeout_hours") == str(
+        app_module.DEFAULT_USER_SESSION_TIMEOUT_HOURS)
+
+
+def test_the_cached_user_list_is_shown(client):
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"},
+                               {"id": "u2", "name": "sam", "is_administrator": True},
+                               {"id": "u3", "name": "old", "is_disabled": True}])
+    body = client.get("/admin/users").data.decode()
+    assert "adam" in body and "sam" in body
+    assert "administrator" in body and "disabled" in body

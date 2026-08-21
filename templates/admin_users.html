@@ -1,0 +1,138 @@
+{% extends "admin_base.html" %}
+{% block title %}User accounts — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>User accounts</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Lets people sign in to the public page with their <strong>Jellyfin</strong> username
+  and password. This is completely separate from your own admin login — a signed-in
+  Jellyfin user is not an admin and can never reach any page under <code>/admin</code>.
+  Off by default.
+</p>
+
+<div class="form-panel" style="margin-bottom: 20px;">
+  <h2 style="font-size: 15px; margin: 0 0 12px;">Current state</h2>
+  {% if summary.enabled %}
+    <div class="service-card__status ok"><span class="led ok"></span>Sign-in is enabled, using “{{ summary.integration_name }}”</div>
+  {% elif summary.toggle_on %}
+    <div class="service-card__status crit"><span class="led crit"></span>Switched on, but not usable</div>
+    <div class="empty-state">
+      No enabled Jellyfin integration is available to authenticate against.
+      Add or enable one under <a href="{{ url_for('admin_integrations') }}">Integrations</a>,
+      then pick it below.
+    </div>
+  {% else %}
+    <div class="service-card__status"><span class="led maint"></span>Sign-in is off — the public page shows no login link</div>
+  {% endif %}
+
+  <div class="resource-card__sub" style="margin-top: 10px;">
+    {% if summary.synced_at %}
+      {{ summary.cached_users }} Jellyfin user(s) cached locally, last refreshed
+      <span class="local-time" data-utc="{{ summary.synced_at }}">{{ summary.synced_at[:16].replace('T', ' ') }} UTC</span>
+      — by the <a href="{{ url_for('admin_tasks') }}">{{ sync_task_name }}</a> scheduled task.
+    {% else %}
+      The user list has never been synced. It's refreshed by the
+      <a href="{{ url_for('admin_tasks') }}">{{ sync_task_name }}</a> scheduled task —
+      use “Run now” there to populate it immediately.
+    {% endif %}
+  </div>
+</div>
+
+<form method="POST" action="{{ url_for('admin_users_settings') }}" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="jellyfin_auth_enabled" {{ 'checked' if summary.toggle_on }}>
+      Allow visitors to sign in with their Jellyfin account
+    </label>
+    <div class="field-hint">
+      Adds a “Sign in” link to the public page. Passwords are checked against Jellyfin
+      itself on every sign-in and are never stored here. Leave this off unless you want
+      a login form on your status page — if the portal is reachable from the internet,
+      turning this on publishes a Jellyfin login form to the internet.
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="jellyfin_auth_integration_id">Authenticate against</label>
+    <select id="jellyfin_auth_integration_id" name="jellyfin_auth_integration_id">
+      <option value="">— First enabled Jellyfin integration —</option>
+      {% for i in jellyfin_integrations %}
+        <option value="{{ i.id }}" {{ 'selected' if selected_integration_id == i.id|string }}>{{ i.name }} ({{ i.base_url }})</option>
+      {% endfor %}
+    </select>
+    <div class="field-hint">
+      The server URL and API key come from that <a href="{{ url_for('admin_integrations') }}">Integration</a>
+      — there's deliberately no second copy of them here, so there's only ever one
+      answer to “where is your Jellyfin”. Only matters if you have more than one.
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="field-check">
+      <input type="checkbox" name="report_requires_login" {{ 'checked' if report_requires_login }}>
+      Require a signed-in Jellyfin user to submit a “Report a problem”
+    </label>
+    <div class="field-hint">
+      Only has any effect while sign-in is enabled above — with it off, the report form
+      stays open to everyone exactly as before. <strong>Worth thinking about:</strong> if
+      Jellyfin is down, nobody who hasn't already signed in can sign in, so nobody new can
+      report the outage. Turn this off if you'd rather take the spam risk than lose reports
+      during an outage.
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="user_session_timeout_hours">Visitor session timeout (hours of inactivity)</label>
+    <input type="number" id="user_session_timeout_hours" name="user_session_timeout_hours"
+           min="0" max="{{ max_session_timeout_hours }}" value="{{ user_session_timeout_hours }}"
+           placeholder="0 = no idle timeout">
+    <div class="field-hint">
+      Separate from your admin session timeout, and deliberately much longer by default —
+      a visitor signing in to file a report isn't holding privileged access. Set to 0 for
+      no idle timeout.
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit" class="btn">Save</button>
+  </div>
+</form>
+
+<h2 class="section-title">Cached Jellyfin users</h2>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
+  A local copy of Jellyfin's user list, refreshed on a schedule. It is <em>never</em> used
+  to check a password — sign-in always asks Jellyfin live. Its only job is to keep people
+  who are already signed in from being thrown out while Jellyfin is unreachable, and to
+  revoke the session of anyone who has since been removed or disabled there.
+</p>
+
+{% if users %}
+<div class="admin-table">
+  <table>
+    <thead>
+      <tr><th>User</th><th>Jellyfin role</th><th>First seen</th><th>Last synced</th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.name }}</td>
+        <td>
+          {% if u.is_disabled %}<span class="badge investigating">disabled</span>
+          {% elif u.is_administrator %}<span class="badge monitoring">administrator</span>
+          {% else %}<span class="badge resolved">user</span>{% endif %}
+        </td>
+        <td><span class="local-time" data-utc="{{ u.first_seen_at }}">{{ u.first_seen_at[:16].replace('T', ' ') }} UTC</span></td>
+        <td><span class="local-time" data-utc="{{ u.last_synced_at }}">{{ u.last_synced_at[:16].replace('T', ' ') }} UTC</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">
+  No users cached yet. Run the <a href="{{ url_for('admin_tasks') }}">{{ sync_task_name }}</a>
+  task to fetch them from Jellyfin.
+</div>
+{% endif %}
+{% endblock %}

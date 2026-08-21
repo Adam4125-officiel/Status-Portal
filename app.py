@@ -29,6 +29,7 @@ import config
 import db
 import discord_bot
 import integrations
+import jellyfin_auth
 import logging_setup
 import monitoring
 import notifications
@@ -1984,6 +1985,55 @@ def admin_2fa_disable():
     else:
         flash("Incorrect code - 2FA was not disabled.", "error")
     return redirect(url_for("admin_2fa"))
+
+
+# ---- User accounts (Jellyfin-backed sign-in for visitors - completely separate
+# from the single-admin password login above; see jellyfin_auth.py) ----
+DEFAULT_USER_SESSION_TIMEOUT_HOURS = 168  # a week
+
+
+def _user_session_timeout_seconds():
+    """None = no idle timeout. Clamped to the same upper bound as the admin session
+    for the same reason: anything beyond the cookie's own Max-Age is a promise this
+    can't keep. Defaults far longer than the admin's, deliberately - a visitor
+    signing in to file a problem report is not holding privileged access, and making
+    them re-authenticate every twelve hours would just make the feature annoying."""
+    raw = db.get_setting("user_session_timeout_hours", str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
+    hours = int(raw) if raw.isdigit() else DEFAULT_USER_SESSION_TIMEOUT_HOURS
+    if hours <= 0:
+        return None
+    return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
+
+
+@app.route("/admin/users")
+@login_required
+def admin_users():
+    return render_template("admin_users.html",
+                            summary=jellyfin_auth.status_summary(),
+                            jellyfin_integrations=[i for i in db.list_integrations()
+                                                   if i["kind"] == "jellyfin" and i["enabled"]],
+                            selected_integration_id=db.get_setting("jellyfin_auth_integration_id", ""),
+                            report_requires_login=db.get_setting("report_requires_login", "1") == "1",
+                            user_session_timeout_hours=db.get_setting(
+                                "user_session_timeout_hours", str(DEFAULT_USER_SESSION_TIMEOUT_HOURS)),
+                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
+                            users=db.list_jellyfin_users(),
+                            sync_task_name=jellyfin_auth.TASK_NAME,
+                            active="users")
+
+
+@app.route("/admin/users/settings", methods=["POST"])
+@login_required
+def admin_users_settings():
+    db.set_setting("jellyfin_auth_enabled", "1" if request.form.get("jellyfin_auth_enabled") else "0")
+    chosen = request.form.get("jellyfin_auth_integration_id", "").strip()
+    db.set_setting("jellyfin_auth_integration_id", chosen if chosen.isdigit() else "")
+    db.set_setting("report_requires_login", "1" if request.form.get("report_requires_login") else "0")
+    timeout_hours = request.form.get("user_session_timeout_hours", "").strip()
+    db.set_setting("user_session_timeout_hours",
+                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
+    flash("User account settings updated.", "success")
+    return redirect(url_for("admin_users"))
 
 
 # ---- Discord bot (separate from the simple webhook notifications above) ----
