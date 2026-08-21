@@ -271,15 +271,36 @@ def _release_asset(release):
     return None
 
 
-def fetch_latest_release(channel=None):
-    """The highest-versioned release on the given channel, as a plain dict.
+def _normalise_release(release, channel):
+    """One GitHub release object -> the plain dict the rest of this module uses.
+
+    `body` is the changelog written at release time. It arrives from the network, so
+    every consumer must treat it as untrusted text: the About page renders it through
+    Jinja's `richtext` filter, which escapes first and then permits a deliberately
+    tiny subset of formatting. Never hand it to anything that emits raw HTML."""
+    return {
+        "tag": release.get("tag_name"),
+        "version": str(release.get("tag_name") or "").lstrip("vV"),
+        "name": release.get("name") or release.get("tag_name"),
+        "prerelease": bool(release.get("prerelease")),
+        "published_at": release.get("published_at"),
+        "html_url": release.get("html_url") or RELEASES_PAGE_URL,
+        "body": release.get("body") or "",
+        "asset": _release_asset(release),
+        "channel": channel,
+    }
+
+
+def fetch_releases(channel=None):
+    """Every usable release on the given channel, newest first *by parsed version*.
 
     stable   -> non-prerelease GitHub releases only.
     unstable -> prereleases too (this project's own `-rc.N` releases).
 
-    Note this picks by *version*, not by publish date: republishing an old release
-    must never look like an update, and a prerelease of an older line must never
-    outrank a newer stable one."""
+    Sorting by version rather than publish date is the same decision documented on
+    fetch_latest_release() below, applied to the whole list: republishing an old
+    release must never look like an update, and a prerelease of an older line must
+    never outrank a newer stable one."""
     channel = channel or get_channel()
     if channel not in CHANNELS:
         channel = DEFAULT_CHANNEL
@@ -316,18 +337,38 @@ def fetch_latest_release(channel=None):
     if not candidates:
         raise UpdateError(f"No {channel} release found in this repository yet.")
 
-    latest = max(candidates, key=lambda r: parse_version(r.get("tag_name")))
-    return {
-        "tag": latest.get("tag_name"),
-        "version": str(latest.get("tag_name") or "").lstrip("vV"),
-        "name": latest.get("name") or latest.get("tag_name"),
-        "prerelease": bool(latest.get("prerelease")),
-        "published_at": latest.get("published_at"),
-        "html_url": latest.get("html_url") or RELEASES_PAGE_URL,
-        "body": latest.get("body") or "",
-        "asset": _release_asset(latest),
-        "channel": channel,
-    }
+    candidates.sort(key=lambda r: parse_version(r.get("tag_name")), reverse=True)
+    return [_normalise_release(r, channel) for r in candidates]
+
+
+def fetch_latest_release(channel=None):
+    """The highest-versioned release on the given channel, as a plain dict.
+
+    Note this picks by *version*, not by publish date: republishing an old release
+    must never look like an update, and a prerelease of an older line must never
+    outrank a newer stable one."""
+    return fetch_releases(channel)[0]
+
+
+# How many intervening releases the About page will list notes for. A cap only so a
+# portal that has been left un-updated for a very long time doesn't render a page of
+# unbounded length (and doesn't cache one); in practice a handful is normal, and the
+# API fetch above is capped at 30 releases regardless.
+MAX_RELEASE_NOTES = 20
+
+
+def _release_notes_between(releases, current):
+    """The releases strictly newer than `current`, newest first, plus the entry for
+    the version being run if it happens to be on this channel.
+
+    Both halves matter on the About page: "what am I about to get" is unanswerable
+    without the first, and "should I take this?" is much easier with the second next
+    to it. Costs no extra request - it's the same response fetch_releases() already
+    parsed for the version and download URL."""
+    current_parsed = parse_version(current)
+    newer = [r for r in releases if parse_version(r["version"]) > current_parsed]
+    running = next((r for r in releases if parse_version(r["version"]) == current_parsed), None)
+    return newer[:MAX_RELEASE_NOTES], len(newer), running
 
 
 def check_for_update(channel=None):
@@ -350,11 +391,20 @@ def check_for_update(channel=None):
         "ahead": False,
         "checked_at": db.now_iso(),
     }
+    result["release_notes"] = []
+    result["release_notes_omitted"] = 0
+    result["current_notes"] = None
     try:
-        release = fetch_latest_release(channel)
+        releases = fetch_releases(channel)
     except UpdateError as e:
         result["error"] = str(e)
         return result
+    release = releases[0]
+
+    notes, total_newer, running = _release_notes_between(releases, current_version())
+    result["release_notes"] = notes
+    result["release_notes_omitted"] = max(0, total_newer - len(notes))
+    result["current_notes"] = running
 
     comparison = _compare(current_version(), release["version"])
     result.update({

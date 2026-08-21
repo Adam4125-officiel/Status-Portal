@@ -492,6 +492,27 @@ DB-backed Settings pages, not a code edit.
   the same class of call as `asset_url()`'s `getmtime`, not the kind of slow outbound
   I/O the no-blocking-in-a-request-handler rule is about. Don't "fix" it into another
   cache.
+- **Release notes come from the same response, not a second request.**
+  `fetch_releases()` returns every release on the channel sorted by *parsed version*
+  (never publish date - republishing an old release must not reorder the changelog);
+  `fetch_latest_release()` is now just its first element. `check_for_update()` carries
+  `release_notes` (everything strictly newer than what's running, newest first),
+  `release_notes_omitted` and `current_notes` (the running version's own entry) into
+  the cache the About page reads.
+- **A release `body` is untrusted network input and must only ever be rendered through
+  `richtext`.** It escapes first and then permits a deliberately tiny subset (bold,
+  links, line breaks), so Markdown headings and bullets show as the literal characters
+  the release author typed. That is the accepted trade - never swap in a real Markdown
+  renderer here without one that is escaping-safe by construction, and never mark a
+  body `|safe`. The CSS deliberately has **no `white-space: pre-wrap`**: `richtext`
+  already turns every newline into a `<br>`, so preserving the newlines too would
+  double every line break.
+- **`MAX_RELEASE_NOTES` (20) caps how many intervening releases are rendered**, with
+  the remainder reported as a count rather than silently dropped - a portal left
+  un-updated for a long time must not render, or cache, a page of unbounded length.
+- **A failed check must still leave the note fields present and empty.** The About
+  page reads them unconditionally, so a network failure has to degrade to "couldn't
+  check", not to a template error.
 - **Changing the channel must clear the update cache** (`admin_about_settings` does).
   Otherwise the page renders a "latest available" that was fetched for the *previous*
   channel right next to the newly-selected one.

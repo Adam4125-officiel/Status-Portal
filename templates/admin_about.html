@@ -65,6 +65,59 @@
   </form>
 </div>
 
+{% if update_status and update_status.ok and update_status.release_notes %}
+<div class="form-panel" style="max-width: 640px; margin-top: 16px;">
+  <h2 style="margin-top: 0;">What's in the update</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Everything published on the <strong>{{ channel }}</strong> channel since
+    {{ update_status.current }}{% if update_status.release_notes|length > 1 %} —
+    {{ update_status.release_notes|length }} releases, newest first{% endif %}. Taking the
+    update installs the newest of these; the ones in between are what you skipped past.
+  </p>
+  {% for r in update_status.release_notes %}
+    <details class="release-notes" {{ 'open' if loop.first }}>
+      <summary>
+        <strong>{{ r.name or r.version }}</strong>
+        {% if r.prerelease %}<span class="pill warn">prerelease</span>{% endif %}
+        {% if r.published_at %}
+          <span class="local-time" style="color: var(--text-faint); font-weight: 400;"
+                data-utc="{{ r.published_at }}">{{ r.published_at[:10] }}</span>
+        {% endif %}
+      </summary>
+      {# The body is Markdown that arrived over the network. richtext escapes it first
+         and then permits a deliberately tiny subset (bold, links, line breaks), so
+         headings and bullets show as the literal characters the author typed. That is
+         the safe trade: this must never become raw HTML from a remote source. #}
+      <div class="release-notes__body">{{ r.body | richtext }}</div>
+      <a href="{{ r.html_url }}" target="_blank" rel="noopener noreferrer">Read on GitHub ↗</a>
+    </details>
+  {% endfor %}
+  {% if update_status.release_notes_omitted %}
+    <p class="field-hint">
+      …and {{ update_status.release_notes_omitted }} older release(s) not shown.
+      <a href="{{ releases_url }}" target="_blank" rel="noopener noreferrer">See them all ↗</a>
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if update_status and update_status.ok and update_status.current_notes %}
+<div class="form-panel" style="max-width: 640px; margin-top: 16px;">
+  <h2 style="margin-top: 0;">Release notes for what you're running</h2>
+  <details class="release-notes">
+    <summary>
+      <strong>{{ update_status.current_notes.name or update_status.current_notes.version }}</strong>
+      {% if update_status.current_notes.published_at %}
+        <span class="local-time" style="color: var(--text-faint); font-weight: 400;"
+              data-utc="{{ update_status.current_notes.published_at }}">{{ update_status.current_notes.published_at[:10] }}</span>
+      {% endif %}
+    </summary>
+    <div class="release-notes__body">{{ update_status.current_notes.body | richtext }}</div>
+    <a href="{{ update_status.current_notes.html_url }}" target="_blank" rel="noopener noreferrer">Read on GitHub ↗</a>
+  </details>
+</div>
+{% endif %}
+
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
   <h2 style="margin-top: 0;">Update preferences</h2>
   <form method="POST" action="{{ url_for('admin_about_settings') }}">

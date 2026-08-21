@@ -1016,3 +1016,35 @@ footer.foot {
   .admin-nav { width: 100%; height: auto; position: static; }
   .admin-main { padding: 22px 16px 50px; }
 }
+
+/* Release notes on /admin/about. The body is GitHub Markdown rendered through the
+   richtext filter, which escapes first and supports only bold/links/line breaks - so
+   headings and bullets arrive as the literal characters the release author typed.
+   Deliberately no white-space: pre-wrap here: richtext already turns every newline
+   into a <br>, so preserving the newlines as well would double every line break. */
+.release-notes {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-panel-raised);
+}
+.release-notes > summary {
+  cursor: pointer;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.release-notes__body {
+  margin: 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-dim);
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
