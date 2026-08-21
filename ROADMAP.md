@@ -103,6 +103,55 @@ web UIs to know if anything's behind.
 `updater.py` is already there to reuse, but each app has its own
 releases API/format to query and parse.
 
+### Per-user notifications: Discord DM and email
+The portal already notifies *the admin* (Discord webhook, ntfy). This is the
+other direction: telling **the person who asked** when something they care
+about happens — their problem report got a reply or was turned into an
+incident, a request they made moved on, or maintenance is starting on a
+service they use.
+
+Two delivery channels, and the interesting part is **where the addresses come
+from**. Seerr already holds an email address and a Discord user ID for each of
+its users, entered once by them. Reading those rather than asking again is the
+difference between "set up notifications" being a chore and being invisible.
+So:
+
+1. If the signed-in Jellyfin user matches a Seerr user with contact details
+   already filled in, use those.
+2. If not, ask on the account page (which already has a contact field to grow
+   into) — and offer to **push it back to Seerr**, so the user enters it once
+   for both systems rather than maintaining two copies that drift.
+
+Worth deciding before building:
+
+- **Matching a Jellyfin user to a Seerr user.** Seerr can import Jellyfin
+  accounts, in which case there's a real link to follow; if it hasn't, matching
+  on email or username is guesswork and should probably just fall back to
+  asking. Getting this wrong means sending someone else's notifications to the
+  wrong person, so it should fail closed.
+- **Writing back to Seerr is the first time this portal would modify another
+  service.** Everything today is read-only except Jellyfin authentication.
+  That's a real line to cross deliberately, with the user's explicit consent in
+  the UI, not a silent sync.
+- **Per-event opt-in, per user.** Nobody wants a DM for every maintenance
+  window on every service. The natural granularity is "things about my own
+  reports" (almost always wanted) versus "anything about services I use"
+  (usually not), so default the first on and the second off.
+- **Sending is outbound I/O and belongs in a scheduled task or the existing
+  background thread**, never inline in the request that triggered it — the same
+  rule every other outbound call in this app follows.
+
+Email needs the SMTP configuration block described in "Email notifications"
+below; the Discord DM path needs `discord_bot.py` to DM a user, which is a
+different code path from its current guild/channel posting (the same one the
+Seerr approval alert further down needs, so build it once).
+
+**Priority:** Medium-High · **Effort:** L — two delivery channels, a matching
+problem with a real failure mode, a write-back to another service, and a
+per-user preferences surface. Best split: Discord DM first (the bot is already
+there), email second (needs the SMTP config below), Seerr contact reuse last,
+since it's the only part that can be wrong in a way that matters.
+
 ### Email notifications
 A third notification channel alongside the existing Discord webhook and
 ntfy, for incident/maintenance events. Needs an SMTP configuration block in
@@ -229,7 +278,23 @@ on — was already identified as the right shape, over splitting into two
 separate Flask apps. Needs a new `PORTAL_ADMIN_PORT` config value, unset by
 default so today's single-port behavior is unchanged.
 
-**Priority:** Medium-High · **Effort:** S-M — the implementation shape is
+**Deferred from the v1.7.0 session (2026-08-21)** and explicitly kept for
+later, having been considered and scheduled out rather than forgotten: it was
+scoped alongside the Jellyfin auth work and deliberately not bundled with it,
+since a port-level access gate and a brand-new authentication path are two
+access-control changes and shipping both together means not knowing which one
+broke anything. It remains the **next candidate** — the only architectural
+item here whose implementation shape is already fully settled.
+
+One wrinkle worth knowing before starting: **cookies are not scoped by port**,
+so a session cookie set on the public port is sent to the admin port as well.
+The split therefore buys *network-level* separation (expose, firewall or
+tunnel the two independently), which is the actual goal — not session
+isolation. Don't let anyone assume otherwise. Also note `app.run()` binds a
+single port, so the dev entry point and `serve_waitress.py` would diverge in
+behaviour unless that's handled deliberately.
+
+**Priority:** High (next up) · **Effort:** S-M — the implementation shape is
 already decided; it's mostly wiring a second listener and one
 `before_request` gate.
 

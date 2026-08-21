@@ -3299,7 +3299,7 @@ def test_an_admin_reply_is_shown_to_the_reporter(client, user_auth, monkeypatch)
     _sign_in(client, monkeypatch)
     body = client.get("/account").data.decode()
     assert "Restarted the transcoder." in body
-    assert "Reply from the admin" in body
+    assert "The admin" in body
 
 
 def test_an_unread_reply_puts_a_dot_on_the_chip_and_opening_the_page_clears_it(client, user_auth, monkeypatch):
@@ -3307,7 +3307,7 @@ def test_an_unread_reply_puts_a_dot_on_the_chip_and_opening_the_page_clears_it(c
     _sign_in(client, monkeypatch)
     _file_report(client)
     rid = db.list_problem_reports()[0]["id"]
-    db.set_problem_report_reply(rid, "Answered.")
+    db.add_report_message(rid, "admin", "Answered.")
 
     assert "user-chip__dot" in client.get("/").data.decode()
     client.get("/account")
@@ -3414,11 +3414,103 @@ def test_the_admin_list_shows_whether_a_reply_has_been_read(client, user_auth, m
     client.get("/logout")
     _login(client)
     client.post(f"/admin/reports/{rid}/reply", data={"reply": "On it."})
-    assert "Not read yet" in client.get("/admin/reports").data.decode()
+    assert "unread" in client.get("/admin/reports").data.decode()
 
     client.get("/admin/logout")
     _sign_in(client, monkeypatch)
     client.get("/account")
     client.get("/logout")
     _login(client)
-    assert "Seen by adam" in client.get("/admin/reports").data.decode()
+    body = client.get("/admin/reports").data.decode()
+    assert "· read" in body or "read</div>" in body
+
+
+# ---- The reporter's side of the conversation ----
+def test_a_user_can_reply_to_their_own_report(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client, "Subtitles are off")
+    rid = db.list_problem_reports()[0]["id"]
+    db.add_report_message(rid, "admin", "Which show?")
+
+    resp = client.post(f"/account/reports/{rid}/reply",
+                       data={"body": "Any of them, since yesterday."}, follow_redirects=True)
+    assert "Your reply has been sent" in resp.data.decode()
+    assert [m["author"] for m in db.list_report_messages(rid)] == ["admin", "user"]
+    assert "Any of them, since yesterday." in client.get("/account").data.decode()
+
+
+def test_a_user_cannot_reply_to_someone_elses_report(client, user_auth, monkeypatch):
+    """Ownership is checked against the report's stored user id, and a report that
+    isn't yours answers exactly like one that doesn't exist - "that exists but isn't
+    yours" is itself information about other people's reports."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
+    rid = db.create_problem_report("sam's report", "", None,
+                                    reporter_user="sam", reporter_user_id="u2")
+    _sign_in(client, monkeypatch)
+    resp = client.post(f"/account/reports/{rid}/reply", data={"body": "butting in"},
+                       follow_redirects=True)
+    assert "could not be found" in resp.data.decode()
+    assert db.list_report_messages(rid) == []
+
+
+def test_replying_to_a_nonexistent_report_looks_identical(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    resp = client.post("/account/reports/9999/reply", data={"body": "hello"},
+                       follow_redirects=True)
+    assert "could not be found" in resp.data.decode()
+
+
+def test_an_empty_user_reply_is_rejected(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    resp = client.post(f"/account/reports/{rid}/reply", data={"body": "   "},
+                       follow_redirects=True)
+    assert "Write something first" in resp.data.decode()
+    assert db.list_report_messages(rid) == []
+
+
+def test_replying_requires_a_signed_in_visitor(client, user_auth):
+    rid = db.create_problem_report("x", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert client.post(f"/account/reports/{rid}/reply", data={"body": "hi"}).status_code == 302
+    assert db.list_report_messages(rid) == []
+
+
+def test_a_user_reply_shows_up_on_the_admin_nav_badge(client, user_auth, monkeypatch):
+    """Without this the admin never learns anybody answered, and the conversation is
+    one-directional in practice."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "reviewed")  # no longer "new", so the badge is 0
+    client.post(f"/account/reports/{rid}/reply", data={"body": "Still happening."})
+    client.get("/logout")
+
+    _login(client)
+    assert db.count_unseen_user_messages() == 1
+    assert "nav-badge" in client.get("/admin/services").data.decode()
+    # Opening the Reports page is what clears it.
+    client.get("/admin/reports")
+    assert db.count_unseen_user_messages() == 0
+
+
+def test_a_user_reply_does_not_reopen_a_closed_report(client, user_auth, monkeypatch):
+    """A status changing itself underneath the admin would be surprising; the unread
+    badge is the signal, and reopening is their call."""
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.update_problem_report_status(rid, "resolved")
+    client.post(f"/account/reports/{rid}/reply", data={"body": "It's back."})
+    assert db.get_problem_report(rid)["status"] == "resolved"
+
+
+def test_the_thread_shows_both_sides_to_the_reporter(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    _file_report(client)
+    rid = db.list_problem_reports()[0]["id"]
+    db.add_report_message(rid, "admin", "Looking now.")
+    client.post(f"/account/reports/{rid}/reply", data={"body": "Thanks!"})
+    body = client.get("/account").data.decode()
+    assert "Looking now." in body and "Thanks!" in body
+    assert "The admin" in body and "You" in body

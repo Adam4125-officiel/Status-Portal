@@ -255,8 +255,12 @@ def _inject_admin_badges():
     # Reads the update cache only (never checks GitHub here) - a miss or a failed
     # check simply means no badge, exactly like "no unread reports".
     cached = updater.get_cached_update_status()
+    # New reports *plus* unread replies from reporters. Both are "someone is waiting
+    # on you" and both live behind the same Reports tab, so one badge covers them -
+    # and without counting replies, the admin would simply never learn that anybody
+    # had answered, which would make the conversation one-directional in practice.
     return {
-        "unread_reports_count": db.count_unread_problem_reports(),
+        "unread_reports_count": db.count_unread_problem_reports() + db.count_unseen_user_messages(),
         "update_available": bool(cached and cached.get("update_available")),
     }
 
@@ -389,7 +393,7 @@ def _csrf_required_for(path, method):
     tests/test_conventions.py reads this function to make sure of that."""
     if method != "POST":
         return False
-    if path.startswith("/admin/") or path in _CSRF_PROTECTED_PUBLIC_PATHS:
+    if path.startswith("/admin/") or path.startswith("/account") or path in _CSRF_PROTECTED_PUBLIC_PATHS:
         return True
     if path == "/report":
         return bool(session.get("portal_user"))
@@ -1151,7 +1155,11 @@ def report_problem():
 @app.route("/admin/reports")
 @login_required
 def admin_reports():
-    return render_template("admin_reports.html", reports=db.list_problem_reports(), active="reports")
+    reports = db.attach_report_messages(db.list_problem_reports())
+    # Opening this page is what marks reporters' replies as read, mirroring what the
+    # account page does for the admin's own messages.
+    db.mark_report_messages_seen([r["id"] for r in reports], "user")
+    return render_template("admin_reports.html", reports=reports, active="reports")
 
 
 @app.route("/admin/reports/<int:rid>/status", methods=["POST"])
@@ -1176,12 +1184,13 @@ def admin_report_reply(rid):
     if not report:
         flash("Report not found.", "error")
         return redirect(url_for("admin_reports"))
-    db.set_problem_report_reply(rid, request.form.get("reply", "")[:2000])
-    if not report["reporter_user_id"]:
+    if not db.add_report_message(rid, "admin", request.form.get("reply", "")[:2000]):
+        flash("Write something first.", "error")
+    elif not report["reporter_user_id"]:
         flash("Reply saved — but this report was submitted anonymously, so nobody can "
               "see it. Use the contact details if there are any.", "error")
     else:
-        flash(f"Reply saved. {report['reporter_user']} will see it on their account page.",
+        flash(f"Reply sent. {report['reporter_user']} will see it on their account page.",
               "success")
     return redirect(url_for("admin_reports"))
 
@@ -1316,16 +1325,46 @@ def user_account():
         # the floating toggle takes precedence over the account-level default.
         return redirect(url_for("user_account", saved=1))
 
-    # Opening the page is what marks replies as read; the write is skipped entirely
-    # when there's nothing to mark, which is the overwhelmingly common case.
+    # Opening the page is what marks the admin's messages as read; the write is
+    # skipped entirely when there's nothing to mark, which is the common case.
     db.mark_replies_seen(user_id)
     return render_template("account.html",
-                            reports=db.list_reports_for_user(user_id),
+                            reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
                             prefs=db.get_user_preferences(user_id),
                             themes=db.USER_THEMES,
                             just_saved=bool(request.args.get("saved")),
                             site_name=db.get_setting("site_name", "Server"),
                             report_statuses=REPORT_STATUS_LABELS)
+
+
+@app.route("/account/reports/<int:rid>/reply", methods=["POST"])
+@user_login_required
+def user_report_reply(rid):
+    """The reporter's side of the conversation.
+
+    Ownership is checked against the report's stored Jellyfin user id, not against
+    anything supplied by the request, so a guessed report id gets the same answer as
+    a nonexistent one - deliberately not distinguishing the two, since "that report
+    exists but isn't yours" is itself information about other people's reports.
+
+    No extra rate limiting beyond the length cap: unlike /report, which is open to
+    anonymous visitors and carries a honeypot, a timing check and a global limit
+    precisely because of that, everything here is attributable to a signed-in
+    Jellyfin account the admin can block outright from /admin/users.
+
+    Replying deliberately does *not* reopen a closed report. A status that changed
+    itself underneath the admin would be surprising; the unread badge on the admin's
+    Reports tab is the signal, and reopening is their call."""
+    user = current_user()
+    report = db.get_problem_report(rid)
+    if not report or report["reporter_user_id"] != user["id"]:
+        flash("That report could not be found.", "error")
+        return redirect(url_for("user_account"))
+    if db.add_report_message(rid, "user", request.form.get("body", "")[:2000]):
+        flash("Your reply has been sent.", "success")
+    else:
+        flash("Write something first.", "error")
+    return redirect(url_for("user_account"))
 
 
 @app.route("/account/theme", methods=["POST"])

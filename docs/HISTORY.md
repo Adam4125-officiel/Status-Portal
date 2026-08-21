@@ -639,6 +639,29 @@ the reports table's timestamp was raw UTC, never having used the `local-time`
 conversion every other timestamp in the app goes through. Both had passed every
 route-level test, which asserts on content and cannot see colour or layout at all.
 
+### One column, then a table: the report reply (2026-08-21)
+
+The reply shipped in rc.3 as a single `admin_reply` column, which was exactly right
+for what was asked ("let the admin answer") and exactly wrong the moment the next
+request arrived ("let the user reply back"). Replacing it with a `report_messages`
+thread was the obvious fix; two details were not:
+
+- **The old column had to be backfilled, not abandoned.** rc.2 and rc.3 were running
+  on a real server with real replies in that column. Dropping it would have silently
+  deleted somebody's conversation on update. It's seeded into the thread by an
+  idempotent one-time insert in `init_db()`, the same shape as the two
+  multi-service backfills that predate it, and the column is left in place unread.
+- **The admin needed an unread signal too.** The single-reply version only ever had
+  one direction to notify, so only the user had a badge. Making it two-way without
+  adding the admin's half would have produced a conversation where the admin never
+  learns anyone answered — which is worse than no reply feature at all, because the
+  user reasonably assumes their message was received.
+
+Also worth noting for its own sake: editing was dropped in the move. The single
+column allowed rewriting a reply in place, which meant the other side could be
+looking at text that no longer existed. Append-only is the correct shape for a
+conversation; a correction is just another message.
+
 ### Verification record — sandbox, 2026-08-21
 
 Exercised against a **stand-in Jellyfin** — a small HTTP server implementing

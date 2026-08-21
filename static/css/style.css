@@ -160,6 +160,15 @@ a.user-chip__name:hover { text-decoration: none; color: var(--brand); }
   margin-bottom: 6px;
 }
 .account-reply__body { font-size: 13px; color: var(--text-primary); white-space: pre-wrap; }
+/* Your own messages, so a thread reads as a conversation rather than a flat list of
+   text. Distinguished by the accent edge changing side, which survives both themes
+   and doesn't rely on colour alone. */
+.account-reply--mine {
+  border-left: 1px solid var(--border);
+  border-right: 2px solid var(--text-faint);
+}
+.account-reply--mine .account-reply__label { color: var(--text-faint); }
+.account-replybox { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; }
 
 .btn.signin {
   border-radius: 20px;

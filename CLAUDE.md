@@ -1252,14 +1252,36 @@ of personal settings. Reached by clicking the username in the sign-in chip.
 - **Report status wording on this page is aimed at the reporter**
   (`REPORT_STATUS_LABELS` in `app.py`), not at the admin triaging. "New" and
   "reviewed" are triage words that tell the person waiting nothing.
-- **An admin reply is visible to exactly one person.** It's shown on that reporter's
-  account page and nowhere else — the report's own text was never public either.
-  Replying to an anonymous report is allowed but warns that nobody can see it; the
-  textarea is disabled for those rows.
-- **Writing a reply resets `reply_seen`**, so editing an already-read reply
-  resurfaces it — the text they read is no longer the text that's there. The unread
-  dot on the sign-in chip is the *only* thing that tells someone an answer is
-  waiting, so don't remove it without replacing it with something.
+- **A report is a two-way thread (`report_messages`), not a field.** `author` is
+  `'admin'` or `'user'`, and `seen` means "seen by the other party" — unambiguous
+  because every message has exactly one intended reader. The old single `admin_reply`
+  column on `problem_reports` is **legacy**: still there (nothing is ever dropped
+  here), backfilled into the thread by an idempotent one-time `INSERT ... WHERE id
+  NOT IN (...)` in `init_db()`, and read by nothing. Don't start writing to it again.
+- **Messages are append-only.** The first version allowed editing a reply, which
+  meant the other party could be looking at text that no longer existed. A
+  conversation where earlier messages change under you is worse than one where a
+  correction is just another message.
+- **Both sides need an unread signal, or the conversation is one-directional in
+  practice.** The user gets the dot on the sign-in chip; the admin's Reports nav
+  badge counts `count_unread_problem_reports()` **plus** `count_unseen_user_messages()`
+  — without that second term the admin would simply never learn anyone had answered.
+  Each side's page marks the *other* side's messages read on open.
+- **A user's reply deliberately does not reopen a closed report.** A status changing
+  itself underneath the admin would be surprising; the badge is the signal, and
+  reopening is their call.
+- **The reporter's reply route checks ownership against the stored
+  `reporter_user_id`**, and a report that isn't theirs answers *identically* to one
+  that doesn't exist — "that exists but isn't yours" is itself information about
+  other people's reports.
+- **No extra rate limiting on replies, deliberately.** `/report`'s honeypot, timing
+  check and global limit exist because it's open to anonymous visitors; every message
+  here is attributable to a signed-in Jellyfin account the admin can block outright
+  from `/admin/users`. If that ever stops being true, this needs revisiting.
+- **An admin reply is visible to exactly one person** — that reporter's account page
+  and nowhere else, since the report's own text was never public either. Replying to
+  an anonymous report is allowed but warns that nobody can see it; the textarea is
+  disabled for those rows.
 - **Preferences live in `user_preferences`, deliberately not as more columns on
   `jellyfin_users`.** That table is rewritten wholesale by every sync, so anything
   stored there must be explicitly carried across `replace_jellyfin_users()` or it is

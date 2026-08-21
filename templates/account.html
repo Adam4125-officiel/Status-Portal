@@ -62,16 +62,23 @@
         </div>
       {% endif %}
 
-      {% if r.admin_reply %}
-        <div class="account-reply">
-          <div class="account-reply__label">Reply from the admin{% if r.replied_at %}
-            · <span class="local-time" data-utc="{{ r.replied_at }}">{{ r.replied_at[:16].replace('T', ' ') }} UTC</span>{% endif %}
+      {% for m in r.messages %}
+        <div class="account-reply {{ 'account-reply--mine' if m.author == 'user' }}">
+          <div class="account-reply__label">
+            {{ 'You' if m.author == 'user' else 'The admin' }}
+            · <span class="local-time" data-utc="{{ m.created_at }}">{{ m.created_at[:16].replace('T', ' ') }} UTC</span>
           </div>
-          <div class="account-reply__body">{{ r.admin_reply }}</div>
+          <div class="account-reply__body">{{ m.body }}</div>
         </div>
-      {% elif r.status == 'new' %}
+      {% else %}
         <div class="account-note account-note--quiet">No reply yet.</div>
-      {% endif %}
+      {% endfor %}
+
+      <form method="POST" action="{{ url_for('user_report_reply', rid=r.id) }}" class="account-replybox">
+        <textarea name="body" rows="2" class="reply-box"
+                  placeholder="{{ 'Add something to this report…' if r.messages else 'Add something to this report — the admin will see it.' }}"></textarea>
+        <button type="submit" class="btn secondary" style="padding:6px 12px;">Send</button>
+      </form>
     </div>
   </div>
   {% endfor %}

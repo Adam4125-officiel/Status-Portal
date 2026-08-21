@@ -817,42 +817,122 @@ def test_a_blank_user_id_matches_nothing(isolated_db):
     assert db.mark_replies_seen("") == 0
 
 
-def test_a_reply_is_stored_and_starts_unseen(isolated_db):
+def test_a_message_is_stored_trimmed_and_starts_unseen(isolated_db):
     rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
-    db.set_problem_report_reply(rid, "  Looking into it now.  ")
-    row = db.get_problem_report(rid)
-    assert row["admin_reply"] == "Looking into it now."
-    assert row["replied_at"] is not None
-    assert row["reply_seen"] == 0
+    db.add_report_message(rid, "admin", "  Looking into it now.  ")
+    messages = db.list_report_messages(rid)
+    assert [(m["author"], m["body"], m["seen"]) for m in messages] \
+        == [("admin", "Looking into it now.", 0)]
     assert db.count_unseen_replies("u1") == 1
 
 
-def test_marking_replies_seen_clears_the_count(isolated_db):
+def test_an_empty_message_is_ignored(isolated_db):
     rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
-    db.set_problem_report_reply(rid, "Fixed.")
+    assert db.add_report_message(rid, "admin", "   ") is None
+    assert db.add_report_message(rid, "admin", "") is None
+    assert db.list_report_messages(rid) == []
+
+
+def test_an_unknown_author_is_refused(isolated_db):
+    """`author` decides who a message is addressed to and who it counts as unread
+    for - a third value would be counted by nobody and shown to nobody."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    assert db.add_report_message(rid, "somebody-else", "hello") is None
+    assert db.list_report_messages(rid) == []
+
+
+def test_a_thread_keeps_both_sides_in_order(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "Can you still reproduce it?")
+    db.add_report_message(rid, "user", "Yes, just now.")
+    db.add_report_message(rid, "admin", "Thanks, looking again.")
+    assert [m["author"] for m in db.list_report_messages(rid)] == ["admin", "user", "admin"]
+
+
+def test_marking_the_admins_messages_seen_clears_the_users_count(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "Fixed.")
     assert db.mark_replies_seen("u1") == 1
     assert db.count_unseen_replies("u1") == 0
     # Nothing left to mark, so a second visit writes nothing at all.
     assert db.mark_replies_seen("u1") == 0
 
 
-def test_editing_a_reply_makes_it_unread_again(isolated_db):
-    """The text they read is no longer the text that's there, so it has to resurface."""
+def test_a_users_own_messages_never_count_as_unread_for_themselves(isolated_db):
+    """Every message has exactly one intended reader - your own reply is not news
+    to you."""
     rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
-    db.set_problem_report_reply(rid, "Fixed.")
-    db.mark_replies_seen("u1")
-    db.set_problem_report_reply(rid, "Actually, not fixed.")
-    assert db.count_unseen_replies("u1") == 1
-
-
-def test_an_empty_reply_clears_it(isolated_db):
-    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
-    db.set_problem_report_reply(rid, "Oops, wrong report.")
-    db.set_problem_report_reply(rid, "")
-    row = db.get_problem_report(rid)
-    assert row["admin_reply"] == ""
-    assert row["replied_at"] is None
+    db.add_report_message(rid, "user", "Still broken.")
     assert db.count_unseen_replies("u1") == 0
+    assert db.count_unseen_user_messages() == 1
+
+
+def test_the_admin_count_covers_every_reporter(isolated_db):
+    """It backs the admin nav badge, which isn't scoped to any one user."""
+    a = db.create_problem_report("a", "", None, reporter_user="adam", reporter_user_id="u1")
+    b = db.create_problem_report("b", "", None, reporter_user="sam", reporter_user_id="u2")
+    db.add_report_message(a, "user", "one")
+    db.add_report_message(b, "user", "two")
+    db.add_report_message(a, "admin", "not counted here")
+    assert db.count_unseen_user_messages() == 2
+    db.mark_report_messages_seen([a, b], "user")
+    assert db.count_unseen_user_messages() == 0
+
+
+def test_marking_seen_only_touches_the_named_author(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "from the admin")
+    db.add_report_message(rid, "user", "from the user")
+    db.mark_report_messages_seen([rid], "user")
+    seen = {m["author"]: m["seen"] for m in db.list_report_messages(rid)}
+    assert seen == {"admin": 0, "user": 1}
+
+
+def test_attach_report_messages_groups_by_report(isolated_db):
+    a = db.create_problem_report("a", "", None, reporter_user="adam", reporter_user_id="u1")
+    b = db.create_problem_report("b", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(a, "admin", "about a")
+    reports = db.attach_report_messages(db.list_reports_for_user("u1"))
+    by_id = {r["id"]: r for r in reports}
+    assert [m["body"] for m in by_id[a]["messages"]] == ["about a"]
+    assert by_id[b]["messages"] == []
+
+
+def test_attach_report_messages_handles_an_empty_list(isolated_db):
+    """An IN () with no placeholders is a syntax error, so the empty case has to
+    short-circuit rather than build a query."""
+    assert db.attach_report_messages([]) == []
+
+
+def test_deleting_a_report_removes_its_messages(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    db.add_report_message(rid, "admin", "hello")
+    db.delete_problem_report(rid)
+    assert db.list_report_messages(rid) == []
+
+
+def test_replies_written_before_threads_existed_are_backfilled(isolated_db):
+    """A 1.7.0-rc.2/rc.3 install has its replies in the old single admin_reply column;
+    updating must not make somebody's existing conversation vanish."""
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam", reporter_user_id="u1")
+    conn = db.get_db()
+    conn.execute("UPDATE problem_reports SET admin_reply=?, replied_at=?, reply_seen=1 WHERE id=?",
+                  ("A reply from before the update", "2026-08-20T10:00:00+00:00", rid))
+    conn.commit()
+    conn.close()
+    conn = db.get_db()
+    conn.execute("DELETE FROM report_messages")
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+    messages = db.list_report_messages(rid)
+    assert [(m["author"], m["body"], m["seen"]) for m in messages] \
+        == [("admin", "A reply from before the update", 1)]
+
+    # Idempotent: running init_db() again must not duplicate it.
+    db.init_db()
+    assert len(db.list_report_messages(rid)) == 1
 
 
 def test_a_linked_incident_is_reported_with_its_current_status(isolated_db):

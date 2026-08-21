@@ -574,13 +574,21 @@ which were previously a one-way street.
 - **what's happened to it** — waiting to be looked at, being looked into, or closed;
 - **whether an incident was opened from it**, including that incident's *current*
   status, so they can follow it as it progresses;
-- **the admin's reply**, if there is one.
+- **the conversation** — the admin's replies, and their own, with a box to add to it.
 
-**Replying.** On `/admin/reports` there's now a reply box under each report. The
-reply is visible to that one reporter, on their account page, and nowhere else — the
-report's own text was never public either. They get a small dot next to their name
-until they've read it, which is the only thing that tells them to go and look.
-Editing a reply makes it unread again; saving an empty one removes it.
+**A conversation, both ways.** On `/admin/reports` there's a reply box under each
+report, and the reporter can reply back from their own account page — so a report
+becomes a thread rather than a one-off message. It's visible to those two and nobody
+else; the report's own text was never public either.
+
+Each side gets told when the other has said something: the reporter gets a small dot
+next to their name, and the admin's **Reports** tab badge counts unread replies as
+well as new reports. Opening the page marks the other side's messages read. Messages
+can't be edited after sending — a correction is just another message, rather than
+text silently changing under someone who already read it.
+
+A reply doesn't reopen a closed report: the badge tells you somebody said something,
+and whether to reopen it is your call.
 
 Reports submitted **anonymously** (before sign-in was enabled, or with the login gate
 off) have no account to show a reply on, and the admin page says so rather than

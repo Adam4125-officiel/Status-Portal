@@ -43,25 +43,27 @@
          textarea into the actions cell - a reply is usually a sentence or three,
          and this table already has seven columns. #}
       <td colspan="7" style="padding-top: 0;">
+        {% for m in r.messages %}
+          <div class="account-reply {{ 'account-reply--mine' if m.author == 'admin' }}" style="margin-bottom: 8px;">
+            <div class="account-reply__label">
+              {{ 'You' if m.author == 'admin' else ('👤 ' ~ (r.reporter_user or 'the reporter')) }}
+              · <span class="local-time" data-utc="{{ m.created_at }}">{{ m.created_at[:16].replace('T', ' ') }} UTC</span>
+              {% if m.author == 'admin' %}· {{ 'read' if m.seen else 'unread' }}{% endif %}
+            </div>
+            <div class="account-reply__body">{{ m.body }}</div>
+          </div>
+        {% endfor %}
         <form action="{{ url_for('admin_report_reply', rid=r.id) }}" method="POST"
               style="display: flex; gap: 8px; align-items: flex-start;">
           <textarea name="reply" rows="2" class="reply-box"
                     placeholder="{{ 'Reply to ' ~ r.reporter_user ~ '…' if r.reporter_user_id else 'Anonymous report — a reply here would never be seen' }}"
                     style="flex: 1; min-height: 44px;"
-                    {{ 'disabled' if not r.reporter_user_id }}>{{ r.admin_reply }}</textarea>
+                    {{ 'disabled' if not r.reporter_user_id }}></textarea>
           {% if r.reporter_user_id %}
-          <button type="submit" class="btn secondary" style="padding:6px 12px;">
-            {{ 'Update reply' if r.admin_reply else 'Reply' }}
-          </button>
+          <button type="submit" class="btn secondary" style="padding:6px 12px;">Reply</button>
           {% endif %}
         </form>
-        {% if r.admin_reply and r.reporter_user_id %}
-          <div class="field-hint" style="margin-top: 4px;">
-            {% if r.reply_seen %}Seen by {{ r.reporter_user }}.
-            {% else %}Not read yet — {{ r.reporter_user }} sees it on their account page.{% endif %}
-            Saving an empty reply removes it.
-          </div>
-        {% elif not r.reporter_user_id %}
+        {% if not r.reporter_user_id %}
           <div class="field-hint" style="margin-top: 4px;">
             Submitted anonymously (or before replies existed), so there's no account to
             show a reply on. Use the contact details if there are any.

@@ -281,6 +281,26 @@ def init_db():
         )
     """)
 
+    # The back-and-forth on a problem report. Replaces the single admin_reply column
+    # on problem_reports, which could only ever hold one message from one side - that
+    # column is left in place (nothing is ever dropped here) and is backfilled into
+    # this table below, but nothing reads it any more.
+    #
+    # `author` is 'admin' or 'user'. `seen` means "seen by the other party", which is
+    # unambiguous because every message has exactly one intended reader: the admin
+    # writes to the reporter, the reporter writes to the admin.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS report_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL,
+            author TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            seen INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (report_id) REFERENCES problem_reports (id) ON DELETE CASCADE
+        )
+    """)
+
     # Per-user settings the *user* chooses about themselves, as opposed to
     # jellyfin_users, which mirrors Jellyfin (plus the one admin-owned decision,
     # portal_allowed, that predates this table). Deliberately its own table rather
@@ -413,6 +433,7 @@ def init_db():
         # Backs "show me my own reports" on the account page, which runs on every
         # visit by a signed-in user.
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_reporter ON problem_reports (reporter_user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_report_messages_report ON report_messages (report_id)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -432,6 +453,17 @@ def init_db():
         INSERT INTO incident_services (incident_id, service_id)
         SELECT id, service_id FROM incidents
         WHERE service_id IS NOT NULL AND id NOT IN (SELECT DISTINCT incident_id FROM incident_services)
+    """)
+    # Replies written before report_messages existed (1.7.0-rc.2/rc.3) live in the
+    # single admin_reply column. Seed them as the first message of their thread so
+    # nobody's existing conversation vanishes when they update. Idempotent via the
+    # NOT IN guard, same shape as the two backfills above - safe to re-run on every
+    # startup forever.
+    conn.execute("""
+        INSERT INTO report_messages (report_id, author, body, created_at, seen)
+        SELECT id, 'admin', admin_reply, COALESCE(replied_at, created_at), reply_seen
+        FROM problem_reports
+        WHERE admin_reply != '' AND id NOT IN (SELECT DISTINCT report_id FROM report_messages)
     """)
     conn.commit()
 
@@ -1526,17 +1558,83 @@ def jellyfin_users_synced_at():
 # ---------- Problem report replies and per-user report history ----------
 # What turns the report form from a black hole into a conversation: the admin can
 # answer, and the reporter can see the answer plus what became of their report.
-def set_problem_report_reply(rid, reply):
-    """Stores (or clears) the admin's reply. Writing a reply resets reply_seen, so
-    editing an already-read reply shows up as new again - which is what the reporter
-    needs, since the text they read is no longer the text that's there."""
-    reply = (reply or "").strip()
+REPORT_AUTHORS = ("admin", "user")
+
+
+def add_report_message(report_id, author, body):
+    """Appends one message to a report's thread. Returns its id, or None if there was
+    nothing to add - an empty message is silently ignored rather than stored, since
+    both sides' forms can be submitted blank by accident.
+
+    Messages are append-only on purpose. The previous single-reply design allowed
+    editing, which meant the other party could be looking at text that no longer
+    existed; a conversation where earlier messages can change under you is worse than
+    one where a correction is just another message."""
+    body = (body or "").strip()
+    if not body or author not in REPORT_AUTHORS:
+        return None
     conn = get_db()
-    conn.execute("""
-        UPDATE problem_reports SET admin_reply=?, replied_at=?, reply_seen=0 WHERE id=?
-    """, (reply, now_iso() if reply else None, rid))
+    cur = conn.execute("""
+        INSERT INTO report_messages (report_id, author, body, created_at, seen)
+        VALUES (?, ?, ?, ?, 0)
+    """, (report_id, author, body, now_iso()))
     conn.commit()
+    new_id = cur.lastrowid
     conn.close()
+    return new_id
+
+
+def list_report_messages(report_id):
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM report_messages WHERE report_id=? ORDER BY created_at, id
+    """, (report_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def attach_report_messages(reports):
+    """Fills in each report's `messages` list in one query rather than one per report -
+    both the admin list and a user's account page render every thread on the page."""
+    reports = list(reports)
+    if not reports:
+        return reports
+    ids = [r["id"] for r in reports]
+    placeholders = ",".join("?" * len(ids))
+    conn = get_db()
+    rows = conn.execute(f"""
+        SELECT * FROM report_messages WHERE report_id IN ({placeholders})
+        ORDER BY created_at, id
+    """, ids).fetchall()
+    conn.close()
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["report_id"], []).append(dict(r))
+    for report in reports:
+        report["messages"] = grouped.get(report["id"], [])
+    return reports
+
+
+def mark_report_messages_seen(report_ids, author):
+    """Marks messages written by `author` as seen, for the given reports. Called when
+    the *other* side opens the page - the admin reading /admin/reports marks the
+    user's messages, and a user opening their account page marks the admin's.
+
+    Returns how many rows changed so a caller can skip follow-up work when there was
+    nothing to mark, which is the common case on a page read far more than written."""
+    report_ids = list(report_ids)
+    if not report_ids or author not in REPORT_AUTHORS:
+        return 0
+    placeholders = ",".join("?" * len(report_ids))
+    conn = get_db()
+    cur = conn.execute(f"""
+        UPDATE report_messages SET seen=1
+        WHERE seen=0 AND author=? AND report_id IN ({placeholders})
+    """, [author] + report_ids)
+    conn.commit()
+    changed = cur.rowcount
+    conn.close()
+    return changed
 
 
 def set_problem_report_incident(rid, incident_id):
@@ -1575,30 +1673,44 @@ def list_reports_for_user(user_id):
 
 
 def count_unseen_replies(user_id):
-    """How many of this user's reports have a reply they haven't looked at yet -
-    backs the little dot on the sign-in chip, which is the only thing that tells
-    someone an answer is waiting."""
+    """Admin messages this user hasn't read yet - backs the dot on the sign-in chip,
+    which is the only thing that tells someone an answer is waiting."""
     if not user_id:
         return 0
     conn = get_db()
     count = conn.execute("""
-        SELECT COUNT(*) FROM problem_reports
-        WHERE reporter_user_id = ? AND admin_reply != '' AND reply_seen = 0
+        SELECT COUNT(*) FROM report_messages m
+        JOIN problem_reports r ON r.id = m.report_id
+        WHERE r.reporter_user_id = ? AND m.author = 'admin' AND m.seen = 0
     """, (user_id,)).fetchone()[0]
     conn.close()
     return count
 
 
+def count_unseen_user_messages():
+    """Replies from reporters the admin hasn't read yet, feeding the admin nav's
+    Reports badge. Without this the admin has no way of knowing somebody answered -
+    which would make the whole two-way conversation pointless, since only one side
+    would ever notice a new message."""
+    conn = get_db()
+    count = conn.execute("""
+        SELECT COUNT(*) FROM report_messages WHERE author = 'user' AND seen = 0
+    """).fetchone()[0]
+    conn.close()
+    return count
+
+
 def mark_replies_seen(user_id):
-    """Called when the user actually opens their account page. Returns how many rows
-    it marked, so the caller can skip the write entirely when there was nothing to
-    mark (the common case, on a page that's read far more often than it changes)."""
+    """Called when a user opens their account page: marks the admin's messages on
+    *their own* reports as read, and nothing else."""
     if not user_id:
         return 0
     conn = get_db()
     cur = conn.execute("""
-        UPDATE problem_reports SET reply_seen=1
-        WHERE reporter_user_id = ? AND admin_reply != '' AND reply_seen = 0
+        UPDATE report_messages SET seen=1
+        WHERE seen=0 AND author='admin' AND report_id IN (
+            SELECT id FROM problem_reports WHERE reporter_user_id = ?
+        )
     """, (user_id,))
     conn.commit()
     changed = cur.rowcount
