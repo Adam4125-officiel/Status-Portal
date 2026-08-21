@@ -142,6 +142,35 @@ FORCE_HTTPS_COOKIES = os.environ.get("PORTAL_FORCE_HTTPS_COOKIES", "false").lowe
 DISCORD_WEBHOOK_URL = os.environ.get("PORTAL_DISCORD_WEBHOOK_URL", "").strip()
 NTFY_URL = os.environ.get("PORTAL_NTFY_URL", "").strip()
 
+# ---------------------------------------------------------------------------
+# Email notifications (the third channel - see notifications.py)
+# ---------------------------------------------------------------------------
+# Meaningfully more setup surface than the two URL-only channels above, which is the
+# tradeoff: it's worth it for anyone using neither Discord nor ntfy, and it's the only
+# channel that can reach a person who hasn't installed anything. Email is considered
+# configured only when host, from-address and at least one recipient are all present -
+# a half-filled block is treated as "not set up" rather than failing at send time.
+#
+# No new dependency: Python's standard smtplib and email packages do all of this.
+SMTP_HOST = os.environ.get("PORTAL_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("PORTAL_SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("PORTAL_SMTP_USERNAME", "").strip()
+# Deliberately not .strip()ed: a password is whatever the provider issued, and
+# trimming it would silently break a legitimate one that ends in a space.
+SMTP_PASSWORD = os.environ.get("PORTAL_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("PORTAL_SMTP_FROM", "").strip()
+# Comma-separated; where incident/maintenance alerts go. Per-user notifications (a
+# separate feature) address their own recipients and don't read this.
+SMTP_TO = os.environ.get("PORTAL_SMTP_TO", "").strip()
+# starttls (587, the usual), ssl (465, implicit TLS), or none (25, unencrypted - only
+# sane for an SMTP server on the same machine or LAN).
+SMTP_SECURITY = os.environ.get("PORTAL_SMTP_SECURITY", "starttls").strip().lower()
+# Its own timeout rather than the 5s the HTTP channels share: an SMTP conversation is
+# several round trips plus a TLS handshake, and a relay that queues rather than
+# delivering immediately can still take a few seconds to accept. Same reasoning as
+# BYPARR_TIMEOUT_SECONDS and JELLYFIN_AUTH_TIMEOUT_SECONDS.
+SMTP_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SMTP_TIMEOUT_SECONDS", "10"))
+
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
 # Blank = disabled entirely, no bot thread started. A bot token is a full login
 # credential (not just a one-way webhook URL), so like the webhook URLs it's env-only,

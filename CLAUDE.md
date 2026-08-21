@@ -1295,6 +1295,21 @@ DB-backed Settings pages, not a code edit.
   to appear, and keeping them adjacent is what stops a channel that sends perfectly
   from being invisible on the admin page, or vice versa. The admin route just renders
   whatever that function returns.
+- **Email is the third channel, and it needs no new dependency** — `smtplib` and
+  `email.message` are stdlib. It counts as configured only when host, from-address
+  *and* at least one recipient are all present; a half-filled block reads as "not set
+  up" rather than as a channel that fails on every send and fills the log with the same
+  error on every service blip.
+- **`send_email()` takes a `recipients` parameter** so per-user notifications can reuse
+  it without going near `PORTAL_SMTP_TO`, which is specifically the admin alert list.
+- **An unrecognised `PORTAL_SMTP_SECURITY` upgrades to STARTTLS, never downgrades to
+  plaintext.** Failing to connect is a far better outcome than quietly sending
+  credentials in the clear because someone typo'd the value.
+- **The HTML body is built with `html.escape()`, not a Jinja template.**
+  `notifications.py` is called from the background health-check thread, where there is
+  no app or request context to render a template in — and this module deliberately
+  doesn't import Flask. Plain text is set *first* because in `multipart/alternative`
+  the last part is the preferred one.
 - The channel status and "Send test" button **moved off `/admin/settings`** into this
   page. The test button still calls `notifications.notify()` with a canned payload —
   the real dispatch path, not a parallel one. It deliberately no longer refuses when

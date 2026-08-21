@@ -15,8 +15,8 @@ admin panel, no Flask knowledge or HTML editing required.
 - Optional **Jellyfin-backed visitor sign-in**, fully separate from the admin login,
   with a personal account page (report history, admin replies, theme preference)
 - Public **"Report a problem"** form, feeding an admin Reports page
-- Optional Discord/ntfy notifications, plus an optional Discord bot (self-editing
-  status message, `/snapshot` command)
+- Optional Discord/ntfy/**email** notifications, plus an optional Discord bot
+  (self-editing status message, `/snapshot` command)
 - Optional **two-factor authentication** (TOTP) for the admin login
 - Host restart/shutdown and per-VM controls (Windows/Hyper-V), plus app/bot restart,
   from the admin panel
