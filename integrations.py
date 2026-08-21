@@ -382,10 +382,14 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
             "title": _seerr_title(media),
             "media_type": media.get("mediaType") or entry.get("type") or "",
             "request_status": SEERR_REQUEST_STATUS.get(entry.get("status"), "Unknown"),
-            "media_status": SEERR_MEDIA_STATUS.get(media.get("status"), "Unknown"),
+            "media_status_label": SEERR_MEDIA_STATUS.get(media.get("status"), "Unknown"),
             "requested_by": requested_by.get("displayName") or requested_by.get("username") or "",
+            # The Seerr user id, kept so a request can be traced back to the Jellyfin
+            # account that made it - via Seerr's own jellyfinUserId link, never a guess.
+            "requested_by_id": str(requested_by.get("id") or ""),
             "requested_at": entry.get("createdAt") or "",
             "pending": entry.get("status") == 1,
+            "media_status": media.get("status"),
         })
     return items
 
@@ -431,6 +435,70 @@ def fetch_seerr_pending(base_url, api_key, limit=50):
     } for entry in payload["results"]]
     total = (payload.get("pageInfo") or {}).get("results")
     return items, (total if isinstance(total, int) else len(items))
+
+
+def fetch_seerr_users(base_url, api_key, limit=200):
+    """Every Seerr user, normalised - including `jellyfin_user_id`, which is the whole
+    point of this call.
+
+    Seerr can import Jellyfin accounts, and when it has, each Seerr user carries the
+    Jellyfin id it was imported from. That is a *real* link and the only one this app
+    will follow. Matching on email or username instead would eventually send one
+    person's notifications to another, which is the failure mode worth refusing
+    outright rather than mitigating.
+
+    Field naming varies across Overseerr/Jellyseerr versions (jellyfinUserId is the
+    documented one; some builds expose it as jellyfinId), so both are checked. The
+    Discord id lives under the user's own notification settings."""
+    base_url = base_url.rstrip("/")
+    r = requests.get(f"{base_url}/api/v1/user",
+                      headers={"X-Api-Key": api_key},
+                      params={"take": limit}, timeout=TIMEOUT)
+    r.raise_for_status()
+    payload = r.json()
+    results = payload.get("results") if isinstance(payload, dict) else payload
+    if not isinstance(results, list):
+        raise ValueError("Unexpected response from /api/v1/user")
+
+    users = []
+    for entry in results:
+        settings = entry.get("settings") or {}
+        users.append({
+            "id": str(entry.get("id")) if entry.get("id") is not None else "",
+            "display_name": entry.get("displayName") or entry.get("username") or "",
+            "email": entry.get("email") or "",
+            "discord_id": str(settings.get("discordId") or ""),
+            "jellyfin_user_id": str(entry.get("jellyfinUserId") or entry.get("jellyfinId") or ""),
+        })
+    return [u for u in users if u["id"]]
+
+
+def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=None):
+    """Writes contact details back to a Seerr user's own settings.
+
+    **The only call in this entire application that modifies another service.**
+    Everything else is read-only, and Jellyfin authentication is the one other outbound
+    write (a session logout). So it is deliberately narrow: exactly one user, exactly
+    the two contact fields, and only ever from an explicit button press with the change
+    shown first. It must never be reachable from a sync, a background task, or anything
+    that runs without someone having just asked for it.
+
+    Seerr's user settings endpoint replaces the fields it is given, so only the ones
+    actually being changed are sent."""
+    base_url = base_url.rstrip("/")
+    payload = {}
+    if email is not None:
+        payload["emailNotifications"] = True
+        payload["email"] = email
+    if discord_id is not None:
+        payload["discordId"] = discord_id
+    if not payload:
+        return False
+    r = requests.post(f"{base_url}/api/v1/user/{seerr_user_id}/settings/notifications",
+                       headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+                       json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return True
 
 
 def fetch_prowlarr_indexers(base_url, api_key):

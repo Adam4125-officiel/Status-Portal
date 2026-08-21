@@ -37,6 +37,7 @@ import scheduler
 import seerr_alerts
 import twofactor
 import updater
+import user_notify
 import version_checks
 
 _logger = logging.getLogger(__name__)
@@ -1256,6 +1257,15 @@ def admin_report_reply(rid):
         flash("Reply saved — but this report was submitted anonymously, so nobody can "
               "see it. Use the contact details if there are any.", "error")
     else:
+        # Queued, not sent: this is one INSERT and the delivery task does the rest, so
+        # a slow SMTP server can never make this button hang. A no-op unless the admin
+        # has switched per-user notifications on and the reporter has somewhere to be
+        # reached, which is why the flash below doesn't promise anything about it.
+        user_notify.notify_user(
+            report["reporter_user_id"], "report_reply",
+            "Your problem report got a reply",
+            f'The admin replied to the report you filed:\n\n"{report["message"][:200]}"\n\n'
+            "Open your account page on the status portal to read it and reply.")
         flash(f"Reply sent. {report['reporter_user']} will see it on their account page.",
               "success")
     return redirect(url_for("admin_reports"))
@@ -1290,6 +1300,11 @@ def admin_report_create_incident(rid):
     # Remembered so the reporter's account page can show what became of their report,
     # and keep showing that incident's current status as it progresses.
     db.set_problem_report_incident(rid, iid)
+    user_notify.notify_user(
+        report["reporter_user_id"], "report_incident",
+        "Your report is now a tracked incident",
+        f'The problem you reported has been turned into an incident: "{title}"\n\n'
+        "You can follow its progress on the status page.")
     flash("Incident created from report.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -1383,7 +1398,13 @@ def user_account():
     if request.method == "POST":
         theme = request.form.get("theme", "auto")
         contact = request.form.get("contact", "").strip()[:200]
-        db.set_user_preferences(user_id, theme=theme, contact=contact)
+        db.set_user_preferences(
+            user_id, theme=theme, contact=contact,
+            notify_email=request.form.get("notify_email", "").strip()[:200],
+            notify_discord_id=request.form.get("notify_discord_id", "").strip()[:32],
+            notify_own_reports=bool(request.form.get("notify_own_reports")),
+            notify_service_events=bool(request.form.get("notify_service_events")),
+            notify_requests=bool(request.form.get("notify_requests")))
         flash("Your settings have been saved.", "success")
         # saved=1 tells the page to bring this browser's own stored theme into line
         # with what was just saved - otherwise the setting would appear to do nothing
@@ -1394,9 +1415,17 @@ def user_account():
     # Opening the page is what marks the admin's messages as read; the write is
     # skipped entirely when there's nothing to mark, which is the common case.
     db.mark_replies_seen(user_id)
+    prefs = db.get_user_preferences(user_id)
+    # Looked up once, on page load, rather than per notification: the delivery task
+    # reads only what's stored here, so a Seerr outage can't stop notifications going
+    # out - it can only stop this page offering to prefill the fields.
+    seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
     return render_template("account.html",
                             reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
-                            prefs=db.get_user_preferences(user_id),
+                            prefs=prefs,
+                            notifications_enabled=user_notify.is_enabled(),
+                            seerr_account=seerr_account,
+                            seerr_configured=user_notify.seerr_integration() is not None,
                             themes=db.USER_THEMES,
                             just_saved=bool(request.args.get("saved")),
                             site_name=db.get_setting("site_name", "Server"),
@@ -1430,6 +1459,57 @@ def user_report_reply(rid):
         flash("Your reply has been sent.", "success")
     else:
         flash("Write something first.", "error")
+    return redirect(url_for("user_account"))
+
+
+@app.route("/account/seerr/import", methods=["POST"])
+@user_login_required
+def user_account_import_seerr_contact():
+    """Copies the contact details Seerr already holds into this portal.
+
+    A read, and one the visitor asked for by pressing a button - the details are shown
+    on the page first, so nobody's address appears in their settings without them
+    having seen where it came from."""
+    user = current_user()
+    account = user_notify.find_seerr_account(user["id"])
+    if not account:
+        flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
+        return redirect(url_for("user_account"))
+    db.set_user_preferences(user["id"],
+                             notify_email=account["email"],
+                             notify_discord_id=account["discord_id"],
+                             seerr_user_id=account["id"])
+    flash("Copied your contact details from Seerr.", "success")
+    return redirect(url_for("user_account"))
+
+
+@app.route("/account/seerr/push", methods=["POST"])
+@user_login_required
+def user_account_push_seerr_contact():
+    """Sends this portal's contact details back to the visitor's Seerr account.
+
+    **The only place this application writes to another service.** It is therefore an
+    explicit button, pressed by the person whose details they are, affecting only their
+    own Seerr user and only the two contact fields - never a sync, never a side effect
+    of saving something else, and never something a background task can reach."""
+    user = current_user()
+    prefs = db.get_user_preferences(user["id"])
+    integration = user_notify.seerr_integration()
+    account = user_notify.find_seerr_account(user["id"])
+    if not integration or not account:
+        flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
+        return redirect(url_for("user_account"))
+    try:
+        integrations.push_seerr_contact(integration["base_url"], integration["api_key"],
+                                         account["id"],
+                                         email=prefs["notify_email"] or None,
+                                         discord_id=prefs["notify_discord_id"] or None)
+    except (requests.RequestException, ValueError) as e:
+        _logger.warning("Could not push contact details to Seerr: %s", e)
+        flash(f"Couldn't update Seerr: {e}", "error")
+        return redirect(url_for("user_account"))
+    db.set_user_preferences(user["id"], seerr_user_id=account["id"])
+    flash("Your Seerr account has been updated with these details.", "success")
     return redirect(url_for("user_account"))
 
 
@@ -2635,6 +2715,34 @@ def admin_notifications():
                             active="notifications")
 
 
+@app.route("/admin/notifications/users", methods=["GET", "POST"])
+@login_required
+def admin_user_notifications():
+    """The master switch for per-user notifications, plus what the delivery queue is
+    doing. The per-*person* settings deliberately aren't here: what someone wants to be
+    told about, and where, is theirs to set on their own account page."""
+    if request.method == "POST":
+        db.set_setting("user_notifications_enabled",
+                        "1" if request.form.get("enabled") else "0")
+        flash("Per-user notification settings saved.", "success")
+        return redirect(url_for("admin_user_notifications"))
+
+    task = scheduler.get_task(user_notify.TASK_NAME)
+    channels = notifications.channel_summary()
+    return render_template(
+        "admin_user_notifications.html",
+        enabled=user_notify.is_enabled(),
+        queue=db.notification_queue_summary(),
+        recent=db.recent_notifications(),
+        email_ready=next((c["configured"] for c in channels if c["key"] == "email"), False),
+        bot_ready=bool(config.DISCORD_BOT_TOKEN) and discord_bot.get_status()["connected"],
+        bot_token_configured=bool(config.DISCORD_BOT_TOKEN),
+        seerr_configured=user_notify.seerr_integration() is not None,
+        max_attempts=db.MAX_NOTIFICATION_ATTEMPTS,
+        task=scheduler.task_view(task) if task else None,
+        active="user-notifications")
+
+
 @app.route("/admin/notifications/seerr", methods=["GET", "POST"])
 @login_required
 def admin_seerr_alerts():
@@ -2973,10 +3081,18 @@ def _process_maintenance_and_notify():
     for event in db.process_maintenance_windows():
         service_name = event["service"]["name"]
         window_title = event["window"]["title"]
-        if event["event"] == "maintenance_started":
-            notifications.notify("Maintenance started", f"{service_name}: {window_title}")
-        else:
-            notifications.notify("Maintenance ended", f"{service_name}: {window_title}")
+        started = event["event"] == "maintenance_started"
+        title = "Maintenance started" if started else "Maintenance ended"
+        notifications.notify(title, f"{service_name}: {window_title}")
+        # And the visitors who asked to hear about service events. Queued from this
+        # background thread exactly as it would be from a request handler - the queue
+        # is what keeps delivery off whichever thread noticed the event.
+        user_notify.notify_service_subscribers(
+            "maintenance",
+            f"{title}: {service_name}",
+            (f"{service_name} is now under maintenance ({window_title})."
+             if started else
+             f"Maintenance on {service_name} has finished ({window_title})."))
 
 
 def _check_status_for_response(r, elapsed_ms, slow_threshold_ms):

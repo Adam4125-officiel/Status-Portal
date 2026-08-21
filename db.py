@@ -402,6 +402,20 @@ def init_db():
     # when a user disappears from Jellyfin - if the account comes back (or the sync
     # was simply wrong for a poll), their settings are still here.
     c.execute("""
+        CREATE TABLE IF NOT EXISTS notification_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            event TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            sent_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
             user_id TEXT PRIMARY KEY,
             theme TEXT NOT NULL DEFAULT 'auto',   -- auto | dark | light
@@ -442,6 +456,21 @@ def init_db():
     # Jellyfin entirely.
     # qBittorrent authenticates with a username/password login rather than an API key,
     # so it needs its own two fields. Every other integration leaves them blank.
+    # Per-user notification settings. On user_preferences rather than jellyfin_users
+    # because that table is rewritten wholesale by every sync - anything user-owned put
+    # there is silently wiped within the hour.
+    _ensure_column(conn, "user_preferences", "notify_email", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "user_preferences", "notify_discord_id", "TEXT NOT NULL DEFAULT ''")
+    # "Things about my own reports" defaults ON: it's a reply to something the person
+    # started, and almost always wanted. "Anything about services I use" defaults OFF:
+    # nobody wants a message for every maintenance window on every service.
+    _ensure_column(conn, "user_preferences", "notify_own_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_service_events", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_requests", "INTEGER NOT NULL DEFAULT 1")
+    # The linked Seerr account id, only ever set from a real Jellyfin<->Seerr link -
+    # never guessed from a matching email or username. Empty means "not linked", which
+    # is the fail-closed state.
+    _ensure_column(conn, "user_preferences", "seerr_user_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
@@ -527,6 +556,10 @@ def init_db():
         # visit by a signed-in user.
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_reporter ON problem_reports (reporter_user_id)",
         "CREATE INDEX IF NOT EXISTS idx_report_messages_report ON report_messages (report_id)",
+        # The drain query is "unsent, oldest first", run every couple of minutes by the
+        # delivery task - covered so it stays an index scan as the table grows.
+        "CREATE INDEX IF NOT EXISTS idx_notification_queue_pending "
+        "ON notification_queue (sent_at, created_at)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -1815,7 +1848,22 @@ def mark_replies_seen(user_id):
 
 # ---------- Per-user preferences (user-owned, unlike jellyfin_users) ----------
 USER_THEMES = ("auto", "dark", "light")
-DEFAULT_USER_PREFERENCES = {"theme": "auto", "contact": ""}
+# Must list every column set_user_preferences() writes, and with the same default the
+# schema declares. get_user_preferences() seeds from this for a user who has never
+# saved anything, and set_user_preferences() reads the *current* values to fill in the
+# fields a caller didn't name - so a key missing here becomes None, then 0, and an
+# "on by default" preference is silently switched off the first time the user saves
+# anything at all.
+DEFAULT_USER_PREFERENCES = {
+    "theme": "auto",
+    "contact": "",
+    "notify_email": "",
+    "notify_discord_id": "",
+    "notify_own_reports": True,
+    "notify_service_events": False,
+    "notify_requests": True,
+    "seerr_user_id": "",
+}
 
 
 def get_user_preferences(user_id):
@@ -1831,22 +1879,171 @@ def get_user_preferences(user_id):
     if row:
         prefs["theme"] = row["theme"] if row["theme"] in USER_THEMES else "auto"
         prefs["contact"] = row["contact"] or ""
+        prefs["notify_email"] = row["notify_email"] or ""
+        prefs["notify_discord_id"] = row["notify_discord_id"] or ""
+        prefs["notify_own_reports"] = bool(row["notify_own_reports"])
+        prefs["notify_service_events"] = bool(row["notify_service_events"])
+        prefs["notify_requests"] = bool(row["notify_requests"])
+        prefs["seerr_user_id"] = row["seerr_user_id"] or ""
     return prefs
 
 
-def set_user_preferences(user_id, theme=None, contact=None):
+# Every column set_user_preferences() can write, and how to coerce it. Named fields
+# only: a caller that knows about one setting (the floating theme toggle) must not be
+# able to blank out the others just by not mentioning them - which is exactly what a
+# "write the whole row" helper would do.
+_USER_PREFERENCE_FIELDS = {
+    "notify_email": str,
+    "notify_discord_id": str,
+    "notify_own_reports": lambda v: int(bool(v)),
+    "notify_service_events": lambda v: int(bool(v)),
+    "notify_requests": lambda v: int(bool(v)),
+    "seerr_user_id": str,
+}
+
+
+def set_user_preferences(user_id, theme=None, contact=None, **fields):
     """Upsert. Only the named fields are written, so a caller that only knows about
     the theme (the toggle button's endpoint) can't blank out the contact."""
     if not user_id:
         return
+    unknown = set(fields) - set(_USER_PREFERENCE_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown user preference(s): {sorted(unknown)}")
     current = get_user_preferences(user_id)
     theme = theme if theme in USER_THEMES else current["theme"]
     contact = current["contact"] if contact is None else contact
+
+    values = {}
+    for name, coerce in _USER_PREFERENCE_FIELDS.items():
+        raw = fields.get(name, current.get(name))
+        values[name] = coerce(raw if raw is not None else "")
+
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    updates = ", ".join(f"{name}=excluded.{name}" for name in values)
     conn = get_db()
-    conn.execute("""
-        INSERT INTO user_preferences (user_id, theme, contact, updated_at) VALUES (?, ?, ?, ?)
+    conn.execute(f"""
+        INSERT INTO user_preferences (user_id, theme, contact, updated_at, {columns})
+        VALUES (?, ?, ?, ?, {placeholders})
         ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, contact=excluded.contact,
-                                            updated_at=excluded.updated_at
-    """, (user_id, theme, contact, now_iso()))
+                                            updated_at=excluded.updated_at, {updates}
+    """, (user_id, theme, contact, now_iso(), *values.values()))
     conn.commit()
     conn.close()
+
+
+# ---------- Per-user notification queue (see user_notify.py) ----------
+# Outbound delivery never happens in the request that triggered it - the request only
+# writes a row here, and a scheduled task drains it. Same rule every other outbound
+# call in this app follows, and the reason a slow SMTP server can't make an admin's
+# "reply" button hang.
+MAX_NOTIFICATION_ATTEMPTS = 5
+
+
+def enqueue_notification(user_id, event, subject, body):
+    """Queues one notification. Cheap enough to call from a request handler: one INSERT,
+    no network."""
+    if not user_id:
+        return None
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO notification_queue (user_id, event, subject, body, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, event, subject, body, now_iso()))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def pending_notifications(limit=50):
+    """Unsent, oldest first, excluding anything that has already failed too many times -
+    a permanently undeliverable row must not block the queue behind it forever."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM notification_queue
+        WHERE sent_at IS NULL AND attempts < ?
+        ORDER BY created_at LIMIT ?
+    """, (MAX_NOTIFICATION_ATTEMPTS, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_notification_sent(notification_id):
+    conn = get_db()
+    conn.execute("UPDATE notification_queue SET sent_at=?, last_error='' WHERE id=?",
+                  (now_iso(), notification_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_notification_failed(notification_id, error):
+    conn = get_db()
+    conn.execute("UPDATE notification_queue SET attempts=attempts+1, last_error=? WHERE id=?",
+                  (str(error)[:300], notification_id))
+    conn.commit()
+    conn.close()
+
+
+def prune_notification_queue(days=30):
+    """Delivered rows are history, not state. Kept briefly so an admin can see that
+    something went out, then removed - this table would otherwise grow forever like
+    status_history did."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_db()
+    cur = conn.execute("DELETE FROM notification_queue WHERE sent_at IS NOT NULL AND sent_at < ?",
+                        (cutoff,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
+
+
+def recent_notifications(limit=15):
+    """The most recent queue entries, for the admin page - so "did that actually go
+    out?" is answerable without reading the log."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM notification_queue ORDER BY created_at DESC, id DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def notification_queue_summary():
+    """Counts for the admin page: waiting, sent, and given up on."""
+    conn = get_db()
+    row = conn.execute("""
+        SELECT
+          SUM(CASE WHEN sent_at IS NULL AND attempts < ? THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) AS sent,
+          SUM(CASE WHEN sent_at IS NULL AND attempts >= ? THEN 1 ELSE 0 END) AS failed
+        FROM notification_queue
+    """, (MAX_NOTIFICATION_ATTEMPTS, MAX_NOTIFICATION_ATTEMPTS)).fetchone()
+    conn.close()
+    return {"pending": row["pending"] or 0, "sent": row["sent"] or 0, "failed": row["failed"] or 0}
+
+
+def users_opted_into(field):
+    """Jellyfin user ids who have switched `field` on. Used for the broadcast-style
+    events (maintenance), where the alternative is reading every user's preferences
+    one at a time."""
+    if field not in _USER_PREFERENCE_FIELDS:
+        raise ValueError(f"Unknown user preference: {field}")
+    conn = get_db()
+    rows = conn.execute(f"SELECT user_id FROM user_preferences WHERE {field}=1").fetchall()
+    conn.close()
+    return [r["user_id"] for r in rows]
+
+
+def user_id_for_seerr_user(seerr_user_id):
+    """The Jellyfin user who has linked this Seerr account, or None. Only ever finds a
+    link that was established from Seerr's own jellyfinUserId - never a guess."""
+    if not seerr_user_id:
+        return None
+    conn = get_db()
+    row = conn.execute("SELECT user_id FROM user_preferences WHERE seerr_user_id=?",
+                        (str(seerr_user_id),)).fetchone()
+    conn.close()
+    return row["user_id"] if row else None

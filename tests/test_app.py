@@ -3408,7 +3408,9 @@ def test_saving_preferences_persists_them(client, user_auth, monkeypatch):
     resp = client.post("/account", data={"theme": "light", "contact": "me@example.invalid"},
                        follow_redirects=True)
     assert "settings have been saved" in resp.data.decode()
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "me@example.invalid"
 
 
 def test_an_explicit_theme_is_rendered_into_the_html_tag(client, user_auth, monkeypatch):
@@ -3437,7 +3439,12 @@ def test_the_theme_endpoint_updates_only_the_theme(client, user_auth, monkeypatc
     db.set_user_preferences("u1", theme="dark", contact="keep me")
     resp = client.post("/account/theme", data={"theme": "light"})
     assert resp.status_code == 204
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "keep me"
+    # The endpoint writes *only* the theme, so every notification preference has to
+    # come back untouched too - it knows nothing about them.
+    assert prefs["notify_own_reports"] is True
 
 
 def test_the_theme_endpoint_requires_a_signed_in_visitor(client, user_auth):

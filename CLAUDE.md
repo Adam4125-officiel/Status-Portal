@@ -1577,6 +1577,38 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   existed, and there's a test asserting it. This is the part most likely to regress
   unnoticed, since nobody testing while signed in would ever see it.
 
+## Per-user notifications (`user_notify.py`, `/admin/notifications/users`, `/account`)
+
+- **Nothing is ever sent from the request that triggered it.** An admin clicking
+  "reply" writes one row to `notification_queue` and returns; the `user_notifications`
+  scheduled task drains it. That's what stops a slow SMTP server making the admin panel
+  hang, and it's the same rule every other outbound call here follows.
+- **Matching a Jellyfin user to a Seerr user fails closed.** The only link followed is
+  Seerr's own `jellyfinUserId`. Matching on email or username would eventually deliver
+  one person's notifications to another, so an unmatched user is simply asked for their
+  details instead. An unreachable Seerr is treated identically to "no link" — both
+  correctly lead to asking.
+- **`integrations.push_seerr_contact()` is the only call in this app that modifies
+  another service.** One user, two contact fields, only from an explicit button press
+  on that person's own account page, with the current Seerr values shown first. It must
+  never become reachable from a sync or a background task.
+- **The gating preference is checked at *delivery* time, not enqueue time**, so
+  switching something off silences what's already queued too.
+- **"Nowhere to send it" counts as delivered, not failed.** No contact details, or the
+  preference switched off, will not be fixed by retrying in two minutes — and a row
+  that can never succeed must not sit in the queue burning attempts.
+- **Partial delivery counts as sent.** Retrying would re-deliver to the channel that
+  already worked.
+- **`DEFAULT_USER_PREFERENCES` must list every field `set_user_preferences()` can
+  write.** A missing key reads back as `None`, is coerced to `0`/`""` when some *other*
+  field is saved, and silently switches an on-by-default preference off. That happened
+  while this was being written; `test_every_writable_preference_has_a_declared_default`
+  now catches it.
+- **Defaults: "things about my own reports" on, "anything about services I use" off.**
+  The first is a reply to something the person started; the second is chatty.
+- **The admin page never lists recipients.** The queue is addressed to a Jellyfin
+  account; whose email or Discord ID that resolved to is that person's business.
+
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
 - **When you add a rule to this file, ask whether it can be a test instead.** Prose in

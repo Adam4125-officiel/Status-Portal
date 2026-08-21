@@ -116,11 +116,92 @@
         reached somewhere specific.
       </div>
     </div>
+    {% if notifications_enabled %}
+    <hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
+    <h3 style="font-size: 14px; margin: 0 0 4px;">Notifications</h3>
+    <p class="field-hint" style="margin-top: 0;">
+      Where to reach you when something you're involved in happens. Leave both blank and
+      nothing is ever sent — this is opt-in, and nothing here is shared with anyone else.
+    </p>
+
+    <div class="field">
+      <label for="notify_email">Email address</label>
+      <input type="email" id="notify_email" name="notify_email" value="{{ prefs.notify_email }}"
+             placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="field">
+      <label for="notify_discord_id">Discord user ID</label>
+      <input type="text" id="notify_discord_id" name="notify_discord_id"
+             value="{{ prefs.notify_discord_id }}" inputmode="numeric"
+             placeholder="123456789012345678">
+      <div class="field-hint">
+        Not your username — the numeric ID. Enable Developer Mode in Discord
+        (Settings → Advanced), then right-click yourself → Copy User ID.
+        The bot can only message you if you share a server with it and allow DMs from
+        server members.
+      </div>
+    </div>
+
+    <div class="field">
+      <label>What to tell me about</label>
+      <div class="checkbox-list">
+        <label class="field-check">
+          <input type="checkbox" name="notify_own_reports" {{ 'checked' if prefs.notify_own_reports }}>
+          Replies to my problem reports, and when one becomes an incident
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_requests" {{ 'checked' if prefs.notify_requests }}>
+          When something I requested becomes available
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_service_events" {{ 'checked' if prefs.notify_service_events }}>
+          Maintenance on any service (this one is chatty)
+        </label>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="form-actions">
       <button type="submit" class="btn">Save settings</button>
       <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
     </div>
   </form>
+
+  {% if notifications_enabled and seerr_configured %}
+  {# Kept outside the settings form above: these are two separate POSTs to two separate
+     endpoints, and nesting a form inside a form isn't valid HTML. #}
+  <div class="form-panel" style="margin-top: 16px;">
+    <h3 style="font-size: 14px; margin-top: 0;">Your Seerr account</h3>
+    {% if not seerr_account %}
+      <p class="field-hint" style="margin-top: 0;">
+        We couldn't find a Seerr account linked to your Jellyfin login, so there's
+        nothing to copy from. That's not a problem — just fill the fields above in
+        yourself. (The portal deliberately won't guess by matching your email or
+        username: getting that wrong would send your notifications to somebody else.)
+      </p>
+    {% else %}
+      <p class="field-hint" style="margin-top: 0;">
+        Linked to <strong>{{ seerr_account.display_name }}</strong> in Seerr, which has:
+        {{ seerr_account.email or 'no email' }}{% if seerr_account.discord_id %},
+        Discord ID {{ seerr_account.discord_id }}{% else %}, no Discord ID{% endif %}.
+      </p>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <form method="POST" action="{{ url_for('user_account_import_seerr_contact') }}">
+          <button type="submit" class="btn secondary">Use these details here</button>
+        </form>
+        <form method="POST" action="{{ url_for('user_account_push_seerr_contact') }}"
+              onsubmit="return confirm('This will update your Seerr account with the contact details saved above. Continue?');">
+          <button type="submit" class="btn secondary">Send my details to Seerr</button>
+        </form>
+      </div>
+      <p class="field-hint">
+        “Send my details to Seerr” is the one thing this portal does that <em>changes</em>
+        another service. It updates only your own Seerr notification settings, only the
+        email and Discord ID, and only when you press it — never automatically.
+      </p>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
 <script src="{{ asset_url('js/local_time.js') }}"></script>
 <script src="{{ asset_url('js/account.js') }}"></script>

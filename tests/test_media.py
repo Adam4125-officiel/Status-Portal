@@ -130,7 +130,10 @@ def test_requests_translate_numeric_statuses_into_words(stub):
     ]})
     items = integrations.fetch_seerr_requests(stub, "key")
     assert items[0]["request_status"] == "Pending approval"
-    assert items[0]["media_status"] == "Processing"
+    assert items[0]["media_status_label"] == "Processing"
+    # The raw code is kept alongside the label, so request-progress tracking can
+    # compare states without parsing English back into numbers.
+    assert items[0]["media_status"] == 3
     assert items[0]["pending"] is True
     assert items[0]["requested_by"] == "Adam"
 
