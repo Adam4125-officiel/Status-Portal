@@ -131,6 +131,92 @@ def normalize_channel_ids(raw):
     return ", ".join(_parse_id_list(raw))
 
 
+def dm_user_ids():
+    """Discord user IDs to send direct messages to (Seerr approval alerts, and the
+    per-user notification path built on top of it).
+
+    Deliberately **not** default-open, unlike the three lists above. Those decide who
+    may *ask* the bot for something already public in the channel they asked from;
+    this decides who the bot messages unprompted. An empty list therefore means "DM
+    nobody", which is the safe direction for something that pushes rather than
+    responds."""
+    return _parse_id_list(db.get_setting("discordbot_dm_user_ids", ""))
+
+
+def normalize_dm_user_ids(raw):
+    return ", ".join(_parse_id_list(raw))
+
+
+# ---------------------------------------------------------------------------
+# Direct messages - a different code path from the guild/channel posting above
+# ---------------------------------------------------------------------------
+# Everything else this bot sends is a reply to a slash command or an edit to a message
+# it already posted, all of which happen *inside* the bot's own event loop. A DM is
+# initiated from outside it: a scheduled task's thread decides someone should be told
+# something. So this uses the same asyncio.run_coroutine_threadsafe bridge stop() does,
+# for the same reason - it is the only correct way to reach the bot's loop from another
+# thread.
+#
+# The limitation to remember, because it is Discord's and cannot be engineered around:
+# a bot may only DM a user who shares a server with it and who hasn't turned off
+# "Direct Messages from server members". A perfectly valid user ID can therefore be
+# undeliverable, and it surfaces as Forbidden (50007). That is reported explicitly
+# rather than logged as a generic failure, because the fix is a human action nobody
+# would guess from "sending failed".
+DM_TIMEOUT_SECONDS = 15
+
+
+def send_dm(user_id, text):
+    """Sends one direct message. Returns (ok, error) - never raises.
+
+    Callers are background tasks that must carry on and record the outcome rather than
+    die, exactly like notifications.notify()'s contract."""
+    client, loop = _runtime["client"], _runtime["loop"]
+    if client is None or loop is None or not _state["connected"]:
+        return False, "The Discord bot isn't connected."
+    discord, _, _ = _try_import_discord()
+    if discord is None:
+        return False, "discord.py isn't installed."
+
+    async def _deliver():
+        # get_user reads the gateway cache; fetch_user is a real API call and is the
+        # fallback for a user the bot hasn't seen this session - the same cache-then-
+        # fetch pattern _edit_tracked_status_message() uses for channels, and it
+        # matters for the same reason: right after a restart the cache is cold, which
+        # would otherwise look identical to "no such user".
+        user = client.get_user(int(user_id)) or await client.fetch_user(int(user_id))
+        await user.send(text)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_deliver(), loop).result(timeout=DM_TIMEOUT_SECONDS)
+        return True, ""
+    except discord.Forbidden:
+        return False, ("Discord refused the DM. A bot can only message someone who "
+                       "shares a server with it and who allows DMs from server members.")
+    except discord.NotFound:
+        return False, "No Discord user with that ID."
+    except ValueError:
+        return False, f"'{user_id}' isn't a valid Discord user ID."
+    except Exception as e:
+        _logger.exception("Could not DM Discord user %s", user_id)
+        return False, str(e)
+
+
+def broadcast_dm(text, user_ids=None):
+    """DMs every configured recipient. Returns (sent, failures) where failures is a
+    list of (user_id, reason) - so a caller can record "3 of 4 delivered, and why the
+    fourth didn't" rather than a bare success/failure for the whole batch."""
+    recipients = user_ids if user_ids is not None else dm_user_ids()
+    sent, failures = 0, []
+    for user_id in recipients:
+        ok, error = send_dm(user_id, text)
+        if ok:
+            sent += 1
+        else:
+            failures.append((user_id, error))
+    return sent, failures
+
+
 def _overall_status(services):
     """Mirrors app.compute_overall_status() - a service with ignore_in_overall_status
     set is excluded from this aggregate the same way, so the two never disagree."""

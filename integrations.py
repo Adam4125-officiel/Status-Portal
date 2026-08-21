@@ -405,6 +405,34 @@ def _seerr_title(media):
     return "(unknown title)"
 
 
+def fetch_seerr_pending(base_url, api_key, limit=50):
+    """Requests awaiting an approval decision, and how many there are in total.
+
+    Uses filter=pending, which is Overseerr's own definition, rather than fetching
+    everything and filtering here - the count has to be the real total, not the total
+    within whatever page size this asked for. `pageInfo.results` is that total; the
+    items are capped separately because they only exist to be named in an alert."""
+    base_url = base_url.rstrip("/")
+    r = requests.get(f"{base_url}/api/v1/request",
+                      headers={"X-Api-Key": api_key},
+                      params={"take": limit, "filter": "pending", "sort": "added"},
+                      timeout=TIMEOUT)
+    r.raise_for_status()
+    payload = r.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise ValueError("Unexpected response from /api/v1/request")
+    items = [{
+        "id": entry.get("id"),
+        "title": _seerr_title(entry.get("media") or {}),
+        "media_type": (entry.get("media") or {}).get("mediaType") or entry.get("type") or "",
+        "requested_by": ((entry.get("requestedBy") or {}).get("displayName")
+                         or (entry.get("requestedBy") or {}).get("username") or ""),
+        "requested_at": entry.get("createdAt") or "",
+    } for entry in payload["results"]]
+    total = (payload.get("pageInfo") or {}).get("results")
+    return items, (total if isinstance(total, int) else len(items))
+
+
 def fetch_prowlarr_indexers(base_url, api_key):
     """Per-indexer health, which is the failure that actually happens in practice:
     "Prowlarr is up" hides one or two indexers going stale or getting rate-limited

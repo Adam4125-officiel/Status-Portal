@@ -34,6 +34,7 @@ import logging_setup
 import monitoring
 import notifications
 import scheduler
+import seerr_alerts
 import twofactor
 import updater
 import version_checks
@@ -270,6 +271,9 @@ def _inject_admin_badges():
         # How many *Arr apps the last version check found behind. Reads one stored
         # setting - never checks anything here, same rule as the update badge above.
         "arr_updates_count": version_checks.updates_available(),
+        # Requests waiting on the admin to approve them. Also a stored value, never a
+        # live call - and admin-only, which the /admin/ guard above already ensures.
+        "seerr_pending_count": seerr_alerts.pending_count(),
     }
 
 
@@ -2629,6 +2633,38 @@ def admin_notifications():
     return render_template("admin_notifications.html", channels=channels,
                             any_configured=any(c["configured"] for c in channels),
                             active="notifications")
+
+
+@app.route("/admin/notifications/seerr", methods=["GET", "POST"])
+@login_required
+def admin_seerr_alerts():
+    """Seerr approval alerts: how many requests are waiting, and who gets DM'd when a
+    new one arrives.
+
+    Under Notifications rather than Integrations because the interesting part is the
+    delivery - the count is one number, the DM configuration is the feature. The count
+    is deliberately admin-only and never appears on the public page: it's operational
+    information about a queue, not a signal about whether anything is working."""
+    if request.method == "POST":
+        db.set_setting(seerr_alerts.DM_ENABLED_SETTING,
+                        "1" if request.form.get("dm_enabled") else "0")
+        db.set_setting("discordbot_dm_user_ids",
+                        discord_bot.normalize_dm_user_ids(request.form.get("dm_user_ids", "")))
+        flash("Seerr alert settings saved.", "success")
+        return redirect(url_for("admin_seerr_alerts"))
+
+    task = scheduler.get_task(seerr_alerts.TASK_NAME)
+    return render_template(
+        "admin_seerr_alerts.html",
+        integration=seerr_alerts.seerr_integration(),
+        pending_count=seerr_alerts.pending_count(),
+        last_checked_at=seerr_alerts.last_checked_at(),
+        dm_enabled=seerr_alerts.dm_enabled(),
+        dm_user_ids=db.get_setting("discordbot_dm_user_ids", ""),
+        bot_token_configured=bool(config.DISCORD_BOT_TOKEN),
+        bot_status=discord_bot.get_status(),
+        task=scheduler.task_view(task) if task else None,
+        active="seerr-alerts")
 
 
 @app.route("/admin/notifications/test", methods=["POST"])

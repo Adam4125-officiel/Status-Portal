@@ -713,6 +713,42 @@ DB-backed Settings pages, not a code edit.
   though it's not in `requirements.txt`. If it's missing and you need to verify code:
   `pip install discord.py` (23 tests fail with `ModuleNotFoundError` without it).
 
+## Discord DMs and Seerr approval alerts (`seerr_alerts.py`, `/admin/notifications/seerr`)
+
+- **`seerr_alerts.py` exists because of the import graph, not by preference.** It needs
+  `integrations` (to ask Seerr) and `discord_bot` (to deliver), and `discord_bot`
+  already imports `integrations` — so it can't live in either without a cycle. A thin
+  layer above both is the shape that works, and it's where the next "watch something,
+  tell someone" job belongs too.
+- **`discord_bot.send_dm()` is a different code path from everything else the bot
+  sends.** Replies and message edits happen *inside* the bot's event loop; a DM is
+  initiated from a scheduled task's thread, so it uses the same
+  `asyncio.run_coroutine_threadsafe` bridge `stop()` does. `get_user()` then
+  `fetch_user()`, cache-then-fetch, for the same reason `_edit_tracked_status_message()`
+  does it: a cold gateway cache right after a restart otherwise looks identical to "no
+  such user".
+- **`dm_user_ids` is default-*closed*, unlike the bot's other three ID lists.** Those
+  decide who may *ask* the bot for something already visible in the channel they asked
+  from; this decides who it messages unprompted. Empty means nobody.
+- **A bot can only DM someone who shares a server with it and allows DMs from server
+  members.** This is Discord's rule and cannot be worked around. A valid user ID can be
+  undeliverable; `send_dm()` reports that case explicitly (`Forbidden`) instead of as a
+  generic failure, because the fix is a human action nobody would guess otherwise. Say
+  this plainly in any UI that collects DM recipients.
+- **The alert is edge-triggered and its state is persisted** (`seerr_notified_request_ids`
+  in `settings`, capped at `MAX_REMEMBERED_IDS`). Same rule as the low-disk alert: a
+  restart while requests are still pending must not re-announce all of them.
+- **A request is only marked announced once a DM actually reached somebody.** A
+  disconnected bot therefore means a *delayed* alert, not a swallowed one.
+- **While DMs are off, what's pending is still remembered** — so switching them on
+  announces what arrives next rather than emptying the whole existing queue into
+  someone's inbox at once.
+- **A failed poll must leave the stored count alone.** Overwriting a real count with 0
+  would quietly tell the admin their approval queue was empty.
+- **The count is admin-only, deliberately.** It's operational information about a
+  queue, not a signal about whether anything is working, so it never reaches the public
+  page.
+
 ## Crash logging (`logging_setup.py`)
 
 - `logging_setup.init_logging()` configures Python's standard `logging` module

@@ -26,6 +26,7 @@
     <a href="{{ url_for('admin_notifications') }}" class="{{ 'active' if active == 'notifications' }}">Channels</a>
     <a href="{{ url_for('admin_discord_bot') }}" class="{{ 'active' if active == 'discord-bot' }}">Discord bot</a>
     <a href="{{ url_for('admin_discord_bot_guilds') }}" class="{{ 'active' if active == 'discord-bot-guilds' }}">Discord servers</a>
+    <a href="{{ url_for('admin_seerr_alerts') }}" class="{{ 'active' if active == 'seerr-alerts' }}">Seerr approvals{% if seerr_pending_count %} <span class="nav-badge">{{ seerr_pending_count }}</span>{% endif %}</a>
 
     <div class="admin-nav__group">System</div>
     <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
