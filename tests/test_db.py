@@ -696,3 +696,99 @@ def test_public_integrations_by_service_matches_the_per_service_filter(isolated_
     assert [i["id"] for i in grouped[sid]] == [shown]
     assert other not in grouped
     assert grouped[sid] == db.list_integrations_for_service(sid)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled task rows
+# ---------------------------------------------------------------------------
+def test_ensure_task_row_is_idempotent_and_never_overwrites(isolated_db):
+    db.ensure_task_row("t", {"enabled": 1, "schedule_kind": "interval",
+                              "interval_minutes": 60, "daily_at": "03:00"})
+    db.update_task_schedule("t", False, "daily", 15, "07:45")
+    # A restart re-registers the task, calling ensure_task_row again with the
+    # registry defaults - the admin's saved settings must survive that.
+    db.ensure_task_row("t", {"enabled": 1, "schedule_kind": "interval",
+                              "interval_minutes": 60, "daily_at": "03:00"})
+    row = db.get_task_row("t")
+    assert (row["enabled"], row["schedule_kind"], row["interval_minutes"], row["daily_at"]) \
+        == (0, "daily", 15, "07:45")
+
+
+def test_update_task_schedule_rejects_an_unknown_kind(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "cron", 60, "03:00")
+    assert db.get_task_row("t")["schedule_kind"] == "interval"
+
+
+def test_update_task_schedule_clamps_the_interval_to_at_least_one_minute(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "interval", 0, "03:00")
+    assert db.get_task_row("t")["interval_minutes"] == 1
+
+
+def test_record_task_run_leaves_the_schedule_alone(isolated_db):
+    db.ensure_task_row("t", {})
+    db.update_task_schedule("t", True, "daily", 30, "05:00")
+    db.record_task_run("t", "failed", "went wrong", 12, "manual")
+    row = db.get_task_row("t")
+    assert (row["last_status"], row["last_message"], row["last_duration_ms"], row["last_trigger"]) \
+        == ("failed", "went wrong", 12, "manual")
+    assert (row["schedule_kind"], row["interval_minutes"], row["daily_at"]) == ("daily", 30, "05:00")
+
+
+# ---------------------------------------------------------------------------
+# The cached Jellyfin user list
+# ---------------------------------------------------------------------------
+def _jf_user(uid, name, admin=False, disabled=False):
+    return {"id": uid, "name": name, "is_administrator": admin, "is_disabled": disabled}
+
+
+def test_replace_jellyfin_users_stores_and_looks_up_case_insensitively(isolated_db):
+    db.replace_jellyfin_users([_jf_user("abc", "Adam"), _jf_user("def", "Someone", admin=True)])
+    assert db.count_jellyfin_users() == 2
+    assert db.get_jellyfin_user_by_name("adam")["id"] == "abc"
+    assert db.get_jellyfin_user_by_name("  ADAM  ")["id"] == "abc"
+    assert db.get_jellyfin_user("def")["is_administrator"] == 1
+
+
+def test_replace_jellyfin_users_is_a_full_replace(isolated_db):
+    db.replace_jellyfin_users([_jf_user("a", "A"), _jf_user("b", "B")])
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    assert [u["id"] for u in db.list_jellyfin_users()] == ["a"]
+    assert db.get_jellyfin_user_by_name("B") is None
+
+
+def test_first_seen_at_is_preserved_across_syncs(isolated_db):
+    """It has to keep meaning "when this portal first saw this account" rather than
+    quietly becoming "when the last sync ran"."""
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    first_seen = db.get_jellyfin_user("a")["first_seen_at"]
+    db.replace_jellyfin_users([_jf_user("a", "A renamed")])
+    row = db.get_jellyfin_user("a")
+    assert row["first_seen_at"] == first_seen
+    assert row["name"] == "A renamed"
+    assert row["last_synced_at"] >= first_seen
+
+
+def test_a_rename_is_tracked_by_id_not_by_name(isolated_db):
+    """Jellyfin's user GUID is stable across a rename; the username is not - which
+    is exactly why the cache is keyed by id."""
+    db.replace_jellyfin_users([_jf_user("a", "OldName")])
+    db.replace_jellyfin_users([_jf_user("a", "NewName")])
+    assert db.count_jellyfin_users() == 1
+    assert db.get_jellyfin_user_by_name("oldname") is None
+    assert db.get_jellyfin_user_by_name("newname")["id"] == "a"
+
+
+def test_synced_at_distinguishes_never_synced_from_synced_and_empty(isolated_db):
+    """An empty cache must never be readable as "this user does not exist"."""
+    assert db.jellyfin_users_synced_at() is None
+    db.replace_jellyfin_users([_jf_user("a", "A")])
+    assert db.jellyfin_users_synced_at() is not None
+
+
+def test_problem_reports_record_their_reporter(isolated_db):
+    rid = db.create_problem_report("broken", "", None, reporter_user="adam")
+    assert db.get_problem_report(rid)["reporter_user"] == "adam"
+    anon = db.create_problem_report("also broken")
+    assert db.get_problem_report(anon)["reporter_user"] == ""

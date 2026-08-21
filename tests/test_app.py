@@ -11,6 +11,7 @@ import pytest
 
 import app as app_module
 import db
+import scheduler
 import twofactor
 import updater
 
@@ -2604,3 +2605,101 @@ def test_static_asset_list_covers_new_files_automatically(client, tmp_path, monk
         assert all("?v=" in u for u in urls)
     finally:
         os.remove(new_file)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks admin page (/admin/tasks) - the framework itself is covered in
+# tests/test_scheduler.py; these are the route-level checks.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def demo_task(isolated_db):
+    """A throwaway task registered into the real registry for the duration of one
+    test, so the routes can be exercised without depending on the Jellyfin sync
+    task's own behaviour."""
+    saved = dict(scheduler._registry)
+    scheduler._registry.clear()
+    scheduler.clear_caches()
+    calls = []
+    scheduler.register("demo_task", "Demo task", "Does nothing in particular.",
+                       lambda: (calls.append(1), "did nothing")[1],
+                       default_interval_minutes=45)
+    yield calls
+    scheduler._registry.clear()
+    scheduler._registry.update(saved)
+    scheduler.clear_caches()
+
+
+def test_admin_tasks_requires_login(client, demo_task):
+    assert client.get("/admin/tasks").status_code == 302
+    assert client.post("/admin/tasks/demo_task/run").status_code == 302
+    assert client.post("/admin/tasks/demo_task/save").status_code == 302
+    assert not demo_task, "an unauthenticated POST actually ran the task"
+
+
+def test_admin_tasks_page_lists_registered_tasks(client, demo_task):
+    _login(client)
+    resp = client.get("/admin/tasks")
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert "Demo task" in body
+    assert "Does nothing in particular." in body
+    assert "no runs recorded yet" in body
+
+
+def test_run_now_executes_the_task_and_reports_the_result(client, demo_task):
+    _login(client)
+    resp = client.post("/admin/tasks/demo_task/run", follow_redirects=True)
+    assert resp.status_code == 200
+    assert demo_task == [1], "the task did not actually run"
+    assert "did nothing" in resp.data.decode()
+    row = db.get_task_row("demo_task")
+    assert row["last_status"] == "success"
+    assert row["last_trigger"] == "manual"
+
+
+def test_run_now_on_a_failing_task_reports_the_failure_without_a_500(client, isolated_db):
+    saved = dict(scheduler._registry)
+    scheduler._registry.clear()
+    scheduler.clear_caches()
+    scheduler.register("boom_task", "Boom", "Always fails.",
+                       lambda: (_ for _ in ()).throw(RuntimeError("kaboom")))
+    try:
+        _login(client)
+        resp = client.post("/admin/tasks/boom_task/run", follow_redirects=True)
+        assert resp.status_code == 200
+        assert "kaboom" in resp.data.decode()
+        assert db.get_task_row("boom_task")["last_status"] == "failed"
+    finally:
+        scheduler._registry.clear()
+        scheduler._registry.update(saved)
+        scheduler.clear_caches()
+
+
+def test_saving_a_schedule_persists_it_without_looking_like_a_run(client, demo_task):
+    """Saving settings must never touch last_run_at - that would both fake a run
+    that didn't happen and silently push the next one an interval into the future."""
+    _login(client)
+    client.post("/admin/tasks/demo_task/run")
+    before = db.get_task_row("demo_task")["last_run_at"]
+
+    client.post("/admin/tasks/demo_task/save", data={
+        "enabled": "on", "schedule_kind": "daily", "interval_minutes": "90", "daily_at": "04:15"})
+    row = db.get_task_row("demo_task")
+    assert (row["schedule_kind"], row["daily_at"], row["interval_minutes"]) == ("daily", "04:15", 90)
+    assert row["last_run_at"] == before
+
+
+def test_unchecking_enabled_disables_the_task(client, demo_task):
+    _login(client)
+    client.post("/admin/tasks/demo_task/save", data={
+        "schedule_kind": "interval", "interval_minutes": "45", "daily_at": "03:00"})
+    assert db.get_task_row("demo_task")["enabled"] == 0
+    assert scheduler.next_run_at(scheduler.get_task("demo_task")) is None
+
+
+def test_unknown_task_names_are_rejected_rather_than_500ing(client, demo_task):
+    _login(client)
+    for path in ("/admin/tasks/nope/run", "/admin/tasks/nope/save"):
+        resp = client.post(path, follow_redirects=True)
+        assert resp.status_code == 200
+        assert "No such scheduled task." in resp.data.decode()

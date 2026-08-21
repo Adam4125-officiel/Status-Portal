@@ -286,6 +286,7 @@ def test_every_module_level_cache_is_reset_between_tests():
     cleared_by_helper = {
         "monitoring.py": _read("monitoring.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "integrations.py": _read("integrations.py").split("def clear_caches")[-1].split("\ndef ")[0],
+        "scheduler.py": _read("scheduler.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "updater.py": _read("updater.py").split("def clear_update_cache")[-1].split("\ndef ")[0],
     }
     missing = []

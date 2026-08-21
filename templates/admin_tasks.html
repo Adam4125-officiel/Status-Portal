@@ -1,0 +1,115 @@
+{% extends "admin_base.html" %}
+{% block title %}Scheduled tasks — Admin{% endblock %}
+{% set status_led = {'success': 'ok', 'failed': 'crit', 'skipped': 'warn'} %}
+{% set status_label = {'success': 'Succeeded', 'failed': 'Failed', 'skipped': 'Skipped'} %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Scheduled tasks</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Recurring background jobs this portal runs on its own. Each one can be turned off,
+  rescheduled, or run immediately without waiting for its next slot. A task that fails
+  is recorded here and retried on its next scheduled run — it never stops the other
+  tasks, and never takes the portal down with it. The scheduler looks for due tasks
+  every {{ tick_seconds }}s, so that's the finest granularity a schedule can actually
+  achieve.
+</p>
+
+{% if tasks %}
+{% for t in tasks %}
+  <div class="form-panel" style="margin-bottom: 12px;">
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+      <h2 style="font-size: 15px; margin: 0;">{{ t.label }}
+        {% if not t.enabled %}<span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">(disabled)</span>{% endif %}
+      </h2>
+      <form action="{{ url_for('admin_task_run', name=t.name) }}" method="POST" style="display:inline;">
+        <button type="submit" class="btn secondary" style="padding:4px 10px;"{{ ' disabled' if t.running }}>
+          {{ 'Running…' if t.running else 'Run now' }}
+        </button>
+      </form>
+    </div>
+
+    <p style="color: var(--text-dim); font-size: 13px; margin: 0 0 12px;">{{ t.description }}</p>
+
+    <div class="info-table" style="margin-bottom: 14px;">
+      <div class="admin-table" style="font-size: 12px;">
+        <table>
+          <tbody>
+            <tr>
+              <th style="width: 150px;">Last run</th>
+              <td>
+                {% if t.running %}
+                  <span class="led warn"></span> running right now
+                {% elif t.last_run_at %}
+                  <span class="local-time" data-utc="{{ t.last_run_at }}">{{ t.last_run_at[:16].replace('T', ' ') }} UTC</span>
+                  {% if t.last_trigger == 'manual' %}<span style="color: var(--text-faint);">(run manually)</span>{% endif %}
+                {% else %}
+                  <span style="color: var(--text-faint);">never</span>
+                {% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Result</th>
+              <td>
+                {% if t.last_status %}
+                  <span class="led {{ status_led.get(t.last_status, 'maint') }}"></span>
+                  {{ status_label.get(t.last_status, t.last_status) }}
+                  {% if t.last_duration_ms is not none %}<span style="color: var(--text-faint);">· {{ t.last_duration_ms }} ms</span>{% endif %}
+                  {% if t.last_message %}<div style="color: var(--text-dim); margin-top: 4px;">{{ t.last_message }}</div>{% endif %}
+                {% else %}
+                  <span style="color: var(--text-faint);">no runs recorded yet</span>
+                {% endif %}
+              </td>
+            </tr>
+            <tr>
+              <th>Next run</th>
+              <td>
+                {% if not t.enabled %}
+                  <span style="color: var(--text-faint);">never — this task is disabled</span>
+                {% elif t.running %}
+                  <span style="color: var(--text-faint);">after the current run finishes</span>
+                {% elif t.next_run_at %}
+                  <span class="local-time" data-utc="{{ t.next_run_at }}">{{ t.next_run_at[:16].replace('T', ' ') }} UTC</span>
+                {% else %}
+                  <span style="color: var(--text-faint);">unknown</span>
+                {% endif %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <form method="POST" action="{{ url_for('admin_task_save', name=t.name) }}" data-task-schedule>
+      <div class="field">
+        <label class="field-check"><input type="checkbox" name="enabled" {{ 'checked' if t.enabled }}> Run this task automatically</label>
+        <div class="field-hint">Unchecked, the task never runs on its own — "Run now" above still works.</div>
+      </div>
+      <div class="field">
+        <label for="schedule_kind_{{ t.name }}">Schedule</label>
+        <select id="schedule_kind_{{ t.name }}" name="schedule_kind" data-schedule-kind>
+          <option value="interval" {{ 'selected' if t.schedule_kind == 'interval' }}>Every N minutes</option>
+          <option value="daily" {{ 'selected' if t.schedule_kind == 'daily' }}>Once a day, at a fixed time</option>
+        </select>
+      </div>
+      <div class="field" data-schedule-field="interval">
+        <label for="interval_minutes_{{ t.name }}">Run every (minutes)</label>
+        <input type="number" id="interval_minutes_{{ t.name }}" name="interval_minutes" min="1" max="10080" value="{{ t.interval_minutes }}">
+      </div>
+      <div class="field" data-schedule-field="daily">
+        <label for="daily_at_{{ t.name }}">Run daily at (UTC)</label>
+        <input type="time" id="daily_at_{{ t.name }}" name="daily_at" value="{{ t.daily_at }}">
+        <div class="field-hint">In UTC, not your local time — this app stores every timestamp in UTC and converts for display, and a schedule that silently shifted with daylight saving would be worse than one you have to convert once.</div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn">Save schedule</button>
+      </div>
+    </form>
+  </div>
+{% endfor %}
+{% else %}
+<div class="empty-state">No scheduled tasks are registered in this build.</div>
+{% endif %}
+
+<script src="{{ asset_url('js/admin_tasks.js') }}"></script>
+{% endblock %}

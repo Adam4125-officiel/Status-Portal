@@ -32,6 +32,7 @@ import integrations
 import logging_setup
 import monitoring
 import notifications
+import scheduler
 import twofactor
 import updater
 
@@ -2037,6 +2038,48 @@ def admin_discord_bot_guilds():
                             active="discord-bot")
 
 
+# ---- Scheduled tasks (see scheduler.py - the framework; the tasks themselves are
+# registered by whichever module owns them) ----
+@app.route("/admin/tasks")
+@login_required
+def admin_tasks():
+    return render_template("admin_tasks.html", tasks=scheduler.list_task_views(),
+                            tick_seconds=config.SCHEDULER_TICK_SECONDS, active="tasks")
+
+
+@app.route("/admin/tasks/<name>/save", methods=["POST"])
+@login_required
+def admin_task_save(name):
+    if scheduler.get_task(name) is None:
+        flash("No such scheduled task.", "error")
+        return redirect(url_for("admin_tasks"))
+    kind = request.form.get("schedule_kind", "interval")
+    interval = request.form.get("interval_minutes", type=int) or 60
+    daily_at = request.form.get("daily_at", "03:00").strip() or "03:00"
+    scheduler.save_schedule(name, enabled=bool(request.form.get("enabled")),
+                             schedule_kind=kind, interval_minutes=interval, daily_at=daily_at)
+    flash("Schedule saved.", "success")
+    return redirect(url_for("admin_tasks"))
+
+
+@app.route("/admin/tasks/<name>/run", methods=["POST"])
+@login_required
+def admin_task_run(name):
+    """Runs the task synchronously, inside the request. That is the same sanctioned
+    exception to the no-slow-I/O-in-a-request-handler rule as the integrations "Check
+    now" button and perform_update(): an explicit one-shot action the admin knowingly
+    triggered, where the whole point is getting the result back in the response.
+    Moving it to a background thread would just mean staring at a page that says
+    nothing happened yet."""
+    if scheduler.get_task(name) is None:
+        flash("No such scheduled task.", "error")
+        return redirect(url_for("admin_tasks"))
+    status, message = scheduler.run_task(name, trigger="manual")
+    category = {"success": "success", "skipped": "error", "busy": "error"}.get(status, "error")
+    flash(f"{scheduler.get_task(name).label}: {status}{' - ' + message if message else ''}", category)
+    return redirect(url_for("admin_tasks"))
+
+
 # ---------------------------------------------------------------------------
 # Background health check
 # ---------------------------------------------------------------------------
@@ -2376,6 +2419,7 @@ if __name__ == "__main__":
     updater.check_pending_marker()
     start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
+    scheduler.start()
     discord_bot.start()
     # debug must stay False whenever this is reachable outside localhost.
     app.run(host="0.0.0.0", port=5000, debug=False)

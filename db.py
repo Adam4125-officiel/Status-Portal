@@ -242,6 +242,45 @@ def init_db():
         )
     """)
 
+    # Generic scheduled-task framework (see scheduler.py). One row per *registered*
+    # task, keyed by the registry name rather than an autoincrement id: the code is
+    # the source of truth for which tasks exist, this table only holds the parts an
+    # admin can change plus the outcome of the last run. A row is created lazily the
+    # first time a task is looked at (scheduler._row), so adding a task to the
+    # registry needs no migration; a row whose task is later removed from the code
+    # simply stops being listed, which is harmless.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            schedule_kind TEXT NOT NULL DEFAULT 'interval',  -- interval | daily
+            interval_minutes INTEGER NOT NULL DEFAULT 60,
+            daily_at TEXT NOT NULL DEFAULT '03:00',          -- HH:MM, UTC
+            last_run_at TEXT,
+            last_status TEXT,                                -- success | failed | skipped
+            last_message TEXT NOT NULL DEFAULT '',
+            last_duration_ms INTEGER,
+            last_trigger TEXT NOT NULL DEFAULT ''            -- schedule | manual
+        )
+    """)
+
+    # The locally cached Jellyfin user list (see jellyfin_auth.py). Keyed by
+    # Jellyfin's own user GUID, which is stable across renames - a username is not.
+    # This is a *cache of an external system*, deliberately persisted in SQLite
+    # rather than held in memory: it has to survive a restart, because it is what
+    # keeps already-signed-in users valid while Jellyfin is unreachable.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS jellyfin_users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            name_lower TEXT NOT NULL,
+            is_administrator INTEGER NOT NULL DEFAULT 0,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TEXT NOT NULL,
+            last_synced_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
 
     # Retrofit columns added after a table already existed in some earlier version of
@@ -267,6 +306,12 @@ def init_db():
     # explicit per-service opt-in to also show them on the public card.
     _ensure_column(conn, "services", "show_run_target_public", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "show_dependencies_public", "INTEGER NOT NULL DEFAULT 0")
+    # Which signed-in Jellyfin user filed a problem report ('' for an anonymous one,
+    # which is still the only possibility on an install that hasn't enabled
+    # Jellyfin-backed auth). Stored as the username, not the user id: it's shown to
+    # the admin, and it has to stay readable for a user who was later removed from
+    # Jellyfin entirely.
+    _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
     # Write-ahead logging. SQLite's default rollback journal takes a database-wide
@@ -322,6 +367,10 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_service_dependencies_service ON service_dependencies (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_service ON problem_reports (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_integrations_service ON integrations (service_id)",
+        # Login looks a user up by name, not by id (the id is what Jellyfin returns
+        # *after* a successful authentication). Small table, but this is the one
+        # query on the sign-in path, and an index costs nothing here.
+        "CREATE INDEX IF NOT EXISTS idx_jellyfin_users_name_lower ON jellyfin_users (name_lower)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -1207,12 +1256,12 @@ def delete_discord_status_message(channel_id):
 # ---------- Problem reports ----------
 # A visitor-submitted bug/issue report, separate from the admin-authored
 # incidents/maintenance system entirely - see app.py's public /report route.
-def create_problem_report(message, contact="", service_id=None):
+def create_problem_report(message, contact="", service_id=None, reporter_user=""):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO problem_reports (message, contact, service_id, status, created_at)
-        VALUES (?, ?, ?, 'new', ?)
-    """, (message, contact, service_id, now_iso()))
+        INSERT INTO problem_reports (message, contact, service_id, status, created_at, reporter_user)
+        VALUES (?, ?, ?, 'new', ?, ?)
+    """, (message, contact, service_id, now_iso(), reporter_user))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -1278,3 +1327,139 @@ def delete_problem_report(rid):
     conn.execute("DELETE FROM problem_reports WHERE id=?", (rid,))
     conn.commit()
     conn.close()
+
+
+# ---------- Scheduled tasks (see scheduler.py) ----------
+# The registry in scheduler.py decides which tasks *exist*; these functions only
+# store the parts an admin can change (enabled, schedule) and the outcome of the
+# last run, so that both survive a restart - the whole point of the table.
+SCHEDULE_KINDS = ("interval", "daily")
+TASK_STATUSES = ("success", "failed", "skipped")
+
+
+def ensure_task_row(name, defaults):
+    """Creates the row for a task the first time it's seen, using the registry's
+    declared defaults. Idempotent: INSERT OR IGNORE, so an existing row (with the
+    admin's own schedule in it) is never reset by a later restart."""
+    conn = get_db()
+    conn.execute("""
+        INSERT OR IGNORE INTO scheduled_tasks (name, enabled, schedule_kind, interval_minutes, daily_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (name, int(defaults.get("enabled", 1)), defaults.get("schedule_kind", "interval"),
+          int(defaults.get("interval_minutes", 60)), defaults.get("daily_at", "03:00")))
+    conn.commit()
+    conn.close()
+
+
+def get_task_row(name):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM scheduled_tasks WHERE name=?", (name,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_task_rows():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM scheduled_tasks ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_task_schedule(name, enabled, schedule_kind, interval_minutes, daily_at):
+    """Only ever touches the admin-editable columns - never last_run_at/last_status.
+    Saving a schedule must not look like the task just ran, and must not reset the
+    clock that decides when it next will."""
+    if schedule_kind not in SCHEDULE_KINDS:
+        schedule_kind = "interval"
+    conn = get_db()
+    conn.execute("""
+        UPDATE scheduled_tasks SET enabled=?, schedule_kind=?, interval_minutes=?, daily_at=?
+        WHERE name=?
+    """, (int(bool(enabled)), schedule_kind, max(1, int(interval_minutes)), daily_at, name))
+    conn.commit()
+    conn.close()
+
+
+def record_task_run(name, status, message="", duration_ms=None, trigger="schedule", ran_at=None):
+    """Written after *every* completed attempt, successful or not. A failed run still
+    stamps last_run_at on purpose: an interval schedule is measured from it, so
+    leaving it unchanged on failure would make a permanently-failing task retry on
+    every single scheduler tick instead of on its next scheduled run."""
+    conn = get_db()
+    conn.execute("""
+        UPDATE scheduled_tasks SET last_run_at=?, last_status=?, last_message=?,
+               last_duration_ms=?, last_trigger=? WHERE name=?
+    """, (ran_at or now_iso(), status, message or "", duration_ms, trigger, name))
+    conn.commit()
+    conn.close()
+
+
+# ---------- Cached Jellyfin user list (see jellyfin_auth.py) ----------
+def replace_jellyfin_users(users):
+    """Full replace, in one transaction, of the locally cached Jellyfin user list.
+
+    Only ever called after a *successful* fetch - a failed sync must leave the
+    previous list completely intact, since that list is what keeps already
+    signed-in users valid while Jellyfin is unreachable. Doing it in a single
+    transaction is what stops a crash mid-write leaving a half-populated list,
+    which would look exactly like "most of your users were deleted".
+
+    first_seen_at is preserved for a user that already exists, so it keeps meaning
+    "when this portal first saw this account" rather than "when the last sync ran".
+    """
+    stamp = now_iso()
+    conn = get_db()
+    try:
+        with conn:
+            existing = {r["id"]: r["first_seen_at"]
+                        for r in conn.execute("SELECT id, first_seen_at FROM jellyfin_users").fetchall()}
+            conn.execute("DELETE FROM jellyfin_users")
+            conn.executemany("""
+                INSERT INTO jellyfin_users (id, name, name_lower, is_administrator, is_disabled,
+                                             first_seen_at, last_synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(u["id"], u["name"], u["name"].strip().lower(),
+                   int(bool(u.get("is_administrator"))), int(bool(u.get("is_disabled"))),
+                   existing.get(u["id"], stamp), stamp) for u in users])
+    finally:
+        conn.close()
+    return len(users)
+
+
+def list_jellyfin_users():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM jellyfin_users ORDER BY name COLLATE NOCASE").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_jellyfin_user(user_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM jellyfin_users WHERE id=?", (user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_jellyfin_user_by_name(name):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM jellyfin_users WHERE name_lower=?",
+                        ((name or "").strip().lower(),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def count_jellyfin_users():
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM jellyfin_users").fetchone()[0]
+    conn.close()
+    return count
+
+
+def jellyfin_users_synced_at():
+    """When the cached list was last refreshed (max last_synced_at), or None if it
+    has never been populated. Distinguishing "never synced" from "synced and empty"
+    matters: an empty cache must never be read as "this user doesn't exist"."""
+    conn = get_db()
+    row = conn.execute("SELECT MAX(last_synced_at) FROM jellyfin_users").fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None

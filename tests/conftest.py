@@ -4,6 +4,7 @@ import db
 import app as app_module
 import integrations as integrations_module
 import monitoring as monitoring_module
+import scheduler as scheduler_module
 import updater as updater_module
 
 
@@ -33,6 +34,7 @@ def _reset_module_state():
     # Modules that own their own clearing.
     integrations_module.clear_caches()
     monitoring_module.clear_caches()
+    scheduler_module.clear_caches()
     updater_module.clear_update_cache()
 
 
