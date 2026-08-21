@@ -602,6 +602,43 @@ delete-and-reinsert, so an admin-set flag that isn't explicitly carried across t
 sync gets wiped on the next run — blocking someone, then finding them able to sign
 in again an hour later, with nothing in any log to explain it.
 
+### The account page, and two bugs only a screenshot could find (2026-08-21)
+
+Adam's feedback after end-to-end testing rc.2 was that a report went into a black
+hole — no way to see whether anyone had looked at it, what came of it, or to hear
+anything back. Hence `/account`.
+
+Almost all of it surfaces facts that already existed in the database. Worth
+recording because it's a recurring shape in this project: the feature that felt
+missing wasn't missing data, it was missing *visibility* of data the admin could
+already see.
+
+**The theme preference was the genuinely hard part**, and not for any reason visible
+in the requirement. It has three inputs (this browser's `localStorage`, the account
+preference, the OS) and — because of the anti-flash script — *two* independent
+implementations of the precedence order. The failure modes are all quiet:
+
+- If the inline script and `theme.js` disagree, the page loads in one colour and
+  switches a moment later.
+- If `localStorage` outranks the account preference (which it must — it's the more
+  recent deliberate action on that device), then saving "Light" on the account page
+  changes every other device and visibly *not* the one you're sitting at. That is
+  the most confusing possible outcome, and it's the default behaviour unless
+  something explicitly syncs the local value after a save.
+- If "Auto" doesn't *remove* the local override, it keeps whatever was last toggled
+  on that device forever, which is not what "auto" means.
+
+All three were driven through a real browser across seven scenarios rather than
+reasoned about.
+
+**Two bugs a screenshot caught and the test suite could not**, both in the same
+render: the admin reply textarea kept the browser's default white background,
+unreadable in dark mode, because the shared input styling is scoped to `.field` —
+a block-level form row, the wrong shape for a control sitting in a table cell. And
+the reports table's timestamp was raw UTC, never having used the `local-time`
+conversion every other timestamp in the app goes through. Both had passed every
+route-level test, which asserts on content and cannot see colour or layout at all.
+
 ### Verification record — sandbox, 2026-08-21
 
 Exercised against a **stand-in Jellyfin** — a small HTTP server implementing

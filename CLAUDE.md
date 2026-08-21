@@ -94,6 +94,7 @@ have bitten someone on exactly that change.
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
+| Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
@@ -1234,6 +1235,60 @@ public page, which has to be a deliberate choice.
   exists in this sandbox**, so the exact response shapes of `/Users` and
   `/Users/AuthenticateByName` are unconfirmed against a running server. See
   `docs/HISTORY.md`.
+
+## The user account page (`/account`) — added 2026-08-21, v1.7.0
+
+A signed-in visitor's own page: what became of the reports they filed, and a couple
+of personal settings. Reached by clicking the username in the sign-in chip.
+
+- **Report visibility is scoped by `reporter_user_id` (Jellyfin's stable id), never
+  by name.** `reporter_user` is kept alongside it for *display only*, because it has
+  to stay readable for someone later removed from Jellyfin entirely.
+  **`db.list_reports_for_user()` refuses a blank id inside the query function**, not
+  in the route: every anonymous report has `reporter_user_id = ''`, so a caller that
+  passed `""` would otherwise be handed every anonymous report in the database. Same
+  for `count_unseen_replies()`/`mark_replies_seen()`. Don't move that guard out to
+  the caller.
+- **Report status wording on this page is aimed at the reporter**
+  (`REPORT_STATUS_LABELS` in `app.py`), not at the admin triaging. "New" and
+  "reviewed" are triage words that tell the person waiting nothing.
+- **An admin reply is visible to exactly one person.** It's shown on that reporter's
+  account page and nowhere else — the report's own text was never public either.
+  Replying to an anonymous report is allowed but warns that nobody can see it; the
+  textarea is disabled for those rows.
+- **Writing a reply resets `reply_seen`**, so editing an already-read reply
+  resurfaces it — the text they read is no longer the text that's there. The unread
+  dot on the sign-in chip is the *only* thing that tells someone an answer is
+  waiting, so don't remove it without replacing it with something.
+- **Preferences live in `user_preferences`, deliberately not as more columns on
+  `jellyfin_users`.** That table is rewritten wholesale by every sync, so anything
+  stored there must be explicitly carried across `replace_jellyfin_users()` or it is
+  silently wiped within the hour (`portal_allowed` is the one exception, and it
+  predates this table — it's admin-owned, not user-owned). Keeping user-owned data
+  out of `jellyfin_users` means the next preference can't fall into that trap.
+- **The theme has three inputs and two implementations of the precedence — they must
+  agree.** The inputs are this browser's `localStorage`, the signed-in user's account
+  preference (`data-server-theme`, rendered onto `<html>` so a fresh device shows the
+  right colours *before* any JavaScript runs), and the OS setting. The order is
+  **localStorage → account preference → OS**, and it is implemented twice: in the
+  inline anti-flash script in `base.html`'s `<head>` and again in
+  `static/js/theme.js`. If those two ever disagree the page visibly changes colour a
+  moment after load. Change both, together, or neither.
+  - The trap that falls out of that order: saving "Light" on the account page would
+    change every *other* device and visibly not the one you're sitting at, because
+    this browser's local choice outranks it. `static/js/account.js` therefore syncs
+    `localStorage` to the newly-saved value — **only immediately after a save**
+    (`data-just-saved`), never on an ordinary visit, or it would quietly undo a local
+    toggle later.
+  - Saving `auto` **removes** the local override rather than leaving it, otherwise
+    "auto" would keep whatever was last toggled on that device forever.
+  - The floating toggle posts to `/account/theme` when signed in, so a choice made
+    anywhere follows the user everywhere. That endpoint writes *only* the theme —
+    `db.set_user_preferences()` takes named fields precisely so the toggle can't
+    blank out anything else.
+- **A signed-out visitor's theme behaviour is unchanged** from before this feature
+  existed, and there's a test asserting it. This is the part most likely to regress
+  unnoticed, since nobody testing while signed in would ever see it.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

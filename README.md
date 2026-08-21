@@ -40,6 +40,10 @@ touching the HTML.
   user list is cached locally by a scheduled task so a Jellyfin outage never signs
   anyone out. Completely separate from your admin login: a signed-in Jellyfin user is
   never an admin and can't reach `/admin` at all
+- Signed-in visitors get their own **account page** (click your name in the corner):
+  what happened to every problem report they sent — whether it's been looked at,
+  whether an incident was opened from it, and any **reply from the admin** — plus a
+  theme preference that follows them across devices
 - A public **"Report a problem" form**, separate from the incident/maintenance
   system — visitors can flag something wrong (optionally tied to a specific
   service), landing in an admin Reports page with an unread-count badge and a
@@ -559,6 +563,37 @@ has never signed in can't sign in — so they can't report the outage either, wh
 one of the moments a status page is most useful. If you'd rather take the spam risk
 than lose reports during an outage, turn the gate off; it's a single checkbox.
 
+### The account page (for signed-in visitors)
+
+Once someone is signed in, their name in the top-right corner is a link to
+**their own account page**. It exists mostly to close the loop on problem reports,
+which were previously a one-way street.
+
+**Their reports.** Everything they've sent, newest first, each showing:
+
+- **what's happened to it** — waiting to be looked at, being looked into, or closed;
+- **whether an incident was opened from it**, including that incident's *current*
+  status, so they can follow it as it progresses;
+- **the admin's reply**, if there is one.
+
+**Replying.** On `/admin/reports` there's now a reply box under each report. The
+reply is visible to that one reporter, on their account page, and nowhere else — the
+report's own text was never public either. They get a small dot next to their name
+until they've read it, which is the only thing that tells them to go and look.
+Editing a reply makes it unread again; saving an empty one removes it.
+
+Reports submitted **anonymously** (before sign-in was enabled, or with the login gate
+off) have no account to show a reply on, and the admin page says so rather than
+letting you write into the void.
+
+**Their settings**, deliberately minimal for now:
+
+- **Theme** — Auto / Dark / Light, applying to *every* device they sign in on. The
+  ☀️/🌙 button still works and takes priority on the device you press it; pressing it
+  just updates this setting too. Nothing changes for visitors who aren't signed in.
+- **Contact details** — pre-fills the contact box on the report form so they don't
+  retype it each time.
+
 ### Two-factor authentication (optional, confirmed working)
 
 `/admin/2fa` adds TOTP-based two-factor authentication to the admin login — works
@@ -717,6 +752,7 @@ status-portal/
   app.py                  # Flask routes (public + admin)
   scheduler.py            # generic recurring-task framework (registry + runner)
   jellyfin_auth.py        # Jellyfin as an identity source: user sync + sign-in
+  templates/account.html  # a signed-in visitor's own page (their reports + settings)
   serve_waitress.py       # run this in production (instead of app.py)
   update.py                # standalone updater CLI - works without the web UI
   updater.py               # the shared update logic (used by update.py AND the admin button)
