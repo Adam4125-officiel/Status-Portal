@@ -2446,6 +2446,21 @@ def _write_uploaded_database(upload, dest_path):
     return None
 
 
+def _remove_sqlite_sidecars(path):
+    """Deletes the -wal/-shm files SQLite creates beside `path`, if any.
+
+    Opening a WAL-mode database creates them even for a read-only connection, so simply
+    validating an uploaded backup leaves two files next to the staged copy. Best-effort:
+    failing to tidy up must never turn a successful restore into a reported failure."""
+    if not path:
+        return
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+
+
 def _db_safety_snapshot():
     """A consistent snapshot of the database as it is *right now*, taken before it is
     replaced. This is the whole reason a bad restore isn't unrecoverable, so it happens
@@ -2528,6 +2543,7 @@ def admin_restore_db():
                                    dir=os.path.dirname(db.DB_PATH))
     os.close(fd)
     snapshot = None
+    installed = None
     try:
         error = _write_uploaded_database(upload, staged)
         if error is None:
@@ -2551,8 +2567,10 @@ def admin_restore_db():
             flash(f"Restore failed: {e}. Your previous database was saved to "
                   f"{snapshot} before the attempt.", "error")
             return redirect(url_for("admin_about"))
-        # staged has been renamed onto the live path, so there is nothing left to clean
-        # up - and the finally block must not delete the database we just installed.
+        # The staged file has been renamed onto the live path, so it must not be
+        # deleted below - but its sidecars still need clearing, hence the separate flag
+        # rather than just dropping the name.
+        installed = staged
         staged = None
         _prune_db_safety_backups()
     finally:
@@ -2561,6 +2579,12 @@ def admin_restore_db():
                 os.remove(staged)
             except OSError:
                 pass
+        # Validating the upload opens it with SQLite, and opening a WAL-mode database -
+        # which every backup of this app is - creates -wal/-shm sidecars beside it. The
+        # rename above moves only the main file, so without this every restore left two
+        # orphaned files in instance/ forever. Found by looking at the directory after a
+        # release re-test, not by any test.
+        _remove_sqlite_sidecars(installed or staged)
 
     _logger.warning("Database restored from an uploaded backup; previous database saved to %s",
                      os.path.basename(snapshot))

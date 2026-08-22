@@ -56,6 +56,18 @@ def admin(client):
     return client
 
 
+@pytest.fixture(autouse=True)
+def isolated_snapshot_dir(tmp_path, monkeypatch):
+    """Redirects the safety-snapshot directory into tmp_path for every test in this
+    file.
+
+    Without this, the tests that don't monkeypatch it themselves take real snapshots
+    into the repository's own instance/db_backups/ - the database under test is
+    isolated, but the *snapshots of it* were being written next to the developer's
+    real ones. Caught by noticing snapshot files timestamped during a pytest run."""
+    monkeypatch.setattr(app_module, "DB_SAFETY_BACKUP_DIR", str(tmp_path / "snapshots"))
+
+
 @pytest.fixture
 def no_restart(monkeypatch):
     """A restore that succeeds calls os.execv via _restart_process(). Never let that
@@ -271,6 +283,33 @@ def test_old_snapshots_are_pruned(admin, tmp_path, monkeypatch, no_restart):
         os.utime(path, (1_700_000_000 + n, 1_700_000_000 + n))
     _upload(admin, _zip_of("portal.db", _valid_backup_bytes(tmp_path)))
     assert len(list(snapshot_dir.glob("*.db"))) == 2
+
+
+def test_no_sqlite_sidecars_are_left_behind_after_a_restore(admin, tmp_path, no_restart):
+    """Validating the upload opens it with SQLite, and opening a WAL-mode database -
+    which every backup of this app is - creates -wal/-shm files beside it. The atomic
+    rename moves only the main file, so without explicit cleanup every restore left two
+    orphaned files in instance/ forever.
+
+    Found by looking at the instance directory after a release re-test, which is exactly
+    the kind of thing no route-level assertion would ever have noticed."""
+    instance_dir = os.path.dirname(db.DB_PATH)
+    _upload(admin, _zip_of("portal.db", _valid_backup_bytes(tmp_path)))
+    leftovers = [n for n in os.listdir(instance_dir) if n.startswith("restore-")]
+    assert leftovers == [], f"orphaned staging files: {leftovers}"
+
+
+def test_no_sqlite_sidecars_are_left_behind_after_a_refusal(admin, tmp_path, no_restart):
+    """Same, for the path where the upload is rejected - validation still opened it."""
+    instance_dir = os.path.dirname(db.DB_PATH)
+    other = tmp_path / "other.db"
+    conn = sqlite3.connect(str(other))
+    conn.execute("CREATE TABLE films (id INTEGER)")
+    conn.commit()
+    conn.close()
+    _upload(admin, other.read_bytes(), filename="other.db")
+    leftovers = [n for n in os.listdir(instance_dir) if n.startswith("restore-")]
+    assert leftovers == [], f"orphaned staging files: {leftovers}"
 
 
 def test_no_staged_file_is_left_behind_after_a_refusal(admin, isolated_db, no_restart):

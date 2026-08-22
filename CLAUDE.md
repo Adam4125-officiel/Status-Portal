@@ -999,6 +999,12 @@ DB-backed Settings pages, not a code edit.
   **must be registered before `_check_csrf`**, because `_check_csrf` reads
   `request.form`, which parses the body and would 413 a perfectly good upload before
   the view ever runs.
+- **The staged upload's SQLite sidecars must be cleaned up too.** Validating it opens
+  the file with SQLite, and opening a WAL-mode database — which every backup of this app
+  is — creates `-wal`/`-shm` beside it, even read-only. `os.replace()` moves only the
+  main file, so without `_remove_sqlite_sidecars()` every restore *and every refusal*
+  left two orphaned files in `instance/` forever. Found by looking at the directory
+  after a release re-test; no route-level assertion would have noticed.
 - **`_prune_db_safety_backups()` reads `KEEP_DB_SAFETY_BACKUPS` inside the function**,
   not as a default argument — a default arg binds at def time and silently ignores a
   monkeypatched constant, the same trap that made `updater._prune_backups` pass for the
@@ -1718,6 +1724,11 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   if the user reports a bug in one of these areas, ask for the actual error text first
   (most of these paths now log real errors instead of swallowing them) rather than
   guessing blind.
+- **Check what the test run and the smoke test left in `instance/` before finishing**,
+  not just that the tests passed. Two real problems have been found that way and by no
+  other means: restore tests writing real safety snapshots into the developer's own
+  `instance/db_backups/` (they now monkeypatch `DB_SAFETY_BACKUP_DIR`), and every
+  database restore orphaning `-wal`/`-shm` sidecars. `ls instance/` costs nothing.
 - Clean up after smoke testing: remove any `instance/portal.db` created during a test
   run, and any cookie jars, before finishing — don't leave a test admin password or
   fake data sitting in what could become the user's real database.
