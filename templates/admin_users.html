@@ -135,17 +135,23 @@
           {% if u.is_disabled %}
             <span class="badge investigating">no — disabled in Jellyfin</span>
             <div class="field-hint" style="margin-top: 4px;">Re-enable them in Jellyfin; the next sync picks it up.</div>
-          {% elif u.portal_allowed %}
-            <form action="{{ url_for('admin_user_access', user_id=u.id) }}" method="POST" style="display:inline;">
-              <input type="hidden" name="allow" value="0">
-              <span class="badge resolved">allowed</span>
-              <button type="submit" class="btn secondary" style="padding:3px 9px; margin-left:6px;">Block</button>
-            </form>
           {% else %}
-            <form action="{{ url_for('admin_user_access', user_id=u.id) }}" method="POST" style="display:inline;">
-              <input type="hidden" name="allow" value="1">
-              <span class="badge identified">blocked here</span>
-              <button type="submit" class="btn secondary" style="padding:3px 9px; margin-left:6px;">Allow</button>
+            {# One switch instead of a badge plus a button. The hidden field carries the
+               value to become, so the same markup works with JavaScript (auto-submit on
+               change) and without it (the fallback button below, which JS hides). #}
+            <form action="{{ url_for('admin_user_access', user_id=u.id) }}" method="POST"
+                  class="switch-form" data-autosubmit>
+              <input type="hidden" name="allow" value="{{ 0 if u.portal_allowed else 1 }}">
+              <label class="switch">
+                <input type="checkbox" {{ 'checked' if u.portal_allowed }}
+                       aria-label="Portal access for {{ u.name }}">
+                <span class="switch__track"><span class="switch__thumb"></span></span>
+              </label>
+              {# "blocked here" rather than just "blocked": being blocked by this portal
+                 and being disabled in Jellyfin are two different facts fixed in two
+                 different places, and the page must not blur them together. #}
+              <span class="switch-form__label">{{ 'allowed' if u.portal_allowed else 'blocked here' }}</span>
+              <button type="submit" class="btn secondary switch-form__fallback">Save</button>
             </form>
           {% endif %}
         </td>
@@ -162,4 +168,5 @@
   task to fetch them from Jellyfin.
 </div>
 {% endif %}
+<script src="{{ asset_url('js/admin_toggle.js') }}"></script>
 {% endblock %}

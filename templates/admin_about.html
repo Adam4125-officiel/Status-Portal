@@ -226,10 +226,19 @@
 {% endif %}
 
 <div class="form-panel" style="max-width: 640px; margin-top: 16px; border-color: var(--crit);">
-  <h2 style="margin-top: 0;">Restore the database from a backup</h2>
+  <h2 style="margin-top: 0;">Database backup and restore</h2>
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
-    Upload a backup zip produced by <strong>Settings → Download a backup</strong> (or the
-    <code>portal.db</code> from inside one) to replace your current database with it.
+    A zipped, consistent snapshot of <code>instance/portal.db</code>, taken right now —
+    worth keeping an off-box copy of, and worth taking before poking at anything by hand.
+  </p>
+  <p>
+    <a href="{{ url_for('admin_settings_backup_db') }}" class="btn secondary">Download a backup</a>
+  </p>
+
+  <h3 style="font-size: 14px; margin: 20px 0 6px;">Restore one</h3>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Upload a backup zip produced by the button above (or the <code>portal.db</code> from
+    inside one) to replace your current database with it.
     This is <strong>data, not code</strong> — the opposite of the rollback points above,
     and neither can restore the other.
   </p>

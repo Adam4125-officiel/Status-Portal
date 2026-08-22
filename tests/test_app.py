@@ -3229,6 +3229,32 @@ def test_the_users_page_distinguishes_blocked_here_from_disabled_in_jellyfin(cli
     assert "disabled in Jellyfin" in body
 
 
+def test_portal_access_is_a_toggle_that_works_without_javascript(client, isolated_db):
+    """The switch is decorative markup around a real checkbox; the hidden field carries
+    the value to switch to, so the same form works whether JS submits it on change or
+    the visitor presses the fallback button."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    body = client.get("/admin/users").data.decode()
+    assert 'class="switch"' in body
+    # Currently allowed, so the form's hidden value must be the *other* state.
+    assert 'name="allow" value="0"' in body
+    assert "switch-form__fallback" in body
+
+    client.post("/admin/users/u1/access", data={"allow": "0"})
+    body = client.get("/admin/users").data.decode()
+    assert 'name="allow" value="1"' in body
+
+
+def test_a_user_disabled_in_jellyfin_gets_no_toggle(client, isolated_db):
+    """There is nothing for the admin to decide - the fix is in Jellyfin, and offering a
+    switch here would imply otherwise."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u2", "name": "off", "is_disabled": True}])
+    body = client.get("/admin/users").data.decode()
+    assert 'class="switch"' not in body
+
+
 # ---------------------------------------------------------------------------
 # The sign-in control in the fixed page-actions cluster
 # ---------------------------------------------------------------------------

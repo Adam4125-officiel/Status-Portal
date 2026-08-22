@@ -1366,9 +1366,16 @@ DB-backed Settings pages, not a code edit.
   the nav label is now also the thing that decides the other two when they disagree.
   Renaming a nav entry means checking all three (this is why "Discord Bot — Servers"
   became "Discord servers" in three places at once).
-- **Every nav entry needs its own `active` key.** A sub-page sharing its parent's key
-  (as `/admin/discord-bot/guilds` did) highlights the wrong entry the moment it gets
-  its own line in the nav.
+- **A sub-page reached only from its parent's own button gets no nav entry**, and sets
+  `active` to its *parent's* key so the nav still shows where you are. Discord servers
+  briefly had both a nav entry and an in-page button to the same place; the button won,
+  because it sits next to the bot settings the page is about.
+- **Toggling a boolean in an admin table uses `.switch`** (`static/css/style.css` +
+  `static/js/admin_toggle.js`), not a badge plus a separate Block/Allow button — that
+  made the reader work out the current state from two elements written in different
+  tones. The markup keeps a real focusable checkbox for keyboards and screen readers,
+  and a hidden field carrying the value to *become*, so the same form works with JS
+  (submit on change) and without it (a fallback button the script hides).
 
 ## Notification channels (`/admin/notifications`, `notifications.py`)
 

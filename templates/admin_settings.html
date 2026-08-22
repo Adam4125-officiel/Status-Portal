@@ -182,16 +182,6 @@
   </div>
 </form>
 
-<div class="form-panel" style="margin-bottom: 20px;">
-  <div class="field">
-    <label>Database backup</label>
-    <div class="field-hint">Downloads a zipped, consistent snapshot of <code>instance/portal.db</code> right now — separate from the automatic backups the self-updater takes before every update. Useful as a safety net before poking at something by hand, or just to keep an off-box copy.</div>
-  </div>
-  <div class="form-actions">
-    <a href="{{ url_for('admin_settings_backup_db') }}" class="btn secondary">Download backup</a>
-  </div>
-</div>
-
 <form method="POST" class="form-panel">
   <div class="field">
     <label for="current_password">Current password</label>

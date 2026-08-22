@@ -3126,7 +3126,11 @@ def admin_discord_bot_guilds():
                             token_configured=bool(config.DISCORD_BOT_TOKEN),
                             connected=status["connected"], guilds=status["guilds"],
                             channel_whitelist=db.get_setting("discordbot_channel_whitelist", ""),
-                            active="discord-bot-guilds")
+                            # Reached from the Discord bot page's own button rather than
+                            # from the nav, so it highlights its parent - a sub-page with
+                            # no nav entry of its own must not leave the nav showing
+                            # nothing selected.
+                            active="discord-bot")
 
 
 # ---- Scheduled tasks (see scheduler.py - the framework; the tasks themselves are
