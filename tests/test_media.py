@@ -420,7 +420,7 @@ def test_the_section_can_be_made_public_while_sign_in_is_enabled(client, monkeyp
 def test_media_is_a_registered_public_page(isolated_db):
     """It moved off the main page into one of its own, so it belongs in PUBLIC_PAGES -
     which is what drives the route, the nav link and the summary alike."""
-    assert "media" in [key for key, _, _, _, _ in app_module.PUBLIC_PAGES]
+    assert "media" in [entry[0] for entry in app_module.PUBLIC_PAGES]
     assert "media" not in [key for key, _ in app_module.PUBLIC_SECTIONS]
 
 

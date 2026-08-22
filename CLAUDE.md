@@ -847,6 +847,17 @@ DB-backed Settings pages, not a code edit.
   admin. `PUBLIC_PAGES` (resources, VMs, Jellyfin activity, media, practical info) are
   pages of their own, reached from the shared `.page-nav` and summarised in one line on
   the main page. The main page answers "is it working?"; everything else is a click away.
+- **Availability and content are two different questions, and the nav must only ask the
+  cheap one.** Each entry in `PUBLIC_PAGES` has an availability predicate (settings
+  only) *and* a context builder (which may poll the machine). Building the nav by
+  calling every context builder meant every public page ran a full resource snapshot —
+  200ms+, and worse when `monitoring`'s CPU cache is stale and `get_resource_snapshot()`
+  falls back to a blocking sample. Jellyfin activity was paying for a disk and CPU poll
+  it never displays, which is what made it look like it had hung. Anything touching the
+  filesystem, the network or psutil belongs in the builder, never the predicate.
+- **`_request_snapshot()` memoises the resource snapshot on `g`.** The main page wants
+  it twice (high-load badge, resources summary) and it's the most expensive thing a
+  public page does.
 - **A page's context builder is the single gate, used by the page *and* the nav *and*
   the summary.** That is what stops a sub-page becoming a way around a `show_public_*`
   setting or `media_requires_login`: if the builder returns `None` the route 404s, the

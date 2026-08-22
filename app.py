@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
@@ -937,13 +937,24 @@ def _group_services(services):
 # corresponding block. A page whose builder reports nothing to show is not linked and
 # 404s if requested directly - the same answer a visitor would get if it didn't exist,
 # rather than an empty page confirming the feature is there but switched off.
+def _request_snapshot():
+    """One resource snapshot per request, memoised on Flask's `g`.
+
+    The main page can want it twice - once for the high-load badge and once for the
+    "Server resources" summary line - and a snapshot is the single most expensive thing
+    a public page does (it reads every disk, and falls back to a blocking CPU sample
+    when monitoring's cache is stale). Taking it twice for one page is pure waste."""
+    if not hasattr(g, "_resource_snapshot"):
+        g._resource_snapshot = monitoring.get_resource_snapshot()
+    return g._resource_snapshot
+
+
 def _resources_context():
     visible = _public_resource_visibility()
     show_any = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
     if not show_any:
         return None
-    snapshot = monitoring.get_resource_snapshot()
-    return {"visible": visible, "snapshot": snapshot, "show_any_resource": show_any}
+    return {"visible": visible, "snapshot": _request_snapshot(), "show_any_resource": show_any}
 
 
 def _vms_context():
@@ -983,25 +994,40 @@ def _high_load():
     visible = _public_resource_visibility()
     if not visible["highload"]:
         return {"active": False, "reasons": []}
-    snapshot = monitoring.get_resource_snapshot()
+    snapshot = _request_snapshot()
     return integrations.evaluate_high_load(snapshot) if snapshot else {"active": False, "reasons": []}
 
 
-# key -> (label, endpoint, context builder, summary builder). The summary is the line
-# shown on the main page; returning a falsy summary still links the page, it just has
-# nothing to say about it yet.
-PUBLIC_PAGES = [
-    ("resources", "Server resources", "public_resources", _resources_context,
-     lambda ctx: _resources_summary(ctx)),
-    ("vms", "Virtual machines", "public_vms", _vms_context,
-     lambda ctx: _vms_summary(ctx)),
-    ("activity", "Jellyfin activity", "public_activity", _activity_context,
-     lambda ctx: _activity_summary(ctx)),
-    ("media", "Media activity", "public_media", _media_context,
-     lambda ctx: _media_summary(ctx)),
-    ("info", "Practical info", "public_info", _info_context,
-     lambda ctx: "How to connect, and what to do when something's wrong"),
-]
+# Whether a page exists for this viewer, answered *without* building its content.
+#
+# This split is load-bearing for performance, not tidiness. The nav appears on every
+# public page, and building it by calling each page's context builder meant every page
+# load ran a full resource snapshot - 200ms+, and worse when monitoring's CPU cache is
+# stale and get_resource_snapshot() falls back to a blocking sample. Navigating to
+# Jellyfin activity was paying for a disk and CPU poll it never displays, which is
+# what made those pages look like they'd hung.
+#
+# Each predicate reads settings only. They must stay cheap: anything that talks to the
+# filesystem, the network or psutil belongs in the context builder, not here.
+def _resources_available():
+    visible = _public_resource_visibility()
+    return any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
+
+
+def _vms_available():
+    return _public_resource_visibility()["vms"]
+
+
+def _activity_available():
+    return _public_resource_visibility()["jellyfin_tasks"]
+
+
+def _media_available():
+    return any(_public_media_visibility().values()) and _media_visible_to(current_user())
+
+
+def _info_available():
+    return bool((db.get_info_page() or "").strip())
 
 
 def _resources_summary(ctx):
@@ -1043,20 +1069,39 @@ def _media_summary(ctx):
     return " · ".join(bits)
 
 
+# key -> (label, endpoint, availability predicate, context builder, summary builder).
+# The summary is the line shown on the main page; returning a falsy summary still links
+# the page, it just has nothing to say about it yet.
+PUBLIC_PAGES = [
+    ("resources", "Server resources", "public_resources", _resources_available,
+     _resources_context, _resources_summary),
+    ("vms", "Virtual machines", "public_vms", _vms_available,
+     _vms_context, _vms_summary),
+    ("activity", "Jellyfin activity", "public_activity", _activity_available,
+     _activity_context, _activity_summary),
+    ("media", "Media activity", "public_media", _media_available,
+     _media_context, _media_summary),
+    ("info", "Practical info", "public_info", _info_available,
+     _info_context, lambda ctx: "How to connect, and what to do when something's wrong"),
+]
+
+
 def _public_page_links(include_summaries=False):
     """Which sub-pages a visitor can see right now, for the nav and the summaries.
 
-    Built by calling each page's own context builder, so "is it linked" and "does it
-    render" can never disagree - a link to a page that would 404 is worse than no link."""
+    Availability comes from the cheap predicate; the (possibly expensive) context is
+    built only when a summary is actually wanted, i.e. on the main page. "Is it linked"
+    and "does it render" still agree, because the page route applies the same predicate
+    before rendering - a link to a page that would 404 is worse than no link."""
     links = []
-    for key, label, endpoint, build_context, summarise in PUBLIC_PAGES:
-        context = build_context()
-        if context is None:
+    for key, label, endpoint, available, build_context, summarise in PUBLIC_PAGES:
+        if not available():
             continue
         entry = {"key": key, "label": label, "url": url_for(endpoint)}
         if include_summaries:
             try:
-                entry["summary"] = summarise(context) or ""
+                context = build_context()
+                entry["summary"] = (summarise(context) or "") if context else ""
             except Exception:
                 # A summary is decoration; it must never be the reason a page 500s.
                 _logger.exception("Could not summarise public page '%s'", key)
@@ -1070,8 +1115,8 @@ def _render_public_page(key):
     entry = next((p for p in PUBLIC_PAGES if p[0] == key), None)
     if entry is None:
         abort(404)
-    _, label, _, build_context, _ = entry
-    context = build_context()
+    _, label, _, available, build_context, _ = entry
+    context = build_context() if available() else None
     if context is None:
         # Switched off, or not visible to this viewer. 404 rather than an empty page:
         # "this doesn't exist here" is the honest answer, and an empty page would
