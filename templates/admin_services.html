@@ -7,35 +7,37 @@
 </div>
 
 {% if services %}
-<table class="admin-table">
-  <thead>
-    <tr><th>Service</th><th>Group</th><th>Runs on</th><th>Status</th><th>Auto-check</th><th>Link</th><th></th></tr>
-  </thead>
-  <tbody>
-    {% for s in services %}
-    <tr>
-      <td>{{ s.icon }} <strong>{{ s.name }}</strong></td>
-      <td>{{ s.group_name or '—' }}</td>
-      <td>
-        {% if s.run_target == 'host' %}Host ({{ hostname }})
-        {% elif s.run_target.startswith('vm:') %}VM: {{ s.run_target[3:] }}
-        {% else %}—{% endif %}
-      </td>
-      <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}{% if s.ignore_in_overall_status %} <span style="color: var(--text-faint);">(ignored)</span>{% endif %}</td>
-      <td>{{ 'yes' if s.auto_check else 'no' }}</td>
-      <td>{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>{% else %}—{% endif %}</td>
-      <td class="actions">
-        <a href="{{ url_for('badge_service', service_id=s.id) }}" target="_blank" title="Embeddable SVG status badge">Badge</a>
-        <a href="{{ url_for('admin_service_edit', service_id=s.id) }}">Edit</a>
-        <form action="{{ url_for('admin_service_delete', service_id=s.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Delete {{ s.name }}?');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="admin-table">
+  <table>
+    <thead>
+      <tr><th>Service</th><th>Group</th><th>Runs on</th><th>Status</th><th>Auto-check</th><th>Link</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for s in services %}
+      <tr>
+        <td>{{ s.icon }} <strong>{{ s.name }}</strong></td>
+        <td>{{ s.group_name or '—' }}</td>
+        <td>
+          {% if s.run_target == 'host' %}Host ({{ hostname }})
+          {% elif s.run_target.startswith('vm:') %}VM: {{ s.run_target[3:] }}
+          {% else %}—{% endif %}
+        </td>
+        <td>{{ s.status }}{% if s.manual_override %} (forced){% endif %}{% if s.ignore_in_overall_status %} <span style="color: var(--text-faint);">(ignored)</span>{% endif %}</td>
+        <td>{{ 'yes' if s.auto_check else 'no' }}</td>
+        <td>{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>{% else %}—{% endif %}</td>
+        <td class="actions">
+          <a href="{{ url_for('badge_service', service_id=s.id) }}" target="_blank" title="Embeddable SVG status badge">Badge</a>
+          <a href="{{ url_for('admin_service_edit', service_id=s.id) }}">Edit</a>
+          <form action="{{ url_for('admin_service_delete', service_id=s.id) }}" method="POST" style="display:inline"
+                onsubmit="return confirm('Delete {{ s.name }}?');">
+            <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <div class="empty-state">No services yet.</div>
 {% endif %}

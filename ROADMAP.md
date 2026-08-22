@@ -1,4 +1,12 @@
-# Candidate features (not built yet)
+# Candidate features
+
+**Eight of the items below were built in v1.8.0 (2026-08-21)** and are marked
+**BUILT** where they appear. They're kept here rather than deleted so the reasoning
+that went into them stays findable; `CLAUDE.md` documents how each one actually works,
+and `docs/HISTORY.md` records what was and wasn't verified.
+
+Still open: the external connectivity check, the stuck-download alert, admin-on-a-
+separate-port, the Jellyfin visibility model, and the Linux-native monitoring backend.
 
 Ideas discussed with Adam, written up so they can slot straight into
 `ROADMAP.md`. Each one lists a rough priority and implementation effort
@@ -10,7 +18,7 @@ where it landed.
 
 Contained but touch the schema or add a genuinely new concept.
 
-### Restore from backup
+### Restore from backup — **BUILT (v1.8.0)**
 The counterpart to the "download a backup" button (built — see CLAUDE.md).
 Let an admin upload a previously-downloaded backup zip and have the portal
 restore `instance/portal.db` from it. Meaningfully riskier than the export
@@ -39,7 +47,7 @@ there is that someone reaching for a restore is usually recovering from
 something, and will look on the About page next to rollback rather than in
 Settings. Same feature, one implementation.
 
-### Updater quality-of-life: release notes in the app, and restore from a backup zip
+### Updater quality-of-life: release notes in the app, and restore from a backup zip — **BUILT (v1.8.0)**
 Two related improvements to `/admin/about`, which today tells you *that* an
 update exists but nothing about what's in it, and can roll code back but not
 data.
@@ -91,7 +99,7 @@ call not chasing five separate incidents that are actually one.
 loop, plus a new status concept that isn't tied to any one service and needs
 its own banner/UI treatment on the public page.
 
-### Version-checker for the *Arr apps themselves
+### Version-checker for the *Arr apps themselves — **BUILT (v1.8.0)**
 Radarr, Sonarr and Prowlarr each expose their own current version and can be
 checked against their latest GitHub release — the same way this app already
 checks its own version for self-updates. This would surface "Radarr has an
@@ -103,7 +111,7 @@ web UIs to know if anything's behind.
 `updater.py` is already there to reuse, but each app has its own
 releases API/format to query and parse.
 
-### Per-user notifications: Discord DM and email
+### Per-user notifications: Discord DM and email — **BUILT (v1.8.0)**
 The portal already notifies *the admin* (Discord webhook, ntfy). This is the
 other direction: telling **the person who asked** when something they care
 about happens — their problem report got a reply or was turned into an
@@ -152,7 +160,7 @@ per-user preferences surface. Best split: Discord DM first (the bot is already
 there), email second (needs the SMTP config below), Seerr contact reuse last,
 since it's the only part that can be wrong in a way that matters.
 
-### Email notifications
+### Email notifications — **BUILT (v1.8.0)**
 A third notification channel alongside the existing Discord webhook and
 ntfy, for incident/maintenance events. Needs an SMTP configuration block in
 `.env` (host, port, credentials, from-address) and a plain-text/HTML
@@ -168,7 +176,7 @@ and a template; the "when to send" logic itself doesn't change.
 New integrations or genuinely stateful logic — worth doing, but each is a
 project of its own rather than an afternoon.
 
-### Radarr + Prowlarr + qBittorrent integration
+### Radarr + Prowlarr + qBittorrent integration — **BUILT (v1.8.0)**
 Three new read-only integrations feeding a new section: what's coming up
 (Radarr's release calendar), what's been requested and its current state,
 and what's actively downloading right now with progress. Note that
@@ -183,7 +191,7 @@ no hard dependency between them; this can be built and shown flat first.
 different auth shapes, new parsing per app, and new UI sections on top of
 the existing `integrations.py` pattern.
 
-### Unified search across Jellyfin and Seerr (signed-in users only)
+### Unified search across Jellyfin and Seerr (signed-in users only) — **BUILT (v1.8.0)**
 One search box on the public page that queries **Jellyfin** and **Seerr**
 at the same time and merges the results, so a visitor asks "do we have X?"
 once instead of checking two places. Each result then offers the action that
@@ -221,7 +229,7 @@ Two things to decide before building:
 same title from both sources must not appear twice), a write action, a new
 UI, and the auth/rate-limiting story above.
 
-### Prowlarr per-indexer health
+### Prowlarr per-indexer health — **BUILT (v1.8.0)**
 Prowlarr's own API already reports each configured indexer's individual
 state (healthy / down / rate-limited), not just whether Prowlarr itself is
 reachable. Surfacing that per-indexer list matters because "Prowlarr is up"
@@ -233,7 +241,7 @@ fine.
 Prowlarr integration above; needs its own endpoint parsing and a small
 per-indexer list in the UI.
 
-### Seerr pending-approval count + Discord DM to admins
+### Seerr pending-approval count + Discord DM to admins — **BUILT (v1.8.0)**
 Polls Seerr for requests awaiting approval and surfaces a count, plus has
 the Discord bot DM admins directly (not post to a channel) when a new one
 comes in. Two things worth deciding before building: whether the count is
@@ -349,9 +357,8 @@ instead.
 
 ## Overall take
 
-The original five quick wins plus service dependencies are all built now
-(see CLAUDE.md for the reasoning behind each) — what's left below is
-genuinely more work, not more of the same. **Restore from backup** is the
+Most of this document is now built (v1.8.0 took eight of these items). What
+remains is genuinely different in character rather than more of the same. **Restore from backup** is the
 one item worth flagging out of proportion to its Medium priority: it's the
 riskiest thing in this document precisely because its counterpart (export)
 was so easy — don't let that make restore feel like a quick add too. Of the

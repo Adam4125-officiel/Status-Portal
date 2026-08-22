@@ -11,11 +11,98 @@
   can control those services — it only reads their health/logs.
 </p>
 
+{% if seerr_diagnosis %}
+<div class="form-panel" style="margin-bottom: 16px; border-color: var(--brand);">
+  <h2 style="font-size: 15px; margin: 0 0 8px;">Seerr search diagnosis</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">{{ seerr_diagnosis.verdict }}</p>
+  <div class="admin-table" style="font-size: 12.5px;">
+    <table>
+      <thead><tr><th style="width: 210px;">Call</th><th style="width: 90px;">Result</th><th style="width: 80px;">Took</th><th>What it depends on</th></tr></thead>
+      <tbody>
+        {% for c in seerr_diagnosis.checks %}
+        <tr>
+          <td><strong>{{ c.name }}</strong></td>
+          <td>
+            {% if c.ok %}<span class="led ok"></span> ok
+            {% else %}<span class="led crit"></span> failed{% endif %}
+            {% if c.status_code %}<div style="color: var(--text-faint);">HTTP {{ c.status_code }}</div>{% endif %}
+          </td>
+          <td>{{ c.elapsed_ms }} ms<div style="color: var(--text-faint);">limit {{ c.timeout }}s</div></td>
+          <td>
+            {{ c.note }}
+            {% if c.error %}<div style="color: var(--crit); margin-top: 4px;">{{ c.error }}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="form-panel" style="margin-bottom: 16px;">
+  <div class="panel-header">
+    <h2 style="font-size: 15px; margin: 0;">App updates</h2>
+    <form action="{{ url_for('admin_task_run', name=version_task.name) }}" method="POST" style="display:inline;">
+      <button type="submit" class="btn secondary" style="padding:4px 10px;"{{ ' disabled' if version_task.running }}>
+        {{ 'Checking…' if version_task.running else 'Check now' }}
+      </button>
+    </form>
+  </div>
+  <p style="color: var(--text-dim); font-size: 13px; margin: 0 0 12px;">
+    Whether your Radarr, Sonarr and Prowlarr are behind their latest release — so you
+    don't have to open three web UIs to find out. Read-only: this portal never updates
+    them, and can't. Which app each integration is comes from the app's own
+    <code>appName</code>, not from the name you gave it here.
+  </p>
+
+  {% if not version_check %}
+    <div class="empty-state">
+      Not checked yet — this runs as the <strong>{{ version_task.label }}</strong> scheduled task
+      ({% if version_task.enabled %}{% if version_task.schedule_kind == 'daily' %}daily at {{ version_task.daily_at }} UTC{% else %}every {{ version_task.interval_minutes }} min{% endif %}{% else %}currently disabled{% endif %}),
+      or press “Check now”.
+    </div>
+  {% else %}
+    <div class="admin-table" style="font-size: 13px;">
+      <table>
+        <thead>
+          <tr><th style="width: 170px;">Integration</th><th style="width: 110px;">Installed</th><th style="width: 110px;">Latest</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {% for r in version_check.results %}
+          <tr>
+            <td><strong>{{ r.name }}</strong>{% if r.app %} <span style="color: var(--text-faint);">({{ r.app }})</span>{% endif %}</td>
+            <td>{{ r.installed or '—' }}</td>
+            <td>
+              {% if r.latest %}
+                <a href="{{ r.latest_url }}" target="_blank" rel="noopener noreferrer">{{ r.latest }} ↗</a>
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              {% if r.error %}
+                <span class="led maint"></span> <span style="color: var(--text-dim);">{{ r.error }}</span>
+              {% elif r.update_available %}
+                <span class="led warn"></span> <strong>Update available</strong>
+              {% else %}
+                <span class="led ok"></span> Up to date
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="resource-card__sub" style="margin-top: 8px;">
+      Last checked <span class="local-time" data-utc="{{ version_check.checked_at }}">{{ version_check.checked_at[:16].replace('T', ' ') }} UTC</span>
+    </div>
+  {% endif %}
+</div>
+
 {% if integrations %}
 {% for i in integrations %}
   {% set entry = statuses.get(i.id) %}
   <div class="form-panel" style="margin-bottom: 12px;">
-    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+    <div class="panel-header">
       <h2 style="font-size: 15px; margin: 0;">{{ i.name }}
         <span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">({{ i.kind }})</span>
       </h2>
@@ -23,6 +110,11 @@
         <form action="{{ url_for('admin_integration_check_now', iid=i.id) }}" method="POST" style="display:inline;">
           <button type="submit" class="btn secondary" style="padding:4px 10px;">Check now</button>
         </form>
+        {% if i.kind == 'jellyseerr' %}
+        <form action="{{ url_for('admin_integration_diagnose', iid=i.id) }}" method="POST" style="display:inline;">
+          <button type="submit" class="btn secondary" style="padding:4px 10px; margin-left:6px;">Diagnose search</button>
+        </form>
+        {% endif %}
         <a href="{{ url_for('admin_integration_edit', iid=i.id) }}" style="margin-left: 8px;">Edit</a>
         <form action="{{ url_for('admin_integration_delete', iid=i.id) }}" method="POST" style="display:inline; margin-left: 8px;"
               onsubmit="return confirm('Delete {{ i.name }}?');">

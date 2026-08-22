@@ -1,0 +1,40 @@
+{% extends "public_base.html" %}
+{% block title %}Where should we reach you? — {{ site_name }}{% endblock %}
+{% block content %}
+<section class="section">
+  <h2 class="section__title">Where should we reach you?</h2>
+  <div class="form-panel" style="max-width: 560px;">
+    <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+      Hi {{ user.name }} — this portal can tell you when the admin replies to a problem
+      you reported, or when something you requested arrives. It has nowhere to send that
+      yet.
+    </p>
+    <p style="font-size: 13px; color: var(--text-dim);">
+      Anything you enter is saved to your Jellyseerr account too, so you only fill it in
+      once. Leaving this blank is completely fine — nothing else changes, and you won't
+      be asked again.
+    </p>
+    <form method="POST">
+      <div class="field">
+        <label for="notify_email">Email address</label>
+        <input type="email" id="notify_email" name="notify_email" autocomplete="email"
+               placeholder="you@example.com">
+      </div>
+      <div class="field">
+        <label for="notify_discord_id">Discord user ID</label>
+        <input type="text" id="notify_discord_id" name="notify_discord_id"
+               inputmode="numeric" placeholder="123456789012345678">
+        <div class="field-hint">
+          Not your username — the numeric ID. Enable Developer Mode in Discord
+          (Settings → Advanced), then right-click yourself → Copy User ID. The bot can
+          only message you if you share a server with it and allow DMs from server members.
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn">Save</button>
+        <button type="submit" name="skip" value="1" class="btn secondary">Not now</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

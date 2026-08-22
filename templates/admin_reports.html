@@ -9,71 +9,73 @@
 </p>
 
 {% if reports %}
-<table class="admin-table">
-  <thead><tr><th>Message</th><th>Service</th><th>From</th><th>Contact</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
-  <tbody>
-    {% for r in reports %}
-    <tr>
-      <td style="max-width: 320px;">{{ r.message }}</td>
-      <td>{{ r.service_name or '—' }}</td>
-      <td>{% if r.reporter_user %}👤 {{ r.reporter_user }}{% else %}<span style="color: var(--text-faint);">anonymous</span>{% endif %}</td>
-      <td>{{ r.contact or '—' }}</td>
-      <td>
-        <form action="{{ url_for('admin_report_status', rid=r.id) }}" method="POST" style="display:inline">
-          <select name="status" onchange="this.form.submit()">
-            <option value="new" {{ 'selected' if r.status == 'new' }}>New</option>
-            <option value="reviewed" {{ 'selected' if r.status == 'reviewed' }}>Reviewed</option>
-            <option value="resolved" {{ 'selected' if r.status == 'resolved' }}>Resolved</option>
-          </select>
-        </form>
-      </td>
-      <td><span class="local-time" data-utc="{{ r.created_at }}">{{ r.created_at[:16].replace('T', ' ') }} UTC</span></td>
-      <td class="actions">
-        <form action="{{ url_for('admin_report_create_incident', rid=r.id) }}" method="POST" style="display:inline">
-          <button type="submit" class="btn secondary" style="padding:4px 10px;">Create incident</button>
-        </form>
-        <form action="{{ url_for('admin_report_delete', rid=r.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Delete this report?');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
-        </form>
-      </td>
-    </tr>
-    <tr>
-      {# The reply spans the full width on its own row rather than squeezing a
-         textarea into the actions cell - a reply is usually a sentence or three,
-         and this table already has seven columns. #}
-      <td colspan="7" style="padding-top: 0;">
-        {% for m in r.messages %}
-          <div class="account-reply {{ 'account-reply--mine' if m.author == 'admin' }}" style="margin-bottom: 8px;">
-            <div class="account-reply__label">
-              {{ 'You' if m.author == 'admin' else ('👤 ' ~ (r.reporter_user or 'the reporter')) }}
-              · <span class="local-time" data-utc="{{ m.created_at }}">{{ m.created_at[:16].replace('T', ' ') }} UTC</span>
-              {% if m.author == 'admin' %}· {{ 'read' if m.seen else 'unread' }}{% endif %}
+<div class="admin-table">
+  <table>
+    <thead><tr><th>Message</th><th>Service</th><th>From</th><th>Contact</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+    <tbody>
+      {% for r in reports %}
+      <tr>
+        <td style="max-width: 320px;">{{ r.message }}</td>
+        <td>{{ r.service_name or '—' }}</td>
+        <td>{% if r.reporter_user %}👤 {{ r.reporter_user }}{% else %}<span style="color: var(--text-faint);">anonymous</span>{% endif %}</td>
+        <td>{{ r.contact or '—' }}</td>
+        <td>
+          <form action="{{ url_for('admin_report_status', rid=r.id) }}" method="POST" style="display:inline">
+            <select name="status" onchange="this.form.submit()">
+              <option value="new" {{ 'selected' if r.status == 'new' }}>New</option>
+              <option value="reviewed" {{ 'selected' if r.status == 'reviewed' }}>Reviewed</option>
+              <option value="resolved" {{ 'selected' if r.status == 'resolved' }}>Resolved</option>
+            </select>
+          </form>
+        </td>
+        <td><span class="local-time" data-utc="{{ r.created_at }}">{{ r.created_at[:16].replace('T', ' ') }} UTC</span></td>
+        <td class="actions">
+          <form action="{{ url_for('admin_report_create_incident', rid=r.id) }}" method="POST" style="display:inline">
+            <button type="submit" class="btn secondary" style="padding:4px 10px;">Create incident</button>
+          </form>
+          <form action="{{ url_for('admin_report_delete', rid=r.id) }}" method="POST" style="display:inline"
+                onsubmit="return confirm('Delete this report?');">
+            <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+          </form>
+        </td>
+      </tr>
+      <tr>
+        {# The reply spans the full width on its own row rather than squeezing a
+           textarea into the actions cell - a reply is usually a sentence or three,
+           and this table already has seven columns. #}
+        <td colspan="7" style="padding-top: 0;">
+          {% for m in r.messages %}
+            <div class="account-reply {{ 'account-reply--mine' if m.author == 'admin' }}" style="margin-bottom: 8px;">
+              <div class="account-reply__label">
+                {{ 'You' if m.author == 'admin' else ('👤 ' ~ (r.reporter_user or 'the reporter')) }}
+                · <span class="local-time" data-utc="{{ m.created_at }}">{{ m.created_at[:16].replace('T', ' ') }} UTC</span>
+                {% if m.author == 'admin' %}· {{ 'read' if m.seen else 'unread' }}{% endif %}
+              </div>
+              <div class="account-reply__body">{{ m.body }}</div>
             </div>
-            <div class="account-reply__body">{{ m.body }}</div>
-          </div>
-        {% endfor %}
-        <form action="{{ url_for('admin_report_reply', rid=r.id) }}" method="POST"
-              style="display: flex; gap: 8px; align-items: flex-start;">
-          <textarea name="reply" rows="2" class="reply-box"
-                    placeholder="{{ 'Reply to ' ~ r.reporter_user ~ '…' if r.reporter_user_id else 'Anonymous report — a reply here would never be seen' }}"
-                    style="flex: 1; min-height: 44px;"
-                    {{ 'disabled' if not r.reporter_user_id }}></textarea>
-          {% if r.reporter_user_id %}
-          <button type="submit" class="btn secondary" style="padding:6px 12px;">Reply</button>
+          {% endfor %}
+          <form action="{{ url_for('admin_report_reply', rid=r.id) }}" method="POST"
+                style="display: flex; gap: 8px; align-items: flex-start;">
+            <textarea name="reply" rows="2" class="reply-box"
+                      placeholder="{{ 'Reply to ' ~ r.reporter_user ~ '…' if r.reporter_user_id else 'Anonymous report — a reply here would never be seen' }}"
+                      style="flex: 1; min-height: 44px;"
+                      {{ 'disabled' if not r.reporter_user_id }}></textarea>
+            {% if r.reporter_user_id %}
+            <button type="submit" class="btn secondary" style="padding:6px 12px;">Reply</button>
+            {% endif %}
+          </form>
+          {% if not r.reporter_user_id %}
+            <div class="field-hint" style="margin-top: 4px;">
+              Submitted anonymously (or before replies existed), so there's no account to
+              show a reply on. Use the contact details if there are any.
+            </div>
           {% endif %}
-        </form>
-        {% if not r.reporter_user_id %}
-          <div class="field-hint" style="margin-top: 4px;">
-            Submitted anonymously (or before replies existed), so there's no account to
-            show a reply on. Use the contact details if there are any.
-          </div>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <div class="empty-state">No reports yet.</div>
 {% endif %}

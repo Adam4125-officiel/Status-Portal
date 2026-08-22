@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Search — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="container">
+  <div class="topbar">
+    <div>
+      <div class="topbar__brand">{{ site_name }}</div>
+      <div class="topbar__sub">Search the library, and ask for what isn't in it</div>
+    </div>
+    <a class="btn secondary" href="{{ url_for('index') }}">← Back to status</a>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="GET" action="{{ url_for('search') }}" class="search-form">
+    <input type="search" name="q" value="{{ query }}" placeholder="Film or series title…"
+           autocomplete="off" autofocus maxlength="100" aria-label="Search the library">
+    <button type="submit" class="btn">Search</button>
+  </form>
+
+  {% if rate_limited %}
+    <div class="flash error">
+      That's a lot of searching in a short time — give it a minute and try again.
+    </div>
+  {% elif not outcome.available %}
+    <div class="empty-state">
+      Search is unavailable right now — neither Jellyfin nor Jellyseerr could be reached.
+      Nothing is wrong with your query; try again shortly.
+    </div>
+  {% elif query %}
+    {% if outcome.errors %}
+      <div class="flash error">
+        Showing partial results —
+        {% for source, reason in outcome.errors.items() %}
+          {{ source }} {{ reason }}{% if not loop.last %}, {% endif %}
+        {% endfor %}.
+        Anything only that source knows about is missing.
+      </div>
+    {% endif %}
+
+    {% if not outcome.results %}
+      <div class="empty-state">Nothing found for “{{ query }}”.</div>
+    {% else %}
+      <div class="search-results">
+        {% for item in outcome.results %}
+        <div class="search-result">
+          <div class="search-result__main">
+            <div class="search-result__title">
+              {{ item.title }}{% if item.year %} <span class="search-result__year">({{ item.year }})</span>{% endif %}
+              <span class="pill">{{ 'Series' if item.media_type == 'tv' else 'Film' }}</span>
+            </div>
+            {% if item.overview %}
+              <div class="search-result__overview">{{ item.overview }}</div>
+            {% endif %}
+          </div>
+          <div class="search-result__action">
+            {% if item.in_library %}
+              {% set link = jellyfin_url(item.jellyfin_id) if item.jellyfin_id else '' %}
+              {% if link %}
+                <a class="btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Watch now ↗</a>
+              {% else %}
+                <span class="pill ok">In the library</span>
+              {% endif %}
+            {% elif item.requested %}
+              <span class="pill warn">Already requested</span>
+            {% elif can_request and item.tmdb_id %}
+              <form method="POST" action="{{ url_for('search_request') }}">
+                <input type="hidden" name="media_type" value="{{ item.media_type }}">
+                <input type="hidden" name="tmdb_id" value="{{ item.tmdb_id }}">
+                <input type="hidden" name="q" value="{{ query }}">
+                <button type="submit" class="btn secondary">Request this</button>
+              </form>
+            {% else %}
+              <span class="pill">Not in the library</span>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      Type a title to see whether it's already here — and ask for it if it isn't.
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

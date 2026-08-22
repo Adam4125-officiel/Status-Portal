@@ -18,7 +18,7 @@
 {% if tasks %}
 {% for t in tasks %}
   <div class="form-panel" style="margin-bottom: 12px;">
-    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+    <div class="panel-header">
       <h2 style="font-size: 15px; margin: 0;">{{ t.label }}
         {% if not t.enabled %}<span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">(disabled)</span>{% endif %}
       </h2>
@@ -109,6 +109,50 @@
 {% endfor %}
 {% else %}
 <div class="empty-state">No scheduled tasks are registered in this build.</div>
+{% endif %}
+
+{% if loops %}
+<div class="admin-header" style="margin-top: 28px;">
+  <h2 style="font-size: 16px;">Always-on background loops</h2>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 14px;">
+  These also run on a timer, but they aren't tasks and can't be rescheduled or switched
+  off from here — each one is listed with the reason why, and with the setting that does
+  control it. They're shown so this page is the complete answer to “what does this portal
+  do on a timer”, rather than two thirds of it.
+</p>
+<div class="form-panel">
+  <div class="admin-table" style="font-size: 13px;">
+    <table>
+      <thead>
+        <tr><th style="width: 190px;">Loop</th><th style="width: 110px;">Every</th><th style="width: 110px;">Running</th><th>Set by</th></tr>
+      </thead>
+      <tbody>
+        {% for l in loops %}
+        <tr>
+          <td>
+            <strong>{{ l.label }}</strong>
+            <div style="color: var(--text-dim); margin-top: 3px;">{{ l.description }}</div>
+          </td>
+          <td>{{ l.interval_seconds }}s</td>
+          <td>
+            {% if l.alive is none %}
+              {# Never started in this process - honest "not applicable", which reads
+                 differently from a thread that started and then died. #}
+              <span class="led maint"></span> not started
+            {% elif l.alive %}
+              <span class="led ok"></span> yes
+            {% else %}
+              <span class="led crit"></span> <strong>stopped</strong>
+            {% endif %}
+          </td>
+          <td><code>{{ l.configured_by }}</code><div style="color: var(--text-faint); margin-top: 3px;">in <code>.env</code>, needs a restart</div></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 {% endif %}
 
 <script src="{{ asset_url('js/admin_tasks.js') }}"></script>

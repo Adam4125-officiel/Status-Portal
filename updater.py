@@ -8,7 +8,9 @@ This module is the single implementation. Both entry points are thin wrappers:
   * `/admin/about`   - the in-app "Update now" button (app.py).
 
 Nothing here imports app.py (app.py imports this), and nothing here touches Flask -
-so the CLI works on a portal that won't even start.
+so the CLI works on a portal that won't even start. `scheduler` is imported too, to
+register the periodic update check as a proper scheduled task; it is subject to the
+same rule (config and db only, no Flask), so the CLI is unaffected.
 
 --------------------------------------------------------------------------------
 Security posture - read this before changing anything below
@@ -52,6 +54,7 @@ import requests
 
 import config
 import db
+import scheduler
 
 _logger = logging.getLogger(__name__)
 
@@ -190,11 +193,42 @@ def set_channel(channel):
         raise UpdateError(f"Could not save the channel setting: {e}")
 
 
+# The setting that governed automatic checking before it became a scheduled task.
+# Still read - once, at import - to seed the new task's default, so an admin who had
+# turned checking off doesn't silently get it back when they upgrade. Nothing writes
+# it any more; the task row is the source of truth from here on.
+LEGACY_CHECK_SETTING = "update_check_enabled"
+
+TASK_NAME = "update_check"
+
+
+def _read_task_enabled(name, default):
+    """The scheduled task's enabled flag, read without ever creating a database.
+
+    Same guard, and the same reasoning, as _read_setting() above: sqlite3.connect()
+    creates an empty file for a path that doesn't exist, and the CLI must not leave a
+    zero-table portal.db behind on a fresh install just by being asked whether
+    checking is on."""
+    if not os.path.isfile(db.DB_PATH):
+        return default
+    try:
+        row = db.get_task_row(name)
+    except Exception:
+        _logger.warning("Could not read the '%s' task row; assuming %r", name, default)
+        return default
+    return default if row is None else bool(row["enabled"])
+
+
 def update_check_enabled():
-    """Whether the background thread is allowed to poll GitHub at all. Off means the
-    About page only ever checks when the admin presses "Check now" - for someone who
-    would rather their home server not make a periodic outbound call."""
-    return _read_setting("update_check_enabled", "1") != "0"
+    """Whether the portal polls GitHub for releases on its own. Off means the About
+    page only ever checks when the admin presses "Check now" - for someone who would
+    rather their home server not make a periodic outbound call.
+
+    This is now the `update_check` scheduled task's own enabled flag, so there is one
+    switch rather than two that can disagree: /admin/tasks and /admin/about are two
+    views of the same row. Until that row exists, the legacy setting still answers."""
+    legacy_default = _read_setting(LEGACY_CHECK_SETTING, "1") != "0"
+    return _read_task_enabled(TASK_NAME, legacy_default)
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +271,36 @@ def _release_asset(release):
     return None
 
 
-def fetch_latest_release(channel=None):
-    """The highest-versioned release on the given channel, as a plain dict.
+def _normalise_release(release, channel):
+    """One GitHub release object -> the plain dict the rest of this module uses.
+
+    `body` is the changelog written at release time. It arrives from the network, so
+    every consumer must treat it as untrusted text: the About page renders it through
+    Jinja's `richtext` filter, which escapes first and then permits a deliberately
+    tiny subset of formatting. Never hand it to anything that emits raw HTML."""
+    return {
+        "tag": release.get("tag_name"),
+        "version": str(release.get("tag_name") or "").lstrip("vV"),
+        "name": release.get("name") or release.get("tag_name"),
+        "prerelease": bool(release.get("prerelease")),
+        "published_at": release.get("published_at"),
+        "html_url": release.get("html_url") or RELEASES_PAGE_URL,
+        "body": release.get("body") or "",
+        "asset": _release_asset(release),
+        "channel": channel,
+    }
+
+
+def fetch_releases(channel=None):
+    """Every usable release on the given channel, newest first *by parsed version*.
 
     stable   -> non-prerelease GitHub releases only.
     unstable -> prereleases too (this project's own `-rc.N` releases).
 
-    Note this picks by *version*, not by publish date: republishing an old release
-    must never look like an update, and a prerelease of an older line must never
-    outrank a newer stable one."""
+    Sorting by version rather than publish date is the same decision documented on
+    fetch_latest_release() below, applied to the whole list: republishing an old
+    release must never look like an update, and a prerelease of an older line must
+    never outrank a newer stable one."""
     channel = channel or get_channel()
     if channel not in CHANNELS:
         channel = DEFAULT_CHANNEL
@@ -282,18 +337,38 @@ def fetch_latest_release(channel=None):
     if not candidates:
         raise UpdateError(f"No {channel} release found in this repository yet.")
 
-    latest = max(candidates, key=lambda r: parse_version(r.get("tag_name")))
-    return {
-        "tag": latest.get("tag_name"),
-        "version": str(latest.get("tag_name") or "").lstrip("vV"),
-        "name": latest.get("name") or latest.get("tag_name"),
-        "prerelease": bool(latest.get("prerelease")),
-        "published_at": latest.get("published_at"),
-        "html_url": latest.get("html_url") or RELEASES_PAGE_URL,
-        "body": latest.get("body") or "",
-        "asset": _release_asset(latest),
-        "channel": channel,
-    }
+    candidates.sort(key=lambda r: parse_version(r.get("tag_name")), reverse=True)
+    return [_normalise_release(r, channel) for r in candidates]
+
+
+def fetch_latest_release(channel=None):
+    """The highest-versioned release on the given channel, as a plain dict.
+
+    Note this picks by *version*, not by publish date: republishing an old release
+    must never look like an update, and a prerelease of an older line must never
+    outrank a newer stable one."""
+    return fetch_releases(channel)[0]
+
+
+# How many intervening releases the About page will list notes for. A cap only so a
+# portal that has been left un-updated for a very long time doesn't render a page of
+# unbounded length (and doesn't cache one); in practice a handful is normal, and the
+# API fetch above is capped at 30 releases regardless.
+MAX_RELEASE_NOTES = 20
+
+
+def _release_notes_between(releases, current):
+    """The releases strictly newer than `current`, newest first, plus the entry for
+    the version being run if it happens to be on this channel.
+
+    Both halves matter on the About page: "what am I about to get" is unanswerable
+    without the first, and "should I take this?" is much easier with the second next
+    to it. Costs no extra request - it's the same response fetch_releases() already
+    parsed for the version and download URL."""
+    current_parsed = parse_version(current)
+    newer = [r for r in releases if parse_version(r["version"]) > current_parsed]
+    running = next((r for r in releases if parse_version(r["version"]) == current_parsed), None)
+    return newer[:MAX_RELEASE_NOTES], len(newer), running
 
 
 def check_for_update(channel=None):
@@ -316,11 +391,20 @@ def check_for_update(channel=None):
         "ahead": False,
         "checked_at": db.now_iso(),
     }
+    result["release_notes"] = []
+    result["release_notes_omitted"] = 0
+    result["current_notes"] = None
     try:
-        release = fetch_latest_release(channel)
+        releases = fetch_releases(channel)
     except UpdateError as e:
         result["error"] = str(e)
         return result
+    release = releases[0]
+
+    notes, total_newer, running = _release_notes_between(releases, current_version())
+    result["release_notes"] = notes
+    result["release_notes_omitted"] = max(0, total_newer - len(notes))
+    result["current_notes"] = running
 
     comparison = _compare(current_version(), release["version"])
     result.update({
@@ -350,10 +434,15 @@ def _compare(current, latest):
 # Cached update check (read by request handlers - never checked inline)
 # ---------------------------------------------------------------------------
 # Same rule and same shape as app.py's _integration_status_cache: an outbound HTTP
-# call must never happen inside a Flask request handler. The background health-check
-# loop calls refresh_update_cache_if_stale() on every tick; it no-ops until the TTL
-# has elapsed, so the loop's own (much shorter) interval doesn't turn into a GitHub
-# request every 2 minutes.
+# call must never happen inside a Flask request handler. The `update_check` scheduled
+# task registered at the bottom of this section is what refills it; the About page
+# only ever reads it.
+#
+# This used to be driven from the health-check loop via refresh_update_cache_if_stale(),
+# which had to carry its own TTL so a 120s health-check interval didn't become a GitHub
+# request every 120s. The scheduler owns "when" now, so that TTL no longer gates the
+# periodic check - refresh_update_cache_if_stale() remains for the "Check now" button
+# (which forces) and for anything that wants the cheap "only if stale" behaviour.
 _update_cache = {"result": None, "refreshed_monotonic": None}
 
 
@@ -386,6 +475,47 @@ def refresh_update_cache_if_stale(ttl_seconds=None, force=False, channel=None):
     if not force and last is not None and (time.monotonic() - last) < ttl:
         return _update_cache["result"]
     return refresh_update_cache(channel)
+
+
+def run_update_check_task():
+    """Body of the `update_check` scheduled task.
+
+    Checks unconditionally rather than going through refresh_update_cache_if_stale():
+    the scheduler already decided this was due, and a second opinion from a TTL here
+    would mean a task that reports "ran fine" while quietly doing nothing.
+
+    A network failure is raised so the scheduler records it as a failed run with the
+    message intact - that is strictly more informative than the silent degradation the
+    About page needs, and the About page is unaffected either way since it reads the
+    cache and renders "couldn't check" for a failed result."""
+    result = refresh_update_cache()
+    if not result["ok"]:
+        raise UpdateError(result["error"] or "Could not check for updates.")
+    if result["update_available"]:
+        return f"Update available: {result['current']} -> {result['latest']}."
+    if result["ahead"]:
+        return (f"Running {result['current']}, which is newer than the latest "
+                f"{result['channel']} release.")
+    return f"Up to date ({result['current']})."
+
+
+scheduler.register(
+    TASK_NAME,
+    "Update check",
+    "Asks GitHub whether a newer release of this portal has been published on the "
+    "channel you've selected, and caches the answer for the About page. Checking "
+    "never installs anything - it only decides whether the About page offers you the "
+    "button.",
+    run_update_check_task,
+    # Seeded from the setting that governed this before it was a task, so upgrading
+    # preserves an admin's existing "don't phone home" choice rather than resetting it.
+    default_enabled=_read_setting(LEGACY_CHECK_SETTING, "1") != "0",
+    # PORTAL_UPDATE_CHECK_INTERVAL_SECONDS is now the *default* for this task's
+    # schedule rather than a hard TTL: the interval is per-task, so per this project's
+    # config split it belongs in the database where an admin can change it, with the
+    # env var deciding what it starts as.
+    default_interval_minutes=max(1, config.UPDATE_CHECK_INTERVAL_SECONDS // 60),
+)
 
 
 # ---------------------------------------------------------------------------

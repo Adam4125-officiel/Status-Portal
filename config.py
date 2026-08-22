@@ -142,6 +142,57 @@ FORCE_HTTPS_COOKIES = os.environ.get("PORTAL_FORCE_HTTPS_COOKIES", "false").lowe
 DISCORD_WEBHOOK_URL = os.environ.get("PORTAL_DISCORD_WEBHOOK_URL", "").strip()
 NTFY_URL = os.environ.get("PORTAL_NTFY_URL", "").strip()
 
+# ---------------------------------------------------------------------------
+# Email notifications (the third channel - see notifications.py)
+# ---------------------------------------------------------------------------
+# Meaningfully more setup surface than the two URL-only channels above, which is the
+# tradeoff: it's worth it for anyone using neither Discord nor ntfy, and it's the only
+# channel that can reach a person who hasn't installed anything. Email is considered
+# configured only when host, from-address and at least one recipient are all present -
+# a half-filled block is treated as "not set up" rather than failing at send time.
+#
+# No new dependency: Python's standard smtplib and email packages do all of this.
+SMTP_HOST = os.environ.get("PORTAL_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("PORTAL_SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("PORTAL_SMTP_USERNAME", "").strip()
+# Deliberately not .strip()ed: a password is whatever the provider issued, and
+# trimming it would silently break a legitimate one that ends in a space.
+SMTP_PASSWORD = os.environ.get("PORTAL_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("PORTAL_SMTP_FROM", "").strip()
+# Comma-separated; where incident/maintenance alerts go. A *fallback* only - the
+# recipient list is a DB setting an admin edits from Notifications -> Channels, because
+# who gets told is a routine choice rather than a credential or deployment config. This
+# is still read so an install configured before that moved keeps working untouched.
+# Per-user notifications (a separate feature) address their own recipients and don't
+# read either.
+SMTP_TO = os.environ.get("PORTAL_SMTP_TO", "").strip()
+# starttls (587, the usual), ssl (465, implicit TLS), or none (25, unencrypted - only
+# sane for an SMTP server on the same machine or LAN).
+SMTP_SECURITY = os.environ.get("PORTAL_SMTP_SECURITY", "starttls").strip().lower()
+# Its own timeout rather than the 5s the HTTP channels share: an SMTP conversation is
+# several round trips plus a TLS handshake, and a relay that queues rather than
+# delivering immediately can still take a few seconds to accept. Same reasoning as
+# BYPARR_TIMEOUT_SECONDS and JELLYFIN_AUTH_TIMEOUT_SECONDS.
+SMTP_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SMTP_TIMEOUT_SECONDS", "10"))
+
+# ---------------------------------------------------------------------------
+# Unified search (see media_search.py)
+# ---------------------------------------------------------------------------
+# Search is the one place in this app where an outbound call genuinely happens inside a
+# request handler: the query isn't known until somebody types it, so no amount of
+# background refreshing can answer it from a cache. That makes the timeout the whole
+# safety story - a slow Jellyfin or Seerr must degrade to "search is unavailable right
+# now" quickly, not hold a request-handling thread (of which waitress has
+# WAITRESS_THREADS) while a person stares at a spinner. Deliberately shorter than every
+# other timeout here for that reason.
+SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"))
+
+# Per-session rate limit: how many searches in how long. A search box wired to two
+# external APIs is a free denial-of-service amplifier, and this is on top of the
+# signed-in-only restriction, not instead of it.
+SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "20"))
+SEARCH_RATE_WINDOW_SECONDS = int(os.environ.get("PORTAL_SEARCH_RATE_WINDOW_SECONDS", "60"))
+
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
 # Blank = disabled entirely, no bot thread started. A bot token is a full login
 # credential (not just a one-way webhook URL), so like the webhook URLs it's env-only,
@@ -184,10 +235,11 @@ JELLYFIN_AUTH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_JELLYFIN_AUTH_TIMEOUT
 # ---------------------------------------------------------------------------
 # Self-update (see updater.py / update.py)
 # ---------------------------------------------------------------------------
-# How often the background thread re-asks GitHub what the latest release is. This
-# is a check interval, so per this project's config split it's an env var, not a
-# DB setting - unlike the *channel* (stable/unstable), which is a routine toggle an
-# admin flips from the browser and therefore lives in the settings table.
+# How often the portal re-asks GitHub what the latest release is. The check is a
+# scheduled task now (see updater.py's registration), so this is the *default* for
+# that task's schedule rather than a hard interval: per-task scheduling is a DB row an
+# admin can change from /admin/tasks, and this decides what it starts as. The
+# *channel* (stable/unstable) is a routine toggle and likewise lives in the database.
 # 6h by default: GitHub's unauthenticated API allows 60 requests/hour per IP and
 # nothing here benefits from knowing about a new release sooner than that.
 UPDATE_CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_UPDATE_CHECK_INTERVAL_SECONDS", "21600"))

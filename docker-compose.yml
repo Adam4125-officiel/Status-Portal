@@ -24,6 +24,19 @@ services:
       # Optional outbound notifications - blank disables each independently.
       - PORTAL_DISCORD_WEBHOOK_URL=${PORTAL_DISCORD_WEBHOOK_URL:-}
       - PORTAL_NTFY_URL=${PORTAL_NTFY_URL:-}
+      # Optional email notifications. Blank host = disabled.
+      - PORTAL_SMTP_HOST=${PORTAL_SMTP_HOST:-}
+      - PORTAL_SMTP_PORT=${PORTAL_SMTP_PORT:-587}
+      - PORTAL_SMTP_SECURITY=${PORTAL_SMTP_SECURITY:-starttls}
+      - PORTAL_SMTP_USERNAME=${PORTAL_SMTP_USERNAME:-}
+      - PORTAL_SMTP_PASSWORD=${PORTAL_SMTP_PASSWORD:-}
+      - PORTAL_SMTP_FROM=${PORTAL_SMTP_FROM:-}
+      - PORTAL_SMTP_TO=${PORTAL_SMTP_TO:-}
+      - PORTAL_SMTP_TIMEOUT_SECONDS=${PORTAL_SMTP_TIMEOUT_SECONDS:-10}
+      # Unified search (signed-in visitors only).
+      - PORTAL_SEARCH_TIMEOUT_SECONDS=${PORTAL_SEARCH_TIMEOUT_SECONDS:-6}
+      - PORTAL_SEARCH_RATE_LIMIT=${PORTAL_SEARCH_RATE_LIMIT:-20}
+      - PORTAL_SEARCH_RATE_WINDOW_SECONDS=${PORTAL_SEARCH_RATE_WINDOW_SECONDS:-60}
       # Optional Discord bot. Blank token = disabled entirely. Note the bot also
       # needs `pip install discord.py`, which this image does not install by
       # default (it's an optional dependency, not in requirements.txt).

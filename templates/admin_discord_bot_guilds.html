@@ -1,9 +1,9 @@
 {% extends "admin_base.html" %}
-{% block title %}Discord Bot — Servers — Admin{% endblock %}
+{% block title %}Discord servers — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Discord Bot — Servers</h1>
-  <a class="btn secondary" href="{{ url_for('admin_discord_bot') }}">← Back to Discord Bot</a>
+  <h1>Discord servers</h1>
+  <a class="btn secondary" href="{{ url_for('admin_discord_bot') }}">← Back to Discord bot</a>
 </div>
 
 <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
@@ -26,14 +26,16 @@
     <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">{{ guild.id }}</span>
   </div>
   {% if guild.channels %}
-  <table class="admin-table">
-    <thead><tr><th>Channel</th><th>ID</th></tr></thead>
-    <tbody>
-      {% for c in guild.channels %}
-      <tr><td>#{{ c.name }}</td><td style="font-family: var(--font-mono);">{{ c.id }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="admin-table">
+    <table>
+      <thead><tr><th>Channel</th><th>ID</th></tr></thead>
+      <tbody>
+        {% for c in guild.channels %}
+        <tr><td>#{{ c.name }}</td><td style="font-family: var(--font-mono);">{{ c.id }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% else %}
   <div class="empty-state">No text channels visible to the bot here.</div>
   {% endif %}

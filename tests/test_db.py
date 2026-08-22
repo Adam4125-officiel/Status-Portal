@@ -1,6 +1,8 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import db
 
 
@@ -972,21 +974,66 @@ def test_reports_follow_a_rename_because_they_key_off_the_user_id(isolated_db):
 # User preferences
 # ---------------------------------------------------------------------------
 def test_preferences_default_without_a_stored_row(isolated_db):
-    assert db.get_user_preferences("u1") == {"theme": "auto", "contact": ""}
-    assert db.get_user_preferences("") == {"theme": "auto", "contact": ""}
+    """Compared against DEFAULT_USER_PREFERENCES rather than a literal, so adding a
+    preference doesn't fail this for the wrong reason - what's asserted is "a user who
+    has never saved anything gets the declared defaults"."""
+    assert db.get_user_preferences("u1") == db.DEFAULT_USER_PREFERENCES
+    assert db.get_user_preferences("") == db.DEFAULT_USER_PREFERENCES
+
+
+def test_every_writable_preference_has_a_declared_default(isolated_db):
+    """A field set_user_preferences() can write but DEFAULT_USER_PREFERENCES doesn't
+    list comes back as None from get_user_preferences(), is then coerced to 0/"" when
+    some *other* field is saved, and silently switches an on-by-default preference off.
+    That happened while this feature was being written."""
+    missing = set(db._USER_PREFERENCE_FIELDS) - set(db.DEFAULT_USER_PREFERENCES)
+    assert not missing, f"Missing from DEFAULT_USER_PREFERENCES: {sorted(missing)}"
+
+
+def test_saving_one_preference_leaves_the_on_by_default_ones_on(isolated_db):
+    """The concrete version of the check above."""
+    db.set_user_preferences("u1", notify_email="a@example.invalid")
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_own_reports"] is True
+    assert prefs["notify_service_events"] is False
 
 
 def test_preferences_round_trip(isolated_db):
     db.set_user_preferences("u1", theme="light", contact="adam@example.invalid")
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "adam@example.invalid"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "adam@example.invalid"
+
+
+def test_notification_preferences_round_trip(isolated_db):
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                             notify_discord_id="123", notify_service_events=True,
+                             notify_own_reports=False, seerr_user_id="7")
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "me@example.invalid"
+    assert prefs["notify_discord_id"] == "123"
+    assert prefs["notify_service_events"] is True
+    assert prefs["notify_own_reports"] is False
+    assert prefs["seerr_user_id"] == "7"
+
+
+def test_an_unknown_preference_is_refused_rather_than_ignored(isolated_db):
+    """A typo'd field name silently doing nothing is how a preference ends up appearing
+    to save and never taking effect."""
+    with pytest.raises(ValueError):
+        db.set_user_preferences("u1", notify_emial="typo@example.invalid")
 
 
 def test_setting_only_the_theme_leaves_the_contact_alone(isolated_db):
     """The toggle button's endpoint only knows about the theme and must not be able
     to blank out anything else."""
-    db.set_user_preferences("u1", theme="dark", contact="keep me")
+    db.set_user_preferences("u1", theme="dark", contact="keep me",
+                             notify_email="keep@example.invalid")
     db.set_user_preferences("u1", theme="light")
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "keep me"
+    assert prefs["notify_email"] == "keep@example.invalid"
 
 
 def test_an_unknown_theme_is_ignored_rather_than_stored(isolated_db):
@@ -1004,4 +1051,6 @@ def test_preferences_are_untouched_by_a_user_sync(isolated_db):
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
     db.set_user_preferences("u1", theme="light", contact="me@example.invalid")
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "sam"}])
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "me@example.invalid"

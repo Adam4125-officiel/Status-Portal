@@ -622,8 +622,26 @@ def start_background_refresh(interval_seconds=10):
     # Tolerate one missed tick before falling back to a live sample, so an ordinary
     # scheduling hiccup doesn't reintroduce the blocking call it was meant to remove.
     _CPU_CACHE["max_age"] = interval_seconds * 3 + 5
-    threading.Thread(target=_background_refresh_loop, args=(interval_seconds,),
-                      daemon=True, name="monitoring-refresh").start()
+    thread = threading.Thread(target=_background_refresh_loop, args=(interval_seconds,),
+                               daemon=True, name="monitoring-refresh")
+    thread.start()
+    _refresh_thread["thread"] = thread
+    return thread
+
+
+# The thread start_background_refresh() started, if any. Held only so the admin panel
+# can report whether it is still alive: if it dies, every reading it publishes silently
+# goes stale (CPU falls back to a live blocking sample, the Windows caches simply stop
+# updating) and until now the only trace of that was a line in the log.
+_refresh_thread = {"thread": None}
+
+
+def refresh_thread_alive():
+    """True/False once the polling thread has been started, None if it never was -
+    which is the honest answer under pytest and anywhere else that imports this module
+    without running an entry point, and reads differently from "started and died"."""
+    thread = _refresh_thread["thread"]
+    return None if thread is None else thread.is_alive()
 
 
 def clear_caches():

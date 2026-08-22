@@ -22,8 +22,8 @@
       <td>
         {% if not update_status %}
           <span style="color: var(--text-dim);">
-            {% if check_enabled %}Not checked yet — the background check runs every
-              {{ check_interval_hours }}h, or press “Check now”.{% else %}Automatic checking is
+            {% if check_enabled %}Not checked yet — the scheduled check runs
+              {{ check_schedule }}, or press “Check now”.{% else %}Automatic checking is
               off — press “Check now”.{% endif %}
           </span>
         {% elif not update_status.ok %}
@@ -65,6 +65,59 @@
   </form>
 </div>
 
+{% if update_status and update_status.ok and update_status.release_notes %}
+<div class="form-panel" style="max-width: 640px; margin-top: 16px;">
+  <h2 style="margin-top: 0;">What's in the update</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Everything published on the <strong>{{ channel }}</strong> channel since
+    {{ update_status.current }}{% if update_status.release_notes|length > 1 %} —
+    {{ update_status.release_notes|length }} releases, newest first{% endif %}. Taking the
+    update installs the newest of these; the ones in between are what you skipped past.
+  </p>
+  {% for r in update_status.release_notes %}
+    <details class="release-notes" {{ 'open' if loop.first }}>
+      <summary>
+        <strong>{{ r.name or r.version }}</strong>
+        {% if r.prerelease %}<span class="pill warn">prerelease</span>{% endif %}
+        {% if r.published_at %}
+          <span class="local-time" style="color: var(--text-faint); font-weight: 400;"
+                data-utc="{{ r.published_at }}">{{ r.published_at[:10] }}</span>
+        {% endif %}
+      </summary>
+      {# The body is Markdown that arrived over the network. richtext escapes it first
+         and then permits a deliberately tiny subset (bold, links, line breaks), so
+         headings and bullets show as the literal characters the author typed. That is
+         the safe trade: this must never become raw HTML from a remote source. #}
+      <div class="release-notes__body">{{ r.body | richtext }}</div>
+      <a href="{{ r.html_url }}" target="_blank" rel="noopener noreferrer">Read on GitHub ↗</a>
+    </details>
+  {% endfor %}
+  {% if update_status.release_notes_omitted %}
+    <p class="field-hint">
+      …and {{ update_status.release_notes_omitted }} older release(s) not shown.
+      <a href="{{ releases_url }}" target="_blank" rel="noopener noreferrer">See them all ↗</a>
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if update_status and update_status.ok and update_status.current_notes %}
+<div class="form-panel" style="max-width: 640px; margin-top: 16px;">
+  <h2 style="margin-top: 0;">Release notes for what you're running</h2>
+  <details class="release-notes">
+    <summary>
+      <strong>{{ update_status.current_notes.name or update_status.current_notes.version }}</strong>
+      {% if update_status.current_notes.published_at %}
+        <span class="local-time" style="color: var(--text-faint); font-weight: 400;"
+              data-utc="{{ update_status.current_notes.published_at }}">{{ update_status.current_notes.published_at[:10] }}</span>
+      {% endif %}
+    </summary>
+    <div class="release-notes__body">{{ update_status.current_notes.body | richtext }}</div>
+    <a href="{{ update_status.current_notes.html_url }}" target="_blank" rel="noopener noreferrer">Read on GitHub ↗</a>
+  </details>
+</div>
+{% endif %}
+
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
   <h2 style="margin-top: 0;">Update preferences</h2>
   <form method="POST" action="{{ url_for('admin_about_settings') }}">
@@ -81,10 +134,13 @@
     </div>
     <div class="field-check">
       <input type="checkbox" name="update_check_enabled" id="update_check_enabled" {{ 'checked' if check_enabled }}>
-      <label for="update_check_enabled">Check GitHub for new releases automatically (every {{ check_interval_hours }}h)</label>
+      <label for="update_check_enabled">Check GitHub for new releases automatically ({{ check_schedule }})</label>
     </div>
     <p class="field-hint">
       Turn this off to stop the portal making any periodic outbound call — “Check now” still works on demand.
+      This is the same switch as the <strong>Update check</strong> task on
+      <a href="{{ url_for('admin_tasks') }}">Scheduled tasks</a>, where you can also change how
+      often it runs and see when it last did.
     </p>
     <div class="form-actions">
       <button type="submit" class="btn">Save</button>
@@ -150,9 +206,11 @@
 
 {% if backups %}
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
-  <h2 style="margin-top: 0;">Rollback points</h2>
+  <h2 style="margin-top: 0;">Rollback points (application code)</h2>
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
     Each update backs up the files it replaces, under <code>instance/update_backups/</code>.
+    These hold <strong>code, not data</strong> — rolling one back undoes an update and leaves
+    your services, incidents and settings exactly as they are.
     Restore one from a shell: <code>python update.py rollback --to &lt;name&gt;</code>.
     Deliberately not a button here — the case it exists for is a portal that won’t start.
   </p>
@@ -166,6 +224,77 @@
   </table>
 </div>
 {% endif %}
+
+<div class="form-panel" style="max-width: 640px; margin-top: 16px; border-color: var(--crit);">
+  <h2 style="margin-top: 0;">Database backup and restore</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    A zipped, consistent snapshot of <code>instance/portal.db</code>, taken right now —
+    worth keeping an off-box copy of, and worth taking before poking at anything by hand.
+  </p>
+  <p>
+    <a href="{{ url_for('admin_settings_backup_db') }}" class="btn secondary">Download a backup</a>
+  </p>
+
+  <h3 style="font-size: 14px; margin: 20px 0 6px;">Restore one</h3>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    Upload a backup zip produced by the button above (or the <code>portal.db</code> from
+    inside one) to replace your current database with it.
+    This is <strong>data, not code</strong> — the opposite of the rollback points above,
+    and neither can restore the other.
+  </p>
+  <p style="font-size: 13px; color: var(--text-dim);">
+    Everything currently in the portal — services, incidents, maintenance windows,
+    settings, reports, the admin password and any 2FA enrolment — is replaced by whatever
+    the backup holds. Your current database is saved to <code>instance/db_backups/</code>
+    first, and the file is checked for being a real Status Portal database before anything
+    is touched. The portal restarts afterwards.
+  </p>
+  <form method="POST" action="{{ url_for('admin_restore_db') }}" enctype="multipart/form-data">
+    <div class="field">
+      <label for="restore-file">Backup file</label>
+      <input type="file" id="restore-file" name="backup" accept=".zip,.db">
+      <div class="field-hint">A <code>.zip</code> from the backup button, or a bare <code>.db</code>.</div>
+    </div>
+    <button type="button" class="btn danger" id="restore-trigger" disabled>Restore this backup…</button>
+
+    <div id="restore-confirm" class="form-panel" style="display:none; border-color: var(--crit); margin-top: 12px;">
+      <p id="restore-confirm-text" style="font-size: 13px;"></p>
+      <div class="field">
+        <input type="text" id="restore-confirm-input" placeholder="Type to confirm" autocomplete="off">
+      </div>
+      {% if totp_enabled %}
+      <div class="field">
+        <label for="restore-totp">2FA code</label>
+        <input type="text" id="restore-totp" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+               maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+      </div>
+      {% endif %}
+      <div class="form-actions">
+        <button type="submit" id="restore-submit" class="btn danger" disabled>Replace the database and restart</button>
+        <button type="button" id="restore-cancel" class="btn secondary">Cancel</button>
+      </div>
+    </div>
+  </form>
+
+  {% if db_backups %}
+  <h3 style="font-size: 13px; margin: 18px 0 6px;">Saved before a previous restore</h3>
+  <p style="font-size: 12px; color: var(--text-faint); margin-top: 0;">
+    Kept in <code>instance/db_backups/</code>. To undo a restore, copy one of these over
+    <code>instance/portal.db</code> from a shell and restart — there is deliberately no
+    button for that, since the case it exists for is a portal that won’t start.
+  </p>
+  <table class="info-table">
+    {% for b in db_backups %}
+    <tr>
+      <th style="font-weight: normal;"><code>{{ b.name }}</code></th>
+      <td>{{ b.size_mb }} MB ·
+        <span class="local-time" data-utc="{{ b.created_at }}">{{ b.created_at[:16].replace('T', ' ') }} UTC</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
 
 <div class="form-panel" style="max-width: 640px; margin-top: 16px;">
   <h2 style="margin-top: 0;">This install</h2>
@@ -188,4 +317,5 @@
 </div>
 
 <script src="{{ asset_url('js/admin_update_control.js') }}"></script>
+<script src="{{ asset_url('js/admin_db_restore.js') }}"></script>
 {% endblock %}
