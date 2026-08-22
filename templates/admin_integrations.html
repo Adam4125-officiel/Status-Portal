@@ -85,10 +85,11 @@
     </form>
   </div>
   <p style="color: var(--text-dim); font-size: 13px; margin: 0 0 12px;">
-    Whether your Radarr, Sonarr and Prowlarr are behind their latest release — so you
-    don't have to open three web UIs to find out. Read-only: this portal never updates
-    them, and can't. Which app each integration is comes from the app's own
-    <code>appName</code>, not from the name you gave it here.
+    Whether your Radarr, Sonarr, Prowlarr, Jellyfin and Seerr are behind their latest
+    release — so you don't have to open five web UIs to find out. Read-only: this portal
+    never updates them, and can't. Which Servarr app an integration is comes from the app's
+    own <code>appName</code> rather than the name you gave it; Jellyfin and Seerr are
+    identified by their integration type.
   </p>
 
   {% if not version_check %}

@@ -54,6 +54,26 @@ KNOWN_APPS = {
     "prowlarr": "Prowlarr/Prowlarr",
 }
 
+# Apps whose integration *kind* already says which project they are, so there's no
+# appName to look up - unlike the Servarr family, where several apps share one kind.
+# Each entry is (label, repo, path, json key holding the running version).
+#
+# Both tag formats were checked before adding them, per the rule above:
+#   jellyfin/jellyfin  /releases/latest -> v10.11.11
+#   seerr-team/seerr   /releases/latest -> v3.4.1
+# Seerr also carries `preview-*` *tags* with no release attached; /releases/latest
+# ignores those by definition, which is exactly why this uses it rather than the tag
+# list - a tag like `preview-pgsql-starvation-fix` parses as 0.0.0 and would report
+# "up to date" forever.
+#
+# Note the project formerly known as Jellyseerr is now **Seerr** (seerr-team/seerr).
+# The integration *kind* stays "jellyseerr" because it's stored in every existing
+# database; only what's displayed changes.
+DIRECT_APPS = {
+    "jellyfin": ("Jellyfin", "jellyfin/jellyfin", "/System/Info", "Version"),
+    "jellyseerr": ("Seerr", "seerr-team/seerr", "/api/v1/status", "version"),
+}
+
 
 def parse_version(text):
     """'5.14.0.9383' -> (5, 14, 0, 9383). Compares as a plain tuple.
@@ -138,6 +158,28 @@ def _fetch_latest_release(repo):
     return tag.lstrip("vV"), data.get("html_url") or f"https://github.com/{repo}/releases"
 
 
+def _fetch_direct_version(integration):
+    """(label, repo, version) for an app whose kind identifies it, or (None, None, error).
+
+    Jellyfin authenticates with X-Emby-Token and Seerr with X-Api-Key, so the header
+    differs; everything else is the same shape."""
+    label, repo, path, key = DIRECT_APPS[integration["kind"]]
+    header = "X-Emby-Token" if integration["kind"] == "jellyfin" else "X-Api-Key"
+    try:
+        r = requests.get(f"{integration['base_url'].rstrip('/')}{path}",
+                          headers={header: integration["api_key"]},
+                          timeout=integrations.TIMEOUT)
+        r.raise_for_status()
+        version = (r.json() or {}).get(key)
+    except requests.RequestException as e:
+        return label, repo, None, str(e)
+    except ValueError:
+        return label, repo, None, "Unexpected (non-JSON) response"
+    if not version:
+        return label, repo, None, f"No '{key}' in the response"
+    return label, repo, str(version).strip(), None
+
+
 def check_one(integration):
     """One integration -> one result row. Never raises."""
     result = {
@@ -151,6 +193,16 @@ def check_one(integration):
         "update_available": False,
         "error": None,
     }
+    if integration["kind"] in DIRECT_APPS:
+        # The kind already says what this is - no appName lookup needed, and no risk of
+        # guessing wrong from the name the admin typed.
+        app_name, repo, installed, error = _fetch_direct_version(integration)
+        result.update({"app": app_name, "installed": installed, "repo": repo})
+        if error:
+            result["error"] = error
+            return result
+        return _compare_against_release(result, repo, installed)
+
     app_name, installed, error = _fetch_app_identity(integration["base_url"], integration["api_key"])
     if error:
         result["error"] = error
@@ -164,6 +216,11 @@ def check_one(integration):
         result["error"] = f"No release feed configured for '{app_name or 'unknown app'}'."
         return result
     result["repo"] = repo
+    return _compare_against_release(result, repo, installed)
+
+
+def _compare_against_release(result, repo, installed):
+    """Shared tail: ask GitHub what the newest release is and compare."""
     try:
         latest, url = _fetch_latest_release(repo)
     except (requests.RequestException, ValueError) as e:
@@ -175,16 +232,19 @@ def check_one(integration):
     return result
 
 
-def _arr_integrations():
-    return [i for i in db.list_integrations() if i["kind"] == "arr" and i["enabled"]]
+def _checkable_integrations():
+    """Everything this module knows how to version-check: the Servarr family plus the
+    apps whose kind identifies them outright."""
+    kinds = {"arr"} | set(DIRECT_APPS)
+    return [i for i in db.list_integrations() if i["kind"] in kinds and i["enabled"]]
 
 
 def run_check_task():
     """Body of the `arr_version_check` scheduled task."""
-    targets = _arr_integrations()
+    targets = _checkable_integrations()
     if not targets:
         raise scheduler.TaskSkipped(
-            "No enabled Servarr integrations to check - add one under Integrations.")
+            "No enabled Radarr/Sonarr/Prowlarr, Jellyfin or Seerr integration to check.")
     results = [check_one(i) for i in targets]
     # Stored before the failure check below, so a partly-successful run still publishes
     # what it did learn - and so a fully-failed run still records the *reason* against
@@ -242,10 +302,11 @@ def updates_available():
 
 scheduler.register(
     TASK_NAME,
-    "Servarr version check",
-    "Asks each enabled Radarr/Sonarr/Prowlarr integration what version it's running "
-    "and compares it against that project's newest GitHub release, so you can see "
-    "from here whether any of them is behind. Read-only - this never updates them.",
+    "App version check",
+    "Asks each enabled Radarr/Sonarr/Prowlarr, Jellyfin and Seerr integration what "
+    "version it's running and compares it against that project's newest GitHub release, "
+    "so you can see from here whether any of them is behind. Read-only - this never "
+    "updates them.",
     run_check_task,
     default_schedule_kind="daily",
     default_daily_at="04:00",

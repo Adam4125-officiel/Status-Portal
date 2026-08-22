@@ -200,3 +200,97 @@ def test_the_repo_list_is_a_constant_not_a_setting():
     source = open(version_checks.__file__, encoding="utf-8").read()
     assert "get_setting" not in source.split("KNOWN_APPS")[1].split("def parse_version")[0]
     assert "verify=True" in source
+
+
+# ---------------------------------------------------------------------------
+# Jellyfin and Seerr, whose integration kind already says what they are
+# ---------------------------------------------------------------------------
+class _DirectApp(BaseHTTPRequestHandler):
+    payloads = {}
+
+    def do_GET(self):
+        for path, body in _DirectApp.payloads.items():
+            if self.path.startswith(path):
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+        self.send_response(404); self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def direct_app():
+    server = HTTPServer(("127.0.0.1", 0), _DirectApp)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    _DirectApp.payloads = {}
+
+
+def test_jellyfin_version_comes_from_system_info(direct_app, monkeypatch):
+    _DirectApp.payloads = {"/System/Info": {"Version": "10.11.10"}}
+    monkeypatch.setattr(version_checks, "_fetch_latest_release",
+                        lambda repo: ("10.11.11", "https://example/rel"))
+    result = version_checks.check_one(
+        {"id": 1, "name": "My Jellyfin", "kind": "jellyfin", "base_url": direct_app,
+         "api_key": "k", "enabled": 1})
+    assert result["app"] == "Jellyfin"
+    assert result["repo"] == "jellyfin/jellyfin"
+    assert result["installed"] == "10.11.10"
+    assert result["update_available"] is True
+
+
+def test_seerr_version_comes_from_its_status_endpoint(direct_app, monkeypatch):
+    _DirectApp.payloads = {"/api/v1/status": {"version": "3.4.1"}}
+    monkeypatch.setattr(version_checks, "_fetch_latest_release",
+                        lambda repo: ("3.4.1", "https://example/rel"))
+    result = version_checks.check_one(
+        {"id": 1, "name": "Requests", "kind": "jellyseerr", "base_url": direct_app,
+         "api_key": "k", "enabled": 1})
+    assert result["app"] == "Seerr"
+    assert result["repo"] == "seerr-team/seerr"
+    assert result["update_available"] is False
+
+
+def test_the_kind_identifies_the_app_so_the_name_is_irrelevant(direct_app, monkeypatch):
+    """No appName lookup for these, so an integration called anything at all still
+    resolves to the right project."""
+    _DirectApp.payloads = {"/System/Info": {"Version": "10.11.11"}}
+    monkeypatch.setattr(version_checks, "_fetch_latest_release",
+                        lambda repo: ("10.11.11", "https://example/rel"))
+    result = version_checks.check_one(
+        {"id": 1, "name": "totally-not-jellyfin", "kind": "jellyfin",
+         "base_url": direct_app, "api_key": "k", "enabled": 1})
+    assert result["repo"] == "jellyfin/jellyfin"
+
+
+def test_a_direct_app_with_no_version_field_is_an_error_row(direct_app):
+    _DirectApp.payloads = {"/System/Info": {}}
+    result = version_checks.check_one(
+        {"id": 1, "name": "J", "kind": "jellyfin", "base_url": direct_app,
+         "api_key": "k", "enabled": 1})
+    assert "No 'Version'" in result["error"]
+
+
+def test_seerrs_preview_tags_would_not_be_mistaken_for_a_version():
+    """Seerr carries tags like `preview-pgsql-starvation-fix` alongside its real
+    releases. Anything unparseable sorts at the bottom, so it can never look newer than
+    what's installed - and /releases/latest ignores tags with no release anyway."""
+    assert version_checks.parse_version("preview-pgsql-starvation-fix") == (0,)
+    assert version_checks._compare("3.4.1", "preview-pgsql-starvation-fix") == 1
+
+
+def test_all_three_kinds_are_picked_up_for_checking(isolated_db):
+    for kind in ("arr", "jellyfin", "jellyseerr"):
+        db.create_integration({"name": kind, "kind": kind, "base_url": "http://x",
+                                "api_key": "k", "enabled": 1})
+    db.create_integration({"name": "tdarr", "kind": "tdarr", "base_url": "http://x",
+                            "api_key": "", "enabled": 1})
+    kinds = {i["kind"] for i in version_checks._checkable_integrations()}
+    assert kinds == {"arr", "jellyfin", "jellyseerr"}

@@ -552,6 +552,17 @@ DB-backed Settings pages, not a code edit.
   name the admin typed. `movies-4k` is still Radarr and something called `radarr`
   might not be; guessing from the label eventually checks the wrong project's releases
   and reports the wrong answer confidently.
+- **Two lookup tables, because there are two situations.** `KNOWN_APPS` maps a Servarr
+  `appName` to a repo (several apps share the `arr` kind, so the app has to be asked
+  what it is). `DIRECT_APPS` maps an integration *kind* straight to a repo and version
+  endpoint, for Jellyfin (`/System/Info` → `Version`) and Seerr (`/api/v1/status` →
+  `version`), where the kind already settles it.
+- **Seerr's repo is `seerr-team/seerr`** — the project was renamed from Jellyseerr. The
+  integration kind stays `jellyseerr` because it's stored in every existing database;
+  only the label changes.
+- **Seerr carries `preview-*` tags with no release attached**, which is exactly the
+  "tags that aren't version numbers" hazard below. `/releases/latest` ignores them by
+  definition, which is why this uses that endpoint rather than the tag list.
 - **`KNOWN_APPS` is a module constant and must stay one** - same argument as
   `updater.py`'s repo constant. Adding an app is a line there *plus* a check that its
   release tags really are plain version numbers: a project tagging releases
