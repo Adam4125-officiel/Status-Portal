@@ -209,7 +209,9 @@ DB-backed Settings pages, not a code edit.
   client-side.** Every public timestamp is wrapped as
   `<span class="local-time" data-utc="{iso}">{utc fallback text}</span>` (or
   `class="local-time-short"` for the compact service-card spot, which gets hour:minute
-  only); `static/js/local_time.js` overwrites the text with `Date.toLocaleString()` in
+  only, or `class="local-date"` for something that happens on a *day* rather than at a
+  moment — picking the wrong one of these is how a release calendar came to show
+  "03:00" with no date); `static/js/local_time.js` overwrites the text with `Date.toLocaleString()` in
   the browser's own timezone. The UTC fallback text stays in the DOM for no-JS
   clients. The server has no idea what timezone a visitor is in — don't try to
   guess/convert server-side. **When adding another timestamp to the public page, grep
@@ -811,6 +813,21 @@ DB-backed Settings pages, not a code edit.
   shape and same reasoning as `report_requires_login`.
 - **`eta == 8640000` is qBittorrent's "unknown"**, not 100 days. Rendering it literally
   gives a nonsense countdown.
+- **Overseerr's request payload embeds media by id and usually carries no title**, which
+  is why that list once read "TMDB #438631". `fetch_seerr_detail()` resolves it from
+  Seerr's own `/api/v1/{movie,tv}/{id}` and caches the answer in-process forever - it's
+  immutable data keyed by a TMDB id, and twenty pending requests would otherwise mean
+  twenty extra calls per refresh. A *failed* lookup is deliberately not cached, or a
+  transient blip would pin "TMDB #..." until the next restart.
+- **Status badges are coloured from a stable key** (`SEERR_*_STATUS_KEY`), never by
+  matching the English label - a relabelling would otherwise silently turn every badge
+  grey. Every code in both status maps needs a key, and a test asserts that.
+- **The "Coming soon" window is `media_calendar_days`** (clamped 1-90). An open-ended
+  calendar pull lets one long-running series fill the list indefinitely.
+- **Use `.local-date` for something that happens on a day**, not `.local-time-short` -
+  the latter renders hour:minute *only*, so a release date came out as a bare "03:00".
+  Three classes now: `local-time` (full), `local-time-short` (clock only),
+  `local-date` (date only).
 
 ## Public page layout (`templates/sections/`)
 

@@ -1198,3 +1198,28 @@ footer.foot {
 .switch input:focus-visible + .switch__track { outline: 2px solid var(--brand); outline-offset: 2px; }
 .switch input:disabled + .switch__track { opacity: 0.5; }
 .switch-form__label { font-size: 12.5px; color: var(--text-dim); white-space: nowrap; }
+
+/* Seerr request/media status badges. Previously every one of these rendered in the
+   same washed-out pill, so a list of ten requests gave no clue which needed attention -
+   the whole job of this list is being scannable. Keyed on a stable status key rather
+   than the English label. */
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.status-pill--available  { background: rgba(46, 160, 87, 0.16);  color: #4ade80; border-color: rgba(46, 160, 87, 0.4); }
+.status-pill--approved   { background: rgba(56, 132, 255, 0.16); color: #7dabff; border-color: rgba(56, 132, 255, 0.4); }
+.status-pill--processing { background: rgba(214, 158, 46, 0.16); color: #f0b849; border-color: rgba(214, 158, 46, 0.4); }
+.status-pill--partial    { background: rgba(214, 158, 46, 0.12); color: #d6a35c; border-color: rgba(214, 158, 46, 0.3); }
+.status-pill--pending    { background: rgba(168, 85, 247, 0.16); color: #c4a0f5; border-color: rgba(168, 85, 247, 0.4); }
+.status-pill--declined,
+.status-pill--failed     { background: rgba(220, 76, 70, 0.16);  color: #f28b82; border-color: rgba(220, 76, 70, 0.4); }
+.status-pill--unknown    { background: var(--bg-panel-raised);   color: var(--text-faint); border-color: var(--border); }
+
+.media-row__year { color: var(--text-faint); font-weight: 400; }

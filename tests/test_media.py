@@ -75,7 +75,7 @@ def route(method, path, payload=None, status=200, raw=None):
 # ---------------------------------------------------------------------------
 # Radarr / Sonarr calendar
 # ---------------------------------------------------------------------------
-def test_calendar_reads_radarr_movies(stub):
+def test_calendar_reads_radarr_movies(isolated_db, stub):
     route("GET", "/api/v3/calendar", [
         {"title": "Dune: Part Three", "year": 2026, "hasFile": False,
          "digitalRelease": "2026-09-01T00:00:00Z", "inCinemas": "2026-07-01T00:00:00Z"},
@@ -86,7 +86,7 @@ def test_calendar_reads_radarr_movies(stub):
     assert items[0]["date"].startswith("2026-09-01")
 
 
-def test_calendar_reads_sonarr_episodes(stub):
+def test_calendar_reads_sonarr_episodes(isolated_db, stub):
     """Same endpoint, different shape. The app is identified from the *item* - a Sonarr
     entry carries a `series` object - so this needs no extra /system/status call, and
     can't get it wrong the way guessing from the integration's name could."""
@@ -101,7 +101,7 @@ def test_calendar_reads_sonarr_episodes(stub):
     assert "S02E05" in items[0]["detail"]
 
 
-def test_a_film_with_only_a_cinema_date_is_not_coming_to_the_server(stub):
+def test_a_film_with_only_a_cinema_date_is_not_coming_to_the_server(isolated_db, stub):
     """inCinemas is deliberately ignored: this section answers "what's arriving here",
     and a cinema date says nothing about that."""
     route("GET", "/api/v3/calendar", [
@@ -110,7 +110,7 @@ def test_a_film_with_only_a_cinema_date_is_not_coming_to_the_server(stub):
     assert integrations.fetch_arr_calendar(stub, "key") == []
 
 
-def test_calendar_is_sorted_soonest_first(stub):
+def test_calendar_is_sorted_soonest_first(isolated_db, stub):
     route("GET", "/api/v3/calendar", [
         {"title": "Later", "year": 2026, "digitalRelease": "2026-12-01T00:00:00Z"},
         {"title": "Sooner", "year": 2026, "digitalRelease": "2026-09-01T00:00:00Z"},
@@ -416,3 +416,93 @@ def test_media_is_a_reorderable_public_section(isolated_db):
     existed would never see it - and the reorder UI wouldn't list it."""
     assert "media" in [key for key, _ in app_module.PUBLIC_SECTIONS]
     assert "media" in app_module._public_section_order()
+
+
+# ---------------------------------------------------------------------------
+# The "Coming soon" window, and the fixes to how requests render
+# ---------------------------------------------------------------------------
+def test_the_calendar_window_is_an_admin_setting(isolated_db, stub):
+    """Without a window, a Sonarr tracking a long-running series returns everything it
+    knows about, indefinitely."""
+    assert integrations.calendar_days() == integrations.DEFAULT_CALENDAR_DAYS
+    db.set_setting("media_calendar_days", "30")
+    assert integrations.calendar_days() == 30
+
+
+@pytest.mark.parametrize("stored, expected", [
+    ("0", integrations.MIN_CALENDAR_DAYS),
+    ("9999", integrations.MAX_CALENDAR_DAYS),
+    ("not a number", integrations.DEFAULT_CALENDAR_DAYS),
+])
+def test_a_nonsense_calendar_window_is_clamped(isolated_db, stored, expected):
+    db.set_setting("media_calendar_days", stored)
+    assert integrations.calendar_days() == expected
+
+
+def test_the_window_is_actually_sent_to_the_arr_app(isolated_db, stub, monkeypatch):
+    seen = {}
+    real_get = integrations.requests.get
+
+    def spy(url, **kwargs):
+        seen.update(kwargs.get("params") or {})
+        return real_get(url, **kwargs)
+
+    route("GET", "/api/v3/calendar", [])
+    db.set_setting("media_calendar_days", "3")
+    monkeypatch.setattr(integrations.requests, "get", spy)
+    integrations.fetch_arr_calendar(stub, "key")
+    from datetime import datetime, timezone
+    start = datetime.fromisoformat(seen["start"]).date()
+    end = datetime.fromisoformat(seen["end"]).date()
+    assert (end - start).days == 3
+
+
+def test_a_request_with_no_title_is_resolved_from_seerr(isolated_db, stub):
+    """The reported bug: this list rendered "TMDB #438631" instead of a title, because
+    Overseerr's request payload embeds media by id and frequently carries no name."""
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "media": {"mediaType": "movie", "status": 5, "tmdbId": 438631}},
+    ]})
+    route("GET", "/api/v1/movie/438631", {"title": "Dune", "releaseDate": "2021-09-15"})
+    items = integrations.fetch_seerr_requests(stub, "key")
+    assert items[0]["title"] == "Dune"
+    assert items[0]["year"] == 2021
+
+
+def test_a_resolved_title_is_only_fetched_once(isolated_db, stub):
+    """Twenty pending requests must not mean twenty extra HTTP calls on every refresh,
+    for answers keyed by an immutable TMDB id."""
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "media": {"mediaType": "movie", "status": 5, "tmdbId": 42}},
+    ]})
+    route("GET", "/api/v1/movie/42", {"title": "Cached Film", "releaseDate": "2020-01-01"})
+    integrations.fetch_seerr_requests(stub, "key")
+    ROUTES.pop(("GET", "/api/v1/movie/42"))     # a second lookup would now 404
+    assert integrations.fetch_seerr_requests(stub, "key")[0]["title"] == "Cached Film"
+
+
+def test_an_unresolvable_title_is_not_cached(isolated_db, stub):
+    """A transient failure must not pin "TMDB #..." in place until the next restart."""
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "media": {"mediaType": "movie", "status": 5, "tmdbId": 77}},
+    ]})
+    assert integrations.fetch_seerr_requests(stub, "key")[0]["title"] == "TMDB #77"
+    route("GET", "/api/v1/movie/77", {"title": "Now Available", "releaseDate": "2019-01-01"})
+    assert integrations.fetch_seerr_requests(stub, "key")[0]["title"] == "Now Available"
+
+
+def test_every_status_has_a_colour_key(isolated_db, stub):
+    """The badges are coloured from a stable key, not by matching the English label, so
+    every code in both maps needs one - a missing key renders as the grey "unknown"
+    pill and silently loses the distinction the colours exist for."""
+    assert set(integrations.SEERR_REQUEST_STATUS) == set(integrations.SEERR_REQUEST_STATUS_KEY)
+    assert set(integrations.SEERR_MEDIA_STATUS) == set(integrations.SEERR_MEDIA_STATUS_KEY)
+
+
+def test_an_unrecognised_status_falls_back_to_unknown(isolated_db, stub):
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 99, "media": {"mediaType": "movie", "status": 99, "title": "X"}},
+    ]})
+    item = integrations.fetch_seerr_requests(stub, "key")[0]
+    assert item["request_status_key"] == "unknown"
+    assert item["media_status_key"] == "unknown"

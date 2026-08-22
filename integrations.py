@@ -9,6 +9,7 @@ kind of service it's showing:
 
     {"reachable": bool, "version": str|None, "issues": [{"level", "message"}], "error": str|None}
 """
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,8 @@ import config
 import db
 import monitoring
 import scheduler
+
+_logger = logging.getLogger(__name__)
 
 TIMEOUT = 5
 
@@ -492,7 +495,21 @@ def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None
 # Four read-only views assembled into one cache, refreshed by the `media_refresh`
 # scheduled task and read by the public section and the admin page. Same rule as
 # everything else here: a request handler only ever reads the cache.
-def fetch_arr_calendar(base_url, api_key, days_ahead=14, limit=20):
+# How far ahead the "Coming soon" list looks, and the bounds an admin may set it to.
+# A window rather than an open-ended pull: a Sonarr with a long-running series tracked
+# would otherwise return everything it knows about, indefinitely.
+DEFAULT_CALENDAR_DAYS = 14
+MIN_CALENDAR_DAYS = 1
+MAX_CALENDAR_DAYS = 90
+
+
+def calendar_days():
+    raw = db.get_setting("media_calendar_days", str(DEFAULT_CALENDAR_DAYS))
+    value = int(raw) if raw.isdigit() else DEFAULT_CALENDAR_DAYS
+    return max(MIN_CALENDAR_DAYS, min(MAX_CALENDAR_DAYS, value))
+
+
+def fetch_arr_calendar(base_url, api_key, days_ahead=None, limit=20):
     """Upcoming releases from a Radarr or Sonarr calendar.
 
     One endpoint serves both and the response shapes differ, so the app is identified
@@ -501,6 +518,7 @@ def fetch_arr_calendar(base_url, api_key, days_ahead=14, limit=20):
     means it can't get the answer wrong the way guessing from the integration's name
     could."""
     base_url = base_url.rstrip("/")
+    days_ahead = calendar_days() if days_ahead is None else days_ahead
     now = datetime.now(timezone.utc)
     r = requests.get(f"{base_url}/api/v3/calendar",
                       headers={"X-Api-Key": api_key},
@@ -545,6 +563,13 @@ SEERR_REQUEST_STATUS = {1: "Pending approval", 2: "Approved", 3: "Declined", 4: 
 SEERR_MEDIA_STATUS = {1: "Unknown", 2: "Pending", 3: "Processing",
                       4: "Partially available", 5: "Available"}
 
+# Stable keys the template styles on, so colour never depends on matching the English
+# label above. Every status in both maps needs an entry here, plus "unknown" for a code
+# Seerr adds later that this app doesn't know yet.
+SEERR_REQUEST_STATUS_KEY = {1: "pending", 2: "approved", 3: "declined", 4: "failed"}
+SEERR_MEDIA_STATUS_KEY = {1: "unknown", 2: "pending", 3: "processing",
+                          4: "partial", 5: "available"}
+
 
 def fetch_seerr_requests(base_url, api_key, limit=20):
     """Recent requests and what became of them."""
@@ -563,12 +588,26 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
     for entry in results:
         media = entry.get("media") or {}
         requested_by = entry.get("requestedBy") or {}
+        media_type = media.get("mediaType") or entry.get("type") or ""
+        title = _seerr_title(media)
+        year = None
+        # The request payload embeds media by id and frequently carries no title, which
+        # is why this list used to read "TMDB #438631". Ask Seerr what that id actually
+        # is - the same question the "Coming soon" list gets answered for free by the
+        # *Arr calendar, which returns real titles.
+        if title.startswith("TMDB #"):
+            detail = fetch_seerr_detail(base_url, api_key, media_type, media.get("tmdbId"))
+            if detail and detail["title"]:
+                title, year = detail["title"], detail["year"]
         items.append({
             "id": entry.get("id"),
-            "title": _seerr_title(media),
+            "title": title,
+            "year": year,
             "media_type": media.get("mediaType") or entry.get("type") or "",
             "request_status": SEERR_REQUEST_STATUS.get(entry.get("status"), "Unknown"),
+            "request_status_key": SEERR_REQUEST_STATUS_KEY.get(entry.get("status"), "unknown"),
             "media_status_label": SEERR_MEDIA_STATUS.get(media.get("status"), "Unknown"),
+            "media_status_key": SEERR_MEDIA_STATUS_KEY.get(media.get("status"), "unknown"),
             "requested_by": requested_by.get("displayName") or requested_by.get("username") or "",
             # The Seerr user id, kept so a request can be traced back to the Jellyfin
             # account that made it - via Seerr's own jellyfinUserId link, never a guess.
@@ -578,6 +617,43 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
             "media_status": media.get("status"),
         })
     return items
+
+
+# tmdb key -> {"title", "year", "poster_path"}. Overseerr's request payload is built
+# around ids and often carries no title at all, so each one has to be looked up - and
+# looked up once, not on every refresh, since a request's title never changes.
+_seerr_detail_cache = {}
+
+
+def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
+    """Title (and year) for one requested item, from Seerr's own detail endpoint.
+
+    Cached forever in-process: this is immutable data keyed by a TMDB id. Without the
+    cache, a queue of twenty requests would mean twenty extra HTTP calls every time the
+    media task ran, for answers that cannot change."""
+    if media_type not in ("movie", "tv") or not tmdb_id:
+        return None
+    key = f"{media_type}:{tmdb_id}"
+    if key in _seerr_detail_cache:
+        return _seerr_detail_cache[key]
+    try:
+        r = requests.get(f"{base_url.rstrip('/')}/api/v1/{media_type}/{tmdb_id}",
+                          headers={"X-Api-Key": api_key}, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        # Not cached: a transient failure must not pin "unknown" in place forever.
+        _logger.info("Could not resolve Seerr %s %s: %s", media_type, tmdb_id, e)
+        return None
+    date = data.get("releaseDate") or data.get("firstAirDate") or ""
+    detail = {
+        "title": data.get("title") or data.get("name") or "",
+        "year": int(date[:4]) if date[:4].isdigit() else None,
+        "poster_path": data.get("posterPath") or "",
+    }
+    if detail["title"]:
+        _seerr_detail_cache[key] = detail
+    return detail
 
 
 def _seerr_title(media):
@@ -879,6 +955,7 @@ def clear_caches():
     _media_cache["indexers"] = []
     _media_cache["refreshed_at"] = None
     _media_cache["errors"] = {}
+    _seerr_detail_cache.clear()
 
 
 def refresh_jellyfin_activity_cache(base_url, api_key):

@@ -45,7 +45,9 @@
         <span class="media-row__meta">{{ c.detail }}</span>
       </div>
       <span class="media-row__meta">
-        <span class="local-time-short" data-utc="{{ c.date }}">{{ c.date[:10] }}</span>
+        {# .local-date, not .local-time-short - the latter renders hour:minute only, so
+           a release date came out as a bare "03:00". #}
+        <span class="local-date" data-utc="{{ c.date }}">{{ c.date[:10] }}</span>
       </span>
       {% if c.have %}<span class="pill">in library</span>{% endif %}
     </div>
@@ -59,13 +61,15 @@
     {% for r in media.requests %}
     <div class="media-row">
       <div class="media-row__main">
-        <span class="media-row__name">{{ r.title }}</span>
+        <span class="media-row__name">{{ r.title }}{% if r.year %} <span class="media-row__year">({{ r.year }})</span>{% endif %}</span>
         <span class="media-row__meta">
           {{ r.media_type }}{% if r.requested_by %} · asked for by {{ r.requested_by }}{% endif %}
         </span>
       </div>
-      <span class="pill {{ 'warn' if r.pending }}">{{ r.request_status }}</span>
-      <span class="media-row__meta">{{ r.media_status_label }}</span>
+      {# Coloured by a stable key rather than by matching the English label, so a
+         relabelling can't silently turn every badge grey. #}
+      <span class="status-pill status-pill--{{ r.request_status_key }}">{{ r.request_status }}</span>
+      <span class="status-pill status-pill--{{ r.media_status_key }}">{{ r.media_status_label }}</span>
     </div>
     {% endfor %}
   </div>

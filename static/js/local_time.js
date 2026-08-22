@@ -11,6 +11,11 @@
   // date + timezone name would be more clutter than the space is worth - just the
   // local clock time, still genuinely local rather than UTC.
   var SHORT_FORMAT = { hour: '2-digit', minute: '2-digit' };
+  // Date-first form, for things that happen on a *day* rather than at a moment - a
+  // release calendar being the case this exists for. Using SHORT_FORMAT there rendered
+  // "03:00" with no date at all, which is the least useful possible answer to "when is
+  // this coming out".
+  var DATE_FORMAT = { year: 'numeric', month: 'short', day: 'numeric' };
 
   function convert(root, selector, format) {
     root.querySelectorAll(selector).forEach(function (el) {
@@ -28,6 +33,7 @@
     root = root || document;
     convert(root, '.local-time[data-utc]', FULL_FORMAT);
     convert(root, '.local-time-short[data-utc]', SHORT_FORMAT);
+    convert(root, '.local-date[data-utc]', DATE_FORMAT);
   };
 
   window.applyLocalTimes(document);

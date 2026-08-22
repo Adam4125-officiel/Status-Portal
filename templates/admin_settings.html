@@ -40,6 +40,15 @@
       <label class="field-check"><input type="checkbox" name="show_public_downloads" {{ 'checked' if show_media.downloads }}> Downloading now, with progress (qBittorrent)</label>
       <label class="field-check"><input type="checkbox" name="show_public_indexers" {{ 'checked' if show_media.indexers }}> Per-indexer health (Prowlarr)</label>
     </div>
+    <div class="field" style="margin-top: 10px;">
+      <label for="media_calendar_days">“Coming soon” looks ahead (days)</label>
+      <input type="number" id="media_calendar_days" name="media_calendar_days" min="1"
+             max="{{ max_calendar_days }}" value="{{ media_calendar_days }}" style="max-width: 120px;">
+      <div class="field-hint">
+        How far into the future the Radarr/Sonarr calendar is read. Without a window a
+        series with a long run ahead of it fills the list indefinitely. 1–{{ max_calendar_days }} days.
+      </div>
+    </div>
     <div class="checkbox-list" style="margin-top: 8px;">
       <label class="field-check"><input type="checkbox" name="media_requires_login" {{ 'checked' if media_requires_login }}> Only show this section to signed-in visitors</label>
     </div>

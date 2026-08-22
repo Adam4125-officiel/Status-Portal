@@ -2758,6 +2758,8 @@ def admin_settings():
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
                             show_media=_public_media_visibility(),
+                            media_calendar_days=integrations.calendar_days(),
+                            max_calendar_days=integrations.MAX_CALENDAR_DAYS,
                             media_requires_login=_media_requires_login(),
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
@@ -2785,6 +2787,9 @@ def admin_settings_general():
         db.set_setting(key, "1" if request.form.get(key) else "0")
     for key in _PUBLIC_MEDIA_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
+    calendar_days = request.form.get("media_calendar_days", "").strip()
+    db.set_setting("media_calendar_days",
+                    calendar_days if calendar_days.isdigit() else str(integrations.DEFAULT_CALENDAR_DAYS))
     db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
         raw = request.form.get(f"highload_{key}", "").strip()
