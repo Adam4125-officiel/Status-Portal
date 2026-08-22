@@ -1,0 +1,68 @@
+{# The search results themselves, rendered both by /search (a full page) and by
+   /search/live (a fragment swapped in while typing). One copy of the markup, so the
+   incremental results can't drift from the submitted ones. #}
+  {% if rate_limited %}
+    <div class="flash error">
+      That's a lot of searching in a short time — give it a minute and try again.
+    </div>
+  {% elif not outcome.available %}
+    <div class="empty-state">
+      Search is unavailable right now — neither Jellyfin nor Jellyseerr could be reached.
+      Nothing is wrong with your query; try again shortly.
+    </div>
+  {% elif query %}
+    {% if outcome.errors %}
+      <div class="flash error">
+        Showing partial results —
+        {% for source, reason in outcome.errors.items() %}
+          {{ source }} {{ reason }}{% if not loop.last %}, {% endif %}
+        {% endfor %}.
+        Anything only that source knows about is missing.
+      </div>
+    {% endif %}
+
+    {% if not outcome.results %}
+      <div class="empty-state">Nothing found for “{{ query }}”.</div>
+    {% else %}
+      <div class="search-results">
+        {% for item in outcome.results %}
+        <div class="search-result">
+          <div class="search-result__main">
+            <div class="search-result__title">
+              {{ item.title }}{% if item.year %} <span class="search-result__year">({{ item.year }})</span>{% endif %}
+              <span class="pill">{{ 'Series' if item.media_type == 'tv' else 'Film' }}</span>
+            </div>
+            {% if item.overview %}
+              <div class="search-result__overview">{{ item.overview }}</div>
+            {% endif %}
+          </div>
+          <div class="search-result__action">
+            {% if item.in_library %}
+              {% set link = jellyfin_url(item.jellyfin_id) if item.jellyfin_id else '' %}
+              {% if link %}
+                <a class="btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Watch now ↗</a>
+              {% else %}
+                <span class="pill ok">In the library</span>
+              {% endif %}
+            {% elif item.requested %}
+              <span class="pill warn">Already requested</span>
+            {% elif can_request and item.tmdb_id %}
+              <form method="POST" action="{{ url_for('search_request') }}">
+                <input type="hidden" name="media_type" value="{{ item.media_type }}">
+                <input type="hidden" name="tmdb_id" value="{{ item.tmdb_id }}">
+                <input type="hidden" name="q" value="{{ query }}">
+                <button type="submit" class="btn secondary">Request this</button>
+              </form>
+            {% else %}
+              <span class="pill">Not in the library</span>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      Type a title to see whether it's already here — and ask for it if it isn't.
+    </div>
+  {% endif %}

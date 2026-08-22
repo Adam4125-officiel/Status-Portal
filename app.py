@@ -1793,6 +1793,11 @@ def user_account_push_seerr_contact():
 # route open to anonymous strangers, where a shared counter is the point; this one is
 # behind a Jellyfin sign-in, so the meaningful unit is "this person", and a global
 # counter would let one enthusiastic searcher lock everybody else out.
+# Typing "dune" shouldn't search TMDB for "d". Enforced on both sides: the client to
+# avoid the request, the server because the client can't be trusted to.
+MIN_LIVE_QUERY_LENGTH = 3
+
+
 def _search_rate_limited():
     now = time.time()
     if now - session.get("search_window_start", 0) > config.SEARCH_RATE_WINDOW_SECONDS:
@@ -1830,7 +1835,41 @@ def search():
                             rate_limited=limited,
                             can_request=media_search.seerr_integration() is not None,
                             jellyfin_url=media_search.jellyfin_item_url,
+                            min_query_length=MIN_LIVE_QUERY_LENGTH,
                             site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/search/live")
+@user_login_required
+def search_live():
+    """The results block alone, for the incremental search that runs while typing.
+
+    A server-rendered HTML fragment rather than JSON, matching /api/incidents/more and
+    the maintenance history: this app has exactly one JSON API (/api/status, for
+    external consumers) and no client-side templating anywhere, so a fragment keeps the
+    live results and the submitted results provably identical - they're the same
+    template.
+
+    Behind the same sign-in and the same per-session rate limit as /search, because it
+    makes exactly the same outbound calls."""
+    user = current_user()
+    query = request.args.get("q", "").strip()[:100]
+    outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
+    limited = False
+
+    # Below the minimum, answer with nothing rather than searching two APIs for "a".
+    # The client enforces this too; this is the half that can't be bypassed.
+    if len(query) >= MIN_LIVE_QUERY_LENGTH:
+        if _search_rate_limited():
+            limited = True
+        else:
+            _register_search()
+            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+
+    return render_template("sections/_search_results.html", query=query, outcome=outcome,
+                            rate_limited=limited,
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url)
 
 
 @app.route("/search/request", methods=["POST"])

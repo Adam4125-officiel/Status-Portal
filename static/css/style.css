@@ -1401,3 +1401,8 @@ footer.foot {
 @media (prefers-reduced-motion: reduce) {
   .skeleton { animation: none; }
 }
+
+/* While an incremental search is in flight, the results already on screen are the
+   previous query's - dimming them says "these are stale" without the jarring blank of
+   clearing them first. */
+.search-results--loading { opacity: 0.55; transition: opacity 0.12s ease; }

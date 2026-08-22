@@ -190,7 +190,12 @@ SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"
 # Per-session rate limit: how many searches in how long. A search box wired to two
 # external APIs is a free denial-of-service amplifier, and this is on top of the
 # signed-in-only restriction, not instead of it.
-SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "20"))
+#
+# Raised from 20 when search became incremental: results now appear while typing, so one
+# person looking for one film costs two or three requests rather than one. The debounce
+# and the three-character minimum are what keep that from being one request per
+# keystroke - this limit is the backstop, not the mechanism.
+SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "40"))
 SEARCH_RATE_WINDOW_SECONDS = int(os.environ.get("PORTAL_SEARCH_RATE_WINDOW_SECONDS", "60"))
 
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).

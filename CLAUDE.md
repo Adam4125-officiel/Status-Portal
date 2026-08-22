@@ -1774,6 +1774,15 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   and `_report_state` which are process-global — those defend a route open to anonymous
   strangers, where a shared counter is the point; this one is already behind a sign-in,
   so a global counter would let one enthusiastic searcher lock everybody else out.
+- **Results appear while typing, from a server-rendered fragment.** `/search/live`
+  returns `sections/_search_results.html` - the *same* partial the full page includes -
+  so the incremental results and the submitted ones cannot drift apart. Same convention
+  as `/api/incidents/more`: this app has one JSON API (`/api/status`, for external
+  consumers) and no client-side templating.
+- **The debounce and the three-character minimum are the mechanism; the rate limit is
+  the backstop.** Both are enforced server-side too, because the client can't be trusted
+  to. `static/js/search_live.js` aborts an in-flight request when a newer keystroke
+  arrives - each one costs two outbound API calls, and only the newest question matters.
 - **Deduping is by title *and year*.** The two sources share no ids (Jellyfin has its
   own, Seerr speaks TMDB), so the title is all there is to match on — and merging a 1984
   film into its 2021 remake would be worse than showing both.

@@ -431,3 +431,67 @@ def test_diagnosing_a_non_seerr_integration_is_refused(client, isolated_db):
                                   "api_key": "k", "enabled": 1})
     resp = client.post(f"/admin/integrations/{iid}/diagnose", follow_redirects=True)
     assert b"only apply to a Jellyseerr" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# Incremental search: results while typing
+# ---------------------------------------------------------------------------
+def test_live_search_returns_a_fragment_not_a_whole_page(visitor, monkeypatch):
+    """A server-rendered fragment, matching /api/incidents/more - this app has one JSON
+    API (/api/status, for external consumers) and no client-side templating."""
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: {
+                            "results": [_sr("Dune", tmdb_id=1)], "errors": {}, "available": True})
+    resp = visitor.get("/search/live?q=dune")
+    assert resp.status_code == 200
+    body = resp.data
+    assert b"Dune" in body
+    # A fragment, so none of the page chrome.
+    assert b"<html" not in body and b"page-nav" not in body
+
+
+def test_the_live_fragment_and_the_page_render_the_same_markup(visitor, monkeypatch):
+    """They're the same template, so what appears while typing cannot drift from what
+    appears after pressing Search."""
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: {
+                            "results": [_sr("Dune", tmdb_id=1)], "errors": {}, "available": True})
+    fragment = visitor.get("/search/live?q=dune").data.decode()
+    page = visitor.get("/search?q=dune").data.decode()
+    assert fragment.strip() in page
+
+
+def test_a_too_short_query_never_reaches_the_apis(visitor, monkeypatch):
+    """Typing "dune" shouldn't search TMDB for "d". Enforced server-side because the
+    client can't be trusted to."""
+    called = []
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: called.append(q) or {
+                            "results": [], "errors": {}, "available": True})
+    visitor.get("/search/live?q=du")
+    assert called == []
+    visitor.get("/search/live?q=dune")
+    assert called == ["dune"]
+
+
+def test_live_search_counts_against_the_same_rate_limit(visitor, monkeypatch):
+    """It makes exactly the same outbound calls as a submitted search, so it can't have
+    a free pass."""
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 2)
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: {
+                            "results": [], "errors": {}, "available": True})
+    for _ in range(2):
+        assert b"lot of searching" not in visitor.get("/search/live?q=dune").data
+    assert b"lot of searching" in visitor.get("/search/live?q=dune").data
+
+
+def test_live_search_requires_a_signed_in_visitor(client, isolated_db):
+    assert client.get("/search/live?q=dune").status_code == 302
+
+
+def test_the_search_page_carries_what_the_live_script_needs(visitor):
+    body = visitor.get("/search").data
+    assert b'id="search-results"' in body
+    assert b'data-live-url="/search/live"' in body
+    assert b'data-min-length=' in body
