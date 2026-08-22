@@ -1406,6 +1406,16 @@ DB-backed Settings pages, not a code edit.
   *and* at least one recipient are all present; a half-filled block reads as "not set
   up" rather than as a channel that fails on every send and fills the log with the same
   error on every service blip.
+- **The recipient list is a DB setting (`smtp_recipients`), not an env var**, unlike the
+  rest of the SMTP block. That split is deliberate and worth keeping straight: host,
+  username and password are credentials and static deployment config; *who gets told* is
+  a routine choice an admin changes without editing a file and restarting.
+  `PORTAL_SMTP_TO` is still read as a fallback so an install configured before this moved
+  keeps working — don't remove it.
+- **`email_recipients()` must never raise**, because `notify()` never may: it runs on
+  the background health-check thread, where an exception would take the whole cycle down
+  over a notification. Reading a DB setting introduced a new way for that to happen, so
+  the read is wrapped and falls back to the env var.
 - **`send_email()` takes a `recipients` parameter** so per-user notifications can reuse
   it without going near `PORTAL_SMTP_TO`, which is specifically the admin alert list.
 - **An unrecognised `PORTAL_SMTP_SECURITY` upgrades to STARTTLS, never downgrades to

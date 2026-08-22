@@ -18,16 +18,48 @@ from email.message import EmailMessage
 import requests
 
 import config
+import db
 
 _logger = logging.getLogger(__name__)
 
 TIMEOUT = 5
 
 
+RECIPIENTS_SETTING = "smtp_recipients"
+
+
 def email_recipients():
-    """The admin alert recipients, from PORTAL_SMTP_TO. Comma-separated, blanks
-    dropped, so a trailing comma or a stray space isn't an empty address."""
-    return [address.strip() for address in config.SMTP_TO.split(",") if address.strip()]
+    """The admin alert recipients. Comma-separated, blanks dropped, so a trailing comma
+    or a stray space isn't an empty address.
+
+    Stored as a DB setting rather than an env var, unlike the rest of the SMTP block.
+    That is a deliberate split rather than an inconsistency: the host, username and
+    password are credentials and static deployment config, whereas *who gets told* is a
+    routine choice an admin changes without wanting to edit a file and restart - exactly
+    the distinction this project's config split is built on.
+
+    PORTAL_SMTP_TO is still read as the fallback, so an install that set it before this
+    moved keeps working untouched until someone edits the list in the admin panel."""
+    try:
+        raw = db.get_setting(RECIPIENTS_SETTING, "")
+    except Exception:
+        # notify() is documented as never raising - it is called from the background
+        # health-check thread, where an exception would take the whole check cycle down
+        # over a notification. Reading a setting is a new way for that to happen, so a
+        # database that isn't there or isn't readable falls back to the env var rather
+        # than propagating.
+        _logger.warning("Could not read the email recipient list; falling back to PORTAL_SMTP_TO")
+        raw = ""
+    if not raw.strip():
+        raw = config.SMTP_TO
+    return [address.strip() for address in raw.split(",") if address.strip()]
+
+
+def normalize_recipients(raw):
+    """Cleans admin-entered input (mixed commas/newlines/whitespace) into a canonical
+    comma-separated string, the same shape the Discord ID lists use."""
+    parts = [p.strip() for p in (raw or "").replace("\n", ",").split(",") if p.strip()]
+    return ", ".join(parts)
 
 
 def email_configured():
@@ -57,7 +89,8 @@ def channel_summary():
         {"key": "email",
          "label": "Email",
          "description": "Sent through your own SMTP server or provider. Needs a host, a "
-                        "from-address and at least one recipient before it counts as set up.",
+                        "from-address and at least one recipient before it counts as set up. "
+                        "Recipients are set below; the rest is in .env.",
          "env_var": "PORTAL_SMTP_HOST",
          "configured": email_configured()},
     ]

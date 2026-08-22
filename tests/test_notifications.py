@@ -318,3 +318,55 @@ def test_a_real_smtp_conversation_delivers_the_message(monkeypatch):
               if p.get_content_type() in ("text/plain", "text/html")]
     assert any("Jellyfin is unreachable." in b for b in bodies)
     assert any("<h2" in b for b in bodies)
+
+
+# ---------------------------------------------------------------------------
+# Recipients are a database setting, not an env var
+# ---------------------------------------------------------------------------
+import db as db_module  # noqa: E402
+
+
+def test_the_stored_recipient_list_wins_over_the_env_var(isolated_db, monkeypatch):
+    _configure_email(monkeypatch, SMTP_TO="from-env@example.invalid")
+    db_module.set_setting(notifications.RECIPIENTS_SETTING, "from-db@example.invalid")
+    assert notifications.email_recipients() == ["from-db@example.invalid"]
+
+
+def test_the_env_var_still_works_for_an_install_that_predates_this(isolated_db, monkeypatch):
+    """Moving a setting must not silently switch off notifications for someone who
+    configured it the old way and hasn't opened the admin page since."""
+    _configure_email(monkeypatch, SMTP_TO="legacy@example.invalid")
+    assert notifications.email_recipients() == ["legacy@example.invalid"]
+
+
+def test_an_unreadable_database_never_breaks_notify(monkeypatch):
+    """notify() runs on the background health-check thread and is documented as never
+    raising. Reading a setting is a new way for that to happen, so it has to fall back
+    rather than propagate."""
+    _configure_email(monkeypatch, SMTP_TO="fallback@example.invalid")
+
+    def boom(*a, **k):
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(notifications.db, "get_setting", boom)
+    assert notifications.email_recipients() == ["fallback@example.invalid"]
+    monkeypatch.setattr(notifications.smtplib, "SMTP", _FakeSMTP)
+    notifications.notify("Title", "Message")  # must not raise
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("a@x.invalid,b@x.invalid", "a@x.invalid, b@x.invalid"),
+    ("a@x.invalid\nb@x.invalid", "a@x.invalid, b@x.invalid"),
+    ("  a@x.invalid ,, ", "a@x.invalid"),
+])
+def test_recipient_input_is_normalised_like_the_discord_id_lists(raw, expected):
+    assert notifications.normalize_recipients(raw) == expected
+
+
+def test_the_admin_page_saves_recipients(client, isolated_db):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/notifications",
+                 data={"recipients": "one@example.invalid\ntwo@example.invalid"},
+                 follow_redirects=True)
+    assert db_module.get_setting(notifications.RECIPIENTS_SETTING) == \
+        "one@example.invalid, two@example.invalid"

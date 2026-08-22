@@ -2827,16 +2827,25 @@ def admin_settings_general():
 
 
 # ---- Notifications ----
-@app.route("/admin/notifications")
+@app.route("/admin/notifications", methods=["GET", "POST"])
 @login_required
 def admin_notifications():
     """The hub for everything notification-related, which used to be scattered: the
     channel status lived in a paragraph at the bottom of Settings, and the Discord bot
     had its own top-level nav entry unrelated to either. Grouping them means "how do I
     get told about this" has one answer."""
+    if request.method == "POST":
+        db.set_setting(notifications.RECIPIENTS_SETTING,
+                        notifications.normalize_recipients(request.form.get("recipients", "")))
+        flash("Email recipients saved.", "success")
+        return redirect(url_for("admin_notifications"))
     channels = notifications.channel_summary()
     return render_template("admin_notifications.html", channels=channels,
                             any_configured=any(c["configured"] for c in channels),
+                            recipients=", ".join(notifications.email_recipients()),
+                            email_host_configured=bool(config.SMTP_HOST),
+                            legacy_env_recipients=bool(config.SMTP_TO)
+                                and not db.get_setting(notifications.RECIPIENTS_SETTING, "").strip(),
                             active="notifications")
 
 

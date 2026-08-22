@@ -159,8 +159,12 @@ SMTP_USERNAME = os.environ.get("PORTAL_SMTP_USERNAME", "").strip()
 # trimming it would silently break a legitimate one that ends in a space.
 SMTP_PASSWORD = os.environ.get("PORTAL_SMTP_PASSWORD", "")
 SMTP_FROM = os.environ.get("PORTAL_SMTP_FROM", "").strip()
-# Comma-separated; where incident/maintenance alerts go. Per-user notifications (a
-# separate feature) address their own recipients and don't read this.
+# Comma-separated; where incident/maintenance alerts go. A *fallback* only - the
+# recipient list is a DB setting an admin edits from Notifications -> Channels, because
+# who gets told is a routine choice rather than a credential or deployment config. This
+# is still read so an install configured before that moved keeps working untouched.
+# Per-user notifications (a separate feature) address their own recipients and don't
+# read either.
 SMTP_TO = os.environ.get("PORTAL_SMTP_TO", "").strip()
 # starttls (587, the usual), ssl (465, implicit TLS), or none (25, unencrypted - only
 # sane for an SMTP server on the same machine or LAN).

@@ -47,6 +47,40 @@
 </div>
 
 <div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Email recipients</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    Who gets incident, maintenance and low-disk alerts by email. Comma-separated for
+    several, the same format as the Discord ID lists elsewhere. Unlike the rest of the
+    SMTP settings this lives in the database, so changing it takes effect immediately and
+    needs no restart — the host, username and password stay in <code>.env</code> because
+    they're credentials.
+  </p>
+  {% if not email_host_configured %}
+    <p class="field-hint">
+      No SMTP host is configured yet (<code>PORTAL_SMTP_HOST</code>), so nothing will be
+      sent whatever you put here.
+    </p>
+  {% endif %}
+  {% if legacy_env_recipients %}
+    <p class="field-hint">
+      Currently coming from <code>PORTAL_SMTP_TO</code> in <code>.env</code>. Saving here
+      takes over from it — you can then remove that variable.
+    </p>
+  {% endif %}
+  <form method="POST">
+    <div class="field">
+      <label for="recipients">Recipients</label>
+      <textarea id="recipients" name="recipients" rows="2"
+                placeholder="you@example.com, someone-else@example.com">{{ recipients }}</textarea>
+      <div class="field-hint">Leave blank to send no email alerts at all.</div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save recipients</button>
+    </div>
+  </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
   <h2 style="margin-top: 0;">Send a test</h2>
   <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
     Sends a real notification through the same code path a genuine incident alert uses —
