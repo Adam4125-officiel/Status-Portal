@@ -1686,6 +1686,28 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   now catches it.
 - **Defaults: "things about my own reports" on, "anything about services I use" off.**
   The first is a reply to something the person started; the second is chatty.
+- **Seerr keeps email and Discord ID in two different places, and this is the trap.**
+  Email is on the base `User` record (so it comes back with `/api/v1/user`); Discord IDs
+  live on a per-user `UserSettings` sub-resource at
+  `/api/v1/user/{id}/settings/notifications`. Reading only the user list therefore syncs
+  email perfectly and Discord not at all — not a flaky field, the wrong API surface.
+  `fetch_seerr_users(with_notification_settings=True)` does the extra per-user request;
+  it's an N+1 and that's the accepted cost, since it runs hourly in a background task and
+  only for users with a real Jellyfin link.
+- **It's `discordIds`, a list.** Current Seerr stores several per user; this portal sends
+  to the first non-empty one. The older singular `discordId` is still read as a fallback.
+- **Seerr's settings POSTs overwrite every field they read from the body**, so writing
+  one field erases the rest — the user's PGP key, Telegram chat, Pushover tokens, quotas.
+  `push_seerr_contact()` is therefore **read-modify-write on both endpoints**, and must
+  stay that way. An earlier version sent only the changed field (and sent `email` to the
+  notifications endpoint, which ignores it entirely). Verified against
+  `seerr-team/seerr`'s `server/routes/user/usersettings.ts` — note the project was
+  renamed from Jellyseerr to **Seerr** (`seerr-team/seerr`, docs.seerr.dev).
+- **Which Seerr is used comes from `integrations.seerr_integration()`**, one function
+  reading the `seerr_integration_id` setting, mirroring how the Jellyfin instance backing
+  sign-in is chosen. It replaced three separate "first enabled one" pickers in
+  `media_search`, `user_notify` and `seerr_alerts`, which could silently disagree — and
+  which meant the Integrations page could diagnose one server while search used another.
 - **Seerr owns contact details; this portal mirrors them.** `seerr_contacts` is a cache
   replaced wholesale by the `seerr_contact_sync` task, exactly like the Jellyfin user
   list and for the same two reasons: the delivery task must not call Seerr per message,

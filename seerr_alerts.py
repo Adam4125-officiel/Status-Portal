@@ -57,10 +57,12 @@ MAX_REMEMBERED_IDS = 500
 
 
 def seerr_integration():
-    """The Jellyseerr/Overseerr integration to poll, or None. First enabled one, same
-    convention as jellyfin_auth.auth_integration()'s fallback."""
-    return next((i for i in db.list_integrations()
-                 if i["kind"] == "jellyseerr" and i["enabled"]), None)
+    """Whichever Seerr the admin selected - see integrations.seerr_integration().
+
+    Deliberately delegated rather than re-implemented here: three copies of "the first
+    enabled one" is three chances for the search page, the notifier and the diagnostic
+    to end up talking to different servers without anyone noticing."""
+    return integrations.seerr_integration()
 
 
 def dm_enabled():

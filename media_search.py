@@ -47,8 +47,12 @@ def jellyfin_integration():
 
 
 def seerr_integration():
-    return next((i for i in db.list_integrations()
-                 if i["kind"] == "jellyseerr" and i["enabled"]), None)
+    """Whichever Seerr the admin selected - see integrations.seerr_integration().
+
+    Deliberately delegated rather than re-implemented here: three copies of "the first
+    enabled one" is three chances for the search page, the notifier and the diagnostic
+    to end up talking to different servers without anyone noticing."""
+    return integrations.seerr_integration()
 
 
 def is_available():

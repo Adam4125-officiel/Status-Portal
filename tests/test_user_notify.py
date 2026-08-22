@@ -161,7 +161,7 @@ def test_delivered_rows_are_eventually_pruned(enabled, monkeypatch):
 # Matching a Jellyfin user to a Seerr user - the part that must fail closed
 # ---------------------------------------------------------------------------
 def _seerr_users(monkeypatch, users):
-    monkeypatch.setattr(integrations, "fetch_seerr_users", lambda url, key, limit=200: users)
+    monkeypatch.setattr(integrations, "fetch_seerr_users", lambda url, key, limit=200, with_notification_settings=False: users)
 
 
 def test_a_real_jellyfin_link_is_followed(enabled, monkeypatch):
@@ -190,7 +190,7 @@ def test_an_unreachable_seerr_is_treated_as_no_link(enabled, monkeypatch):
     db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
                             "api_key": "k", "enabled": 1})
 
-    def boom(url, key, limit=200):
+    def boom(url, key, limit=200, with_notification_settings=False):
         raise integrations.requests.RequestException("down")
 
     monkeypatch.setattr(integrations, "fetch_seerr_users", boom)
@@ -418,7 +418,7 @@ def test_a_failed_contact_sync_leaves_the_previous_details_alone(enabled, monkey
     _linked_seerr(monkeypatch, email="adam@x")
     user_notify.sync_seerr_contacts()
 
-    def boom(url, key, limit=200):
+    def boom(url, key, limit=200, with_notification_settings=False):
         raise integrations.requests.RequestException("down")
 
     monkeypatch.setattr(integrations, "fetch_seerr_users", boom)
@@ -542,3 +542,139 @@ def test_answering_the_prompt_saves_and_stops_asking(signed_in_visitor, monkeypa
 
 def test_the_prompt_endpoint_requires_a_signed_in_visitor(client, isolated_db):
     assert client.get("/account/contact").status_code == 302
+
+
+# ---------------------------------------------------------------------------
+# Seerr keeps email and Discord ID in two different places
+# ---------------------------------------------------------------------------
+# Verified against seerr-team/seerr's server/routes/user/usersettings.ts. The user list
+# carries email; Discord IDs live on a per-user notification-settings sub-resource, and
+# are a *list*. Reading only the base record is why email synced and Discord never did.
+import json as _json          # noqa: E402
+import threading as _threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, HTTPServer  # noqa: E402
+from urllib.parse import urlparse as _urlparse  # noqa: E402
+
+
+class _SeerrStub(BaseHTTPRequestHandler):
+    """Enough of Seerr to exercise the real two-endpoint shape, including the fact that
+    a POST replaces every field it reads."""
+    state = {}
+
+    def _json(self, payload, status=200):
+        body = _json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = _urlparse(self.path).path
+        if path == "/api/v1/user":
+            return self._json({"results": [
+                {"id": 7, "displayName": "Adam", "email": "adam@seerr.lan",
+                 "jellyfinUserId": "u1", "settings": {}},
+            ]})
+        if path == "/api/v1/user/7/settings/notifications":
+            return self._json(_SeerrStub.state["notifications"])
+        if path == "/api/v1/user/7/settings/main":
+            return self._json(_SeerrStub.state["main"])
+        self.send_response(404); self.end_headers()
+
+    def do_POST(self):
+        path = _urlparse(self.path).path
+        length = int(self.headers.get("Content-Length", 0))
+        body = _json.loads(self.rfile.read(length) or b"{}")
+        if path == "/api/v1/user/7/settings/notifications":
+            _SeerrStub.state["notifications"] = body
+            return self._json(body)
+        if path == "/api/v1/user/7/settings/main":
+            _SeerrStub.state["main"] = body
+            return self._json(body)
+        self.send_response(404); self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def seerr_stub():
+    _SeerrStub.state = {
+        # The fields a real Seerr would already hold and that must survive a write.
+        "notifications": {"discordIds": ["999"], "pgpKey": "KEEP-ME",
+                           "telegramChatId": "123", "notificationTypes": {}},
+        "main": {"username": "adam", "email": "adam@seerr.lan", "locale": "en",
+                  "movieQuotaLimit": 5},
+    }
+    server = HTTPServer(("127.0.0.1", 0), _SeerrStub)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def test_discord_ids_come_from_the_notification_sub_resource(seerr_stub):
+    """The reported bug. Without asking for the sub-resource the field is structurally
+    invisible - it simply isn't on the record being read."""
+    without = integrations.fetch_seerr_users(seerr_stub, "k")
+    assert without[0]["discord_id"] == ""          # not on the base record
+    withit = integrations.fetch_seerr_users(seerr_stub, "k", with_notification_settings=True)
+    assert withit[0]["discord_id"] == "999"
+    assert withit[0]["email"] == "adam@seerr.lan"  # email still from the base record
+
+
+def test_seerr_discord_ids_are_a_list(seerr_stub):
+    """Current Seerr stores `discordIds`, plural. Reading `discordId` finds nothing."""
+    _SeerrStub.state["notifications"]["discordIds"] = ["", "  ", "424242"]
+    users = integrations.fetch_seerr_users(seerr_stub, "k", with_notification_settings=True)
+    assert users[0]["discord_id"] == "424242"
+
+
+def test_the_older_singular_spelling_is_still_understood(seerr_stub):
+    _SeerrStub.state["notifications"] = {"discordId": "555"}
+    users = integrations.fetch_seerr_users(seerr_stub, "k", with_notification_settings=True)
+    assert users[0]["discord_id"] == "555"
+
+
+def test_one_users_settings_failing_does_not_lose_the_others_details(seerr_stub, monkeypatch):
+    def boom(base_url, api_key, seerr_user_id):
+        raise integrations.requests.RequestException("nope")
+
+    monkeypatch.setattr(integrations, "fetch_seerr_notification_settings", boom)
+    users = integrations.fetch_seerr_users(seerr_stub, "k", with_notification_settings=True)
+    assert users[0]["email"] == "adam@seerr.lan"
+
+
+def test_writing_a_discord_id_does_not_wipe_the_rest_of_the_settings(seerr_stub):
+    """Seerr's POST overwrites every field it reads from the body, so sending only the
+    one being changed erases the user's PGP key, Telegram chat and Pushover tokens.
+    Read-modify-write is not optional here."""
+    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="111")
+    saved = _SeerrStub.state["notifications"]
+    assert saved["discordIds"] == ["111"]
+    assert saved["pgpKey"] == "KEEP-ME"
+    assert saved["telegramChatId"] == "123"
+
+
+def test_writing_an_email_goes_to_the_general_settings_not_notifications(seerr_stub):
+    """The notifications endpoint doesn't read `email` at all, so an earlier version of
+    this wrote emails into a void."""
+    integrations.push_seerr_contact(seerr_stub, "k", 7, email="new@x.invalid")
+    assert _SeerrStub.state["main"]["email"] == "new@x.invalid"
+    # and doesn't blank the other general settings
+    assert _SeerrStub.state["main"]["movieQuotaLimit"] == 5
+    assert _SeerrStub.state["main"]["username"] == "adam"
+
+
+def test_clearing_a_discord_id_sends_an_empty_list(seerr_stub):
+    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="")
+    assert _SeerrStub.state["notifications"]["discordIds"] == []
+
+
+def test_the_sync_now_captures_discord_ids(enabled, seerr_stub):
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": seerr_stub,
+                            "api_key": "k", "enabled": 1})
+    user_notify.sync_seerr_contacts()
+    cached = db.get_seerr_contact("u1")
+    assert cached["email"] == "adam@seerr.lan"
+    assert cached["discord_id"] == "999"

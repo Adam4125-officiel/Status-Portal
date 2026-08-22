@@ -2825,6 +2825,10 @@ def admin_integrations():
     return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
                             check_interval=config.CHECK_INTERVAL_SECONDS,
                             version_check=version_checks.get_results(),
+                            seerr_choices=[i for i in db.list_integrations()
+                                            if i["kind"] == "jellyseerr" and i["enabled"]],
+                            seerr_chosen=db.get_setting(integrations.SEERR_INTEGRATION_SETTING, ""),
+                            seerr_in_use=integrations.seerr_integration(),
                             # Popped, so the report shows once after the button is
                             # pressed rather than sticking around looking like live state.
                             seerr_diagnosis=session.pop("seerr_diagnosis", None),
@@ -2849,6 +2853,22 @@ def admin_integration_check_now(iid):
     return redirect(url_for("admin_integrations"))
 
 
+@app.route("/admin/integrations/seerr-instance", methods=["POST"])
+@login_required
+def admin_seerr_instance():
+    """Which Seerr backs search, requests, approval alerts and contact sync.
+
+    Same shape as the Jellyfin instance that backs user sign-in. It matters once more
+    than one exists: before this, each feature independently took "the first enabled
+    one", so the Integrations page could be diagnosing one server while search talked
+    to another."""
+    raw = request.form.get("seerr_integration_id", "").strip()
+    db.set_setting(integrations.SEERR_INTEGRATION_SETTING, raw if raw.isdigit() else "")
+    integrations.clear_caches()
+    flash("Seerr instance saved.", "success")
+    return redirect(url_for("admin_integrations"))
+
+
 @app.route("/admin/integrations/<int:iid>/diagnose", methods=["POST"])
 @login_required
 def admin_integration_diagnose(iid):
@@ -2863,7 +2883,11 @@ def admin_integration_diagnose(iid):
     if not integration or integration["kind"] != "jellyseerr":
         flash("Search diagnostics only apply to a Jellyseerr/Overseerr integration.", "error")
         return redirect(url_for("admin_integrations"))
-    report = integrations.diagnose_seerr(integration["base_url"], integration["api_key"])
+    # The admin's own failing search term, so the diagnostic reproduces the actual
+    # problem rather than proving that the word "test" works. A 400 that only happens
+    # for real queries is a 400 about the query.
+    query = request.form.get("query", "").strip()[:100] or "test"
+    report = integrations.diagnose_seerr(integration["base_url"], integration["api_key"], query)
     session["seerr_diagnosis"] = report
     return redirect(url_for("admin_integrations"))
 

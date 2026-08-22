@@ -342,6 +342,30 @@ def search_jellyfin(base_url, api_key, query, jellyfin_user_id=None, limit=12):
     } for item in items if item.get("Id")]
 
 
+def _http_error_detail(exc):
+    """The body of a 4xx/5xx, trimmed, or "".
+
+    Seerr answers a rejected request with JSON explaining what it objected to, and
+    throwing that away was what made an HTTP 400 unactionable - "answered HTTP 400" is
+    true and tells nobody what to change. requests' HTTPError carries the response, so
+    the explanation is right there."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except Exception:
+        # Anything at all here - a non-JSON body, or a response object that doesn't
+        # implement json() - must degrade to "no detail", never to a second exception
+        # raised while explaining the first.
+        return (getattr(response, "text", "") or "").strip()[:300]
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail", "errors"):
+            if payload.get(key):
+                return str(payload[key])[:300]
+    return str(payload)[:300]
+
+
 def describe_request_error(exc):
     """A short, human phrase for why an outbound call failed.
 
@@ -355,7 +379,8 @@ def describe_request_error(exc):
         status = exc.response.status_code if exc.response is not None else 0
         if status in (401, 403):
             return f"refused the API key (HTTP {status})"
-        return f"answered HTTP {status}"
+        detail = _http_error_detail(exc)
+        return f"answered HTTP {status}" + (f" - {detail}" if detail else "")
     if isinstance(exc, requests.ConnectionError):
         return "couldn't be connected to"
     if isinstance(exc, ValueError):
@@ -396,15 +421,22 @@ def diagnose_seerr(base_url, api_key, query="test"):
              "Seerr host - which the health check above does not."),
     ):
         entry = {"name": name, "path": path, "timeout": timeout, "note": note,
-                 "ok": False, "status_code": None, "elapsed_ms": None, "error": None}
+                 "ok": False, "status_code": None, "elapsed_ms": None, "error": None,
+                 "url": None, "body": None}
         started = time.monotonic()
         try:
             r = requests.get(f"{base_url}{path}", headers=headers, params=params,
                               timeout=timeout)
             entry["status_code"] = r.status_code
+            # The exact URL requests built, so a query that Seerr rejects can be seen
+            # verbatim rather than guessed at.
+            entry["url"] = r.url
             r.raise_for_status()
             r.json()
             entry["ok"] = True
+        except requests.HTTPError as e:
+            entry["error"] = describe_request_error(e)
+            entry["body"] = _http_error_detail(e)
         except (requests.RequestException, ValueError) as e:
             entry["error"] = f"{describe_request_error(e)} - {e}"
         entry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
@@ -699,7 +731,34 @@ def fetch_seerr_pending(base_url, api_key, limit=50):
     return items, (total if isinstance(total, int) else len(items))
 
 
-def fetch_seerr_users(base_url, api_key, limit=200):
+def fetch_seerr_notification_settings(base_url, api_key, seerr_user_id):
+    """One user's notification settings, where Seerr actually keeps their Discord ID.
+
+    Seerr splits a person across two structures: the `User` record (email, account
+    info) and a per-user `UserSettings` sub-resource (notification preferences). The
+    user list only carries the first, which is why email synced correctly and Discord
+    ID never did - it was structurally invisible to a caller reading only the base
+    record, rather than a flaky field.
+
+    Note `discordIds` is a **list** in current Seerr, not a single `discordId` string.
+    Verified against seerr-team/seerr's server/routes/user/usersettings.ts."""
+    r = requests.get(f"{base_url.rstrip('/')}/api/v1/user/{seerr_user_id}/settings/notifications",
+                      headers={"X-Api-Key": api_key}, timeout=TIMEOUT)
+    r.raise_for_status()
+    payload = r.json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def first_discord_id(settings):
+    """Seerr allows several Discord IDs per user; this portal sends to one. First
+    non-empty entry, tolerating the older singular `discordId` spelling."""
+    ids = settings.get("discordIds")
+    if isinstance(ids, list):
+        return next((str(i).strip() for i in ids if str(i).strip()), "")
+    return str(settings.get("discordId") or "").strip()
+
+
+def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=False):
     """Every Seerr user, normalised - including `jellyfin_user_id`, which is the whole
     point of this call.
 
@@ -724,43 +783,90 @@ def fetch_seerr_users(base_url, api_key, limit=200):
 
     users = []
     for entry in results:
-        settings = entry.get("settings") or {}
+        # The base record's embedded settings, if this Seerr version exposes any. Kept
+        # as a best-effort source; the sub-resource below is the authoritative one.
+        embedded = entry.get("settings") or {}
         users.append({
             "id": str(entry.get("id")) if entry.get("id") is not None else "",
             "display_name": entry.get("displayName") or entry.get("username") or "",
             "email": entry.get("email") or "",
-            "discord_id": str(settings.get("discordId") or ""),
+            "discord_id": first_discord_id(embedded),
             "jellyfin_user_id": str(entry.get("jellyfinUserId") or entry.get("jellyfinId") or ""),
         })
-    return [u for u in users if u["id"]]
+    users = [u for u in users if u["id"]]
+
+    if with_notification_settings:
+        # One extra request per *linked* user. That's an N+1, and it's the accepted
+        # cost of the data living somewhere else: it runs hourly in a background task,
+        # only for users who actually map to a Jellyfin account, and a failure on one
+        # user leaves the rest (and their email) intact.
+        for user in users:
+            if not user["jellyfin_user_id"]:
+                continue
+            try:
+                settings = fetch_seerr_notification_settings(base_url, api_key, user["id"])
+            except (requests.RequestException, ValueError) as e:
+                _logger.info("Could not read Seerr notification settings for user %s: %s",
+                              user["id"], e)
+                continue
+            user["discord_id"] = first_discord_id(settings) or user["discord_id"]
+    return users
 
 
 def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=None):
     """Writes contact details back to a Seerr user's own settings.
 
-    **The only call in this entire application that modifies another service.**
-    Everything else is read-only, and Jellyfin authentication is the one other outbound
-    write (a session logout). So it is deliberately narrow: exactly one user, exactly
-    the two contact fields, and only ever from an explicit button press with the change
-    shown first. It must never be reachable from a sync, a background task, or anything
-    that runs without someone having just asked for it.
+    **The only call in this entire application that modifies another service.** So it is
+    deliberately narrow: exactly one user, exactly the two contact fields, and only ever
+    from an explicit button press with the change shown first. It must never be
+    reachable from a sync or a background task.
 
-    Seerr's user settings endpoint replaces the fields it is given, so only the ones
-    actually being changed are sent."""
+    Three things about Seerr's API make this less obvious than it looks, all verified
+    against seerr-team/seerr's server/routes/user/usersettings.ts:
+
+    * **Email and Discord live in different places.** Email is on the user's general
+      settings (`/settings/main`); Discord is on their notification settings
+      (`/settings/notifications`). Posting an email to the notifications endpoint - as
+      an earlier version of this did - is silently ignored.
+    * **Discord is `discordIds`, a list**, not a `discordId` string.
+    * **Both POSTs overwrite every field they read from the body.** Sending only the one
+      field being changed therefore *erases* the rest - the user's PGP key, Telegram
+      chat, Pushover tokens and quotas. So each write is read-modify-write: fetch the
+      current settings, change the one value, send the whole object back.
+    """
     base_url = base_url.rstrip("/")
-    payload = {}
+    headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
+    changed = False
+
     if email is not None:
-        payload["emailNotifications"] = True
-        payload["email"] = email
+        current = requests.get(f"{base_url}/api/v1/user/{seerr_user_id}/settings/main",
+                                headers=headers, timeout=TIMEOUT)
+        current.raise_for_status()
+        body = current.json() if current.content else {}
+        body = dict(body) if isinstance(body, dict) else {}
+        body["email"] = email
+        r = requests.post(f"{base_url}/api/v1/user/{seerr_user_id}/settings/main",
+                           headers=headers, json=body, timeout=TIMEOUT)
+        r.raise_for_status()
+        changed = True
+
     if discord_id is not None:
-        payload["discordId"] = discord_id
-    if not payload:
-        return False
-    r = requests.post(f"{base_url}/api/v1/user/{seerr_user_id}/settings/notifications",
-                       headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-                       json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
-    return True
+        current = requests.get(
+            f"{base_url}/api/v1/user/{seerr_user_id}/settings/notifications",
+            headers=headers, timeout=TIMEOUT)
+        current.raise_for_status()
+        body = current.json() if current.content else {}
+        body = dict(body) if isinstance(body, dict) else {}
+        # Replaces the list rather than appending: this portal manages one ID, and
+        # accumulating stale ones would mean messaging people who'd been removed.
+        body["discordIds"] = [discord_id] if discord_id else []
+        r = requests.post(
+            f"{base_url}/api/v1/user/{seerr_user_id}/settings/notifications",
+            headers=headers, json=body, timeout=TIMEOUT)
+        r.raise_for_status()
+        changed = True
+
+    return changed
 
 
 def fetch_prowlarr_indexers(base_url, api_key):
@@ -815,6 +921,31 @@ def get_cached_media():
             for key, value in _media_cache.items()}
 
 
+SEERR_INTEGRATION_SETTING = "seerr_integration_id"
+
+
+def seerr_integration():
+    """The Jellyseerr/Overseerr integration everything Seerr-shaped should use.
+
+    One function rather than the three near-identical "first enabled one" pickers that
+    media_search, user_notify and seerr_alerts each had. Those could silently disagree
+    the moment a second Seerr existed - and worse, so could the *diagnostic*, which
+    tests whichever integration the admin clicked while search quietly used a different
+    one. That is a very plausible reading of "the diagnostic says fine but searching
+    returns HTTP 400".
+
+    Same shape as jellyfin_auth.auth_integration(): an explicit choice wins, nothing
+    chosen falls back to the first enabled one (right for the common case of having
+    exactly one), and a stored id pointing at something deleted or disabled resolves to
+    None rather than silently using some *other* Seerr."""
+    raw = db.get_setting(SEERR_INTEGRATION_SETTING, "")
+    candidates = [i for i in db.list_integrations()
+                  if i["kind"] == "jellyseerr" and i["enabled"]]
+    if raw.isdigit():
+        return next((i for i in candidates if i["id"] == int(raw)), None)
+    return candidates[0] if candidates else None
+
+
 def _first_enabled(kind):
     return next((i for i in db.list_integrations()
                  if i["kind"] == kind and i["enabled"]), None)
@@ -828,7 +959,7 @@ def refresh_media_cache():
     Which is also why this returns a summary instead of raising on the first failure."""
     integrations_by_kind = {
         "arr": [i for i in db.list_integrations() if i["kind"] == "arr" and i["enabled"]],
-        "jellyseerr": _first_enabled("jellyseerr"),
+        "jellyseerr": seerr_integration(),
         "qbittorrent": _first_enabled("qbittorrent"),
     }
     if not any(integrations_by_kind.values()):

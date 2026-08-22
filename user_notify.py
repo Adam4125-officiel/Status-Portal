@@ -88,8 +88,12 @@ def notify_service_subscribers(event, subject, body, exclude_user_id=None):
 # Where a person's contact details come from
 # ---------------------------------------------------------------------------
 def seerr_integration():
-    return next((i for i in db.list_integrations()
-                 if i["kind"] == "jellyseerr" and i["enabled"]), None)
+    """Whichever Seerr the admin selected - see integrations.seerr_integration().
+
+    Deliberately delegated rather than re-implemented here: three copies of "the first
+    enabled one" is three chances for the search page, the notifier and the diagnostic
+    to end up talking to different servers without anyone noticing."""
+    return integrations.seerr_integration()
 
 
 def find_seerr_account(jellyfin_user_id):
@@ -103,7 +107,8 @@ def find_seerr_account(jellyfin_user_id):
     if integration is None or not jellyfin_user_id:
         return None
     try:
-        users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"])
+        users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"],
+                                                with_notification_settings=True)
     except (requests.RequestException, ValueError) as e:
         _logger.info("Could not read Seerr users while looking for a link: %s", e)
         return None
@@ -192,7 +197,10 @@ def sync_seerr_contacts():
     if integration is None:
         raise scheduler.TaskSkipped(
             "No enabled Jellyseerr/Overseerr integration - add one under Integrations.")
-    users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"])
+    # Discord IDs live on a per-user sub-resource, not the user list, so the sync has to
+    # ask for them explicitly - that is exactly why email synced and Discord never did.
+    users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"],
+                                            with_notification_settings=True)
     linked = [{"jellyfin_user_id": u["jellyfin_user_id"], "seerr_user_id": u["id"],
                "display_name": u["display_name"], "email": u["email"],
                "discord_id": u["discord_id"]}
