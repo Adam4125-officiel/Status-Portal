@@ -812,16 +812,18 @@ def _service_defaults():
 # templates/sections/<key>.html partial, which owns its own "is there anything to
 # show" guard - index() doesn't filter this list by content, it's included
 # unconditionally in whatever order is configured, same as today's fixed order.
+# The main page's own content blocks, in the order an admin can rearrange them.
+#
+# Deliberately short. The public page used to carry nine of these in one scroll -
+# announcements, services, incidents, info, resources, VMs, Jellyfin activity, media
+# and search - which buried the thing almost every visitor actually came for ("is it
+# working?") under everything else. What's left here is that question; the rest moved
+# to pages of their own (PUBLIC_PAGES below) and appears here only as a one-line
+# summary linking through.
 PUBLIC_SECTIONS = [
     ("announcements", "Announcements"),
     ("services", "Services"),
     ("incidents", "Incidents & maintenance"),
-    ("info", "Practical info"),
-    ("resources", "Server resources"),
-    ("vms", "Virtual machines"),
-    ("jellyfin_activity", "Jellyfin activity"),
-    ("media", "Media activity"),
-    ("search", "Library search"),
 ]
 _DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
 
@@ -914,6 +916,188 @@ def _group_services(services):
     return groups
 
 
+# ---------------------------------------------------------------------------
+# The public sub-pages
+# ---------------------------------------------------------------------------
+# Each of these was a block on the main page and is now a page of its own. The context
+# builder for each is shared between its page *and* the main page's summary line, which
+# is the point: the visibility rules (show_public_*, media_requires_login) are applied
+# once, in one place, so a sub-page cannot become a way around a setting that hides the
+# corresponding block. A page whose builder reports nothing to show is not linked and
+# 404s if requested directly - the same answer a visitor would get if it didn't exist,
+# rather than an empty page confirming the feature is there but switched off.
+def _resources_context():
+    visible = _public_resource_visibility()
+    show_any = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
+    if not show_any:
+        return None
+    snapshot = monitoring.get_resource_snapshot()
+    return {"visible": visible, "snapshot": snapshot, "show_any_resource": show_any}
+
+
+def _vms_context():
+    visible = _public_resource_visibility()
+    if not visible["vms"]:
+        return None
+    vms = monitoring.get_cached_vm_snapshot()
+    return {"visible": visible, "vms": vms}
+
+
+def _activity_context():
+    visible = _public_resource_visibility()
+    if not visible["jellyfin_tasks"]:
+        return None
+    activity = integrations.get_cached_jellyfin_activity()
+    return {"visible": visible, "jellyfin_activity": activity}
+
+
+def _media_context():
+    media_visible = _public_media_visibility()
+    if not any(media_visible.values()) or not _media_visible_to(current_user()):
+        return None
+    return {"media": integrations.get_cached_media(), "media_visible": media_visible}
+
+
+def _info_context():
+    info = db.get_info_page()
+    if not (info or "").strip():
+        return None
+    return {"info": info}
+
+
+def _high_load():
+    """The high-load badge, which stays on the main page even though the resource cards
+    moved: it answers "is something wrong right now", which is the main page's job. Its
+    toggle is separate from the cards', so it needs its own snapshot when they're off."""
+    visible = _public_resource_visibility()
+    if not visible["highload"]:
+        return {"active": False, "reasons": []}
+    snapshot = monitoring.get_resource_snapshot()
+    return integrations.evaluate_high_load(snapshot) if snapshot else {"active": False, "reasons": []}
+
+
+# key -> (label, endpoint, context builder, summary builder). The summary is the line
+# shown on the main page; returning a falsy summary still links the page, it just has
+# nothing to say about it yet.
+PUBLIC_PAGES = [
+    ("resources", "Server resources", "public_resources", _resources_context,
+     lambda ctx: _resources_summary(ctx)),
+    ("vms", "Virtual machines", "public_vms", _vms_context,
+     lambda ctx: _vms_summary(ctx)),
+    ("activity", "Jellyfin activity", "public_activity", _activity_context,
+     lambda ctx: _activity_summary(ctx)),
+    ("media", "Media activity", "public_media", _media_context,
+     lambda ctx: _media_summary(ctx)),
+    ("info", "Practical info", "public_info", _info_context,
+     lambda ctx: "How to connect, and what to do when something's wrong"),
+]
+
+
+def _resources_summary(ctx):
+    snapshot = ctx.get("snapshot") or {}
+    bits = []
+    if ctx["visible"].get("cpu") and snapshot.get("cpu_percent") is not None:
+        bits.append(f"CPU {snapshot['cpu_percent']}%")
+    if ctx["visible"].get("memory") and (snapshot.get("memory") or {}).get("percent") is not None:
+        bits.append(f"memory {snapshot['memory']['percent']}%")
+    if ctx["visible"].get("disks") and snapshot.get("disks"):
+        bits.append(f"{len(snapshot['disks'])} disk(s)")
+    return " · ".join(bits)
+
+
+def _vms_summary(ctx):
+    vms = ctx.get("vms") or []
+    if not vms:
+        return ""
+    running = sum(1 for vm in vms if (vm.get("state") or "").lower() == "running")
+    return f"{running} of {len(vms)} running"
+
+
+def _activity_summary(ctx):
+    tasks = (ctx.get("jellyfin_activity") or {}).get("running_tasks") or []
+    if not tasks:
+        return "Nothing running right now"
+    return f"{len(tasks)} task(s) running"
+
+
+def _media_summary(ctx):
+    media, visible = ctx["media"], ctx["media_visible"]
+    bits = []
+    if visible.get("downloads") and media.get("downloads"):
+        bits.append(f"{len(media['downloads'])} downloading")
+    if visible.get("calendar") and media.get("calendar"):
+        bits.append(f"{len(media['calendar'])} coming soon")
+    if visible.get("requests") and media.get("requests"):
+        bits.append(f"{len(media['requests'])} request(s)")
+    return " · ".join(bits)
+
+
+def _public_page_links(include_summaries=False):
+    """Which sub-pages a visitor can see right now, for the nav and the summaries.
+
+    Built by calling each page's own context builder, so "is it linked" and "does it
+    render" can never disagree - a link to a page that would 404 is worse than no link."""
+    links = []
+    for key, label, endpoint, build_context, summarise in PUBLIC_PAGES:
+        context = build_context()
+        if context is None:
+            continue
+        entry = {"key": key, "label": label, "url": url_for(endpoint)}
+        if include_summaries:
+            try:
+                entry["summary"] = summarise(context) or ""
+            except Exception:
+                # A summary is decoration; it must never be the reason a page 500s.
+                _logger.exception("Could not summarise public page '%s'", key)
+                entry["summary"] = ""
+        links.append(entry)
+    return links
+
+
+def _render_public_page(key):
+    """Shared body of every sub-page route."""
+    entry = next((p for p in PUBLIC_PAGES if p[0] == key), None)
+    if entry is None:
+        abort(404)
+    _, label, _, build_context, _ = entry
+    context = build_context()
+    if context is None:
+        # Switched off, or not visible to this viewer. 404 rather than an empty page:
+        # "this doesn't exist here" is the honest answer, and an empty page would
+        # confirm the feature exists and is merely hidden.
+        abort(404)
+    return render_template(f"public/{key}.html", page_label=label, active_page=key,
+                            site_name=db.get_setting("site_name", "Server"),
+                            nav_links=_public_page_links(),
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            repo_url=updater.REPO_URL, **context)
+
+
+@app.route("/resources")
+def public_resources():
+    return _render_public_page("resources")
+
+
+@app.route("/vms")
+def public_vms():
+    return _render_public_page("vms")
+
+
+@app.route("/activity")
+def public_activity():
+    return _render_public_page("activity")
+
+
+@app.route("/media")
+def public_media():
+    return _render_public_page("media")
+
+
+@app.route("/info")
+def public_info():
+    return _render_public_page("info")
+
+
 @app.route("/")
 def index():
     services = _attach_integration_status(_enrich_services(db.list_services()))
@@ -925,35 +1109,23 @@ def index():
     # the filtered list is already empty, so this adds no query in the common case.
     incidents_hidden = not incidents and bool(db.list_incidents(limit=1))
     maintenance_windows = db.list_public_maintenance_windows()
-    info = db.get_info_page()
     overall = compute_overall_status(services)
     site_name = db.get_setting("site_name", "Server")
-    visible = _public_resource_visibility()
-    show_any_resource = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
-    # High-load detection needs a live snapshot even if none of the resource cards
-    # themselves are set to display - the badge is a separate toggle from them.
-    snapshot = monitoring.get_resource_snapshot() if (show_any_resource or visible["highload"]) else None
-    vms = monitoring.get_cached_vm_snapshot() if visible["vms"] else []
-    high_load = integrations.evaluate_high_load(snapshot) if (visible["highload"] and snapshot) \
-        else {"active": False, "reasons": []}
-    jellyfin_activity = integrations.get_cached_jellyfin_activity() if visible["jellyfin_tasks"] else None
-    # Reads the cache the media_refresh task fills - never fetches anything here.
-    media_visible = _public_media_visibility()
-    media = (integrations.get_cached_media()
-             if (any(media_visible.values()) and _media_visible_to(current_user())) else None)
     # Signed-in visitors only, and only when there's something to search. Both halves
     # matter: without sign-in the box would expose the whole library to anyone who can
     # load the page, and without an integration it would be a box that does nothing.
     search_enabled = bool(current_user()) and media_search.is_available()
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
-                            maintenance_windows=maintenance_windows, info=info, overall=overall,
+                            maintenance_windows=maintenance_windows, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
-                            site_name=site_name, visible=visible, show_any_resource=show_any_resource,
-                            snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
-                            media=media, media_visible=media_visible,
-                            search_enabled=search_enabled,
+                            site_name=site_name,
+                            high_load=_high_load(),
+                            # Both the nav and the one-line summaries come from the same
+                            # builders the pages themselves use.
+                            nav_links=_public_page_links(),
+                            page_summaries=_public_page_links(include_summaries=True),
+                            search_enabled=search_enabled, active_page="status",
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 

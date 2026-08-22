@@ -1,25 +1,10 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
 {% block title %}{{ site_name }} Status{% endblock %}
 {% set status_label = {'operational': 'Operational', 'slow': 'Slow', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
 {% set status_css = {'operational': 'ok', 'slow': 'warn', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
 {% set incident_label = {'investigating': 'Investigating', 'identified': 'Identified', 'monitoring': 'Monitoring', 'resolved': 'Resolved'} %}
 {% set announce_label = {'info': 'Info', 'success': 'Success', 'warning': 'Warning', 'critical': 'Critical'} %}
-{% block body %}
-<div class="wrap">
-
-  <div class="topbar">
-    <div class="brand">
-      {% if site_logo_filename %}
-        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
-      {% else %}
-        <span class="dot-server"></span>
-      {% endif %}
-      {{ site_name }}
-    </div>
-    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
-      next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
-    </div>
-  </div>
+{% block content %}
 
   <div class="status-hero">
     <div class="status-hero__row">
@@ -47,10 +32,26 @@
     {% include 'sections/' ~ key ~ '.html' %}
   {% endfor %}
 
-  <footer class="foot">status-portal · auto-refresh active · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a> · <a href="{{ repo_url }}" target="_blank" rel="noopener">Like this page? ⭐ Check it out on GitHub</a></footer>
-</div>
-<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
-<script src="{{ asset_url('js/main.js') }}"></script>
-<script src="{{ asset_url('js/local_time.js') }}"></script>
+  {# Everything that used to be a block on this page, now one line each linking to its
+     own page. The summaries come from the same builders those pages use, so they can't
+     advertise something the page wouldn't show. #}
+  {% if page_summaries %}
+  <section class="section">
+    <h2 class="section__title">More</h2>
+    <div class="summary-grid">
+      {% for entry in page_summaries %}
+      <a class="summary-card" href="{{ entry.url }}">
+        <span class="summary-card__label">{{ entry.label }}</span>
+        {% if entry.summary %}<span class="summary-card__value">{{ entry.summary }}</span>{% endif %}
+        <span class="summary-card__go">View details →</span>
+      </a>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+{% endblock %}
+{% block page_scripts %}
+{# Only the main page has the incidents/maintenance "load more" buttons. #}
 <script src="{{ asset_url('js/public_history.js') }}"></script>
 {% endblock %}

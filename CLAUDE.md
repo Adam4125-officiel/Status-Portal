@@ -829,17 +829,33 @@ DB-backed Settings pages, not a code edit.
   Three classes now: `local-time` (full), `local-time-short` (clock only),
   `local-date` (date only).
 
-## Public page layout (`templates/sections/`)
+## Public page layout (`templates/sections/`, `templates/public/`)
 
-- Each of the 7 public-page content blocks (announcements, services, incidents &
-  maintenance, practical info, resources, VMs, Jellyfin activity) is its own partial
-  under `templates/sections/<key>.html`, each owning its own "is there anything to
-  show" guard. The topbar/status-hero/footer are page chrome, not content, and stay
-  hardcoded in `index.html` — deliberately never made reorderable.
+- **The public page is split in two kinds of thing.** `PUBLIC_SECTIONS` (announcements,
+  services, incidents & maintenance) are blocks on the main page, reorderable by the
+  admin. `PUBLIC_PAGES` (resources, VMs, Jellyfin activity, media, practical info) are
+  pages of their own, reached from the shared `.page-nav` and summarised in one line on
+  the main page. The main page answers "is it working?"; everything else is a click away.
+- **A page's context builder is the single gate, used by the page *and* the nav *and*
+  the summary.** That is what stops a sub-page becoming a way around a `show_public_*`
+  setting or `media_requires_login`: if the builder returns `None` the route 404s, the
+  nav doesn't link it, and no summary mentions it — all three from the same call. Never
+  render a sub-page from anything other than `_render_public_page()`.
+- **A switched-off page 404s rather than rendering empty.** An empty page confirms the
+  feature exists and is merely hidden; 404 is the same answer a visitor would get if it
+  didn't exist.
+- **Auto-refresh lives in `public_base.html`, not `index.html`.** The public page used
+  to be one page that reloaded itself; after the split, putting the refresh script only
+  on the main page would silently freeze the resources and VM pages.
+- Each content block is its own partial under `templates/sections/<key>.html`, each
+  owning its own "is there anything to show" guard, and the sub-page templates under
+  `templates/public/` just include the matching partial — one copy of the markup, and
+  the guard still applies wherever it's rendered. The topbar/status-hero/footer are page
+  chrome, not content, and stay hardcoded — deliberately never made reorderable.
 - `app._public_section_order()` reads the `public_layout_order` setting
   (comma-separated section keys) and is the *only* place that decides render order —
   `index.html` just does `{% include 'sections/' ~ key ~ '.html' %}` in a loop.
-  **If you add an 8th section**, add its key to the `PUBLIC_SECTIONS` list in `app.py`
+  **If you add another main-page section**, add its key to the `PUBLIC_SECTIONS` list in `app.py`
   (which doubles as the label lookup for the admin reorder UI);
   `_public_section_order()` already appends any valid key missing from a stale stored
   value at the end, so an admin who saved a custom order before your new section

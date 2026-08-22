@@ -1301,3 +1301,49 @@ footer.foot {
 .admin-table td,
 .form-panel code,
 .resource-card__sub { overflow-wrap: anywhere; }
+
+/* Public page navigation and the "More" summary cards.
+   The public page used to be one long scroll of nine blocks; these are what replaced
+   the five that moved to pages of their own. */
+.page-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+}
+.page-nav a {
+  padding: 7px 12px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -3px;
+}
+.page-nav a:hover { color: var(--text-primary); text-decoration: none; }
+.page-nav a.active { color: var(--brand); border-bottom-color: var(--brand); }
+.brand__link { color: inherit; }
+.brand__link:hover { text-decoration: none; }
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+}
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+.summary-card:hover { border-color: var(--brand-dim); text-decoration: none; }
+.summary-card__label { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.summary-card__value { font-size: 12.5px; color: var(--text-dim); }
+.summary-card__go { font-size: 11.5px; color: var(--brand); margin-top: 2px; }

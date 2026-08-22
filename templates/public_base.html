@@ -1,0 +1,49 @@
+{# Shared shell for every public page: the brand bar, the page nav, and the footer.
+   index.html and the sub-pages under public/ all extend this, so a change to the
+   chrome happens once rather than six times. #}
+{% extends "base.html" %}
+{% block body %}
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand">
+      {% if site_logo_filename %}
+        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
+      {% else %}
+        <span class="dot-server"></span>
+      {% endif %}
+      <a href="{{ url_for('index') }}" class="brand__link">{{ site_name }}</a>
+    </div>
+    <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
+      next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
+    </div>
+  </div>
+
+  {# Only pages with something to show are listed, because the same builders decide
+     both that and whether the page renders at all - a link that 404s is worse than no
+     link. Status is always first and always present. #}
+  <nav class="page-nav" aria-label="Sections">
+    <a href="{{ url_for('index') }}" class="{{ 'active' if active_page == 'status' }}">Status</a>
+    {% for link in nav_links %}
+      <a href="{{ link.url }}" class="{{ 'active' if active_page == link.key }}">{{ link.label }}</a>
+    {% endfor %}
+    {% if search_enabled %}
+      <a href="{{ url_for('search') }}" class="{{ 'active' if active_page == 'search' }}">Search</a>
+    {% endif %}
+  </nav>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+
+  <footer class="foot">status-portal · <a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a> · <a href="{{ repo_url }}" target="_blank" rel="noopener">Like this page? ⭐ Check it out on GitHub</a></footer>
+</div>
+<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
+<script src="{{ asset_url('js/main.js') }}"></script>
+<script src="{{ asset_url('js/local_time.js') }}"></script>
+{% block page_scripts %}{% endblock %}
+{% endblock %}

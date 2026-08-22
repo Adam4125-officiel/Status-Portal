@@ -353,19 +353,23 @@ def _sign_in(client, user_id="u1", name="adam"):
                                "authenticated_at": 0}
 
 
-def test_the_media_section_is_off_by_default(client):
+def test_the_media_page_is_off_by_default(client):
     """All four parts default to off. Unlike the resource cards, this says something
     about what's in (or heading into) the library and who asked for it, so it has to be
     opted into rather than appearing the moment an integration is configured."""
     integrations._media_cache["calendar"] = [
         {"kind": "movie", "title": "Should Not Appear", "detail": "", "date": "2026-09-01", "have": False}]
+    assert client.get("/media").status_code == 404
     assert b"Should Not Appear" not in client.get("/").data
 
 
-def test_the_media_section_renders_once_switched_on(client):
+def test_the_media_page_renders_once_switched_on(client):
     _enable_media()
-    body = client.get("/").data
-    assert b"Media activity" in body and b"Visible Film" in body
+    assert b"Visible Film" in client.get("/media").data
+    # The main page links to it and summarises it, rather than carrying the block.
+    main = client.get("/").data
+    assert b"Media activity" in main and b"/media" in main
+    assert b"Visible Film" not in main
 
 
 def test_only_the_switched_on_parts_render(client, isolated_db):
@@ -374,7 +378,7 @@ def test_only_the_switched_on_parts_render(client, isolated_db):
     integrations._media_cache["downloads"] = [
         {"name": "Secret Download", "progress": 10.0, "state": "downloading",
          "size_gb": 1.0, "dl_speed_mbs": 0.0, "eta_seconds": None}]
-    body = client.get("/").data
+    body = client.get("/media").data
     assert b"Visible Film" in body
     assert b"Secret Download" not in body
 
@@ -383,7 +387,9 @@ def test_the_section_is_hidden_from_anonymous_visitors_when_sign_in_is_enabled(c
     _enable_media()
     monkeypatch.setattr(app_module.jellyfin_auth, "is_enabled", lambda: True)
     db.set_setting("media_requires_login", "1")
-    assert b"Visible Film" not in client.get("/").data
+    # 404 for a signed-out visitor, and not linked from the main page either.
+    assert client.get("/media").status_code == 404
+    assert b"/media" not in client.get("/").data
 
 
 def test_a_signed_in_visitor_sees_it(client, monkeypatch):
@@ -391,7 +397,7 @@ def test_a_signed_in_visitor_sees_it(client, monkeypatch):
     monkeypatch.setattr(app_module.jellyfin_auth, "is_enabled", lambda: True)
     db.set_setting("media_requires_login", "1")
     _sign_in(client)
-    assert b"Visible Film" in client.get("/").data
+    assert b"Visible Film" in client.get("/media").data
 
 
 def test_requiring_login_does_nothing_when_sign_in_isnt_configured(client, monkeypatch):
@@ -401,21 +407,21 @@ def test_requiring_login_does_nothing_when_sign_in_isnt_configured(client, monke
     _enable_media()
     monkeypatch.setattr(app_module.jellyfin_auth, "is_enabled", lambda: False)
     db.set_setting("media_requires_login", "1")
-    assert b"Visible Film" in client.get("/").data
+    assert b"Visible Film" in client.get("/media").data
 
 
 def test_the_section_can_be_made_public_while_sign_in_is_enabled(client, monkeypatch):
     _enable_media()
     monkeypatch.setattr(app_module.jellyfin_auth, "is_enabled", lambda: True)
     db.set_setting("media_requires_login", "0")
-    assert b"Visible Film" in client.get("/").data
+    assert b"Visible Film" in client.get("/media").data
 
 
-def test_media_is_a_reorderable_public_section(isolated_db):
-    """It has to be in PUBLIC_SECTIONS, or an admin who saved a layout order before it
-    existed would never see it - and the reorder UI wouldn't list it."""
-    assert "media" in [key for key, _ in app_module.PUBLIC_SECTIONS]
-    assert "media" in app_module._public_section_order()
+def test_media_is_a_registered_public_page(isolated_db):
+    """It moved off the main page into one of its own, so it belongs in PUBLIC_PAGES -
+    which is what drives the route, the nav link and the summary alike."""
+    assert "media" in [key for key, _, _, _, _ in app_module.PUBLIC_PAGES]
+    assert "media" not in [key for key, _ in app_module.PUBLIC_SECTIONS]
 
 
 # ---------------------------------------------------------------------------

@@ -1887,28 +1887,32 @@ def test_public_section_order_defaults_to_the_declared_order(isolated_db):
 
 
 def test_public_section_order_respects_stored_setting(isolated_db):
-    db.set_setting("public_layout_order", "vms,services,announcements")
+    db.set_setting("public_layout_order", "incidents,services")
     order = app_module._public_section_order()
     # Stored order first, then every other valid key appended in its default position -
     # so a section added after the admin last saved an order still appears, at the end,
     # rather than silently disappearing.
-    assert order[:3] == ["vms", "services", "announcements"]
+    assert order[:2] == ["incidents", "services"]
     assert set(order) == {k for k, _ in app_module.PUBLIC_SECTIONS}
 
 
 def test_public_section_order_drops_unknown_keys(isolated_db):
-    db.set_setting("public_layout_order", "vms,not-a-real-section,services")
+    """Also covers the keys of blocks that have since moved to their own pages: an
+    admin who saved an order back when "vms" was a main-page section keeps a working
+    order rather than a broken one."""
+    db.set_setting("public_layout_order", "incidents,not-a-real-section,vms,services")
     order = app_module._public_section_order()
     assert "not-a-real-section" not in order
-    assert order[:2] == ["vms", "services"]
+    assert "vms" not in order
+    assert order[:2] == ["incidents", "services"]
 
 
 def test_admin_settings_general_saves_layout_order(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/general", data={"layout_order": "vms,services,incidents,announcements,info,resources,jellyfin_activity"})
+    resp = client.post("/admin/settings/general", data={"layout_order": "incidents,services,announcements"})
     assert resp.status_code == 302
-    assert db.get_setting("public_layout_order") == "vms,services,incidents,announcements,info,resources,jellyfin_activity"
-    assert app_module._public_section_order()[0] == "vms"
+    assert db.get_setting("public_layout_order") == "incidents,services,announcements"
+    assert app_module._public_section_order()[0] == "incidents"
 
 
 def test_admin_settings_general_saves_service_defaults(client):
@@ -2339,13 +2343,19 @@ def test_service_without_url_hides_open_button(client):
 
 
 def test_public_page_shows_jellyfin_tasks_when_enabled(client):
+    """Jellyfin activity has its own page now; the main page links to it and summarises
+    it rather than carrying the whole block."""
     import integrations as integrations_module
     db.set_setting("show_public_jellyfin_tasks", "1")
     integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
 
-    resp = client.get("/")
-    assert b"Trickplay Image Extraction" in resp.data
-    assert b"Jellyfin activity" in resp.data
+    page = client.get("/activity")
+    assert b"Trickplay Image Extraction" in page.data
+
+    main = client.get("/")
+    assert b"Jellyfin activity" in main.data          # linked and summarised
+    assert b"1 task(s) running" in main.data
+    assert b"Trickplay Image Extraction" not in main.data
 
 
 def test_public_page_hides_jellyfin_tasks_when_disabled(client):
@@ -2357,11 +2367,66 @@ def test_public_page_hides_jellyfin_tasks_when_disabled(client):
     assert b"Trickplay Image Extraction" not in resp.data
 
 
-def test_public_page_hides_jellyfin_activity_section_when_no_tasks_running(client):
+def test_the_activity_page_says_so_when_nothing_is_running(client):
+    """The section used to disappear entirely when idle. As a page it stays reachable
+    and says nothing is running - a link that 404s half the time would be worse."""
     db.set_setting("show_public_jellyfin_tasks", "1")
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
-    resp = client.get("/")
-    assert b"Jellyfin activity" not in resp.data
+    assert client.get("/activity").status_code == 200
+    assert b"Nothing running right now" in client.get("/").data
+
+
+# ---------------------------------------------------------------------------
+# The public page split: what stays, what moved, and who can reach it
+# ---------------------------------------------------------------------------
+def test_the_main_page_keeps_the_is_it_working_content(client, isolated_db):
+    """Status, services and incidents are what almost every visitor came for, so they
+    stay put rather than moving behind a link."""
+    db.create_service({"name": "Jellyfin", "url": "http://x", "description": "media",
+                        "status": "operational"})
+    body = client.get("/").data
+    assert b"Jellyfin" in body
+    assert b"service(s) tracked" in body
+
+
+@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
+    """The important half of the split. Moving a block to its own route must not become
+    a way around the setting that hides it - so a page whose content is switched off
+    404s rather than rendering empty, which would confirm the feature is merely
+    hidden."""
+    assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
+    """And it isn't advertised either: the nav is built from the same context builders
+    the pages use, so a link can never point at something that would 404."""
+    assert path.encode() not in client.get("/").data
+
+
+def test_switching_a_section_on_makes_its_page_reachable_and_linked(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    assert client.get("/resources").status_code == 200
+    assert b"/resources" in client.get("/").data
+
+
+def test_the_info_page_disappears_when_emptied(client, isolated_db):
+    """It ships with placeholder text, so it's there from the start - but an admin who
+    clears it shouldn't be left with an empty page linked from the nav."""
+    assert client.get("/info").status_code == 200
+    db.set_info_page("How to connect over Tailscale")
+    assert b"How to connect over Tailscale" in client.get("/info").data
+    db.set_info_page("   ")
+    assert client.get("/info").status_code == 404
+    assert b"/info" not in client.get("/").data
+
+
+def test_every_sub_page_carries_the_shared_nav(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    body = client.get("/resources").data
+    assert b'class="page-nav"' in body
+    assert b">Status<" in body
 
 
 # ---------------------------------------------------------------------------
