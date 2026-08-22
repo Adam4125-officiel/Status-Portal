@@ -1654,6 +1654,19 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   and the link is never guessed.** Same rule as per-user notifications. With no link the
   request still goes through (unattributed) and the UI says so — an unattributed request
   is a much smaller problem than one attributed to the wrong person.
+- **"Search says Seerr is down, Integrations says it's up" is not a contradiction, and
+  the timeout is not the cause.** The two facts come from different calls with different
+  dependencies: `/api/v1/status` is served by Seerr itself, while `/api/v1/search` makes
+  Seerr go out to **TMDB**, so a Seerr host with slow or blocked outbound internet fails
+  the second and passes the first. The Integrations page also reads a **cache** refreshed
+  on the health-check interval, so it can be showing something up to
+  `CHECK_INTERVAL_SECONDS` old. Search already has the *longer* timeout of the two, so
+  widening it fixes nothing — `integrations.diagnose_seerr()` (the "Diagnose search"
+  button on `/admin/integrations`) runs both calls back to back and says which applies.
+- **Search failures are described in words** (`describe_request_error()`), not as a bare
+  "couldn't be reached" — timed out, refused the API key, answered HTTP 500 and
+  couldn't connect have completely different fixes, and are logged at *warning*, not
+  info.
 - **A 409 from Seerr is "already requested", which is ordinary**, not an error worth
   alarming anyone with — someone pressed the button twice.
 - **A TV request must send `seasons: "all"`.** Seerr rejects a series request with no

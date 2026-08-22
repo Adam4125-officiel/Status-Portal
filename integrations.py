@@ -9,6 +9,7 @@ kind of service it's showing:
 
     {"reachable": bool, "version": str|None, "issues": [{"level", "message"}], "error": str|None}
 """
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -336,6 +337,92 @@ def search_jellyfin(base_url, api_key, query, jellyfin_user_id=None, limit=12):
         "jellyfin_id": item.get("Id"),
         "in_library": True,
     } for item in items if item.get("Id")]
+
+
+def describe_request_error(exc):
+    """A short, human phrase for why an outbound call failed.
+
+    Exists because "Seerr couldn't be reached" is the same sentence whether the server
+    refused the connection, took too long, or answered with a 500 - and those have
+    completely different fixes. The full exception still goes to the log; this is what a
+    person is shown."""
+    if isinstance(exc, requests.Timeout):
+        return "timed out"
+    if isinstance(exc, requests.HTTPError):
+        status = exc.response.status_code if exc.response is not None else 0
+        if status in (401, 403):
+            return f"refused the API key (HTTP {status})"
+        return f"answered HTTP {status}"
+    if isinstance(exc, requests.ConnectionError):
+        return "couldn't be connected to"
+    if isinstance(exc, ValueError):
+        return "answered with something that isn't JSON"
+    return "failed"
+
+
+def diagnose_seerr(base_url, api_key, query="test"):
+    """Runs the health check and the search call back to back against the same Seerr,
+    timing both, and reports exactly what each did.
+
+    This exists because of a real report: the search page said Seerr couldn't be reached
+    while the Integrations page showed it reachable with a version. Those two facts come
+    from genuinely different calls, and guessing which difference mattered would have
+    meant widening a timeout and hoping. The two candidate explanations this
+    distinguishes:
+
+    * **/api/v1/status is served locally; /api/v1/search proxies to TMDB.** If the Seerr
+      host's outbound internet is slow or blocked, or TMDB is having a bad day, search
+      fails while status answers instantly. Nothing about the portal's configuration is
+      wrong in that case.
+    * **The Integrations page reads a cache** refreshed on the health-check interval, so
+      what it shows can be up to CHECK_INTERVAL_SECONDS old. "At the same time" isn't
+      literally simultaneous, and Seerr may simply have gone away in between.
+
+    Note the timeouts are *not* a candidate: search already gets the longer of the two
+    (config.SEARCH_TIMEOUT_SECONDS vs the shared TIMEOUT)."""
+    base_url = base_url.rstrip("/")
+    headers = {"X-Api-Key": api_key}
+    report = {"base_url": base_url, "query": query, "checks": []}
+
+    for name, path, params, timeout, note in (
+            ("Health check (/api/v1/status)", "/api/v1/status", None, TIMEOUT,
+             "Served entirely by Seerr itself - no internet access needed."),
+            ("Search (/api/v1/search)", "/api/v1/search", {"query": query, "page": 1},
+             config.SEARCH_TIMEOUT_SECONDS,
+             "Seerr proxies this to TMDB, so it needs working outbound internet on the "
+             "Seerr host - which the health check above does not."),
+    ):
+        entry = {"name": name, "path": path, "timeout": timeout, "note": note,
+                 "ok": False, "status_code": None, "elapsed_ms": None, "error": None}
+        started = time.monotonic()
+        try:
+            r = requests.get(f"{base_url}{path}", headers=headers, params=params,
+                              timeout=timeout)
+            entry["status_code"] = r.status_code
+            r.raise_for_status()
+            r.json()
+            entry["ok"] = True
+        except (requests.RequestException, ValueError) as e:
+            entry["error"] = f"{describe_request_error(e)} - {e}"
+        entry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        report["checks"].append(entry)
+
+    healthy, searchable = (c["ok"] for c in report["checks"])
+    if healthy and not searchable:
+        report["verdict"] = (
+            "Seerr itself is fine, but its search isn't answering. Search is the only one "
+            "of these two that Seerr has to reach TMDB for, so this points at the Seerr "
+            "host's outbound internet (or TMDB), not at this portal's settings.")
+    elif not healthy and not searchable:
+        report["verdict"] = "Seerr isn't answering at all right now."
+    elif searchable and not healthy:
+        report["verdict"] = "Search works but the health endpoint doesn't - unusual; check the URL."
+    else:
+        report["verdict"] = ("Both calls succeeded just now. If the search page reported a "
+                             "problem earlier, it was intermittent - the Integrations page "
+                             "shows a cached result up to one check interval old, so the two "
+                             "were never looking at the same moment.")
+    return report
 
 
 def search_seerr(base_url, api_key, query, limit=12):

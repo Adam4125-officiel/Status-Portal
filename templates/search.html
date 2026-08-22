@@ -34,8 +34,11 @@
   {% elif query %}
     {% if outcome.errors %}
       <div class="flash error">
-        Showing partial results — {{ outcome.errors.keys() | join(' and ') }}
-        couldn't be reached, so anything only it knows about is missing.
+        Showing partial results —
+        {% for source, reason in outcome.errors.items() %}
+          {{ source }} {{ reason }}{% if not loop.last %}, {% endif %}
+        {% endfor %}.
+        Anything only that source knows about is missing.
       </div>
     {% endif %}
 

@@ -11,6 +11,35 @@
   can control those services — it only reads their health/logs.
 </p>
 
+{% if seerr_diagnosis %}
+<div class="form-panel" style="margin-bottom: 16px; border-color: var(--brand);">
+  <h2 style="font-size: 15px; margin: 0 0 8px;">Seerr search diagnosis</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">{{ seerr_diagnosis.verdict }}</p>
+  <div class="admin-table" style="font-size: 12.5px;">
+    <table>
+      <thead><tr><th style="width: 210px;">Call</th><th style="width: 90px;">Result</th><th style="width: 80px;">Took</th><th>What it depends on</th></tr></thead>
+      <tbody>
+        {% for c in seerr_diagnosis.checks %}
+        <tr>
+          <td><strong>{{ c.name }}</strong></td>
+          <td>
+            {% if c.ok %}<span class="led ok"></span> ok
+            {% else %}<span class="led crit"></span> failed{% endif %}
+            {% if c.status_code %}<div style="color: var(--text-faint);">HTTP {{ c.status_code }}</div>{% endif %}
+          </td>
+          <td>{{ c.elapsed_ms }} ms<div style="color: var(--text-faint);">limit {{ c.timeout }}s</div></td>
+          <td>
+            {{ c.note }}
+            {% if c.error %}<div style="color: var(--crit); margin-top: 4px;">{{ c.error }}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 <div class="form-panel" style="margin-bottom: 16px;">
   <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
     <h2 style="font-size: 15px; margin: 0;">App updates</h2>
@@ -81,6 +110,11 @@
         <form action="{{ url_for('admin_integration_check_now', iid=i.id) }}" method="POST" style="display:inline;">
           <button type="submit" class="btn secondary" style="padding:4px 10px;">Check now</button>
         </form>
+        {% if i.kind == 'jellyseerr' %}
+        <form action="{{ url_for('admin_integration_diagnose', iid=i.id) }}" method="POST" style="display:inline;">
+          <button type="submit" class="btn secondary" style="padding:4px 10px; margin-left:6px;">Diagnose search</button>
+        </form>
+        {% endif %}
         <a href="{{ url_for('admin_integration_edit', iid=i.id) }}" style="margin-left: 8px;">Edit</a>
         <form action="{{ url_for('admin_integration_delete', iid=i.id) }}" method="POST" style="display:inline; margin-left: 8px;"
               onsubmit="return confirm('Delete {{ i.name }}?');">

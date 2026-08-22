@@ -346,3 +346,86 @@ def test_the_request_route_is_csrf_protected():
     """It's an authenticated write against another service, so it belongs in the
     protected set - a new public POST route is a deliberate decision, not a default."""
     assert app_module._csrf_required_for("/search/request", "POST") is True
+
+
+# ---------------------------------------------------------------------------
+# Why search can report Seerr down while the Integrations page says it's up
+# ---------------------------------------------------------------------------
+# A real report. The two facts come from genuinely different calls: /api/v1/status is
+# served by Seerr itself, while /api/v1/search makes Seerr go out to TMDB. The timeouts
+# are *not* the difference - search already gets the longer of the two - so the fix was
+# to build something that measures both rather than widening anything.
+def test_the_search_timeout_is_not_shorter_than_the_health_checks():
+    """Pinning the thing that would otherwise be the obvious wrong guess."""
+    assert config.SEARCH_TIMEOUT_SECONDS >= integrations.TIMEOUT
+
+
+@pytest.mark.parametrize("exc, expected", [
+    (integrations.requests.Timeout(), "timed out"),
+    (integrations.requests.ConnectionError(), "couldn't be connected to"),
+    (ValueError(), "answered with something that isn't JSON"),
+])
+def test_failures_are_described_in_words(exc, expected):
+    """"Couldn't be reached" reads the same whether the server refused, hung, or
+    answered 500 - and those have completely different fixes."""
+    assert integrations.describe_request_error(exc) == expected
+
+
+def test_an_http_error_names_its_status():
+    class _R:
+        status_code = 500
+    assert "500" in integrations.describe_request_error(
+        integrations.requests.HTTPError(response=_R()))
+
+
+def test_a_rejected_api_key_is_called_out_specifically():
+    class _R:
+        status_code = 403
+    assert "API key" in integrations.describe_request_error(
+        integrations.requests.HTTPError(response=_R()))
+
+
+def test_the_diagnosis_separates_a_healthy_seerr_from_a_broken_search(isolated_db, stub):
+    """The exact reported symptom: status answers, search doesn't."""
+    route("/api/v1/status", {"version": "2.1.0"})
+    route("/api/v1/search", {"message": "TMDB unreachable"}, status=500)
+    report = integrations.diagnose_seerr(stub, "k")
+    healthy, searchable = report["checks"]
+    assert healthy["ok"] is True
+    assert searchable["ok"] is False and "500" in searchable["error"]
+    assert "outbound internet" in report["verdict"]
+
+
+def test_the_diagnosis_points_at_caching_when_both_calls_work(isolated_db, stub):
+    """If both succeed now, the likely explanation is that the Integrations page was
+    showing a cached result - it refreshes on the health-check interval, so the two were
+    never looking at the same moment."""
+    route("/api/v1/status", {"version": "2.1.0"})
+    route("/api/v1/search", {"results": []})
+    assert "cached" in integrations.diagnose_seerr(stub, "k")["verdict"]
+
+
+def test_the_search_page_says_how_a_source_failed_not_just_that_it_did(visitor, monkeypatch):
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: {
+                            "results": [], "errors": {"Seerr": "timed out"}, "available": True})
+    body = visitor.get("/search?q=dune").data
+    assert b"Seerr timed out" in body
+
+
+def test_the_diagnose_button_only_appears_for_seerr(client, isolated_db):
+    _admin = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.create_integration({"name": "Radarr", "kind": "arr", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1})
+    assert b"Diagnose search" not in client.get("/admin/integrations").data
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1})
+    assert b"Diagnose search" in client.get("/admin/integrations").data
+
+
+def test_diagnosing_a_non_seerr_integration_is_refused(client, isolated_db):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    iid = db.create_integration({"name": "Radarr", "kind": "arr", "base_url": "http://x",
+                                  "api_key": "k", "enabled": 1})
+    resp = client.post(f"/admin/integrations/{iid}/diagnose", follow_redirects=True)
+    assert b"only apply to a Jellyseerr" in resp.data

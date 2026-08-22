@@ -2604,6 +2604,9 @@ def admin_integrations():
     return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
                             check_interval=config.CHECK_INTERVAL_SECONDS,
                             version_check=version_checks.get_results(),
+                            # Popped, so the report shows once after the button is
+                            # pressed rather than sticking around looking like live state.
+                            seerr_diagnosis=session.pop("seerr_diagnosis", None),
                             version_task=scheduler.task_view(scheduler.get_task(version_checks.TASK_NAME)),
                             active="integrations")
 
@@ -2622,6 +2625,25 @@ def admin_integration_check_now(iid):
     _integration_status_cache[iid] = {"status": status, "checked_at": db.now_iso()}
     flash("Reachable." if status["reachable"] else f"Unreachable: {status['error']}",
           "success" if status["reachable"] else "error")
+    return redirect(url_for("admin_integrations"))
+
+
+@app.route("/admin/integrations/<int:iid>/diagnose", methods=["POST"])
+@login_required
+def admin_integration_diagnose(iid):
+    """Runs Seerr's health check and its search call back to back and reports both.
+
+    A sanctioned explicit-slow-action, exactly like "Check now" beside it. It exists
+    because "search says Seerr is down, this page says it's up" is a genuinely confusing
+    pair of facts, and the two come from different calls with different dependencies -
+    the health endpoint is local to Seerr, search proxies to TMDB. Rather than guess
+    which difference mattered, this measures both against the real instance."""
+    integration = db.get_integration(iid)
+    if not integration or integration["kind"] != "jellyseerr":
+        flash("Search diagnostics only apply to a Jellyseerr/Overseerr integration.", "error")
+        return redirect(url_for("admin_integrations"))
+    report = integrations.diagnose_seerr(integration["base_url"], integration["api_key"])
+    session["seerr_diagnosis"] = report
     return redirect(url_for("admin_integrations"))
 
 

@@ -110,16 +110,18 @@ def search(query, jellyfin_user_id=None):
                 jellyfin["base_url"], jellyfin["api_key"], query, jellyfin_user_id)
             result["available"] = True
         except (requests.RequestException, ValueError) as e:
-            _logger.info("Jellyfin search failed: %s", e)
-            result["errors"]["Jellyfin"] = str(e)
+            # Warning, not info: this is a user-visible failure, and it used to be
+            # logged quietly enough that nobody could tell *why* search had degraded.
+            _logger.warning("Jellyfin search failed: %s", e)
+            result["errors"]["Jellyfin"] = integrations.describe_request_error(e)
 
     if seerr:
         try:
             seerr_items = integrations.search_seerr(seerr["base_url"], seerr["api_key"], query)
             result["available"] = True
         except (requests.RequestException, ValueError) as e:
-            _logger.info("Seerr search failed: %s", e)
-            result["errors"]["Seerr"] = str(e)
+            _logger.warning("Seerr search failed: %s", e)
+            result["errors"]["Seerr"] = integrations.describe_request_error(e)
 
     result["results"] = merge(jellyfin_items, seerr_items)
     return result
