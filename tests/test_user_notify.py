@@ -383,3 +383,162 @@ def test_the_admin_page_never_lists_recipients(client):
     body = client.get("/admin/notifications/users").data
     assert b"A subject" in body
     assert b"private@example.invalid" not in body
+
+
+# ---------------------------------------------------------------------------
+# Contact details: Seerr owns them, the portal mirrors them, either side can fill them
+# ---------------------------------------------------------------------------
+def _linked_seerr(monkeypatch, email="", discord_id=""):
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "7", "display_name": "Adam", "email": email,
+                                 "discord_id": discord_id, "jellyfin_user_id": "u1"}])
+
+
+def test_the_contact_sync_mirrors_only_linked_accounts(enabled, monkeypatch):
+    """A Seerr user with no jellyfinUserId has nobody here to attach to. Matching by
+    name or email would eventually give one person another's notifications."""
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [
+        {"id": "7", "display_name": "Adam", "email": "adam@x", "discord_id": "1",
+         "jellyfin_user_id": "u1"},
+        {"id": "8", "display_name": "Nobody", "email": "no@x", "discord_id": "",
+         "jellyfin_user_id": ""},
+    ])
+    message = user_notify.sync_seerr_contacts()
+    assert db.get_seerr_contact("u1")["email"] == "adam@x"
+    assert db.list_seerr_contacts().keys() == {"u1"}
+    assert "1 linked" in message
+
+
+def test_a_failed_contact_sync_leaves_the_previous_details_alone(enabled, monkeypatch):
+    """Same rule as the Jellyfin user sync: an outage must not wipe what's known, or a
+    blip would stop notifications for everyone."""
+    _linked_seerr(monkeypatch, email="adam@x")
+    user_notify.sync_seerr_contacts()
+
+    def boom(url, key, limit=200):
+        raise integrations.requests.RequestException("down")
+
+    monkeypatch.setattr(integrations, "fetch_seerr_users", boom)
+    with pytest.raises(integrations.requests.RequestException):
+        user_notify.sync_seerr_contacts()
+    assert db.get_seerr_contact("u1")["email"] == "adam@x"
+
+
+def test_delivery_falls_back_to_the_synced_details(enabled, monkeypatch):
+    """Somebody who filled their details in on Seerr and never touched this portal must
+    still be reachable."""
+    db.replace_seerr_contacts([{"jellyfin_user_id": "u1", "seerr_user_id": "7",
+                                 "display_name": "Adam", "email": "from-seerr@x",
+                                 "discord_id": "999"}])
+    assert user_notify.contact_for("u1") == ("from-seerr@x", "999")
+
+
+def test_saving_a_contact_writes_it_through_to_seerr(enabled, monkeypatch):
+    """Seerr is the source of truth, so anything entered here goes there rather than
+    becoming a private second copy that drifts."""
+    _linked_seerr(monkeypatch)
+    pushed = []
+    monkeypatch.setattr(integrations, "push_seerr_contact",
+                        lambda url, key, uid, email=None, discord_id=None:
+                        pushed.append((uid, email, discord_id)) or True)
+    ok, message = user_notify.save_contact("u1", email="new@x", discord_id="42")
+    assert ok is True
+    assert pushed == [("7", "new@x", "42")]
+    # Mirrored locally straight away, so it works before the next sync runs.
+    assert db.get_seerr_contact("u1")["email"] == "new@x"
+    assert user_notify.contact_for("u1") == ("new@x", "42")
+
+
+def test_a_failed_write_back_still_keeps_what_was_typed(enabled, monkeypatch):
+    """Losing somebody's input because another service was unreachable is the worse
+    outcome - so it's reported, not rolled back."""
+    _linked_seerr(monkeypatch)
+
+    def boom(*a, **k):
+        raise integrations.requests.RequestException("seerr down")
+
+    monkeypatch.setattr(integrations, "push_seerr_contact", boom)
+    ok, message = user_notify.save_contact("u1", email="typed@x")
+    assert ok is False
+    assert "Seerr couldn" in message
+    assert user_notify.contact_for("u1")[0] == "typed@x"
+
+
+def test_saving_without_a_linked_seerr_account_still_works(enabled):
+    """No Seerr, or no link, must not stop somebody being reachable by this portal."""
+    ok, message = user_notify.save_contact("u1", email="local@x")
+    assert ok is True and "nowhere to copy it to" in message
+    assert user_notify.contact_for("u1")[0] == "local@x"
+
+
+# ---------------------------------------------------------------------------
+# The two places a missing detail can be filled in
+# ---------------------------------------------------------------------------
+def test_the_admin_can_set_a_users_contact_details(client, isolated_db, monkeypatch):
+    db.set_setting("user_notifications_enabled", "1")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    _linked_seerr(monkeypatch)
+    pushed = []
+    monkeypatch.setattr(integrations, "push_seerr_contact",
+                        lambda url, key, uid, email=None, discord_id=None:
+                        pushed.append(email) or True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/users/u1/contact",
+                 data={"notify_email": "set-by-admin@x", "notify_discord_id": ""},
+                 follow_redirects=True)
+    assert pushed == ["set-by-admin@x"]
+    assert user_notify.contact_for("u1")[0] == "set-by-admin@x"
+
+
+def test_the_admin_contact_form_only_shows_when_notifications_are_on(client, isolated_db):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    assert b"contact-form" not in client.get("/admin/users").data
+    db.set_setting("user_notifications_enabled", "1")
+    assert b"contact-form" in client.get("/admin/users").data
+
+
+def test_a_visitor_with_nowhere_to_be_reached_is_prompted(signed_in_visitor):
+    db.set_setting("user_notifications_enabled", "1")
+    assert user_notify.needs_contact_details("u1") is True
+    resp = signed_in_visitor.get("/account/contact")
+    assert resp.status_code == 200
+    assert b"Where should we reach you" in resp.data
+
+
+def test_the_prompt_is_skippable_and_stays_skipped(signed_in_visitor):
+    """Asking the same question on every sign-in is how a prompt becomes something
+    people learn to click past without reading."""
+    db.set_setting("user_notifications_enabled", "1")
+    signed_in_visitor.post("/account/contact", data={"skip": "1"}, follow_redirects=True)
+    assert db.get_user_preferences("u1")["contact_prompt_dismissed"] is True
+    assert user_notify.needs_contact_details("u1") is False
+    # And it stops rendering.
+    assert signed_in_visitor.get("/account/contact").status_code == 302
+
+
+def test_a_visitor_who_already_has_details_is_not_prompted(signed_in_visitor):
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="already@x")
+    assert user_notify.needs_contact_details("u1") is False
+
+
+def test_nobody_is_prompted_while_the_feature_is_off(signed_in_visitor):
+    assert user_notify.needs_contact_details("u1") is False
+
+
+def test_answering_the_prompt_saves_and_stops_asking(signed_in_visitor, monkeypatch):
+    db.set_setting("user_notifications_enabled", "1")
+    _linked_seerr(monkeypatch)
+    monkeypatch.setattr(integrations, "push_seerr_contact", lambda *a, **k: True)
+    signed_in_visitor.post("/account/contact", data={"notify_email": "mine@x"},
+                            follow_redirects=True)
+    assert user_notify.contact_for("u1")[0] == "mine@x"
+    assert db.get_user_preferences("u1")["contact_prompt_dismissed"] is True
+
+
+def test_the_prompt_endpoint_requires_a_signed_in_visitor(client, isolated_db):
+    assert client.get("/account/contact").status_code == 302

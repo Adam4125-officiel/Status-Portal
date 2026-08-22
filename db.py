@@ -402,6 +402,17 @@ def init_db():
     # when a user disappears from Jellyfin - if the account comes back (or the sync
     # was simply wrong for a poll), their settings are still here.
     c.execute("""
+        CREATE TABLE IF NOT EXISTS seerr_contacts (
+            jellyfin_user_id TEXT PRIMARY KEY,
+            seerr_user_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            discord_id TEXT NOT NULL DEFAULT '',
+            synced_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS notification_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
@@ -471,6 +482,8 @@ def init_db():
     # never guessed from a matching email or username. Empty means "not linked", which
     # is the fail-closed state.
     _ensure_column(conn, "user_preferences", "seerr_user_id", "TEXT NOT NULL DEFAULT ''")
+    # "Don't ask me for contact details again." Set by skipping the post-sign-in prompt.
+    _ensure_column(conn, "user_preferences", "contact_prompt_dismissed", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
@@ -1863,6 +1876,7 @@ DEFAULT_USER_PREFERENCES = {
     "notify_service_events": False,
     "notify_requests": True,
     "seerr_user_id": "",
+    "contact_prompt_dismissed": False,
 }
 
 
@@ -1885,6 +1899,7 @@ def get_user_preferences(user_id):
         prefs["notify_service_events"] = bool(row["notify_service_events"])
         prefs["notify_requests"] = bool(row["notify_requests"])
         prefs["seerr_user_id"] = row["seerr_user_id"] or ""
+        prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
     return prefs
 
 
@@ -1899,6 +1914,7 @@ _USER_PREFERENCE_FIELDS = {
     "notify_service_events": lambda v: int(bool(v)),
     "notify_requests": lambda v: int(bool(v)),
     "seerr_user_id": str,
+    "contact_prompt_dismissed": lambda v: int(bool(v)),
 }
 
 
@@ -1931,6 +1947,83 @@ def set_user_preferences(user_id, theme=None, contact=None, **fields):
     """, (user_id, theme, contact, now_iso(), *values.values()))
     conn.commit()
     conn.close()
+
+
+# ---------- Cached Seerr contact details (see user_notify.py) ----------
+# Seerr is the source of truth for a person's email and Discord ID - they enter it once
+# there, and this portal reads it. What's stored here is a *cache*, replaced wholesale on
+# every sync exactly like the Jellyfin user list above, for the same two reasons: the
+# admin page and the delivery task must not have to call Seerr, and a Seerr outage must
+# not stop notifications going to people whose details were already known.
+#
+# Keyed by Jellyfin user id, because that's the only link this app will follow (Seerr's
+# own jellyfinUserId). A Seerr user with no Jellyfin link simply isn't cached - there is
+# no one here to attach them to.
+def replace_seerr_contacts(contacts):
+    """Full replace, in one transaction. Only ever called after a successful fetch, so a
+    failed sync leaves the previous details completely intact."""
+    stamp = now_iso()
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("DELETE FROM seerr_contacts")
+            conn.executemany("""
+                INSERT INTO seerr_contacts (jellyfin_user_id, seerr_user_id, display_name,
+                                             email, discord_id, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [(c["jellyfin_user_id"], str(c["seerr_user_id"]), c.get("display_name", ""),
+                   c.get("email", ""), c.get("discord_id", ""), stamp)
+                  for c in contacts if c.get("jellyfin_user_id")])
+    finally:
+        conn.close()
+
+
+def get_seerr_contact(jellyfin_user_id):
+    if not jellyfin_user_id:
+        return None
+    conn = get_db()
+    row = conn.execute("SELECT * FROM seerr_contacts WHERE jellyfin_user_id=?",
+                        (jellyfin_user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_seerr_contacts():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM seerr_contacts").fetchall()
+    conn.close()
+    return {r["jellyfin_user_id"]: dict(r) for r in rows}
+
+
+def upsert_seerr_contact(jellyfin_user_id, seerr_user_id, email=None, discord_id=None,
+                          display_name=None):
+    """Updates one cached row immediately after a successful write to Seerr, so the new
+    value is usable straight away rather than only after the next sync."""
+    if not jellyfin_user_id:
+        return
+    current = get_seerr_contact(jellyfin_user_id) or {}
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO seerr_contacts (jellyfin_user_id, seerr_user_id, display_name, email,
+                                     discord_id, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jellyfin_user_id) DO UPDATE SET
+            seerr_user_id=excluded.seerr_user_id, display_name=excluded.display_name,
+            email=excluded.email, discord_id=excluded.discord_id, synced_at=excluded.synced_at
+    """, (jellyfin_user_id, str(seerr_user_id),
+          current.get("display_name", "") if display_name is None else display_name,
+          current.get("email", "") if email is None else email,
+          current.get("discord_id", "") if discord_id is None else discord_id,
+          now_iso()))
+    conn.commit()
+    conn.close()
+
+
+def seerr_contacts_synced_at():
+    conn = get_db()
+    row = conn.execute("SELECT MAX(synced_at) AS s FROM seerr_contacts").fetchone()
+    conn.close()
+    return row["s"] if row and row["s"] else None
 
 
 # ---------- Per-user notification queue (see user_notify.py) ----------

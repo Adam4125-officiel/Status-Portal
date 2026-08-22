@@ -497,6 +497,17 @@ def is_first_run():
 # groundwork for the per-content visibility work on the ROADMAP, and is deliberately
 # *not* consulted anywhere in this app today. No password and no Jellyfin access
 # token ever goes in here: the session cookie is signed, not encrypted.
+def _contact_prompt_url_if_needed(user_id):
+    """Where to send someone after signing in: the contact prompt if they have nowhere
+    to be reached and haven't waved it away, otherwise None (carry on as before)."""
+    try:
+        return url_for("user_contact_prompt") if user_notify.needs_contact_details(user_id) else None
+    except Exception:
+        # A prompt is a nicety; it must never be the reason a sign-in fails.
+        _logger.exception("Could not decide whether to prompt for contact details")
+        return None
+
+
 def _start_user_session(user):
     session.permanent = True
     session["portal_user"] = {
@@ -1529,7 +1540,11 @@ def user_login():
             _register_user_login_success()
             _start_user_session(result["user"])
             _logger.info("Jellyfin user '%s' signed in", result["user"]["name"])
-            return redirect(next_url or url_for("index"))
+            # Asked once, and only when there's genuinely nowhere to reach them. An
+            # explicit ?next= still wins - somebody who clicked a link and got bounced
+            # through sign-in should land where they were going.
+            prompt = None if next_url else _contact_prompt_url_if_needed(result["user"]["id"])
+            return redirect(prompt or next_url or url_for("index"))
 
         reason = result.get("reason")
         if reason == "unreachable":
@@ -1639,6 +1654,40 @@ def user_report_reply(rid):
     else:
         flash("Write something first.", "error")
     return redirect(url_for("user_account"))
+
+
+@app.route("/account/contact", methods=["GET", "POST"])
+@user_login_required
+def user_contact_prompt():
+    """A one-time, skippable ask for somewhere to send notifications.
+
+    Shown right after signing in when the person has no contact details anywhere - which
+    is common, because Seerr doesn't require them either. Skipping is a real answer and
+    is remembered: being asked the same question on every sign-in is how a prompt turns
+    into an annoyance people learn to click past."""
+    user = current_user()
+    if request.method == "POST":
+        if request.form.get("skip"):
+            db.set_user_preferences(user["id"], contact_prompt_dismissed=True)
+            return redirect(url_for("index"))
+        ok, message = user_notify.save_contact(
+            user["id"],
+            email=request.form.get("notify_email", "").strip()[:200],
+            discord_id=request.form.get("notify_discord_id", "").strip()[:32])
+        # Asked and answered either way - a failed write-back to Seerr still saved the
+        # value here, so there's no reason to keep asking.
+        db.set_user_preferences(user["id"], contact_prompt_dismissed=True)
+        flash(message or "Saved.", "success" if ok else "error")
+        return redirect(url_for("index"))
+
+    if not user_notify.needs_contact_details(user["id"]):
+        return redirect(url_for("user_account"))
+    return render_template("contact_prompt.html",
+                            site_name=db.get_setting("site_name", "Server"),
+                            user=user, nav_links=_public_page_links(),
+                            search_enabled=bool(current_user()) and media_search.is_available(),
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            repo_url=updater.REPO_URL, active_page=None)
 
 
 @app.route("/account/seerr/import", methods=["POST"])
@@ -3232,6 +3281,9 @@ def _user_session_timeout_seconds():
 @login_required
 def admin_users():
     return render_template("admin_users.html",
+                            contacts=db.list_seerr_contacts(),
+                            contacts_synced_at=db.seerr_contacts_synced_at(),
+                            notifications_enabled=user_notify.is_enabled(),
                             summary=jellyfin_auth.status_summary(),
                             jellyfin_integrations=[i for i in db.list_integrations()
                                                    if i["kind"] == "jellyfin" and i["enabled"]],
@@ -3286,6 +3338,28 @@ def admin_user_access(user_id):
 
 
 # ---- Discord bot (separate from the simple webhook notifications above) ----
+@app.route("/admin/users/<user_id>/contact", methods=["POST"])
+@login_required
+def admin_user_contact(user_id):
+    """Fills in a Jellyfin user's email/Discord ID on their behalf.
+
+    Seerr is where this data lives, so this writes through to Seerr rather than keeping
+    a private copy - see user_notify.save_contact(). It exists because Seerr often
+    simply doesn't have these filled in, and an admin who knows the answer shouldn't
+    have to go and set it up in another app first."""
+    user = db.get_jellyfin_user(user_id)
+    if not user:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    ok, message = user_notify.save_contact(
+        user_id,
+        email=request.form.get("notify_email", "").strip()[:200],
+        discord_id=request.form.get("notify_discord_id", "").strip()[:32])
+    flash(f"{user['name']}: {message}" if message else f"Saved for {user['name']}.",
+          "success" if ok else "error")
+    return redirect(url_for("admin_users"))
+
+
 @app.route("/admin/discord-bot", methods=["GET", "POST"])
 @login_required
 def admin_discord_bot():

@@ -120,7 +120,7 @@
 <div class="admin-table">
   <table>
     <thead>
-      <tr><th>User</th><th>Jellyfin role</th><th>Portal access</th><th>First seen</th><th>Last synced</th></tr>
+      <tr><th>User</th><th>Jellyfin role</th><th>Portal access</th>{% if notifications_enabled %}<th>Contact (from Seerr)</th>{% endif %}<th>First seen</th><th>Last synced</th></tr>
     </thead>
     <tbody>
       {% for u in users %}
@@ -155,6 +155,26 @@
             </form>
           {% endif %}
         </td>
+        {% if notifications_enabled %}
+        {% set c = contacts.get(u.id, {}) %}
+        <td>
+          {# Seerr is where this data belongs, so the form writes through to it rather
+             than keeping a private second copy. It's here because Seerr frequently has
+             these blank, and an admin who knows the answer shouldn't have to go and set
+             it up in another app first. #}
+          <form action="{{ url_for('admin_user_contact', user_id=u.id) }}" method="POST"
+                class="contact-form">
+            <input type="email" name="notify_email" value="{{ c.email or '' }}"
+                   placeholder="email" aria-label="Email for {{ u.name }}">
+            <input type="text" name="notify_discord_id" value="{{ c.discord_id or '' }}"
+                   inputmode="numeric" placeholder="Discord ID" aria-label="Discord ID for {{ u.name }}">
+            <button type="submit" class="btn secondary">Save</button>
+          </form>
+          {% if not c %}
+            <div class="field-hint">No linked Seerr account.</div>
+          {% endif %}
+        </td>
+        {% endif %}
         <td><span class="local-time" data-utc="{{ u.first_seen_at }}">{{ u.first_seen_at[:16].replace('T', ' ') }} UTC</span></td>
         <td><span class="local-time" data-utc="{{ u.last_synced_at }}">{{ u.last_synced_at[:16].replace('T', ' ') }} UTC</span></td>
       </tr>

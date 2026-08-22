@@ -1686,6 +1686,28 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   now catches it.
 - **Defaults: "things about my own reports" on, "anything about services I use" off.**
   The first is a reply to something the person started; the second is chatty.
+- **Seerr owns contact details; this portal mirrors them.** `seerr_contacts` is a cache
+  replaced wholesale by the `seerr_contact_sync` task, exactly like the Jellyfin user
+  list and for the same two reasons: the delivery task must not call Seerr per message,
+  and a Seerr outage must not stop notifications to people whose details are already
+  known. A failed sync leaves the previous rows completely intact.
+- **Only accounts Seerr itself has linked to a Jellyfin user are cached.** Same
+  fail-closed rule as everywhere else here — matching on name or email would eventually
+  give one person another's notifications.
+- **Anything entered in this portal is written back to Seerr** via
+  `user_notify.save_contact()`, the single path both the admin users page and the
+  visitor prompt use. A failed write-back is *reported but not rolled back*: losing what
+  somebody just typed because another service was unreachable is the worse outcome, and
+  the local value is what delivery reads.
+- **`contact_for()` prefers what was entered here over what Seerr last said.** That
+  sounds backwards for a source-of-truth arrangement, and is deliberate: the two agree
+  in the normal case because saving writes through, and the exception is a *failed*
+  write-back — where the value the person actually typed is the better one to use.
+- **The post-sign-in prompt is asked once and skipping is remembered**
+  (`contact_prompt_dismissed`). Being asked the same question on every sign-in is how a
+  prompt becomes something people learn to click past. An explicit `?next=` beats the
+  prompt — somebody who followed a link and got bounced through sign-in should land
+  where they were going.
 - **The admin page never lists recipients.** The queue is addressed to a Jellyfin
   account; whose email or Discord ID that resolved to is that person's business.
 

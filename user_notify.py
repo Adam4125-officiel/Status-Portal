@@ -111,14 +111,107 @@ def find_seerr_account(jellyfin_user_id):
 
 
 def contact_for(user_id):
-    """(email, discord_id) for a user: whatever they've saved here.
+    """(email, discord_id) for a user, from the local caches only.
 
-    Deliberately reads only this app's stored preferences and never calls Seerr. This
-    runs once per queued notification in a background task; going out to Seerr for each
-    one would be both slow and a way for a Seerr outage to stop delivery entirely.
-    Seerr is consulted once, when the account page offers to fill these in."""
+    Never calls Seerr. This runs once per queued notification in a background task, so
+    going out to Seerr each time would be slow *and* would let a Seerr outage stop
+    delivery to people whose details are perfectly well known.
+
+    Precedence is "what was entered here" over "what Seerr last said", which sounds
+    backwards for a system where Seerr is the source of truth - but anything entered
+    here is written straight to Seerr and mirrored into the cache, so the two agree.
+    The exception is a write-back that failed, and in that case the value the person
+    actually typed is the better one to use."""
     prefs = db.get_user_preferences(user_id)
-    return prefs["notify_email"], prefs["notify_discord_id"]
+    cached = db.get_seerr_contact(user_id) or {}
+    return (prefs["notify_email"] or cached.get("email", ""),
+            prefs["notify_discord_id"] or cached.get("discord_id", ""))
+
+
+def save_contact(jellyfin_user_id, email=None, discord_id=None):
+    """Stores a contact detail and pushes it to Seerr. Returns (ok, message).
+
+    Seerr is where this data belongs - people fill it in once there, and Seerr uses it
+    for its own notifications - so anything entered in this portal is written back
+    rather than kept as a private second copy that drifts. It's still stored locally
+    too: the delivery task reads the local copy, and it must keep working when Seerr is
+    down or when the account isn't linked at all.
+
+    A failed write-back is reported, not swallowed, but does not undo the local save -
+    losing what somebody just typed because another service was unreachable would be
+    the worse outcome."""
+    fields = {}
+    if email is not None:
+        fields["notify_email"] = email.strip()
+    if discord_id is not None:
+        fields["notify_discord_id"] = discord_id.strip()
+    if not fields:
+        return True, ""
+    db.set_user_preferences(jellyfin_user_id, **fields)
+
+    integration = seerr_integration()
+    account = find_seerr_account(jellyfin_user_id) if integration else None
+    if not account:
+        return True, ("Saved here. Your Jellyfin account isn't linked to a Seerr one, so "
+                      "there's nowhere to copy it to.")
+    try:
+        integrations.push_seerr_contact(
+            integration["base_url"], integration["api_key"], account["id"],
+            email=fields.get("notify_email"), discord_id=fields.get("notify_discord_id"))
+    except (requests.RequestException, ValueError) as e:
+        _logger.warning("Saved contact details locally but could not push them to Seerr: %s", e)
+        return False, f"Saved here, but Seerr couldn't be updated ({e})."
+
+    db.set_user_preferences(jellyfin_user_id, seerr_user_id=account["id"])
+    db.upsert_seerr_contact(jellyfin_user_id, account["id"],
+                             email=fields.get("notify_email"),
+                             discord_id=fields.get("notify_discord_id"),
+                             display_name=account["display_name"])
+    return True, "Saved, and copied to your Seerr account."
+
+
+def needs_contact_details(user_id):
+    """Whether this person has nowhere to be reached, and hasn't said they'd rather not
+    be asked. Drives the one-time prompt after signing in."""
+    if not is_enabled():
+        return False
+    if db.get_user_preferences(user_id).get("contact_prompt_dismissed"):
+        return False
+    email, discord_id = contact_for(user_id)
+    return not (email or discord_id)
+
+
+def sync_seerr_contacts():
+    """Body of the `seerr_contact_sync` scheduled task.
+
+    Refreshes the local mirror of what Seerr holds. Same shape and same reasoning as the
+    Jellyfin user sync: replaced wholesale on success, left completely alone on failure,
+    and only users with a real jellyfinUserId link are stored - matching by name or email
+    would eventually attach one person's contact details to another."""
+    integration = seerr_integration()
+    if integration is None:
+        raise scheduler.TaskSkipped(
+            "No enabled Jellyseerr/Overseerr integration - add one under Integrations.")
+    users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"])
+    linked = [{"jellyfin_user_id": u["jellyfin_user_id"], "seerr_user_id": u["id"],
+               "display_name": u["display_name"], "email": u["email"],
+               "discord_id": u["discord_id"]}
+              for u in users if u["jellyfin_user_id"]]
+    db.replace_seerr_contacts(linked)
+    with_contact = sum(1 for c in linked if c["email"] or c["discord_id"])
+    return (f"Cached {len(linked)} linked Seerr account(s) of {len(users)}; "
+            f"{with_contact} have contact details.")
+
+
+scheduler.register(
+    "seerr_contact_sync",
+    "Seerr contact sync",
+    "Mirrors the email and Discord ID each linked Seerr account holds, so per-user "
+    "notifications can be delivered without calling Seerr - and keep working while it's "
+    "down. Only accounts Seerr has linked to a Jellyfin user are stored.",
+    sync_seerr_contacts,
+    default_interval_minutes=60,
+)
 
 
 # ---------------------------------------------------------------------------
