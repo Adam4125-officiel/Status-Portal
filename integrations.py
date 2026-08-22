@@ -301,6 +301,105 @@ def fetch_qbittorrent_downloads(base_url, username, password, limit=20):
 
 
 # ---------------------------------------------------------------------------
+# Search (Jellyfin + Seerr) - the one place an outbound call happens live
+# ---------------------------------------------------------------------------
+# Everything else in this module is polled into a cache by a background task, because a
+# request handler must never wait on another server. Search genuinely cannot work that
+# way: the query isn't known until somebody types it. So these two use their own, much
+# shorter timeout (config.SEARCH_TIMEOUT_SECONDS) and the caller degrades to "search is
+# unavailable right now" rather than holding a request thread open.
+def search_jellyfin(base_url, api_key, query, jellyfin_user_id=None, limit=12):
+    """What's already in the library, as far as this user is concerned.
+
+    `userId` matters: Jellyfin filters results by what that account may actually see, so
+    passing it means the portal can't reveal a library the person has no access to.
+    Without one, Jellyfin answers as the API key's owner - which is why it's passed
+    whenever it's known."""
+    base_url = base_url.rstrip("/")
+    params = {"searchTerm": query, "Recursive": "true", "Limit": limit,
+              "IncludeItemTypes": "Movie,Series",
+              "Fields": "ProductionYear", "EnableTotalRecordCount": "false"}
+    if jellyfin_user_id:
+        params["userId"] = jellyfin_user_id
+    r = requests.get(f"{base_url}/Items", headers={"X-Emby-Token": api_key},
+                      params=params, timeout=config.SEARCH_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    payload = r.json()
+    items = payload.get("Items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Unexpected response from /Items")
+    return [{
+        "source": "jellyfin",
+        "title": item.get("Name") or "(untitled)",
+        "year": item.get("ProductionYear"),
+        "media_type": "tv" if item.get("Type") == "Series" else "movie",
+        "jellyfin_id": item.get("Id"),
+        "in_library": True,
+    } for item in items if item.get("Id")]
+
+
+def search_seerr(base_url, api_key, query, limit=12):
+    """What exists at all, whether or not it's in the library.
+
+    Seerr searches TMDB, so this is where "we don't have it, do you want it?" comes
+    from. `mediaInfo.status == 5` means Seerr already considers it available, which is
+    how a result gets recognised as in-library even when Jellyfin's own search didn't
+    match the title."""
+    base_url = base_url.rstrip("/")
+    r = requests.get(f"{base_url}/api/v1/search",
+                      headers={"X-Api-Key": api_key},
+                      params={"query": query, "page": 1},
+                      timeout=config.SEARCH_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    payload = r.json()
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("Unexpected response from /api/v1/search")
+
+    items = []
+    for entry in results[:limit]:
+        media_type = entry.get("mediaType")
+        if media_type not in ("movie", "tv"):
+            continue  # person results and anything else Seerr returns aren't requestable
+        info = entry.get("mediaInfo") or {}
+        date = entry.get("releaseDate") or entry.get("firstAirDate") or ""
+        items.append({
+            "source": "seerr",
+            "title": entry.get("title") or entry.get("name") or "(untitled)",
+            "year": int(date[:4]) if date[:4].isdigit() else None,
+            "media_type": media_type,
+            "tmdb_id": entry.get("id"),
+            "overview": (entry.get("overview") or "")[:300],
+            "poster_path": entry.get("posterPath") or "",
+            "in_library": info.get("status") == 5,
+            "requested": info.get("status") in (2, 3),
+        })
+    return items
+
+
+def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None):
+    """Asks Seerr for something, on behalf of a specific Seerr user where one is known.
+
+    `userId` is what makes the request show up in Seerr's own approval queue attributed
+    to the person who actually asked, rather than to whoever owns the API key. It is
+    only ever passed when a *real* Jellyfin-to-Seerr link exists - see media_search.py
+    for why that link is never guessed."""
+    base_url = base_url.rstrip("/")
+    payload = {"mediaType": media_type, "mediaId": int(tmdb_id)}
+    if seerr_user_id:
+        payload["userId"] = int(seerr_user_id)
+    if media_type == "tv":
+        # Seerr requires a season selection for series; "all" is the only sane default
+        # for a portal that isn't going to render a season picker.
+        payload["seasons"] = "all"
+    r = requests.post(f"{base_url}/api/v1/request",
+                       headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+                       json=payload, timeout=config.SEARCH_TIMEOUT_SECONDS)
+    r.raise_for_status()
+    return r.json() if r.content else {}
+
+
+# ---------------------------------------------------------------------------
 # Media activity: what's coming, what was asked for, what's downloading
 # ---------------------------------------------------------------------------
 # Four read-only views assembled into one cache, refreshed by the `media_refresh`

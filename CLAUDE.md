@@ -99,6 +99,7 @@ have bitten someone on exactly that change.
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
+| Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
@@ -1608,6 +1609,42 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   The first is a reply to something the person started; the second is chatty.
 - **The admin page never lists recipients.** The queue is addressed to a Jellyfin
   account; whose email or Discord ID that resolved to is that person's business.
+
+## Unified search (`media_search.py`, `/search`)
+
+- **This is the one place an outbound call happens inside a request handler, and it is
+  a deliberate carve-out, not an exception that has crept in.** A search query isn't
+  known until somebody types it, so there is nothing to pre-fetch into a cache. Do not
+  "fix" it by adding a cache, and do not use it as a precedent for anything that *can*
+  be background-refreshed.
+- **What makes the carve-out acceptable is the safety machinery, so don't remove any of
+  it**: `config.SEARCH_TIMEOUT_SECONDS` (6s, deliberately shorter than every other
+  timeout here) so a slow Jellyfin can't hold a request thread; each source failing
+  independently; and a distinct "search is unavailable right now" state that must never
+  be collapsed into "nothing found" — one is a system problem, the other is an answer.
+- **Signed-in visitors only, plus a per-session rate limit.** Three separate reasons:
+  the result set reveals the whole library, requesting is a write against Seerr that has
+  to be attributable to a person, and a search box wired to two external APIs is a
+  free denial-of-service amplifier. The limit is **per session**, unlike `_login_state`
+  and `_report_state` which are process-global — those defend a route open to anonymous
+  strangers, where a shared counter is the point; this one is already behind a sign-in,
+  so a global counter would let one enthusiastic searcher lock everybody else out.
+- **Deduping is by title *and year*.** The two sources share no ids (Jellyfin has its
+  own, Seerr speaks TMDB), so the title is all there is to match on — and merging a 1984
+  film into its 2021 remake would be worse than showing both.
+- **A merged result must keep both ids.** Jellyfin's is what makes "Watch now"
+  possible; Seerr's TMDB id is what makes a request possible. Dropping either silently
+  disables one of the two actions on exactly the rows where both apply.
+- **Jellyfin wins on whether something is actually present.** It has the file; Seerr's
+  `mediaInfo.status` is an opinion about it.
+- **A request is attributed to the matching Seerr user via Seerr's own `jellyfinUserId`,
+  and the link is never guessed.** Same rule as per-user notifications. With no link the
+  request still goes through (unattributed) and the UI says so — an unattributed request
+  is a much smaller problem than one attributed to the wrong person.
+- **A 409 from Seerr is "already requested", which is ordinary**, not an error worth
+  alarming anyone with — someone pressed the button twice.
+- **A TV request must send `seasons: "all"`.** Seerr rejects a series request with no
+  season selection, and this portal isn't going to render a season picker.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

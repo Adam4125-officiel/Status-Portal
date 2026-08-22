@@ -33,6 +33,10 @@ services:
       - PORTAL_SMTP_FROM=${PORTAL_SMTP_FROM:-}
       - PORTAL_SMTP_TO=${PORTAL_SMTP_TO:-}
       - PORTAL_SMTP_TIMEOUT_SECONDS=${PORTAL_SMTP_TIMEOUT_SECONDS:-10}
+      # Unified search (signed-in visitors only).
+      - PORTAL_SEARCH_TIMEOUT_SECONDS=${PORTAL_SEARCH_TIMEOUT_SECONDS:-6}
+      - PORTAL_SEARCH_RATE_LIMIT=${PORTAL_SEARCH_RATE_LIMIT:-20}
+      - PORTAL_SEARCH_RATE_WINDOW_SECONDS=${PORTAL_SEARCH_RATE_WINDOW_SECONDS:-60}
       # Optional Discord bot. Blank token = disabled entirely. Note the bot also
       # needs `pip install discord.py`, which this image does not install by
       # default (it's an optional dependency, not in requirements.txt).

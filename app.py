@@ -31,6 +31,7 @@ import discord_bot
 import integrations
 import jellyfin_auth
 import logging_setup
+import media_search
 import monitoring
 import notifications
 import scheduler
@@ -405,7 +406,7 @@ def _enforce_user_session():
 
 # POST paths outside /admin/ that still need CSRF protection. /report is
 # conditional rather than listed here - see _csrf_required_for().
-_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme"}
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme", "/search/request"}
 
 
 def _csrf_required_for(path, method):
@@ -820,6 +821,7 @@ PUBLIC_SECTIONS = [
     ("vms", "Virtual machines"),
     ("jellyfin_activity", "Jellyfin activity"),
     ("media", "Media activity"),
+    ("search", "Library search"),
 ]
 _DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
 
@@ -939,6 +941,10 @@ def index():
     media_visible = _public_media_visibility()
     media = (integrations.get_cached_media()
              if (any(media_visible.values()) and _media_visible_to(current_user())) else None)
+    # Signed-in visitors only, and only when there's something to search. Both halves
+    # matter: without sign-in the box would expose the whole library to anyone who can
+    # load the page, and without an integration it would be a box that does nothing.
+    search_enabled = bool(current_user()) and media_search.is_available()
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, info=info, overall=overall,
@@ -947,6 +953,7 @@ def index():
                             site_name=site_name, visible=visible, show_any_resource=show_any_resource,
                             snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
                             media=media, media_visible=media_visible,
+                            search_enabled=search_enabled,
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -1511,6 +1518,73 @@ def user_account_push_seerr_contact():
     db.set_user_preferences(user["id"], seerr_user_id=account["id"])
     flash("Your Seerr account has been updated with these details.", "success")
     return redirect(url_for("user_account"))
+
+
+# ---------------------------------------------------------------------------
+# Unified search (signed-in visitors only)
+# ---------------------------------------------------------------------------
+# Per *session*, not process-global like the login and report limiters. Those defend a
+# route open to anonymous strangers, where a shared counter is the point; this one is
+# behind a Jellyfin sign-in, so the meaningful unit is "this person", and a global
+# counter would let one enthusiastic searcher lock everybody else out.
+def _search_rate_limited():
+    now = time.time()
+    if now - session.get("search_window_start", 0) > config.SEARCH_RATE_WINDOW_SECONDS:
+        session["search_window_start"] = now
+        session["search_count"] = 0
+    return session.get("search_count", 0) >= config.SEARCH_RATE_LIMIT
+
+
+def _register_search():
+    session["search_count"] = session.get("search_count", 0) + 1
+
+
+@app.route("/search")
+@user_login_required
+def search():
+    """The one request handler in this app that makes a live outbound call.
+
+    Everything else reads a cache filled by a background task, because a request must
+    never wait on another server. A search query isn't known until someone types it, so
+    there is nothing to pre-fetch - see media_search.py for the safety machinery that
+    makes this carve-out acceptable rather than a quiet exception to the rule."""
+    user = current_user()
+    query = request.args.get("q", "").strip()[:100]
+    outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
+    limited = False
+
+    if query:
+        if _search_rate_limited():
+            limited = True
+        else:
+            _register_search()
+            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+
+    return render_template("search.html", query=query, outcome=outcome,
+                            rate_limited=limited,
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/search/request", methods=["POST"])
+@user_login_required
+def search_request():
+    """Asks Seerr for something on the signed-in visitor's behalf.
+
+    A write against another service, so it's a POST, it's CSRF-protected (see
+    _csrf_required_for), it requires a signed-in visitor, and it counts against the same
+    per-session rate limit as searching."""
+    user = current_user()
+    if _search_rate_limited():
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.form.get("q", "")))
+    _register_search()
+    ok, message = media_search.request(request.form.get("media_type", ""),
+                                        request.form.get("tmdb_id", ""),
+                                        user["id"], user.get("name", ""))
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("search", q=request.form.get("q", "")))
 
 
 @app.route("/account/theme", methods=["POST"])

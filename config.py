@@ -171,6 +171,24 @@ SMTP_SECURITY = os.environ.get("PORTAL_SMTP_SECURITY", "starttls").strip().lower
 # BYPARR_TIMEOUT_SECONDS and JELLYFIN_AUTH_TIMEOUT_SECONDS.
 SMTP_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SMTP_TIMEOUT_SECONDS", "10"))
 
+# ---------------------------------------------------------------------------
+# Unified search (see media_search.py)
+# ---------------------------------------------------------------------------
+# Search is the one place in this app where an outbound call genuinely happens inside a
+# request handler: the query isn't known until somebody types it, so no amount of
+# background refreshing can answer it from a cache. That makes the timeout the whole
+# safety story - a slow Jellyfin or Seerr must degrade to "search is unavailable right
+# now" quickly, not hold a request-handling thread (of which waitress has
+# WAITRESS_THREADS) while a person stares at a spinner. Deliberately shorter than every
+# other timeout here for that reason.
+SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"))
+
+# Per-session rate limit: how many searches in how long. A search box wired to two
+# external APIs is a free denial-of-service amplifier, and this is on top of the
+# signed-in-only restriction, not instead of it.
+SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "20"))
+SEARCH_RATE_WINDOW_SECONDS = int(os.environ.get("PORTAL_SEARCH_RATE_WINDOW_SECONDS", "60"))
+
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
 # Blank = disabled entirely, no bot thread started. A bot token is a full login
 # credential (not just a one-way webhook URL), so like the webhook URLs it's env-only,
