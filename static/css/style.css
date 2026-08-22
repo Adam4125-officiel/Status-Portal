@@ -299,6 +299,11 @@ body.no-visitor-controls .topbar { padding-right: 46px; }
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
+  /* The ::after glow below sits at inset -6px, so the dot *paints* 6px wider than it
+     *measures* on every side. Without this margin that glow lands on top of whatever
+     text follows - which on a narrow screen is exactly the reported "green blob over
+     the word yes". Must stay >= the glow inset. */
+  margin-right: 7px;
 }
 .led::after {
   content: "";
@@ -727,7 +732,16 @@ footer.foot {
   color: var(--text-faint);
 }
 
-.admin-main { flex: 1; padding: 30px 36px 60px; max-width: 900px; }
+.admin-main {
+  flex: 1;
+  padding: 30px 36px 60px;
+  max-width: 900px;
+  /* A flex item's min-width defaults to auto, meaning "never shrink below my content".
+     A table wider than the column therefore pushed this panel - and with it the whole
+     page - sideways, instead of scrolling inside its own .admin-table container. This
+     one declaration is what makes every overflow-x: auto below it actually work. */
+  min-width: 0;
+}
 
 .admin-header {
   display: flex;
@@ -829,13 +843,24 @@ footer.foot {
 .core-bar__fill.warn { background: var(--warn); }
 .core-bar__fill.crit { background: var(--crit); }
 
+/* .admin-table is the *wrapper*, never the <table> itself. It used to be both,
+   depending on the page, which is why some admin tables were silently clipped on a
+   phone (overflow: hidden on a wrapper hides the overflow) while others pushed the
+   whole page sideways (the same class on a <table>, where it does nothing useful).
+   One shape, and a convention test keeps it that way. */
 .admin-table {
   width: 100%;
-  border-collapse: collapse;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  /* Scrolls rather than clips: a table too wide for the viewport must still be
+     readable by scrolling it, and must not drag the page sideways with it. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.admin-table > table {
+  width: 100%;
+  border-collapse: collapse;
 }
 .admin-table th, .admin-table td {
   text-align: left;
@@ -854,6 +879,18 @@ footer.foot {
 .admin-table tr:last-child td { border-bottom: none; }
 .admin-table td.actions { white-space: nowrap; text-align: right; }
 .admin-table td.actions a, .admin-table td.actions button { margin-left: 8px; }
+
+@media (max-width: 720px) {
+  /* Below this, a multi-column data table crushes rather than shrinking gracefully, so
+     let it keep a readable width and scroll inside its own container.
+
+     Scoped to tables with a <thead>, which is what distinguishes a real data table from
+     the two-column label/value tables used inside panels - forcing a minimum width on
+     "Last run | 12:04" would make something that already fits scroll for no reason.
+     Browsers without :has() simply don't apply it and get the previous behaviour. */
+  .admin-table > table:has(thead) { min-width: 520px; }
+  .admin-table th, .admin-table td { padding: 9px 10px; }
+}
 
 /* Label/value pairs inside a .form-panel (the About page's version, paths and
    project metadata) - unlike .admin-table this sits *within* a panel that already
@@ -1223,3 +1260,44 @@ footer.foot {
 .status-pill--unknown    { background: var(--bg-panel-raised);   color: var(--text-faint); border-color: var(--border); }
 
 .media-row__year { color: var(--text-faint); font-weight: 400; }
+
+/* Contexts that already space their children with a flex gap don't need the led's own
+   margin on top of it - it would just read as a wide gap. */
+.media-row .led,
+.switch-form .led { margin-right: 0; }
+
+/* No breathing glow on a status dot inside a dense admin table.
+   The ring is an ::after at inset -6px, so it paints outside the dot's own layout box
+   and lands on whatever sits beside it - or, when a cell is narrow enough for its label
+   to wrap, on the line underneath. That is the "green blob over the word yes" bug, and
+   the margin-right on .led only fixes the horizontal half of it.
+
+   The glow earns its place on the public status page, where the cards are large and the
+   point is to draw the eye. In a table of ten rows of 12px text it is noise that
+   collides with the text it is meant to annotate, so it goes. The dot itself, with its
+   box-shadow, still reads perfectly well. */
+.admin-table .led::after { content: none; }
+
+/* Panel header: a title on the left, its actions on the right. Was four near-identical
+   inline styles, which is exactly how one of them came to lack a wrap rule and push the
+   Integrations page 30px wider than a 360px phone. */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  /* The actions drop under the title rather than off the side of the screen. */
+  flex-wrap: wrap;
+}
+.panel-header > :last-child { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Text that comes from another system - an error message, a URL, a version string -
+   has no spaces to break at, so it pushes its container (and the page) sideways on a
+   narrow screen. "HTTPConnectionPool(host='127.0.0.1', port=9)" was the one that found
+   this. Anywhere the portal renders text it didn't write, let it break mid-word. */
+.empty-state,
+.field-hint,
+.admin-table td,
+.form-panel code,
+.resource-card__sub { overflow-wrap: anywhere; }

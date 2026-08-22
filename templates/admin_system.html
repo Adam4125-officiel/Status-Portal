@@ -33,20 +33,22 @@
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
     What this process is currently holding in memory instead of re-fetching. {{ cache_clear_note }}
   </p>
-  <table class="admin-table" style="margin-bottom: 12px;">
-    <thead><tr><th>Cache</th><th style="text-align: right;">Held</th></tr></thead>
-    <tbody>
-      {% for c in caches %}
-      <tr>
-        <td>{{ c.name }}</td>
-        <td style="text-align: right; font-family: var(--font-mono); font-size: 12px; white-space: nowrap;">
-          {{ c.entries }} <span style="color: var(--text-faint);">{{ c.detail }}</span>
-          {% if c.updated_at %}<br><span class="local-time" data-utc="{{ c.updated_at }}" style="color: var(--text-faint);">{{ c.updated_at[:16] }} UTC</span>{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="admin-table">
+    <table style="margin-bottom: 12px;">
+      <thead><tr><th>Cache</th><th style="text-align: right;">Held</th></tr></thead>
+      <tbody>
+        {% for c in caches %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td style="text-align: right; font-family: var(--font-mono); font-size: 12px; white-space: nowrap;">
+            {{ c.entries }} <span style="color: var(--text-faint);">{{ c.detail }}</span>
+            {% if c.updated_at %}<br><span class="local-time" data-utc="{{ c.updated_at }}" style="color: var(--text-faint);">{{ c.updated_at[:16] }} UTC</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 
   {% if connections %}
   <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 6px;">Last known reachability, as cached above:</p>

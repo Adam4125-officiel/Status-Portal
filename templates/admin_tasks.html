@@ -18,7 +18,7 @@
 {% if tasks %}
 {% for t in tasks %}
   <div class="form-panel" style="margin-bottom: 12px;">
-    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+    <div class="panel-header">
       <h2 style="font-size: 15px; margin: 0;">{{ t.label }}
         {% if not t.enabled %}<span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">(disabled)</span>{% endif %}
       </h2>

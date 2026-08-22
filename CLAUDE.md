@@ -1387,6 +1387,29 @@ DB-backed Settings pages, not a code edit.
   `active` to its *parent's* key so the nav still shows where you are. Discord servers
   briefly had both a nav entry and an in-page button to the same place; the button won,
   because it sits next to the bot settings the page is about.
+- **`.admin-table` is the wrapper `<div>`, never the `<table>` itself.** On a wrapper
+  its `overflow-x: auto` scrolls a too-wide table; on the table it does nothing and the
+  table drags the whole page sideways. The codebase had it both ways (nine pages one,
+  five the other), which is why one page got a bug report and eight stayed broken.
+  `tests/test_conventions.py` enforces it.
+- **`.admin-main` needs `min-width: 0`.** It's a flex item, and a flex item's default
+  `min-width: auto` means "never shrink below my content" — so a wide table pushed the
+  panel and the page sideways no matter how many `overflow-x: auto` containers sat
+  inside it. That one declaration is what makes all of them work.
+- **`.led`'s glow is an `::after` at `inset: -6px`, so the dot paints wider than it
+  measures.** It's suppressed inside `.admin-table` (`content: none`) because in a dense
+  table it lands on the text beside it — or, when a cell is narrow enough to wrap, on the
+  line beneath. That was the "green blob over the word yes" report. It stays on the
+  public status page, where the cards are big and drawing the eye is the point.
+- **Text from another system must be allowed to break mid-word** (`overflow-wrap:
+  anywhere` on `.empty-state`, `.field-hint`, `.admin-table td`, `code`). An error like
+  `HTTPConnectionPool(host='127.0.0.1', port=9)` has nothing to break at and pushes the
+  page sideways on a phone.
+- **Audit responsively by measuring, not by looking.** The script that found all of the
+  above walks every admin page at 320/360/390/480/640/768/1024px and reports two things:
+  any `.led` whose painted box (glow included) intersects a text rect, and
+  `documentElement.scrollWidth > clientWidth`. Five separate causes, only visible one at
+  a time.
 - **Toggling a boolean in an admin table uses `.switch`** (`static/css/style.css` +
   `static/js/admin_toggle.js`), not a badge plus a separate Block/Allow button — that
   made the reader work out the current state from two elements written in different

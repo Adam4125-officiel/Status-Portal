@@ -41,7 +41,7 @@
 {% endif %}
 
 <div class="form-panel" style="margin-bottom: 16px;">
-  <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+  <div class="panel-header">
     <h2 style="font-size: 15px; margin: 0;">App updates</h2>
     <form action="{{ url_for('admin_task_run', name=version_task.name) }}" method="POST" style="display:inline;">
       <button type="submit" class="btn secondary" style="padding:4px 10px;"{{ ' disabled' if version_task.running }}>
@@ -102,7 +102,7 @@
 {% for i in integrations %}
   {% set entry = statuses.get(i.id) %}
   <div class="form-panel" style="margin-bottom: 12px;">
-    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+    <div class="panel-header">
       <h2 style="font-size: 15px; margin: 0;">{{ i.name }}
         <span style="color: var(--text-faint); font-weight: 400; font-size: 12px;">({{ i.kind }})</span>
       </h2>

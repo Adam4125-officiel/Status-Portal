@@ -26,14 +26,16 @@
     <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">{{ guild.id }}</span>
   </div>
   {% if guild.channels %}
-  <table class="admin-table">
-    <thead><tr><th>Channel</th><th>ID</th></tr></thead>
-    <tbody>
-      {% for c in guild.channels %}
-      <tr><td>#{{ c.name }}</td><td style="font-family: var(--font-mono);">{{ c.id }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="admin-table">
+    <table>
+      <thead><tr><th>Channel</th><th>ID</th></tr></thead>
+      <tbody>
+        {% for c in guild.channels %}
+        <tr><td>#{{ c.name }}</td><td style="font-family: var(--font-mono);">{{ c.id }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   {% else %}
   <div class="empty-state">No text channels visible to the bot here.</div>
   {% endif %}

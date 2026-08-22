@@ -478,3 +478,25 @@ def test_no_new_bare_background_loops():
         "If it genuinely cannot be a task (too frequent for the tick, or it lives in "
         "another event loop), register it with scheduler.register_loop() so it is at "
         "least visible, and add it to `allowed` here with the reason.")
+
+
+# ---------------------------------------------------------------------------
+# Admin tables are a wrapper, not the table
+# ---------------------------------------------------------------------------
+def test_admin_table_is_always_a_wrapper_never_the_table_itself():
+    """CLAUDE.md: `.admin-table` is the scroll container, and the <table> goes inside it.
+
+    It used to be both, depending on the page, and the two behave completely differently:
+    on a wrapper the overflow rule scrolls a too-wide table, while on the <table> itself
+    it does nothing and the table drags the whole page sideways on a phone. Nine pages
+    had it one way and five the other, which is exactly the kind of split that produces
+    a bug report about one page and leaves the other eight broken."""
+    offenders = []
+    for path, src in _template_files():
+        for match in re.finditer(r"<table[^>]*class=\"[^\"]*\badmin-table\b", src):
+            offenders.append(f"{path}:{src[:match.start()].count(chr(10)) + 1}")
+    assert not offenders, (
+        f"<table class=\"admin-table\"> found at {offenders}. Wrap it instead:\n"
+        '  <div class="admin-table"><table>...</table></div>\n'
+        "The class is the scroll container - on the <table> itself the overflow rule "
+        "does nothing and a wide table pushes the page sideways.")
