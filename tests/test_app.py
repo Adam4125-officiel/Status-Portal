@@ -2372,8 +2372,11 @@ def test_the_activity_page_says_so_when_nothing_is_running(client):
     and says nothing is running - a link that 404s half the time would be worse."""
     db.set_setting("show_public_jellyfin_tasks", "1")
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
-    assert client.get("/activity").status_code == 200
-    assert b"Nothing running right now" in client.get("/").data
+    page = client.get("/activity")
+    assert page.status_code == 200
+    # The page has to *say* it's idle - rendering nothing reads as broken.
+    assert b"idling at the moment" in page.data
+    assert b"Idle right now" in client.get("/").data
 
 
 # ---------------------------------------------------------------------------
@@ -2420,6 +2423,21 @@ def test_the_info_page_disappears_when_emptied(client, isolated_db):
     db.set_info_page("   ")
     assert client.get("/info").status_code == 404
     assert b"/info" not in client.get("/").data
+
+
+def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_db, monkeypatch):
+    """Regression: the nav is shared, but `search_enabled` was only computed by the main
+    page's route - so the Search tab existed only on the page that happened to pass it."""
+    db.set_setting("show_public_cpu", "1")
+    db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1})
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    with client.session_transaction() as sess:
+        sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
+                               "authenticated_at": 0}
+    for path in ("/", "/resources", "/info"):
+        assert b'href="/search"' in client.get(path).data, path
 
 
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):

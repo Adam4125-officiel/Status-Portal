@@ -1,4 +1,22 @@
-{% if jellyfin_activity and jellyfin_activity.running_tasks %}
-<div class="section-title">Jellyfin activity</div>
-<div class="info-block">🔧 Running: {{ jellyfin_activity.running_tasks|join(', ') }}</div>
-{% endif %}
+{# Jellyfin's current activity. Rendered on its own page, so "nothing is happening" has
+   to be said out loud - a page that renders to nothing reads as broken, not as idle. #}
+<section class="section">
+  <h2 class="section__title">Jellyfin activity</h2>
+
+  {% if jellyfin_activity and jellyfin_activity.transcoding %}
+    <div class="info-block">
+      🎞 Transcoding {{ jellyfin_activity.transcoding }} stream{{ 's' if jellyfin_activity.transcoding != 1 }} right now
+    </div>
+  {% endif %}
+
+  {% if jellyfin_activity and jellyfin_activity.running_tasks %}
+    <div class="info-block">🔧 Running: {{ jellyfin_activity.running_tasks|join(', ') }}</div>
+  {% endif %}
+
+  {% if activity_idle %}
+    <div class="empty-state">
+      Jellyfin is idling at the moment — nothing transcoding, and no background tasks
+      running. This refreshes on its own.
+    </div>
+  {% endif %}
+</section>

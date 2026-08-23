@@ -1774,6 +1774,20 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   and `_report_state` which are process-global — those defend a route open to anonymous
   strangers, where a shared counter is the point; this one is already behind a sign-in,
   so a global counter would let one enthusiastic searcher lock everybody else out.
+- **The Seerr search query must be percent-encoded, not form-encoded.** Seerr proxies
+  search to TMDB, and TMDB rejects `+` with HTTP 400 *"Parameter 'query' must be url
+  encoded. Its value may not contain reserved characters."* — so `params={"query": ...}`
+  (requests' default, which uses `+` for a space) worked for single words and failed for
+  every multi-word search. `_seerr_search_url()` builds it with
+  `urlencode(quote_via=quote)`; don't "simplify" it back to `params=`. The diagnostic
+  builds its URL the same way on purpose: when it didn't, it reported "both calls
+  succeeded" while search was broken, because it happened to use a one-word query.
+- **Anything the shared public nav renders must be passed by *every* route that renders
+  it.** `search_enabled` was computed only by `index()`, so the Search tab existed on the
+  Status page and nowhere else. `_render_public_page()` passes the same set.
+- **A page on its own needs an empty state; a block on a shared page doesn't.** The
+  Jellyfin activity partial guarded itself into rendering nothing when idle, which is
+  right inside a long scroll and reads as broken as a whole page. It now says so.
 - **Results appear while typing, from a server-rendered fragment.** `/search/live`
   returns `sections/_search_results.html` - the *same* partial the full page includes -
   so the incremental results and the submitted ones cannot drift apart. Same convention

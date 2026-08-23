@@ -495,3 +495,80 @@ def test_the_search_page_carries_what_the_live_script_needs(visitor):
     assert b'id="search-results"' in body
     assert b'data-live-url="/search/live"' in body
     assert b'data-min-length=' in body
+
+
+# ---------------------------------------------------------------------------
+# The HTTP 400: a space encoded as "+" rather than "%20"
+# ---------------------------------------------------------------------------
+# Confirmed against a real instance, from the diagnostic's own output:
+#   query=Harry+Potter -> HTTP 400
+#   "Parameter 'query' must be url encoded. Its value may not contain reserved
+#    characters."
+# Seerr proxies search to TMDB, and TMDB rejects "+" as a reserved character. requests'
+# default param encoding uses "+" for a space, so single-word searches worked and every
+# multi-word one failed.
+class _TmdbStrictSeerr(BaseHTTPRequestHandler):
+    """Rejects a "+" in the query exactly as TMDB does."""
+    seen = []
+
+    def do_GET(self):
+        raw_query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        _TmdbStrictSeerr.seen.append(raw_query)
+        if "+" in raw_query:
+            body = json.dumps({
+                "message": "Parameter 'query' must be url encoded. Its value may not "
+                           "contain reserved characters."}).encode()
+            self.send_response(400)
+        else:
+            body = json.dumps({"results": []}).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def strict_seerr():
+    _TmdbStrictSeerr.seen = []
+    server = HTTPServer(("127.0.0.1", 0), _TmdbStrictSeerr)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def test_a_multi_word_search_is_percent_encoded(strict_seerr):
+    """The regression test for the reported bug: this exact call used to 400."""
+    integrations.search_seerr(strict_seerr, "k", "Harry Potter")
+    assert "query=Harry%20Potter" in _TmdbStrictSeerr.seen[0]
+    assert "+" not in _TmdbStrictSeerr.seen[0]
+
+
+@pytest.mark.parametrize("term", [
+    "Harry Potter",          # the reported one
+    "Fast & Furious",        # an ampersand would otherwise start a new parameter
+    "L'Étranger",            # apostrophe plus non-ASCII
+    "9 1/2 Weeks",           # a slash
+])
+def test_awkward_search_terms_survive_encoding(strict_seerr, term):
+    integrations.search_seerr(strict_seerr, "k", term)
+    assert "+" not in _TmdbStrictSeerr.seen[-1]
+
+
+def test_the_diagnostic_sends_the_same_request_search_does(strict_seerr):
+    """It stops being a diagnostic the moment it differs from the real call - which is
+    precisely why the first version reported "both calls succeeded" while searching was
+    broken: it happened to use a single-word query."""
+    report = integrations.diagnose_seerr(strict_seerr, "k", "Harry Potter")
+    search_check = report["checks"][1]
+    assert search_check["ok"] is True
+    assert "query=Harry%20Potter" in search_check["url"]
+
+
+def test_a_single_word_query_worked_all_along(strict_seerr):
+    """Why this went unnoticed: "test" has nothing to encode."""
+    integrations.search_seerr(strict_seerr, "k", "test")
+    assert _TmdbStrictSeerr.seen[0] == "query=test&page=1"

@@ -970,7 +970,11 @@ def _activity_context():
     if not visible["jellyfin_tasks"]:
         return None
     activity = integrations.get_cached_jellyfin_activity()
-    return {"visible": visible, "jellyfin_activity": activity}
+    # "Nothing is happening" is a real answer and the page has to be able to say it, so
+    # this returns a context even when both lists are empty - unlike the other builders,
+    # where empty means "not configured" and the page shouldn't exist at all.
+    return {"visible": visible, "jellyfin_activity": activity,
+            "activity_idle": not activity.get("running_tasks") and not activity.get("transcoding")}
 
 
 def _media_context():
@@ -1051,10 +1055,14 @@ def _vms_summary(ctx):
 
 
 def _activity_summary(ctx):
-    tasks = (ctx.get("jellyfin_activity") or {}).get("running_tasks") or []
-    if not tasks:
-        return "Nothing running right now"
-    return f"{len(tasks)} task(s) running"
+    activity = ctx.get("jellyfin_activity") or {}
+    bits = []
+    if activity.get("transcoding"):
+        bits.append(f"{activity['transcoding']} transcoding")
+    tasks = activity.get("running_tasks") or []
+    if tasks:
+        bits.append(f"{len(tasks)} task(s) running")
+    return " · ".join(bits) if bits else "Idle right now"
 
 
 def _media_summary(ctx):
@@ -1125,6 +1133,10 @@ def _render_public_page(key):
     return render_template(f"public/{key}.html", page_label=label, active_page=key,
                             site_name=db.get_setting("site_name", "Server"),
                             nav_links=_public_page_links(),
+                            # The nav is shared, so everything it renders has to be
+                            # passed everywhere it appears - without this the Search tab
+                            # existed only on the page that happened to compute it.
+                            search_enabled=bool(current_user()) and media_search.is_available(),
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             repo_url=updater.REPO_URL, **context)
 

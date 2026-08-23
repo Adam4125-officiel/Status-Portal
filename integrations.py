@@ -12,6 +12,7 @@ kind of service it's showing:
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -412,21 +413,23 @@ def diagnose_seerr(base_url, api_key, query="test"):
     headers = {"X-Api-Key": api_key}
     report = {"base_url": base_url, "query": query, "checks": []}
 
-    for name, path, params, timeout, note in (
-            ("Health check (/api/v1/status)", "/api/v1/status", None, TIMEOUT,
+    # Each entry is (name, full url, timeout, note). The search URL is built exactly the
+    # way search_seerr() builds it - percent-encoded - so this diagnoses the request the
+    # portal actually makes rather than a lookalike.
+    for name, url, timeout, note in (
+            ("Health check (/api/v1/status)", f"{base_url}/api/v1/status", TIMEOUT,
              "Served entirely by Seerr itself - no internet access needed."),
-            ("Search (/api/v1/search)", "/api/v1/search", {"query": query, "page": 1},
+            ("Search (/api/v1/search)", _seerr_search_url(base_url, query),
              config.SEARCH_TIMEOUT_SECONDS,
              "Seerr proxies this to TMDB, so it needs working outbound internet on the "
              "Seerr host - which the health check above does not."),
     ):
-        entry = {"name": name, "path": path, "timeout": timeout, "note": note,
+        entry = {"name": name, "timeout": timeout, "note": note,
                  "ok": False, "status_code": None, "elapsed_ms": None, "error": None,
                  "url": None, "body": None}
         started = time.monotonic()
         try:
-            r = requests.get(f"{base_url}{path}", headers=headers, params=params,
-                              timeout=timeout)
+            r = requests.get(url, headers=headers, timeout=timeout)
             entry["status_code"] = r.status_code
             # The exact URL requests built, so a query that Seerr rejects can be seen
             # verbatim rather than guessed at.
@@ -460,6 +463,22 @@ def diagnose_seerr(base_url, api_key, query="test"):
     return report
 
 
+def _seerr_search_url(base_url, query, page=1):
+    """The search URL, with the query **percent**-encoded.
+
+    Seerr proxies search to TMDB, and TMDB rejects a `+` in the query with
+    HTTP 400 "Parameter 'query' must be url encoded. Its value may not contain reserved
+    characters." requests' default param encoding uses `+` for a space (the
+    form-encoding convention), so every multi-word search failed while single words
+    worked - which is exactly why the health check and a "test" query both passed while
+    "Harry Potter" did not.
+
+    urlencode(quote_via=quote) percent-encodes spaces as %20, and reserved characters
+    (&, /, ') along with them. Confirmed against a real instance, not deduced."""
+    return f"{base_url.rstrip('/')}/api/v1/search?" + urlencode(
+        {"query": query, "page": page}, quote_via=quote)
+
+
 def search_seerr(base_url, api_key, query, limit=12):
     """What exists at all, whether or not it's in the library.
 
@@ -467,10 +486,10 @@ def search_seerr(base_url, api_key, query, limit=12):
     from. `mediaInfo.status == 5` means Seerr already considers it available, which is
     how a result gets recognised as in-library even when Jellyfin's own search didn't
     match the title."""
-    base_url = base_url.rstrip("/")
-    r = requests.get(f"{base_url}/api/v1/search",
+    # Pre-built rather than passed as params=, so the query is percent-encoded - see
+    # _seerr_search_url() for why that is not a stylistic choice.
+    r = requests.get(_seerr_search_url(base_url, query),
                       headers={"X-Api-Key": api_key},
-                      params={"query": query, "page": 1},
                       timeout=config.SEARCH_TIMEOUT_SECONDS)
     r.raise_for_status()
     payload = r.json()
