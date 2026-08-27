@@ -27,6 +27,15 @@ admin panel, no Flask knowledge or HTML editing required.
 - **Self-updating** — one-click update from the admin panel or a standalone
   `update.py` script, with integrity checks, automatic backups and rollback
 
+## Screenshots
+
+| Public status page | Admin panel |
+| --- | --- |
+| ![Public status page](docs/images/screenshots/public-desktop-light.png) | ![Admin services page](docs/images/screenshots/admin-dashboard-desktop.png) |
+
+More screenshots (incidents, scheduled tasks, notifications, dark mode, mobile) are on
+the [wiki](https://github.com/Adam4125-officiel/Status-Portal/wiki).
+
 ## Quick start
 
 ```bash
