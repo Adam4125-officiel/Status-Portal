@@ -4,6 +4,9 @@ A personal status portal for your home server (Jellyfin, *Arr stack, SMB, etc.) 
 links, announcements, incidents/maintenance and practical info, all editable from an
 admin panel, no Flask knowledge or HTML editing required.
 
+**[Project website](https://adam4125-officiel.github.io/Status-Portal/)** — screenshots,
+the full feature list and integrations at a glance.
+
 ## Features
 
 - Backend: Python/Flask · Storage: SQLite (a single file, created automatically)
@@ -34,7 +37,8 @@ admin panel, no Flask knowledge or HTML editing required.
 | ![Public status page](docs/images/screenshots/public-desktop-light.png) | ![Admin services page](docs/images/screenshots/admin-dashboard-desktop.png) |
 
 More screenshots (incidents, scheduled tasks, notifications, dark mode, mobile) are on
-the [wiki](https://github.com/Adam4125-officiel/Status-Portal/wiki).
+the [project website](https://adam4125-officiel.github.io/Status-Portal/) and the
+[wiki](https://github.com/Adam4125-officiel/Status-Portal/wiki).
 
 ## Quick start
 
