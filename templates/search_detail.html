@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="container">
+  <div class="topbar">
+    <div>
+      <div class="topbar__brand">{{ site_name }}</div>
+      <div class="topbar__sub">{{ 'Series' if item.media_type == 'tv' else 'Film' }} detail</div>
+    </div>
+    <a class="btn secondary" href="{{ url_for('search', q=query) }}">← Back to search</a>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <div class="search-result search-result--detail">
+    {% if item.poster_path %}
+      <img class="search-result__poster search-result__poster--large" loading="lazy"
+           src="https://image.tmdb.org/t/p/w342{{ item.poster_path }}" alt="{{ item.title }}">
+    {% else %}
+      <div class="search-result__poster search-result__poster--large search-result__poster--placeholder" aria-hidden="true">🎬</div>
+    {% endif %}
+    <div class="search-result__main">
+      <div class="search-result__title" style="font-size: 18px;">
+        {{ item.title }}{% if item.year %} <span class="search-result__year">({{ item.year }})</span>{% endif %}
+        <span class="pill">{{ 'Series' if item.media_type == 'tv' else 'Film' }}</span>
+      </div>
+      {% if detail.genres %}
+        <div class="field-hint" style="margin-top: 4px;">{{ detail.genres | join(', ') }}</div>
+      {% endif %}
+      <div class="field-hint">
+        {% if detail.runtime %}{{ detail.runtime }} min{% endif %}
+        {% if detail.runtime and detail.vote_average %} · {% endif %}
+        {% if detail.vote_average %}★ {{ '%.1f' | format(detail.vote_average) }}/10{% endif %}
+      </div>
+      {% if detail.overview %}
+        <div class="search-result__overview" style="margin-top: 12px; font-size: 13.5px;">{{ detail.overview }}</div>
+      {% endif %}
+      <div style="margin-top: 16px;">
+        {% include 'sections/_search_result_action.html' %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

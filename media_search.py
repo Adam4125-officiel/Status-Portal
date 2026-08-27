@@ -171,6 +171,22 @@ def jellyfin_item_url(item_id):
     return f"{integration['base_url'].rstrip('/')}/web/index.html#!/details?id={item_id}"
 
 
+def detail(media_type, tmdb_id):
+    """Full detail (overview, genres, runtime, rating, seasons) for one search result,
+    for the detail page reached by clicking a title. None when Seerr isn't configured,
+    the id isn't valid, or the lookup itself fails - fetch_seerr_detail() already
+    degrades network/parse failures to None rather than raising, so there is nothing
+    further to catch here."""
+    seerr = seerr_integration()
+    if not seerr or media_type not in ("movie", "tv"):
+        return None
+    try:
+        tmdb_id = int(tmdb_id)
+    except (TypeError, ValueError):
+        return None
+    return integrations.fetch_seerr_detail(seerr["base_url"], seerr["api_key"], media_type, tmdb_id)
+
+
 def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name=""):
     """Asks Seerr for something. Returns (ok, message).
 

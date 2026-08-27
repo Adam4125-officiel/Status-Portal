@@ -283,6 +283,49 @@ def test_a_series_request_asks_for_every_season(isolated_db, stub, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Extended detail (for the search detail page and the request configuration page)
+# ---------------------------------------------------------------------------
+def test_movie_detail_carries_overview_genres_runtime_and_rating(stub):
+    route("/api/v1/movie/1399", {
+        "title": "Dune", "releaseDate": "2021-09-15", "posterPath": "/dune.jpg",
+        "overview": "A noble family becomes embroiled in a war.",
+        "genres": [{"id": 1, "name": "Science Fiction"}, {"id": 2, "name": "Adventure"}],
+        "runtime": 155, "voteAverage": 8.0,
+    })
+    detail = integrations.fetch_seerr_detail(stub, "k", "movie", 1399)
+    assert detail["overview"] == "A noble family becomes embroiled in a war."
+    assert detail["genres"] == ["Science Fiction", "Adventure"]
+    assert detail["runtime"] == 155
+    assert detail["vote_average"] == 8.0
+    assert detail["seasons"] == []
+
+
+def test_tv_detail_carries_seasons_and_falls_back_to_episode_run_time(stub):
+    route("/api/v1/tv/1399", {
+        "name": "Foundation", "firstAirDate": "2021-09-24", "posterPath": "/f.jpg",
+        "overview": "Psychohistorians save the galaxy.",
+        "genres": [{"id": 1, "name": "Drama"}],
+        "episodeRunTime": [55], "voteAverage": 7.5,
+        "seasons": [{"seasonNumber": 0, "episodeCount": 3, "airDate": ""},
+                    {"seasonNumber": 1, "episodeCount": 10, "airDate": "2021-09-24"}],
+    })
+    detail = integrations.fetch_seerr_detail(stub, "k", "tv", 1399)
+    assert detail["runtime"] == 55
+    assert detail["seasons"] == [
+        {"season_number": 0, "episode_count": 3, "air_date": ""},
+        {"season_number": 1, "episode_count": 10, "air_date": "2021-09-24"},
+    ]
+
+
+def test_a_movie_with_no_runtime_data_is_none_not_zero(stub):
+    route("/api/v1/movie/1", {"title": "X", "releaseDate": "2020-01-01"})
+    detail = integrations.fetch_seerr_detail(stub, "k", "movie", 1)
+    assert detail["runtime"] is None
+    assert detail["genres"] == []
+    assert detail["overview"] == ""
+
+
+# ---------------------------------------------------------------------------
 # Access control and rate limiting
 # ---------------------------------------------------------------------------
 @pytest.fixture
@@ -495,6 +538,48 @@ def test_the_search_page_carries_what_the_live_script_needs(visitor):
     assert b'id="search-results"' in body
     assert b'data-live-url="/search/live"' in body
     assert b'data-min-length=' in body
+
+
+# ---------------------------------------------------------------------------
+# The detail page
+# ---------------------------------------------------------------------------
+def test_the_detail_page_shows_overview_and_genres(visitor, stub):
+    _configure(stub, jellyfin=False)
+    route("/api/v1/movie/1399", {
+        "title": "Dune", "releaseDate": "2021-09-15", "posterPath": "/dune.jpg",
+        "overview": "A noble family becomes embroiled in a war.",
+        "genres": [{"id": 1, "name": "Science Fiction"}], "runtime": 155, "voteAverage": 8.0,
+    })
+    resp = visitor.get("/search/detail/movie/1399")
+    assert resp.status_code == 200
+    assert b"Dune" in resp.data
+    assert b"noble family" in resp.data
+    assert b"Science Fiction" in resp.data
+
+
+def test_an_unresolvable_detail_404s(visitor, stub):
+    _configure(stub, jellyfin=False)
+    assert visitor.get("/search/detail/movie/9999").status_code == 404
+
+
+def test_the_detail_page_requires_a_signed_in_visitor(client):
+    assert client.get("/search/detail/movie/1").status_code == 302
+
+
+def test_the_detail_page_counts_against_the_rate_limit(visitor, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    route("/api/v1/movie/1", {"title": "X", "releaseDate": "2020-01-01"})
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 1)
+    visitor.get("/search/detail/movie/1")
+    resp = visitor.get("/search/detail/movie/1", follow_redirects=True)
+    assert b"lot of requests" in resp.data
+
+
+def test_the_detail_page_carries_library_status_from_the_query_string(visitor, stub):
+    _configure(stub, jellyfin=False)
+    route("/api/v1/movie/1", {"title": "X", "releaseDate": "2020-01-01"})
+    resp = visitor.get("/search/detail/movie/1?requested=1")
+    assert b"Already requested" in resp.data
 
 
 # ---------------------------------------------------------------------------

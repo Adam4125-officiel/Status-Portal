@@ -689,7 +689,9 @@ _seerr_detail_cache = {}
 
 
 def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
-    """Title (and year) for one requested item, from Seerr's own detail endpoint.
+    """Full detail for one item, from Seerr's own /movie or /tv endpoint - title/year
+    (used for resolving a bare "TMDB #12345" placeholder) plus overview/genres/runtime/
+    rating/seasons (used by the search detail page).
 
     Cached forever in-process: this is immutable data keyed by a TMDB id. Without the
     cache, a queue of twenty requests would mean twenty extra HTTP calls every time the
@@ -709,10 +711,24 @@ def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
         _logger.info("Could not resolve Seerr %s %s: %s", media_type, tmdb_id, e)
         return None
     date = data.get("releaseDate") or data.get("firstAirDate") or ""
+    runtime = data.get("runtime")
+    if runtime is None:
+        # tv: a list, one per season generation - the most common length is what's
+        # actually meaningful to show, since it varies by season for some series.
+        episode_run_time = data.get("episodeRunTime") or []
+        runtime = episode_run_time[0] if episode_run_time else None
     detail = {
         "title": data.get("title") or data.get("name") or "",
         "year": int(date[:4]) if date[:4].isdigit() else None,
         "poster_path": data.get("posterPath") or "",
+        "overview": data.get("overview") or "",
+        "genres": [g["name"] for g in (data.get("genres") or []) if g.get("name")],
+        "runtime": runtime,
+        "vote_average": data.get("voteAverage"),
+        "seasons": [{"season_number": s.get("seasonNumber"),
+                     "episode_count": s.get("episodeCount"),
+                     "air_date": s.get("airDate") or ""}
+                    for s in (data.get("seasons") or []) if s.get("seasonNumber") is not None],
     }
     if detail["title"]:
         _seerr_detail_cache[key] = detail

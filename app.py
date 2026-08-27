@@ -90,7 +90,13 @@ def set_security_headers(response):
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
+        # image.tmdb.org is the one exception, for search-result posters - same class
+        # of scoped, named-host exception as the two fonts.google* hosts above, not a
+        # general relaxation. Jellyfin-only results (no TMDB poster_path) stay
+        # text-only rather than proxying Jellyfin's own image endpoint through a
+        # request handler, which the no-live-outbound-I/O rule elsewhere exists to
+        # avoid.
+        "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
         "frame-ancestors 'none'"
@@ -1897,6 +1903,39 @@ def search_live():
                             rate_limited=limited,
                             can_request=media_search.seerr_integration() is not None,
                             jellyfin_url=media_search.jellyfin_item_url)
+
+
+@app.route("/search/detail/<media_type>/<int:tmdb_id>")
+@user_login_required
+def search_detail(media_type, tmdb_id):
+    """A single result's full detail - poster, overview, genres, runtime, rating -
+    reached by clicking a title in the search results. Counts against the same
+    per-session rate limit as searching, since it's another live outbound call.
+
+    in_library/jellyfin_id/requested arrive as query params from the results link
+    rather than being re-derived here - this route has no independent way to know a
+    single TMDB id's Jellyfin/Seerr status without a second live search, and they're
+    read-only display info, not anything this route writes."""
+    if _search_rate_limited():
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.args.get("q", "")))
+    _register_search()
+    detail = media_search.detail(media_type, tmdb_id)
+    if not detail:
+        return render_template("error.html", code=404,
+                               message="Couldn't find that title."), 404
+    item = {
+        "title": detail["title"], "year": detail["year"], "media_type": media_type,
+        "tmdb_id": tmdb_id, "poster_path": detail["poster_path"],
+        "in_library": request.args.get("in_library") == "1",
+        "jellyfin_id": request.args.get("jellyfin_id") or "",
+        "requested": request.args.get("requested") == "1",
+    }
+    return render_template("search_detail.html", item=item, detail=detail,
+                            query=request.args.get("q", ""),
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url,
+                            site_name=db.get_setting("site_name", "Server"))
 
 
 @app.route("/search/request", methods=["POST"])

@@ -27,9 +27,20 @@
       <div class="search-results">
         {% for item in outcome.results %}
         <div class="search-result">
+          {% if item.poster_path %}
+            <img class="search-result__poster" loading="lazy"
+                 src="https://image.tmdb.org/t/p/w154{{ item.poster_path }}" alt="{{ item.title }}">
+          {% else %}
+            <div class="search-result__poster search-result__poster--placeholder" aria-hidden="true">🎬</div>
+          {% endif %}
           <div class="search-result__main">
             <div class="search-result__title">
-              {{ item.title }}{% if item.year %} <span class="search-result__year">({{ item.year }})</span>{% endif %}
+              {% if item.tmdb_id %}
+                <a href="{{ url_for('search_detail', media_type=item.media_type, tmdb_id=item.tmdb_id, q=query, in_library='1' if item.in_library else '', jellyfin_id=item.jellyfin_id or '', requested='1' if item.requested else '') }}">{{ item.title }}</a>
+              {% else %}
+                {{ item.title }}
+              {% endif %}
+              {% if item.year %} <span class="search-result__year">({{ item.year }})</span>{% endif %}
               <span class="pill">{{ 'Series' if item.media_type == 'tv' else 'Film' }}</span>
             </div>
             {% if item.overview %}
@@ -37,25 +48,7 @@
             {% endif %}
           </div>
           <div class="search-result__action">
-            {% if item.in_library %}
-              {% set link = jellyfin_url(item.jellyfin_id) if item.jellyfin_id else '' %}
-              {% if link %}
-                <a class="btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Watch now ↗</a>
-              {% else %}
-                <span class="pill ok">In the library</span>
-              {% endif %}
-            {% elif item.requested %}
-              <span class="pill warn">Already requested</span>
-            {% elif can_request and item.tmdb_id %}
-              <form method="POST" action="{{ url_for('search_request') }}">
-                <input type="hidden" name="media_type" value="{{ item.media_type }}">
-                <input type="hidden" name="tmdb_id" value="{{ item.tmdb_id }}">
-                <input type="hidden" name="q" value="{{ query }}">
-                <button type="submit" class="btn secondary">Request this</button>
-              </form>
-            {% else %}
-              <span class="pill">Not in the library</span>
-            {% endif %}
+            {% include 'sections/_search_result_action.html' %}
           </div>
         </div>
         {% endfor %}
