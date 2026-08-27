@@ -522,7 +522,28 @@ section { padding: 84px 0; position: relative; }
   overflow: hidden;
 }
 .gallery-item.hidden { display: none; }
-.gallery-shot { line-height: 0; border-bottom: 1px solid var(--border-soft); background: var(--bg-sunken); }
+/* A fixed aspect-ratio box, not line-height:0 + width:100%: a portrait
+   mobile screenshot forced to the same width as a landscape desktop one
+   rendered at its native ~390px flush left, with a large dead gap instead
+   of filling the card. Centering it here with object-fit: contain turns
+   that gap into even side padding regardless of the source image's
+   orientation. */
+.gallery-shot {
+  aspect-ratio: 16 / 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-sunken);
+}
+.gallery-shot img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
 .gallery-caption {
   padding: 12px 16px;
   font-size: 0.85rem;
