@@ -497,6 +497,23 @@ def test_an_unresolvable_title_is_not_cached(isolated_db, stub):
     assert integrations.fetch_seerr_requests(stub, "key")[0]["title"] == "Now Available"
 
 
+def test_pending_requests_also_resolve_a_bare_tmdb_title(isolated_db, stub):
+    """The reported bug, specifically in the pending list: fetch_seerr_pending() built
+    its title with _seerr_title() alone, with no fallback for a bare "TMDB #12345"
+    placeholder - unlike fetch_seerr_requests(), which already resolved it. That's what
+    made the Discord approval DM (built from this list via seerr_alerts.format_alert())
+    read "TMDB #11279 (tv) for Pakuo" instead of a real title."""
+    route("GET", "/api/v1/request", {
+        "pageInfo": {"results": 1},
+        "results": [{"id": 9, "media": {"mediaType": "tv", "tmdbId": 11279},
+                     "requestedBy": {"displayName": "Pakuo"}}],
+    })
+    route("GET", "/api/v1/tv/11279", {"name": "Attack on Titan", "firstAirDate": "2013-04-07"})
+    items, total = integrations.fetch_seerr_pending(stub, "key")
+    assert items[0]["title"] == "Attack on Titan"
+    assert total == 1
+
+
 def test_every_status_has_a_colour_key(isolated_db, stub):
     """The badges are coloured from a stable key, not by matching the English label, so
     every code in both maps needs one - a missing key renders as the grey "unknown"

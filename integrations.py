@@ -640,16 +640,7 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
         media = entry.get("media") or {}
         requested_by = entry.get("requestedBy") or {}
         media_type = media.get("mediaType") or entry.get("type") or ""
-        title = _seerr_title(media)
-        year = None
-        # The request payload embeds media by id and frequently carries no title, which
-        # is why this list used to read "TMDB #438631". Ask Seerr what that id actually
-        # is - the same question the "Coming soon" list gets answered for free by the
-        # *Arr calendar, which returns real titles.
-        if title.startswith("TMDB #"):
-            detail = fetch_seerr_detail(base_url, api_key, media_type, media.get("tmdbId"))
-            if detail and detail["title"]:
-                title, year = detail["title"], detail["year"]
+        title, year, _poster_path = _resolved_seerr_media(base_url, api_key, media)
         items.append({
             "id": entry.get("id"),
             "title": title,
@@ -668,6 +659,27 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
             "media_status": media.get("status"),
         })
     return items
+
+
+def _resolved_seerr_media(base_url, api_key, media):
+    """A (title, year, poster_path) triple for an embedded `media` object, resolving a
+    bare "TMDB #12345" placeholder via fetch_seerr_detail() when that's all
+    _seerr_title() could produce.
+
+    Shared by fetch_seerr_requests() and fetch_seerr_pending() - the request payload
+    embeds media by id and frequently carries no title (or poster) at all, which is why
+    both lists used to (separately) read "TMDB #438631"/read it correctly depending on
+    which one you looked at. One helper means one place to get this right. The detail
+    lookup only happens when the title actually needs it, same as before - not an extra
+    call added for the poster's sake alone."""
+    title = _seerr_title(media)
+    if not title.startswith("TMDB #"):
+        return title, None, media.get("posterPath") or ""
+    media_type = media.get("mediaType") or ""
+    detail = fetch_seerr_detail(base_url, api_key, media_type, media.get("tmdbId"))
+    if detail and detail["title"]:
+        return detail["title"], detail["year"], detail["poster_path"]
+    return title, None, media.get("posterPath") or ""
 
 
 # tmdb key -> {"title", "year", "poster_path"}. Overseerr's request payload is built
@@ -728,7 +740,13 @@ def fetch_seerr_pending(base_url, api_key, limit=50):
     Uses filter=pending, which is Overseerr's own definition, rather than fetching
     everything and filtering here - the count has to be the real total, not the total
     within whatever page size this asked for. `pageInfo.results` is that total; the
-    items are capped separately because they only exist to be named in an alert."""
+    items are capped separately because they only exist to be named in an alert.
+
+    Title resolution goes through the same _resolved_seerr_media() helper
+    fetch_seerr_requests() uses - this list used to build its title with _seerr_title()
+    alone, with no fallback for a bare "TMDB #12345" placeholder, which is exactly why
+    the Discord approval DM (built from this list) used to show the raw id instead of a
+    real title."""
     base_url = base_url.rstrip("/")
     r = requests.get(f"{base_url}/api/v1/request",
                       headers={"X-Api-Key": api_key},
@@ -738,14 +756,19 @@ def fetch_seerr_pending(base_url, api_key, limit=50):
     payload = r.json()
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise ValueError("Unexpected response from /api/v1/request")
-    items = [{
-        "id": entry.get("id"),
-        "title": _seerr_title(entry.get("media") or {}),
-        "media_type": (entry.get("media") or {}).get("mediaType") or entry.get("type") or "",
-        "requested_by": ((entry.get("requestedBy") or {}).get("displayName")
-                         or (entry.get("requestedBy") or {}).get("username") or ""),
-        "requested_at": entry.get("createdAt") or "",
-    } for entry in payload["results"]]
+    items = []
+    for entry in payload["results"]:
+        media = entry.get("media") or {}
+        title, _year, poster_path = _resolved_seerr_media(base_url, api_key, media)
+        requested_by = entry.get("requestedBy") or {}
+        items.append({
+            "id": entry.get("id"),
+            "title": title,
+            "media_type": media.get("mediaType") or entry.get("type") or "",
+            "poster_path": poster_path,
+            "requested_by": requested_by.get("displayName") or requested_by.get("username") or "",
+            "requested_at": entry.get("createdAt") or "",
+        })
     total = (payload.get("pageInfo") or {}).get("results")
     return items, (total if isinstance(total, int) else len(items))
 
