@@ -254,8 +254,9 @@ def test_contact_lookup_reads_stored_preferences_only(enabled, monkeypatch):
 # ---------------------------------------------------------------------------
 # Request progress
 # ---------------------------------------------------------------------------
-def _request(rid, status, by="3", title="Some Film"):
+def _request(rid, status, by="3", title="Some Film", request_status_key="pending"):
     return {"id": rid, "title": title, "media_type": "movie", "request_status": "Approved",
+            "request_status_key": request_status_key,
             "media_status_label": "x", "media_status": status, "requested_by": "Adam",
             "requested_by_id": by, "requested_at": "", "pending": False}
 
@@ -296,7 +297,56 @@ def test_request_states_survive_a_restart(enabled, monkeypatch):
                         lambda url, key, limit=50: [_request(1, 3)])
     seerr_alerts.track_request_progress({"base_url": "http://s", "api_key": "k"})
     stored = json.loads(db.get_setting(seerr_alerts.REQUEST_STATES_SETTING))
-    assert stored == {"1": 3}
+    assert stored == {"1": {"media_status": 3, "request_status": "pending"}}
+
+
+def test_an_old_int_shaped_stored_state_does_not_crash(enabled, monkeypatch):
+    """A settings row saved before approved/declined tracking existed is just the bare
+    media_status int, not a dict - reading it must not raise on the next poll. The
+    media-status half of that old value is still meaningful (it's exactly the same
+    number the new shape stores under "media_status"), so the availability transition
+    is still correctly detected from it; only the request_status half is unknown for
+    this one request's first post-upgrade poll, which is the acceptable cost of a
+    schema change with no data to backfill that simply didn't exist before."""
+    db.set_setting(seerr_alerts.REQUEST_STATES_SETTING, json.dumps({"1": 3}))
+    db.set_user_preferences("u1", seerr_user_id="3", notify_email="me@example.invalid")
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 5)])
+    assert seerr_alerts.track_request_progress({"base_url": "http://s", "api_key": "k"}) == 1
+
+
+def test_an_approval_notifies_the_requester(enabled, monkeypatch):
+    db.set_user_preferences("u1", seerr_user_id="3", notify_discord_id="123")
+    integration = {"base_url": "http://s", "api_key": "k"}
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 2, request_status_key="pending")])
+    seerr_alerts.track_request_progress(integration)
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 2, request_status_key="approved")])
+    assert seerr_alerts.track_request_progress(integration) == 1
+    row = db.pending_notifications()[0]
+    assert row["user_id"] == "u1"
+    assert row["event"] == "seerr_event"
+    assert "approved" in row["subject"]
+
+
+def test_a_decline_notifies_the_requester(enabled, monkeypatch):
+    db.set_user_preferences("u1", seerr_user_id="3", notify_discord_id="123")
+    integration = {"base_url": "http://s", "api_key": "k"}
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 2, request_status_key="pending")])
+    seerr_alerts.track_request_progress(integration)
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 2, request_status_key="declined")])
+    assert seerr_alerts.track_request_progress(integration) == 1
+    assert "declined" in db.pending_notifications()[0]["subject"]
+
+
+def test_a_first_sighting_of_an_already_decided_request_says_nothing(enabled, monkeypatch):
+    db.set_user_preferences("u1", seerr_user_id="3", notify_discord_id="123")
+    monkeypatch.setattr(integrations, "fetch_seerr_requests",
+                        lambda url, key, limit=50: [_request(1, 2, request_status_key="approved")])
+    assert seerr_alerts.track_request_progress({"base_url": "http://s", "api_key": "k"}) == 0
 
 
 # ---------------------------------------------------------------------------

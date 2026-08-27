@@ -800,6 +800,70 @@ def first_discord_id(settings):
     return str(settings.get("discordId") or "").strip()
 
 
+# Seerr's issueType numbers (video/audio/subtitle/other problems) - a label only, not
+# used for any decision here. Status is assumed 1=open/2=resolved, matching the 1-based
+# numbering every other Seerr status enum in this module uses (request/media status);
+# **this specific assumption is unverified** - Seerr's published OpenAPI spec omits a
+# `status` field from the Issue schema entirely (it isn't just under-documented, it's
+# genuinely absent), so this is the same convention applied by inference, not read from
+# the spec like everything else in this file. Confirm against a real instance before
+# trusting it fully; see CLAUDE.md.
+SEERR_ISSUE_TYPE = {1: "video", 2: "audio", 3: "subtitle", 4: "other"}
+
+
+def _issue_media_title_and_poster(base_url, api_key, media):
+    """Resolves an issue's title/poster the same way a request's is - except an issue's
+    embedded MediaInfo carries no mediaType field at all (unlike a request's media
+    object), so which detail endpoint to call isn't knowable from the payload. Movie is
+    tried first, then tv; either lookup is cached forever (fetch_seerr_detail), so a
+    wrong first guess costs one extra call, not one per poll."""
+    tmdb_id = media.get("tmdbId")
+    if not tmdb_id:
+        return "(unknown title)", ""
+    for media_type in ("movie", "tv"):
+        detail = fetch_seerr_detail(base_url, api_key, media_type, tmdb_id)
+        if detail and detail["title"]:
+            return detail["title"], detail["poster_path"]
+    return f"TMDB #{tmdb_id}", ""
+
+
+def fetch_seerr_issues(base_url, api_key, limit=50):
+    """Open and recently-updated issues (playback problems etc. reported against
+    something in the library), for the Seerr-event DM lifecycle.
+
+    filter=all + sort=modified so a status change (open -> resolved) or a new comment
+    on an existing issue surfaces on the next poll, not just a brand-new one."""
+    base_url = base_url.rstrip("/")
+    r = requests.get(f"{base_url}/api/v1/issue",
+                      headers={"X-Api-Key": api_key},
+                      params={"take": limit, "filter": "all", "sort": "modified"},
+                      timeout=TIMEOUT)
+    r.raise_for_status()
+    payload = r.json()
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("Unexpected response from /api/v1/issue")
+
+    items = []
+    for entry in results:
+        if entry.get("id") is None:
+            continue
+        media = entry.get("media") or {}
+        title, poster_path = _issue_media_title_and_poster(base_url, api_key, media)
+        created_by = entry.get("createdBy") or {}
+        items.append({
+            "id": entry["id"],
+            "title": title,
+            "poster_path": poster_path,
+            "issue_type": SEERR_ISSUE_TYPE.get(entry.get("issueType"), "issue"),
+            "status": "resolved" if entry.get("status") == 2 else "open",
+            "created_by_id": str(created_by.get("id") or ""),
+            "created_by_name": created_by.get("displayName") or created_by.get("username") or "",
+            "comment_count": len(entry.get("comments") or []),
+        })
+    return items
+
+
 def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=False):
     """Every Seerr user, normalised - including `jellyfin_user_id`, which is the whole
     point of this call.

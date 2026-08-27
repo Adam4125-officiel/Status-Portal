@@ -285,3 +285,105 @@ def test_a_corrupted_notified_list_starts_over_rather_than_crashing(seerr_config
 def test_the_alert_text_names_the_title_and_requester(monkeypatch):
     text = seerr_alerts.format_alert(_request(1, "Dune: Part Three"))
     assert "Dune: Part Three" in text and "Adam" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue tracking (part of the Seerr event lifecycle - see track_issue_updates())
+# ---------------------------------------------------------------------------
+def _issue(iid, status="open", comment_count=0, title="Some Film", created_by_id="9"):
+    return {"id": iid, "title": title, "poster_path": "", "issue_type": "video",
+            "status": status, "created_by_id": created_by_id, "created_by_name": "Pat",
+            "comment_count": comment_count}
+
+
+def _issues(monkeypatch, issues):
+    monkeypatch.setattr(integrations, "fetch_seerr_issues", lambda url, key, limit=50: issues)
+
+
+def test_a_new_issue_alerts_the_admin_but_not_the_reporter(isolated_db, monkeypatch):
+    """A brand-new issue is already implicitly "reported by" its own creator - only an
+    update is news to them specifically. The admin needs to hear about both."""
+    db.set_user_preferences("u1", seerr_user_id="9", notify_discord_id="123")
+    _issues(monkeypatch, [_issue(1)])
+    count, alerts = seerr_alerts.track_issue_updates({"base_url": "http://s", "api_key": "k"})
+    assert count == 1
+    assert "New issue" in alerts[0]
+    assert db.pending_notifications() == []
+
+
+def test_an_issue_status_change_notifies_both(isolated_db, monkeypatch):
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", seerr_user_id="9", notify_discord_id="123")
+    integration = {"base_url": "http://s", "api_key": "k"}
+    _issues(monkeypatch, [_issue(1, status="open")])
+    seerr_alerts.track_issue_updates(integration)
+    _issues(monkeypatch, [_issue(1, status="resolved")])
+    count, alerts = seerr_alerts.track_issue_updates(integration)
+    assert count == 1
+    assert "Issue update" in alerts[0]
+    queued = db.pending_notifications()
+    assert len(queued) == 1
+    assert queued[0]["user_id"] == "u1"
+    assert queued[0]["event"] == "seerr_event"
+
+
+def test_a_new_comment_counts_as_an_update(isolated_db, monkeypatch):
+    integration = {"base_url": "http://s", "api_key": "k"}
+    _issues(monkeypatch, [_issue(1, comment_count=1)])
+    seerr_alerts.track_issue_updates(integration)
+    _issues(monkeypatch, [_issue(1, comment_count=2)])
+    count, _alerts = seerr_alerts.track_issue_updates(integration)
+    assert count == 1
+
+
+def test_nothing_changed_produces_no_alert(isolated_db, monkeypatch):
+    integration = {"base_url": "http://s", "api_key": "k"}
+    _issues(monkeypatch, [_issue(1)])
+    seerr_alerts.track_issue_updates(integration)
+    count, alerts = seerr_alerts.track_issue_updates(integration)
+    assert count == 0
+    assert alerts == []
+
+
+def test_an_unlinked_issue_reporter_only_alerts_the_admin(isolated_db, monkeypatch):
+    """No Jellyfin<->Seerr link means no per-user notification, same rule as request
+    progress - but the admin-directed alert doesn't depend on that link at all."""
+    integration = {"base_url": "http://s", "api_key": "k"}
+    _issues(monkeypatch, [_issue(1, status="open", created_by_id="")])
+    seerr_alerts.track_issue_updates(integration)
+    _issues(monkeypatch, [_issue(1, status="resolved", created_by_id="")])
+    count, alerts = seerr_alerts.track_issue_updates(integration)
+    assert count == 1
+    assert db.pending_notifications() == []
+
+
+def test_issue_states_survive_a_restart(isolated_db, monkeypatch):
+    _issues(monkeypatch, [_issue(1, status="open", comment_count=2)])
+    seerr_alerts.track_issue_updates({"base_url": "http://s", "api_key": "k"})
+    stored = json.loads(db.get_setting(seerr_alerts.ISSUE_STATES_SETTING))
+    assert stored == {"1": {"status": "open", "comment_count": 2}}
+
+
+def test_a_failed_issue_poll_does_not_crash_the_approval_check(seerr_configured, monkeypatch):
+    """The approval count is this task's primary job - an issue-tracking failure must
+    be logged and skipped, not let the whole scheduled run fail."""
+    def boom(url, key, limit=50):
+        raise integrations.requests.RequestException("down")
+
+    monkeypatch.setattr(integrations, "fetch_seerr_issues", boom)
+    _seerr(monkeypatch, [_request(1)], total=1)
+    message = seerr_alerts.run_approval_check()
+    assert "1 awaiting approval" in message
+
+
+def test_issue_alerts_are_delivered_alongside_approval_alerts(seerr_configured, monkeypatch):
+    db.set_setting(seerr_alerts.DM_ENABLED_SETTING, "1")
+    db.set_setting("discordbot_dm_user_ids", "111")
+    sent = []
+    monkeypatch.setattr(discord_bot, "broadcast_dm",
+                        lambda text, user_ids=None: (sent.append(text), (1, []))[1])
+    _seerr(monkeypatch, [])
+    _issues(monkeypatch, [_issue(1, title="A Reported Film")])
+    message = seerr_alerts.run_approval_check()
+    assert any("A Reported Film" in t for t in sent)
+    assert "1 issue update" in message
