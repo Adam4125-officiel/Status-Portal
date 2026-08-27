@@ -356,6 +356,29 @@ code, .mono { font-family: var(--font-mono); }
   :root:not([data-theme="light"]) .shot-dark { display: block; }
 }
 
+/* Hero only: below the mobile breakpoint, swap to the screenshot actually
+   captured at phone width instead of shrinking the 1440px desktop capture
+   until its text becomes unreadable. Every rule in this block is
+   !important and deliberately so: the generic shot-light/shot-dark
+   theme-swap rules above target any element with those classes (including
+   these .shot-mobile-tagged images) at equal-or-higher specificity, so a
+   normal-weight override here would silently lose on some combination of
+   theme x viewport. !important plus source order (these rules are last)
+   is what makes every one of the four theme x viewport combinations show
+   exactly one image — verified with Playwright, not just by eye. */
+.shot-mobile { display: none !important; }
+@media (max-width: 640px) {
+  .frame .shot-desktop { display: none !important; }
+  .frame .shot-mobile.shot-light { display: block !important; }
+  .frame .shot-mobile.shot-dark { display: none !important; }
+  :root[data-theme="dark"] .frame .shot-mobile.shot-light { display: none !important; }
+  :root[data-theme="dark"] .frame .shot-mobile.shot-dark { display: block !important; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .frame .shot-mobile.shot-light { display: none !important; }
+    :root:not([data-theme="light"]) .frame .shot-mobile.shot-dark { display: block !important; }
+  }
+}
+
 /* ---------------- Section shell ---------------- */
 section { padding: 84px 0; position: relative; }
 .section-head {
@@ -605,4 +628,15 @@ footer {
   section { padding: 56px 0; }
   .topbar-inner { padding: 12px 16px; }
   .wrap { padding: 0 16px; }
+
+  /* Full-bleed the hero frame so the embedded mobile screenshot renders at
+     its native 390px width instead of being resampled down to fit the
+     wrap's gutter, which visibly blurred the in-image text. */
+  .hero .frame {
+    width: 100vw;
+    margin-left: calc(50% - 50vw);
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
 }
