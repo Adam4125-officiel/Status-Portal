@@ -80,31 +80,34 @@
       </div>
     </div>
 
-    <form method="POST" action="{{ url_for('admin_task_save', name=t.name) }}" data-task-schedule>
-      <div class="field">
-        <label class="field-check"><input type="checkbox" name="enabled" {{ 'checked' if t.enabled }}> Run this task automatically</label>
-        <div class="field-hint">Unchecked, the task never runs on its own — "Run now" above still works.</div>
-      </div>
-      <div class="field">
-        <label for="schedule_kind_{{ t.name }}">Schedule</label>
-        <select id="schedule_kind_{{ t.name }}" name="schedule_kind" data-schedule-kind>
-          <option value="interval" {{ 'selected' if t.schedule_kind == 'interval' }}>Every N minutes</option>
-          <option value="daily" {{ 'selected' if t.schedule_kind == 'daily' }}>Once a day, at a fixed time</option>
-        </select>
-      </div>
-      <div class="field" data-schedule-field="interval">
-        <label for="interval_minutes_{{ t.name }}">Run every (minutes)</label>
-        <input type="number" id="interval_minutes_{{ t.name }}" name="interval_minutes" min="1" max="10080" value="{{ t.interval_minutes }}">
-      </div>
-      <div class="field" data-schedule-field="daily">
-        <label for="daily_at_{{ t.name }}">Run daily at (UTC)</label>
-        <input type="time" id="daily_at_{{ t.name }}" name="daily_at" value="{{ t.daily_at }}">
-        <div class="field-hint">In UTC, not your local time — this app stores every timestamp in UTC and converts for display, and a schedule that silently shifted with daylight saving would be worse than one you have to convert once.</div>
-      </div>
-      <div class="form-actions">
-        <button type="submit" class="btn">Save schedule</button>
-      </div>
-    </form>
+    <details>
+      <summary>Edit schedule</summary>
+      <form method="POST" action="{{ url_for('admin_task_save', name=t.name) }}" data-task-schedule>
+        <div class="field">
+          <label class="field-check"><input type="checkbox" name="enabled" {{ 'checked' if t.enabled }}> Run this task automatically</label>
+          <div class="field-hint">Unchecked, the task never runs on its own — "Run now" above still works.</div>
+        </div>
+        <div class="field">
+          <label for="schedule_kind_{{ t.name }}">Schedule</label>
+          <select id="schedule_kind_{{ t.name }}" name="schedule_kind" data-schedule-kind>
+            <option value="interval" {{ 'selected' if t.schedule_kind == 'interval' }}>Every N minutes</option>
+            <option value="daily" {{ 'selected' if t.schedule_kind == 'daily' }}>Once a day, at a fixed time</option>
+          </select>
+        </div>
+        <div class="field" data-schedule-field="interval">
+          <label for="interval_minutes_{{ t.name }}">Run every (minutes)</label>
+          <input type="number" id="interval_minutes_{{ t.name }}" name="interval_minutes" min="1" max="10080" value="{{ t.interval_minutes }}">
+        </div>
+        <div class="field" data-schedule-field="daily">
+          <label for="daily_at_{{ t.name }}">Run daily at (UTC)</label>
+          <input type="time" id="daily_at_{{ t.name }}" name="daily_at" value="{{ t.daily_at }}">
+          <div class="field-hint">In UTC, not your local time — this app stores every timestamp in UTC and converts for display, and a schedule that silently shifted with daylight saving would be worse than one you have to convert once.</div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn">Save schedule</button>
+        </div>
+      </form>
+    </details>
   </div>
 {% endfor %}
 {% else %}
