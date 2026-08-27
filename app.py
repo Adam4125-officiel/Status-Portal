@@ -1671,6 +1671,15 @@ def user_account():
     # reads only what's stored here, so a Seerr outage can't stop notifications going
     # out - it can only stop this page offering to prefill the fields.
     seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    # Auto-populate rather than waiting for the manual "Use these details here" button:
+    # only when *both* fields are still blank here, so this never overwrites a choice
+    # the person already made (including a value this same fill-in wrote last time,
+    # which is exactly what stops it from repeating on every subsequent visit).
+    if seerr_account and not prefs["notify_email"] and not prefs["notify_discord_id"] \
+            and (seerr_account["email"] or seerr_account["discord_id"]):
+        user_notify.adopt_seerr_contact(user_id, seerr_account)
+        prefs = db.get_user_preferences(user_id)
+        flash("Filled in your contact details from Seerr — edit or clear them below.", "success")
     return render_template("account.html",
                             reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
                             prefs=prefs,
@@ -1760,10 +1769,7 @@ def user_account_import_seerr_contact():
     if not account:
         flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
         return redirect(url_for("user_account"))
-    db.set_user_preferences(user["id"],
-                             notify_email=account["email"],
-                             notify_discord_id=account["discord_id"],
-                             seerr_user_id=account["id"])
+    user_notify.adopt_seerr_contact(user["id"], account)
     flash("Copied your contact details from Seerr.", "success")
     return redirect(url_for("user_account"))
 

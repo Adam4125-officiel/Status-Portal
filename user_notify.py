@@ -115,6 +115,18 @@ def find_seerr_account(jellyfin_user_id):
     return next((u for u in users if u["jellyfin_user_id"] == str(jellyfin_user_id)), None)
 
 
+def adopt_seerr_contact(user_id, account):
+    """Copies a linked Seerr account's email/Discord ID into this portal's own copy.
+
+    One write, shared by the manual "Use these details here" button and the automatic
+    first-load fill-in on the account page - both are "take what Seerr already has",
+    the only difference is whether a person clicked something to trigger it."""
+    db.set_user_preferences(user_id,
+                             notify_email=account["email"],
+                             notify_discord_id=account["discord_id"],
+                             seerr_user_id=account["id"])
+
+
 def contact_for(user_id):
     """(email, discord_id) for a user, from the local caches only.
 

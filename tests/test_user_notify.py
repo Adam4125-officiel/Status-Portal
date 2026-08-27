@@ -337,6 +337,56 @@ def test_importing_from_seerr_copies_the_details_and_records_the_link(signed_in_
     assert prefs["seerr_user_id"] == "3"
 
 
+def test_opening_the_account_page_auto_fills_from_a_linked_seerr_account(signed_in_visitor, monkeypatch):
+    """The ask: don't make someone click "Use these details here" - pull it in the
+    first time the page is opened with nothing filled in locally yet."""
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "adam@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = signed_in_visitor.get("/account")
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "adam@example.invalid"
+    assert prefs["notify_discord_id"] == "999"
+    assert prefs["seerr_user_id"] == "3"
+    assert b"Filled in your contact details from Seerr" in resp.data
+
+
+def test_auto_fill_never_overwrites_an_existing_choice(signed_in_visitor, monkeypatch):
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    db.set_user_preferences("u1", notify_email="mine@example.invalid")
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "seerr@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = signed_in_visitor.get("/account")
+    prefs = db.get_user_preferences("u1")
+    # The email a person already set is left alone, and the fact that the other field
+    # (Discord ID) is blank doesn't matter - the guard is "both blank", not "either".
+    assert prefs["notify_email"] == "mine@example.invalid"
+    assert prefs["notify_discord_id"] == ""
+    assert b"Filled in your contact details from Seerr" not in resp.data
+
+
+def test_auto_fill_does_not_repeat_on_a_second_visit(signed_in_visitor, monkeypatch):
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "adam@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    signed_in_visitor.get("/account")
+    db.set_user_preferences("u1", notify_email="")   # the person cleared it back out
+    resp = signed_in_visitor.get("/account")
+    # Discord ID is still set from the first fill-in, so the "both blank" guard no
+    # longer holds - a cleared field must not be silently refilled forever.
+    assert db.get_user_preferences("u1")["notify_email"] == ""
+    assert b"Filled in your contact details from Seerr" not in resp.data
+
+
 def test_pushing_to_seerr_writes_only_that_users_two_contact_fields(signed_in_visitor, monkeypatch):
     """The only call in this application that modifies another service, so what it's
     allowed to touch is worth pinning down."""
