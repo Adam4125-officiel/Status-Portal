@@ -749,6 +749,13 @@ DB-backed Settings pages, not a code edit.
   undeliverable; `send_dm()` reports that case explicitly (`Forbidden`) instead of as a
   generic failure, because the fix is a human action nobody would guess otherwise. Say
   this plainly in any UI that collects DM recipients.
+- **`fetch_seerr_pending()`'s title resolution must go through the same
+  `_resolved_seerr_media()` helper `fetch_seerr_requests()` uses.** It didn't, once —
+  `fetch_seerr_pending()` built its title with `_seerr_title()` alone, no fallback for
+  a bare `"TMDB #12345"` placeholder, which is exactly why the Discord approval DM (built
+  from this list) used to read "TMDB #11279 (tv) for Pakuo" instead of a real title.
+  Both request-list functions in `integrations.py` must keep sharing this helper rather
+  than drifting back into two independent implementations.
 - **The alert is edge-triggered and its state is persisted** (`seerr_notified_request_ids`
   in `settings`, capped at `MAX_REMEMBERED_IDS`). Same rule as the low-disk alert: a
   restart while requests are still pending must not re-announce all of them.
@@ -762,6 +769,36 @@ DB-backed Settings pages, not a code edit.
 - **The count is admin-only, deliberately.** It's operational information about a
   queue, not a signal about whether anything is working, so it never reaches the public
   page.
+- **The Seerr event lifecycle (approved/declined/issues) is polling, not a webhook
+  receiver — a deliberate choice, not a placeholder for one.** Extending the existing
+  `seerr_approvals` task (asking the same poll more questions) was preferred over a
+  public `/hooks/seerr` POST route: no new internet-reachable endpoint, no setup steps
+  inside Seerr, and it can't silently go quiet just because Seerr can't reach the
+  portal. The cost is up to one task interval of delay and that only state *changes*
+  are seen, not e.g. an issue comment that gets edited between polls — accepted
+  trade-offs, not bugs.
+- **`track_request_progress()` also tracks approved/declined, not just "available".**
+  The persisted per-request state (`seerr_request_media_states`) changed shape from a
+  bare `media_status` int to `{"media_status": ..., "request_status": ...}` — read
+  defensively (`_previous_state()`), since a stored int from before this change must
+  not crash the next poll. A `pending -> approved`/`pending -> declined` transition
+  (via `fetch_seerr_requests()`'s already-fetched `request_status_key`) queues a
+  `"seerr_event"` notification to the requester, same `user_id_for_seerr_user()`
+  resolution the arrival case already used.
+- **Issues are tracked the same edge-triggered/persisted-state way**
+  (`track_issue_updates()`, `integrations.fetch_seerr_issues()`, settings key
+  `seerr_issue_states`). A new or changed issue DMs the admin(s) via the existing
+  `discord_bot.broadcast_dm()` + `dm_enabled()` path (admin-directed, so per-user
+  preferences don't apply); an *update* (not a brand-new issue — the reporter already
+  knows they just filed it) also notifies whoever opened it via `"seerr_event"`.
+  **Unverified beyond the published spec**: Seerr's OpenAPI spec omits a `status` field
+  from the `Issue` schema entirely (not just under-documented — genuinely absent), so
+  `open`/`resolved` is inferred (1/2) by analogy with every other Seerr status enum in
+  `integrations.py`, not read from the spec like the rest of this file. An issue's
+  embedded media also carries no `mediaType`, unlike a request's — title resolution
+  tries `movie` then `tv` (cached either way, so a wrong first guess costs one extra
+  call, not one per poll). Confirm against a real instance before trusting either
+  assumption fully.
 
 ## Crash logging (`logging_setup.py`)
 
@@ -1402,6 +1439,12 @@ DB-backed Settings pages, not a code edit.
 - **`PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` is now a *default*, not a fixed interval** —
   it decides what the task's schedule starts as; after that the DB row wins and an
   admin changes it from `/admin/tasks` with no restart.
+- **Each task card's schedule-editing form is collapsed by default**, behind a native
+  `<details>` (same technique as the combined wizard's "Advanced settings" block, zero
+  JS) - the info table (Last run/Result/Next run) and "Run now" stay visible either
+  way, only the enabled-checkbox/schedule-kind/interval-or-daily/Save form collapses.
+  The "Always-on background loops" section is deliberately left always-expanded -
+  informational/read-only, nothing to collapse away from.
 
 ## Admin panel navigation (`templates/admin_base.html`)
 
@@ -1706,8 +1749,38 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   field is saved, and silently switches an on-by-default preference off. That happened
   while this was being written; `test_every_writable_preference_has_a_declared_default`
   now catches it.
-- **Defaults: "things about my own reports" on, "anything about services I use" off.**
-  The first is a reply to something the person started; the second is chatty.
+- **One preference column per channel per event, not one shared column per event
+  (added 2026-08-27).** `notify_own_reports`/`notify_service_events`/`notify_requests`
+  used to gate email *and* Discord DM together — someone couldn't ask for something by
+  email without also getting a DM. Split into `notify_email_reports`/
+  `notify_email_requests`/`notify_email_maintenance` and the Discord equivalents, plus a
+  Discord-only `notify_discord_seerr_events` (approvals/declines/availability/issues, on
+  by default — described in the UI as "Seerr events"). The three legacy columns stay
+  (never dropped) but are read by nothing; a one-time backfill in `init_db()` — guarded
+  by checking `PRAGMA table_info` for the new columns *before* calling `_ensure_column`
+  on them, since the existing anti-join backfill idiom doesn't apply to new columns on
+  an existing row — copies each legacy value into both of its new per-channel columns
+  so nobody's existing choice is silently reset. `EVENT_CHANNEL_PREFERENCE` (replacing
+  the old `EVENT_PREFERENCE`) maps each event to `{"email": col_or_None, "discord":
+  col_or_None}`; `deliver()` gates each channel independently, and a channel mapped to
+  `None` (email, for `seerr_event`) is never used regardless of contact info.
+  `db.users_opted_into()` now takes `*fields` (OR'd) since maintenance broadcast spans
+  two columns.
+- **Defaults: "things about my own reports" on, "something I requested" on, "anything
+  about services I use" off** (per channel now, not once for both). The first two are
+  a reply to something the person started, or news about something they asked for, and
+  almost always wanted; maintenance is chatty regardless of channel.
+- **Admin management of a user's preferences reuses the visitor's own `account.html`,
+  not a separate admin-only settings grid.** `/admin/users/<user_id>/account`
+  (`admin_user_account()`) renders the same template in an `admin_viewing=True` mode —
+  same `_save_account_prefs()` (app.py) the visitor's own POST uses, same
+  `user_notify.adopt_seerr_contact()` the auto-fill/manual-import paths use — scoped to
+  the path's `user_id` instead of `current_user()`. This is the deliberate alternative
+  to maintaining two UIs for the same preferences. The report thread is the one thing
+  hidden in admin-viewing mode (`/admin/reports` already covers that); everything else
+  user-facing (theme, contact, both notification tables, the Seerr account block)
+  stays. `admin_users.html`'s username links there now; the inline per-row
+  email/Discord-ID edit form is gone.
 - **Seerr keeps email and Discord ID in two different places, and this is the trap.**
   Email is on the base `User` record (so it comes back with `/api/v1/user`); Discord IDs
   live on a per-user `UserSettings` sub-resource at
@@ -1743,6 +1816,14 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   visitor prompt use. A failed write-back is *reported but not rolled back*: losing what
   somebody just typed because another service was unreachable is the worse outcome, and
   the local value is what delivery reads.
+- **The account page auto-fills from a linked Seerr account the first time it's opened
+  with both fields still blank**, rather than waiting for the manual "Use these
+  details here" button - `user_notify.adopt_seerr_contact(user_id, account)` is the one
+  write both paths use. The guard is "both fields blank", checked on every page load,
+  so it only ever fires once: as soon as either field has a value (typed, imported, or
+  from this auto-fill itself), the guard no longer holds, and clearing a field back out
+  does not bring the auto-fill back - a cleared field must stay cleared, not be
+  silently refilled forever.
 - **`contact_for()` prefers what was entered here over what Seerr last said.** That
   sounds backwards for a source-of-truth arrangement, and is deliberate: the two agree
   in the normal case because saving writes through, and the exception is a *failed*
@@ -1824,8 +1905,42 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   info.
 - **A 409 from Seerr is "already requested", which is ordinary**, not an error worth
   alarming anyone with — someone pressed the button twice.
-- **A TV request must send `seasons: "all"`.** Seerr rejects a series request with no
-  season selection, and this portal isn't going to render a season picker.
+- **A TV request needs a season selection, and "all" is only the fallback** for a
+  caller that doesn't pass specific ones — see request configuration below for where a
+  real picker now exists. Seerr rejects a series request with no seasons at all.
+- **Posters are TMDB images (`image.tmdb.org`), one scoped CSP `img-src` exception** —
+  same class of named-host exception the `fonts.google*` entries already are, not a
+  general relaxation. `poster_path` was already threaded through `search_seerr()` →
+  `media_search.merge()`; only the rendering was missing. A Jellyfin-only result (no
+  Seerr/TMDB match) stays text-only rather than proxying Jellyfin's own image endpoint
+  through a request handler — that would be exactly the live-outbound-I/O-in-a-handler
+  problem this app avoids everywhere else.
+- **The detail page and the results list share one action partial**
+  (`templates/sections/_search_result_action.html`) — Watch now / Request / Already
+  requested / In the library, rendered identically in both places by construction, not
+  by discipline. `fetch_seerr_detail()` was extended (same forever-cache, no second
+  call) to carry `overview`/`genres`/`runtime`/`vote_average`/`seasons` alongside the
+  title/year it already resolved, since the detail page needs the same Seerr response
+  fetch_seerr_pending()/fetch_seerr_requests() already fetch for title resolution.
+- **The detail route (`/search/detail/<media_type>/<tmdb_id>`) trusts query-string
+  `in_library`/`jellyfin_id`/`requested`, sourced from the results link, rather than
+  re-deriving them.** There is no cheaper way to know a single TMDB id's Jellyfin/Seerr
+  status without a second live search — a deliberate, low-stakes scope choice (stale
+  display info, not anything the route writes), not an oversight.
+- **Request configuration**: "Request this" opens
+  `/search/request/configure` rather than submitting immediately. A season picker (all
+  seasons pre-checked, matching the old hardcoded `"all"`) is shown to **every**
+  signed-in visitor; root folder, quality profile and tags are shown - and honoured -
+  **only when the browser is also signed in as the portal admin**
+  (`session["logged_in"]`), since root folder values are real server filesystem paths.
+  `integrations.fetch_seerr_{radarr,sonarr}_{servers,detail}()` read Seerr's
+  `/service/radarr`/`/service/sonarr` endpoints and default to whichever server Seerr
+  flags `isDefault` (a picker between servers is only shown when there's more than one -
+  the common case has exactly one *Arr instance per kind). **The admin-only fields are
+  re-checked server-side in `search_request()`** (stripped to `None` unless
+  `session["logged_in"]`) - the configuration page not rendering them for a plain
+  visitor is not itself an authorization boundary, and a forged POST must not be able
+  to smuggle them in.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
