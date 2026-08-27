@@ -870,6 +870,28 @@ DB-backed Settings pages, not a code edit.
 - **Status badges are coloured from a stable key** (`SEERR_*_STATUS_KEY`), never by
   matching the English label - a relabelling would otherwise silently turn every badge
   grey. Every code in both status maps needs a key, and a test asserts that.
+- **A request's real availability lives in `media.status` or `media.status4k`,
+  never both, and which one depends on `entry.is4k` — reading `status`
+  unconditionally is a real bug, not a hypothetical one.** Seerr's own request-creation
+  code (`server/entity/MediaRequest.ts`) explicitly leaves the tier that *wasn't*
+  requested at `MediaStatus.UNKNOWN` forever (`status: !is4k ? PENDING : UNKNOWN,
+  status4k: is4k ? PENDING : UNKNOWN`), and its own frontend (`RequestCard`) reads
+  `media[is4k ? 'status4k' : 'status']` for exactly this reason. `fetch_seerr_requests()`
+  used to read `media.status` unconditionally, which is why a 4K request showed
+  "Unknown" no matter how long ago it was requested or how available it actually was —
+  not a display bug, a genuinely wrong field read, confirmed against Seerr's own source
+  rather than guessed at. This also silently broke the "something you requested has
+  arrived" notification for 4K requests specifically, since `seerr_alerts.
+  track_request_progress()` reads the same (now-fixed) `media_status` field from this
+  function's output.
+- **`SEERR_REQUEST_STATUS`/`SEERR_MEDIA_STATUS` must cover every code Seerr defines,
+  not just the ones seen in casual testing.** `MediaRequestStatus` has a 5th value
+  (`COMPLETED`) and `MediaStatus` has a 6th and 7th (`BLOCKLISTED`, `DELETED`) beyond
+  what these maps originally listed — verified against `server/constants/media.ts`.
+  Missing any of them silently fell back to "Unknown" for exactly the requests/media in
+  that state, the same failure shape as the `is4k` bug above but simpler: a genuinely
+  new/rare enum value maps to "Unknown" cleanly by design (the fallback exists on
+  purpose), but a value the enum has *always* had must not.
 - **The "Coming soon" window is `media_calendar_days`** (clamped 1-90). An open-ended
   calendar pull lets one long-running series fill the list indefinitely.
 - **Use `.local-date` for something that happens on a day**, not `.local-time-short` -

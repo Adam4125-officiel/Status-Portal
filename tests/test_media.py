@@ -529,3 +529,53 @@ def test_an_unrecognised_status_falls_back_to_unknown(isolated_db, stub):
     item = integrations.fetch_seerr_requests(stub, "key")[0]
     assert item["request_status_key"] == "unknown"
     assert item["media_status_key"] == "unknown"
+
+
+def test_a_completed_request_is_not_unknown(isolated_db, stub):
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 5, "media": {"mediaType": "movie", "status": 5, "title": "X"}},
+    ]})
+    item = integrations.fetch_seerr_requests(stub, "key")[0]
+    assert item["request_status_key"] == "completed"
+
+
+def test_blocklisted_and_deleted_media_are_not_unknown(isolated_db, stub):
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "media": {"mediaType": "movie", "status": 6, "title": "Blocked"}},
+        {"id": 2, "status": 2, "media": {"mediaType": "movie", "status": 7, "title": "Gone"}},
+    ]})
+    items = integrations.fetch_seerr_requests(stub, "key")
+    assert items[0]["media_status_key"] == "blocklisted"
+    assert items[1]["media_status_key"] == "deleted"
+
+
+def test_a_4k_requests_availability_reads_status4k_not_status(isolated_db, stub):
+    """The reported bug: most items on Media Activity showed "Unknown" regardless of
+    how available they actually were. Root cause, confirmed against Seerr's own
+    RequestCard component (`requestData.media[requestData.is4k ? 'status4k' : 'status']`)
+    and its request-creation code (which explicitly leaves the *other* tier's status at
+    Unknown - server/entity/MediaRequest.ts: `status4k: requestBody.is4k ? PENDING :
+    UNKNOWN`): a 4K request's real availability lives in `media.status4k`, while
+    `media.status` (the non-4K tier, never requested) sits at Unknown forever. Reading
+    `media.status` unconditionally is exactly why this showed "Unknown" no matter how
+    long ago the item was requested."""
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "is4k": True,
+         "media": {"mediaType": "movie", "title": "4K Film", "status": 1, "status4k": 5}},
+    ]})
+    item = integrations.fetch_seerr_requests(stub, "key")[0]
+    assert item["media_status_key"] == "available"
+    assert item["media_status_label"] == "Available"
+    assert item["is4k"] is True
+
+
+def test_a_non_4k_requests_availability_still_reads_plain_status(isolated_db, stub):
+    """The other half of the same fix: a non-4K request must keep reading `status`,
+    not `status4k` (which is Unknown here because 4K was never requested)."""
+    route("GET", "/api/v1/request", {"results": [
+        {"id": 1, "status": 2, "is4k": False,
+         "media": {"mediaType": "movie", "title": "SD Film", "status": 5, "status4k": 1}},
+    ]})
+    item = integrations.fetch_seerr_requests(stub, "key")[0]
+    assert item["media_status_key"] == "available"
+    assert item["is4k"] is False

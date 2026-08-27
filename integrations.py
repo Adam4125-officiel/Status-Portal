@@ -670,17 +670,24 @@ def fetch_arr_calendar(base_url, api_key, days_ahead=None, limit=20):
     return sorted(items, key=lambda i: i["date"])[:limit]
 
 
-# Overseerr/Jellyseerr status codes. Numbers in the API, words for humans.
-SEERR_REQUEST_STATUS = {1: "Pending approval", 2: "Approved", 3: "Declined", 4: "Failed"}
+# Overseerr/Jellyseerr status codes. Numbers in the API, words for humans. Verified
+# against seerr-team/seerr's server/constants/media.ts (MediaRequestStatus/MediaStatus
+# enums) - 5 (Completed) and 6/7 (Blocklisted/Deleted) were missing here, which fell
+# back to "Unknown" for exactly the requests/media in those states.
+SEERR_REQUEST_STATUS = {1: "Pending approval", 2: "Approved", 3: "Declined", 4: "Failed",
+                        5: "Completed"}
 SEERR_MEDIA_STATUS = {1: "Unknown", 2: "Pending", 3: "Processing",
-                      4: "Partially available", 5: "Available"}
+                      4: "Partially available", 5: "Available",
+                      6: "Blocklisted", 7: "Deleted"}
 
 # Stable keys the template styles on, so colour never depends on matching the English
 # label above. Every status in both maps needs an entry here, plus "unknown" for a code
 # Seerr adds later that this app doesn't know yet.
-SEERR_REQUEST_STATUS_KEY = {1: "pending", 2: "approved", 3: "declined", 4: "failed"}
+SEERR_REQUEST_STATUS_KEY = {1: "pending", 2: "approved", 3: "declined", 4: "failed",
+                            5: "completed"}
 SEERR_MEDIA_STATUS_KEY = {1: "unknown", 2: "pending", 3: "processing",
-                          4: "partial", 5: "available"}
+                          4: "partial", 5: "available",
+                          6: "blocklisted", 7: "deleted"}
 
 
 def fetch_seerr_requests(base_url, api_key, limit=20):
@@ -702,22 +709,32 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
         requested_by = entry.get("requestedBy") or {}
         media_type = media.get("mediaType") or entry.get("type") or ""
         title, year, _poster_path = _resolved_seerr_media(base_url, api_key, media)
+        # Seerr tracks availability separately per quality tier: `media.status` is the
+        # non-4K copy, `media.status4k` the 4K one, and a request only ever moves the
+        # tier it actually asked for - the other stays at its default (Unknown) forever.
+        # Reading `status` unconditionally is why a 4K request showed "Unknown" no
+        # matter how long ago it was requested or how available it actually was; Seerr's
+        # own frontend picks the field the same way (RequestCard:
+        # `requestData.media[requestData.is4k ? 'status4k' : 'status']`).
+        is4k = bool(entry.get("is4k"))
+        media_status = media.get("status4k") if is4k else media.get("status")
         items.append({
             "id": entry.get("id"),
             "title": title,
             "year": year,
             "media_type": media.get("mediaType") or entry.get("type") or "",
+            "is4k": is4k,
             "request_status": SEERR_REQUEST_STATUS.get(entry.get("status"), "Unknown"),
             "request_status_key": SEERR_REQUEST_STATUS_KEY.get(entry.get("status"), "unknown"),
-            "media_status_label": SEERR_MEDIA_STATUS.get(media.get("status"), "Unknown"),
-            "media_status_key": SEERR_MEDIA_STATUS_KEY.get(media.get("status"), "unknown"),
+            "media_status_label": SEERR_MEDIA_STATUS.get(media_status, "Unknown"),
+            "media_status_key": SEERR_MEDIA_STATUS_KEY.get(media_status, "unknown"),
             "requested_by": requested_by.get("displayName") or requested_by.get("username") or "",
             # The Seerr user id, kept so a request can be traced back to the Jellyfin
             # account that made it - via Seerr's own jellyfinUserId link, never a guess.
             "requested_by_id": str(requested_by.get("id") or ""),
             "requested_at": entry.get("createdAt") or "",
             "pending": entry.get("status") == 1,
-            "media_status": media.get("status"),
+            "media_status": media_status,
         })
     return items
 
