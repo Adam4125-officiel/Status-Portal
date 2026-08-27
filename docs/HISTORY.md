@@ -693,6 +693,71 @@ while every curl-based test still passed. No console errors on any new page.
 observing a running server, and the `Authorization` / `X-Emby-Authorization` header
 pair is belt-and-braces for older builds rather than something confirmed necessary.
 
+## Database restore, and the restart that never came back (v1.8.0, 2026-08-21)
+
+### The restart that never came back
+
+Found while live-testing the new database restore, which ends by re-executing the
+process. The restore itself worked perfectly - the right data came back, the safety
+snapshot was written - and then the portal simply did not return. No process, nothing
+listening on 5000, and nothing in the app log. The only trace was two lines at the very
+bottom of the console output:
+
+```
+ * Serving Flask app 'app'
+Address already in use
+Port 5000 is in use by another program.
+```
+
+The cause is a deliberate Werkzeug behaviour meeting a deliberate one of ours.
+`werkzeug.serving.run_simple()` calls `srv.socket.set_inheritable(True)` and exports
+the descriptor as `WERKZEUG_SERVER_FD`, so that its auto-reloader can hand the same
+bound port to a child process. Marking the socket inheritable is exactly what stops
+`os.execv` from closing it. But the re-executed process only *adopts* that descriptor
+when the reloader is active (`WERKZEUG_RUN_MAIN`), which it never is here - the app
+runs `debug=False`. So the new image tried to bind a port its own previous image was
+still holding, failed, and exited.
+
+Three things about this are worth remembering:
+
+- **It was never a restore bug.** `_restart_process()` is used by `/admin/system`'s
+  restart button and by the self-updater, both of which shipped long before this. Any
+  install run as `python app.py` - which is what the README's Quick start tells you to
+  do - has had a restart button that killed the portal, and a self-updater that
+  installed the update and then took the portal down for good.
+- **Production was never affected**, which is why nobody noticed. `serve_waitress.py`
+  is the documented production entry point and waitress never marks its socket
+  inheritable, so there the descriptor is closed at exec and the rebind succeeds.
+- **The mocked tests could not have found it.** They assert that the route *called*
+  `_restart_process()`, which was true and remained true throughout. Nothing short of
+  actually restarting a real process and asking whether it came back would have caught
+  this - and CLAUDE.md at the time said not to do that. That rule has been amended:
+  `control_host()` (reboots the machine) stays never-live; `_restart_process()` (re-
+  execs this app) now has to be exercised live at least once when restart behaviour
+  changes.
+
+The fix is `app._release_dev_server_socket()`: pop `WERKZEUG_SERVER_FD` from the
+environment and close that descriptor immediately before `os.execv`. It is a no-op
+under waitress, and any failure is swallowed - not being able to close a socket must
+never be the reason a restart doesn't happen. Verified two ways: an isolated probe
+that binds a port the way `run_simple` does, execs itself, and reports whether the
+rebind succeeded (fails without the fix, succeeds with it), and a real end-to-end
+restore showing the same PID answering HTTP 200 two seconds later.
+
+### What the restore was tested against
+
+A real backup produced by the existing "Download a backup" button, on a live server:
+a service added *after* the backup was taken vanished on restore and one present in
+the backup came back, proving the file was genuinely replaced rather than merged. The
+refusal paths were exercised live too - a text file, and a valid SQLite database
+containing an unrelated `movies` table - and in both cases the live database was
+byte-unchanged and no safety snapshot was written.
+
+Not tested against: a database large enough to approach the 64 MB cap, a genuinely
+corrupt-but-openable database (the corruption test mangles bytes and SQLite rejects it
+at open time rather than at `integrity_check`), and Windows, where `os.replace` over a
+file another process holds open behaves differently than it does here.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

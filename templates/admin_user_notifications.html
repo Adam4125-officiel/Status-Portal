@@ -1,0 +1,129 @@
+{% extends "admin_base.html" %}
+{% block title %}Per-user notifications — Admin{% endblock %}
+{% set status_led = {'sent': 'ok', 'waiting': 'warn', 'given up': 'crit'} %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Per-user notifications</h1>
+  {% if task %}
+  <form action="{{ url_for('admin_task_run', name=task.name) }}" method="POST" style="display:inline;">
+    <button type="submit" class="btn secondary"{{ ' disabled' if task.running }}>
+      {{ 'Sending…' if task.running else 'Send now' }}
+    </button>
+  </form>
+  {% endif %}
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Tells the <em>person who asked</em>, rather than only telling you: a reply to their
+  problem report, their report becoming an incident, something they requested arriving,
+  or maintenance they asked to hear about. What each person wants and where to reach them
+  is theirs to set on their own account page — this switch only decides whether any of it
+  happens at all.
+</p>
+
+<div class="form-panel">
+  <h2 style="margin-top: 0;">Switch</h2>
+  <form method="POST">
+    <div class="field-check">
+      <input type="checkbox" name="enabled" id="enabled" {{ 'checked' if enabled }}>
+      <label for="enabled">Send notifications to signed-in visitors</label>
+    </div>
+    <p class="field-hint">
+      Off by default. Turning it on makes the portal message your users, so it's a
+      deliberate choice — and nothing is sent to anyone who hasn't entered contact details
+      of their own.
+    </p>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save</button>
+    </div>
+  </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Delivery</h2>
+  <div class="admin-table" style="font-size: 13px;">
+    <table>
+      <tbody>
+        <tr>
+          <th style="width: 190px;">Email</th>
+          <td>
+            {% if email_ready %}<span class="led ok"></span> ready
+            {% else %}<span class="led maint"></span>
+              not set up — see <a href="{{ url_for('admin_notifications') }}">Channels</a>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th>Discord DM</th>
+          <td>
+            {% if bot_ready %}<span class="led ok"></span> ready
+            {% elif bot_token_configured %}<span class="led warn"></span>
+              bot configured but not connected — DMs will be retried
+            {% else %}<span class="led maint"></span>
+              no bot — see <a href="{{ url_for('admin_discord_bot') }}">Discord bot</a>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th>Seerr contact lookup</th>
+          <td>
+            {% if seerr_configured %}<span class="led ok"></span>
+              available — users can copy their details across from Seerr
+            {% else %}<span class="led maint"></span>
+              no Jellyseerr integration; users enter their details by hand
+            {% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="field-hint">
+    Sending happens in the <strong>{{ task.label if task else 'Per-user notifications' }}</strong>
+    scheduled task{% if task %}, {% if task.schedule_kind == 'daily' %}daily at {{ task.daily_at }} UTC{% else %}every {{ task.interval_minutes }} min{% endif %}
+    (<a href="{{ url_for('admin_tasks') }}">change</a>){% endif %} — never inside the request that
+    triggered it, so nothing in this panel ever waits on an email.
+  </p>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Queue</h2>
+  <div style="display: flex; gap: 26px; margin-bottom: 6px;">
+    <div><span style="font-size: 24px; font-weight: 600;">{{ queue.pending }}</span>
+      <div class="resource-card__sub">waiting</div></div>
+    <div><span style="font-size: 24px; font-weight: 600;">{{ queue.sent }}</span>
+      <div class="resource-card__sub">sent</div></div>
+    <div><span style="font-size: 24px; font-weight: 600;">{{ queue.failed }}</span>
+      <div class="resource-card__sub">given up after {{ max_attempts }} tries</div></div>
+  </div>
+
+  {% if recent %}
+  <div class="admin-table" style="font-size: 12px; margin-top: 14px;">
+    <table>
+      <thead>
+        <tr><th style="width: 150px;">When</th><th style="width: 130px;">Event</th><th>Subject</th><th style="width: 150px;">State</th></tr>
+      </thead>
+      <tbody>
+        {% for n in recent %}
+        {% set state = 'sent' if n.sent_at else ('given up' if n.attempts >= max_attempts else 'waiting') %}
+        <tr>
+          <td><span class="local-time" data-utc="{{ n.created_at }}">{{ n.created_at[:16].replace('T', ' ') }} UTC</span></td>
+          <td><code>{{ n.event }}</code></td>
+          <td>{{ n.subject }}</td>
+          <td>
+            <span class="led {{ status_led.get(state, 'maint') }}"></span> {{ state }}
+            {% if n.last_error %}<div style="color: var(--text-dim); margin-top: 3px;">{{ n.last_error }}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="field-hint">
+    Recipients aren't shown here. The queue is addressed to a Jellyfin account, and whose
+    email or Discord ID it resolved to is that person's business, not something to list on
+    an admin page.
+  </p>
+  {% else %}
+  <div class="empty-state">Nothing has been queued yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

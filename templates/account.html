@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Your account — {{ site_name }}{% endblock %}
+{% block title %}{{ 'Viewing ' ~ target_user.name if admin_viewing else 'Your account' }} — {{ site_name }}{% endblock %}
 {% block body %}
 <div class="wrap" style="max-width: 760px;">
   <div class="topbar">
@@ -11,17 +11,32 @@
       {% endif %}
       {{ site_name }}
     </div>
-    <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
+    {% if admin_viewing %}
+      <a href="{{ url_for('admin_users') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to User accounts</a>
+    {% else %}
+      <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
+    {% endif %}
   </div>
 
-  <div class="admin-header">
-    <h1>Your account</h1>
-  </div>
-  <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
-    Signed in as <strong>{{ portal_user.name }}</strong> with your Jellyfin account.
-    Your settings here are stored by this portal only — nothing on this page changes
-    anything in Jellyfin.
-  </p>
+  {% if admin_viewing %}
+    <div class="admin-header">
+      <h1>{{ target_user.name }}'s account</h1>
+    </div>
+    <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+      Viewing <strong>{{ target_user.name }}</strong>'s account as an admin — the same
+      settings they'd see themselves. Their problem reports aren't shown here; manage
+      those from <a href="{{ url_for('admin_reports') }}">Reports</a> instead.
+    </p>
+  {% else %}
+    <div class="admin-header">
+      <h1>Your account</h1>
+    </div>
+    <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+      Signed in as <strong>{{ portal_user.name }}</strong> with your Jellyfin account.
+      Your settings here are stored by this portal only — nothing on this page changes
+      anything in Jellyfin.
+    </p>
+  {% endif %}
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, msg in messages %}
@@ -29,6 +44,7 @@
     {% endfor %}
   {% endwith %}
 
+  {% if not admin_viewing %}
   <h2 class="section-title">Your reports</h2>
   {% if reports %}
   <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
@@ -89,6 +105,7 @@
     follow what happens to it here.
   </div>
   {% endif %}
+  {% endif %}
 
   <h2 class="section-title" style="margin-top: 28px;">Settings</h2>
   <form method="POST" class="form-panel" id="account-prefs"
@@ -116,11 +133,138 @@
         reached somewhere specific.
       </div>
     </div>
+    {% if notifications_enabled %}
+    <hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
+    <h3 style="font-size: 14px; margin: 0 0 4px;">Notifications</h3>
+    <p class="field-hint" style="margin-top: 0;">
+      Where to reach you when something you're involved in happens. Leave both blank and
+      nothing is ever sent — this is opt-in, and nothing here is shared with anyone else.
+    </p>
+
+    <div class="field">
+      <label for="notify_email">Email address</label>
+      <input type="email" id="notify_email" name="notify_email" value="{{ prefs.notify_email }}"
+             placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="field">
+      <label for="notify_discord_id">Discord user ID</label>
+      <input type="text" id="notify_discord_id" name="notify_discord_id"
+             value="{{ prefs.notify_discord_id }}" inputmode="numeric"
+             placeholder="123456789012345678">
+      <div class="field-hint">
+        Not your username — the numeric ID. Enable Developer Mode in Discord
+        (Settings → Advanced), then right-click yourself → Copy User ID.
+        The bot can only message you if you share a server with it and allow DMs from
+        server members.
+      </div>
+    </div>
+
+    <div class="field">
+      <label>By email</label>
+      <div class="checkbox-list">
+        <label class="field-check">
+          <input type="checkbox" name="notify_email_reports" {{ 'checked' if prefs.notify_email_reports }}>
+          Replies to my problem reports, and when one becomes an incident
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_email_requests" {{ 'checked' if prefs.notify_email_requests }}>
+          When something I requested becomes available
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_email_maintenance" {{ 'checked' if prefs.notify_email_maintenance }}>
+          Maintenance on any service (this one is chatty)
+        </label>
+      </div>
+    </div>
+    <div class="field">
+      <label>By Discord DM</label>
+      <div class="checkbox-list">
+        <label class="field-check">
+          <input type="checkbox" name="notify_discord_reports" {{ 'checked' if prefs.notify_discord_reports }}>
+          Replies to my problem reports, and when one becomes an incident
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_discord_requests" {{ 'checked' if prefs.notify_discord_requests }}>
+          When something I requested becomes available
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_discord_maintenance" {{ 'checked' if prefs.notify_discord_maintenance }}>
+          Maintenance on any service (this one is chatty)
+        </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_discord_seerr_events" {{ 'checked' if prefs.notify_discord_seerr_events }}>
+          Seerr events — approvals, declines, availability, and issues
+        </label>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="form-actions">
       <button type="submit" class="btn">Save settings</button>
-      <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
+      {% if admin_viewing %}
+        <a href="{{ url_for('admin_users') }}" class="btn secondary">Back to User accounts</a>
+      {% else %}
+        <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
+      {% endif %}
     </div>
   </form>
+
+  {% if notifications_enabled and seerr_configured %}
+  {# Kept outside the settings form above: these are two separate POSTs to two separate
+     endpoints, and nesting a form inside a form isn't valid HTML. #}
+  <div class="form-panel" style="margin-top: 16px;">
+    <h3 style="font-size: 14px; margin-top: 0;">Your Seerr account</h3>
+    {% if not seerr_account %}
+      <p class="field-hint" style="margin-top: 0;">
+        {% if admin_viewing %}
+          Couldn't find a Seerr account linked to {{ target_user.name }}'s Jellyfin
+          login, so there's nothing to copy from. (The portal deliberately won't guess
+          by matching an email or username: getting that wrong would send someone's
+          notifications to somebody else.)
+        {% else %}
+          We couldn't find a Seerr account linked to your Jellyfin login, so there's
+          nothing to copy from. That's not a problem — just fill the fields above in
+          yourself. (The portal deliberately won't guess by matching your email or
+          username: getting that wrong would send your notifications to somebody else.)
+        {% endif %}
+      </p>
+    {% else %}
+      <p class="field-hint" style="margin-top: 0;">
+        Linked to <strong>{{ seerr_account.display_name }}</strong> in Seerr, which has:
+        {{ seerr_account.email or 'no email' }}{% if seerr_account.discord_id %},
+        Discord ID {{ seerr_account.discord_id }}{% else %}, no Discord ID{% endif %}.
+      </p>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        {% if admin_viewing %}
+          <form method="POST" action="{{ url_for('admin_user_account_import_seerr', user_id=target_user.id) }}">
+            <button type="submit" class="btn secondary">Use these details here</button>
+          </form>
+          <form method="POST" action="{{ url_for('admin_user_contact', user_id=target_user.id) }}"
+                onsubmit="return confirm('This will update {{ target_user.name }}\'s Seerr account with the contact details saved above. Continue?');">
+            <input type="hidden" name="notify_email" value="{{ prefs.notify_email }}">
+            <input type="hidden" name="notify_discord_id" value="{{ prefs.notify_discord_id }}">
+            <input type="hidden" name="next" value="{{ url_for('admin_user_account', user_id=target_user.id) }}">
+            <button type="submit" class="btn secondary">Send these details to Seerr</button>
+          </form>
+        {% else %}
+          <form method="POST" action="{{ url_for('user_account_import_seerr_contact') }}">
+            <button type="submit" class="btn secondary">Use these details here</button>
+          </form>
+          <form method="POST" action="{{ url_for('user_account_push_seerr_contact') }}"
+                onsubmit="return confirm('This will update your Seerr account with the contact details saved above. Continue?');">
+            <button type="submit" class="btn secondary">Send my details to Seerr</button>
+          </form>
+        {% endif %}
+      </div>
+      <p class="field-hint">
+        “Send {{ 'these' if admin_viewing else 'my' }} details to Seerr” is the one
+        thing this portal does that <em>changes</em> another service. It updates only
+        {{ 'their' if admin_viewing else 'your' }} own Seerr notification settings, only
+        the email and Discord ID, and only when {{ 'pressed' if admin_viewing else 'you press it' }} — never automatically.
+      </p>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
 <script src="{{ asset_url('js/local_time.js') }}"></script>
 <script src="{{ asset_url('js/account.js') }}"></script>

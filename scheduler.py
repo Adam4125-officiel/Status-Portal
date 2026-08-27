@@ -82,6 +82,74 @@ _task_state = {}
 _state_lock = threading.Lock()
 
 
+class BackgroundLoop:
+    """A long-running thread that is *not* a scheduled task, described so the admin
+    panel can list it alongside the ones that are.
+
+    Three of this app's recurring jobs deliberately did not become tasks (see
+    CLAUDE.md -> Scheduled tasks): the health-check loop is the core of the app and a
+    browser-reachable off switch for it would also switch off incident detection;
+    resource polling runs faster than SCHEDULER_TICK_SECONDS, so the scheduler
+    physically cannot drive it; and the Discord bot's refresh runs inside discord.py's
+    own asyncio loop, where moving it here would mean scheduling coroutines across
+    threads for no gain.
+
+    Leaving them entirely undescribed is the worse answer, though - "what does this
+    portal do on a timer" then has two places to look and one of them is the source
+    code. So they are registered here as read-only entries: same page, same
+    vocabulary, explicitly not controllable."""
+
+    def __init__(self, name, label, description, interval_seconds, configured_by, is_alive):
+        self.name = name
+        self.label = label
+        self.description = description
+        self.interval_seconds = interval_seconds
+        self.configured_by = configured_by
+        self.is_alive = is_alive
+
+
+# name -> BackgroundLoop. Same shape and lifecycle as _registry above: populated at
+# import time, never mutated afterwards, so it needs no locking.
+_loops = {}
+
+
+def register_loop(name, label, description, interval_seconds, configured_by, is_alive):
+    """Registers a read-only background loop for the admin page to list. `is_alive` is
+    a callable rather than a value because liveness is read at render time - a thread
+    that has died since startup must show as dead, not as whatever it was when it was
+    registered."""
+    _loops[name] = BackgroundLoop(name, label, description, interval_seconds,
+                                  configured_by, is_alive)
+    return _loops[name]
+
+
+def registered_loops():
+    return list(_loops.values())
+
+
+def loop_view(loop):
+    """One loop's row. `alive` is None when the answer is "not applicable" rather than
+    "no" - an optional feature that was never switched on has no thread to be dead."""
+    try:
+        alive = loop.is_alive()
+    except Exception:
+        # Reading liveness must never be able to break the page that reports it.
+        _logger.exception("Could not read liveness for background loop '%s'", loop.name)
+        alive = None
+    return {
+        "name": loop.name,
+        "label": loop.label,
+        "description": loop.description,
+        "interval_seconds": loop.interval_seconds,
+        "configured_by": loop.configured_by,
+        "alive": alive,
+    }
+
+
+def list_loop_views():
+    return [loop_view(loop) for loop in registered_loops()]
+
+
 def register(name, label, description, run, **defaults):
     """Called at import time by the module that owns the task. Re-registering the
     same name replaces the definition rather than raising: a module re-imported

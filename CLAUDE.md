@@ -85,16 +85,21 @@ have bitten someone on exactly that change.
 | A new cache of any kind | *Sessions/caching* → module-owned `clear_caches()`, and reset it in `tests/conftest.py` |
 | Pagination / "load more" | *Conventions* → `/api/incidents/more`, and `docs/HISTORY.md` → "four pagination bugs in sequence" |
 | A new integration kind | *Conventions* → the `fetch_integration_status()` dispatch dict; per-integration timeouts |
+| Comparing a version of anything | *Version checks* → `updater.parse_version` is 3-component semver; Servarr is 4-component |
 | The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
 | The updater | *Self-update* — especially what rollback can and cannot do |
-| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`/`_restart_process()` |
+| Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`; `_restart_process()` has its own, narrower rule |
+| Anything that ends in a restart | *Testing/verification habits* → mocks can't tell you the process came back; exercise it live once |
+| The database restore | *Restoring the database* → the order is the safety machinery |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
+| A new admin page, or moving one in the nav | *Admin panel navigation* → pick a group, keep the route, three labels must agree |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
+| Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 
 Three things that are true no matter what you're touching:
@@ -204,7 +209,9 @@ DB-backed Settings pages, not a code edit.
   client-side.** Every public timestamp is wrapped as
   `<span class="local-time" data-utc="{iso}">{utc fallback text}</span>` (or
   `class="local-time-short"` for the compact service-card spot, which gets hour:minute
-  only); `static/js/local_time.js` overwrites the text with `Date.toLocaleString()` in
+  only, or `class="local-date"` for something that happens on a *day* rather than at a
+  moment — picking the wrong one of these is how a release calendar came to show
+  "03:00" with no date); `static/js/local_time.js` overwrites the text with `Date.toLocaleString()` in
   the browser's own timezone. The UTC fallback text stays in the DOM for no-JS
   clients. The server has no idea what timezone a visitor is in — don't try to
   guess/convert server-side. **When adding another timestamp to the public page, grep
@@ -491,6 +498,27 @@ DB-backed Settings pages, not a code edit.
   the same class of call as `asset_url()`'s `getmtime`, not the kind of slow outbound
   I/O the no-blocking-in-a-request-handler rule is about. Don't "fix" it into another
   cache.
+- **Release notes come from the same response, not a second request.**
+  `fetch_releases()` returns every release on the channel sorted by *parsed version*
+  (never publish date - republishing an old release must not reorder the changelog);
+  `fetch_latest_release()` is now just its first element. `check_for_update()` carries
+  `release_notes` (everything strictly newer than what's running, newest first),
+  `release_notes_omitted` and `current_notes` (the running version's own entry) into
+  the cache the About page reads.
+- **A release `body` is untrusted network input and must only ever be rendered through
+  `richtext`.** It escapes first and then permits a deliberately tiny subset (bold,
+  links, line breaks), so Markdown headings and bullets show as the literal characters
+  the release author typed. That is the accepted trade - never swap in a real Markdown
+  renderer here without one that is escaping-safe by construction, and never mark a
+  body `|safe`. The CSS deliberately has **no `white-space: pre-wrap`**: `richtext`
+  already turns every newline into a `<br>`, so preserving the newlines too would
+  double every line break.
+- **`MAX_RELEASE_NOTES` (20) caps how many intervening releases are rendered**, with
+  the remainder reported as a count rather than silently dropped - a portal left
+  un-updated for a long time must not render, or cache, a page of unbounded length.
+- **A failed check must still leave the note fields present and empty.** The About
+  page reads them unconditionally, so a network failure has to degrade to "couldn't
+  check", not to a template error.
 - **Changing the channel must clear the update cache** (`admin_about_settings` does).
   Otherwise the page renders a "latest available" that was fetched for the *previous*
   channel right next to the newly-selected one.
@@ -509,6 +537,48 @@ DB-backed Settings pages, not a code edit.
   from that same panel would address nothing. Same reasoning as
   `twofactor.RESET_2FA` being a host-level file. It defaults to **enabled** (the button
   was explicitly asked for), and the route checks it, not just the template.
+
+## Servarr version checks (`version_checks.py`, `/admin/integrations`)
+
+- **`version_checks.parse_version()` is deliberately not `updater.parse_version()`, and
+  this is the trap.** Servarr versions have **four** numeric components
+  (`6.4.1.10545`) and the fourth - the build number - is the one that actually moves
+  between releases. `updater.parse_version` keeps three and spends its fourth slot on a
+  prerelease rank, so it parses `6.4.0.10540` and `6.4.0.10523` as the *identical*
+  tuple and would report a months-old Radarr as up to date. There is a test asserting
+  exactly that. The portal's own tags are semver with `-rc.N` and genuinely need the
+  other function; these two formats must not share a parser.
+- **Which app an integration is comes from the app's own `appName`**, never from the
+  name the admin typed. `movies-4k` is still Radarr and something called `radarr`
+  might not be; guessing from the label eventually checks the wrong project's releases
+  and reports the wrong answer confidently.
+- **Two lookup tables, because there are two situations.** `KNOWN_APPS` maps a Servarr
+  `appName` to a repo (several apps share the `arr` kind, so the app has to be asked
+  what it is). `DIRECT_APPS` maps an integration *kind* straight to a repo and version
+  endpoint, for Jellyfin (`/System/Info` → `Version`) and Seerr (`/api/v1/status` →
+  `version`), where the kind already settles it.
+- **Seerr's repo is `seerr-team/seerr`** — the project was renamed from Jellyseerr. The
+  integration kind stays `jellyseerr` because it's stored in every existing database;
+  only the label changes.
+- **Seerr carries `preview-*` tags with no release attached**, which is exactly the
+  "tags that aren't version numbers" hazard below. `/releases/latest` ignores them by
+  definition, which is why this uses that endpoint rather than the tag list.
+- **`KNOWN_APPS` is a module constant and must stay one** - same argument as
+  `updater.py`'s repo constant. Adding an app is a line there *plus* a check that its
+  release tags really are plain version numbers: a project tagging releases
+  `2024.10-hotfix` parses as `0.0.0` and would silently report "up to date" forever.
+- **Results are persisted to the `settings` table, not held in a module cache.** This
+  is a daily task, so an in-memory result would mean the admin page saying "not checked
+  yet" for up to a day after every restart.
+- **A run where *every* app failed is recorded as a failure, not a success** - it
+  answered no question at all, and showing green for it hides the most likely cause.
+  Per-app results are stored *before* that failure is raised, so the page still
+  explains what went wrong instead of going blank. (Found by live-testing against a
+  genuinely rate-limited GitHub, not by the unit tests.)
+- **GitHub's unauthenticated API allows 60 requests/hour per IP, shared across
+  everything this portal asks it** - the self-update check and these three. Fine at
+  daily/6-hourly cadence; worth remembering before adding a fourth caller or shortening
+  an interval.
 
 ## Monitoring architecture (`monitoring.py`)
 
@@ -657,6 +727,79 @@ DB-backed Settings pages, not a code edit.
   though it's not in `requirements.txt`. If it's missing and you need to verify code:
   `pip install discord.py` (23 tests fail with `ModuleNotFoundError` without it).
 
+## Discord DMs and Seerr approval alerts (`seerr_alerts.py`, `/admin/notifications/seerr`)
+
+- **`seerr_alerts.py` exists because of the import graph, not by preference.** It needs
+  `integrations` (to ask Seerr) and `discord_bot` (to deliver), and `discord_bot`
+  already imports `integrations` — so it can't live in either without a cycle. A thin
+  layer above both is the shape that works, and it's where the next "watch something,
+  tell someone" job belongs too.
+- **`discord_bot.send_dm()` is a different code path from everything else the bot
+  sends.** Replies and message edits happen *inside* the bot's event loop; a DM is
+  initiated from a scheduled task's thread, so it uses the same
+  `asyncio.run_coroutine_threadsafe` bridge `stop()` does. `get_user()` then
+  `fetch_user()`, cache-then-fetch, for the same reason `_edit_tracked_status_message()`
+  does it: a cold gateway cache right after a restart otherwise looks identical to "no
+  such user".
+- **`dm_user_ids` is default-*closed*, unlike the bot's other three ID lists.** Those
+  decide who may *ask* the bot for something already visible in the channel they asked
+  from; this decides who it messages unprompted. Empty means nobody.
+- **A bot can only DM someone who shares a server with it and allows DMs from server
+  members.** This is Discord's rule and cannot be worked around. A valid user ID can be
+  undeliverable; `send_dm()` reports that case explicitly (`Forbidden`) instead of as a
+  generic failure, because the fix is a human action nobody would guess otherwise. Say
+  this plainly in any UI that collects DM recipients.
+- **`fetch_seerr_pending()`'s title resolution must go through the same
+  `_resolved_seerr_media()` helper `fetch_seerr_requests()` uses.** It didn't, once —
+  `fetch_seerr_pending()` built its title with `_seerr_title()` alone, no fallback for
+  a bare `"TMDB #12345"` placeholder, which is exactly why the Discord approval DM (built
+  from this list) used to read "TMDB #11279 (tv) for Pakuo" instead of a real title.
+  Both request-list functions in `integrations.py` must keep sharing this helper rather
+  than drifting back into two independent implementations.
+- **The alert is edge-triggered and its state is persisted** (`seerr_notified_request_ids`
+  in `settings`, capped at `MAX_REMEMBERED_IDS`). Same rule as the low-disk alert: a
+  restart while requests are still pending must not re-announce all of them.
+- **A request is only marked announced once a DM actually reached somebody.** A
+  disconnected bot therefore means a *delayed* alert, not a swallowed one.
+- **While DMs are off, what's pending is still remembered** — so switching them on
+  announces what arrives next rather than emptying the whole existing queue into
+  someone's inbox at once.
+- **A failed poll must leave the stored count alone.** Overwriting a real count with 0
+  would quietly tell the admin their approval queue was empty.
+- **The count is admin-only, deliberately.** It's operational information about a
+  queue, not a signal about whether anything is working, so it never reaches the public
+  page.
+- **The Seerr event lifecycle (approved/declined/issues) is polling, not a webhook
+  receiver — a deliberate choice, not a placeholder for one.** Extending the existing
+  `seerr_approvals` task (asking the same poll more questions) was preferred over a
+  public `/hooks/seerr` POST route: no new internet-reachable endpoint, no setup steps
+  inside Seerr, and it can't silently go quiet just because Seerr can't reach the
+  portal. The cost is up to one task interval of delay and that only state *changes*
+  are seen, not e.g. an issue comment that gets edited between polls — accepted
+  trade-offs, not bugs.
+- **`track_request_progress()` also tracks approved/declined, not just "available".**
+  The persisted per-request state (`seerr_request_media_states`) changed shape from a
+  bare `media_status` int to `{"media_status": ..., "request_status": ...}` — read
+  defensively (`_previous_state()`), since a stored int from before this change must
+  not crash the next poll. A `pending -> approved`/`pending -> declined` transition
+  (via `fetch_seerr_requests()`'s already-fetched `request_status_key`) queues a
+  `"seerr_event"` notification to the requester, same `user_id_for_seerr_user()`
+  resolution the arrival case already used.
+- **Issues are tracked the same edge-triggered/persisted-state way**
+  (`track_issue_updates()`, `integrations.fetch_seerr_issues()`, settings key
+  `seerr_issue_states`). A new or changed issue DMs the admin(s) via the existing
+  `discord_bot.broadcast_dm()` + `dm_enabled()` path (admin-directed, so per-user
+  preferences don't apply); an *update* (not a brand-new issue — the reporter already
+  knows they just filed it) also notifies whoever opened it via `"seerr_event"`.
+  **Unverified beyond the published spec**: Seerr's OpenAPI spec omits a `status` field
+  from the `Issue` schema entirely (not just under-documented — genuinely absent), so
+  `open`/`resolved` is inferred (1/2) by analogy with every other Seerr status enum in
+  `integrations.py`, not read from the spec like the rest of this file. An issue's
+  embedded media also carries no `mediaType`, unlike a request's — title resolution
+  tries `movie` then `tv` (cached either way, so a wrong first guess costs one extra
+  call, not one per poll). Confirm against a real instance before trusting either
+  assumption fully.
+
 ## Crash logging (`logging_setup.py`)
 
 - `logging_setup.init_logging()` configures Python's standard `logging` module
@@ -680,17 +823,120 @@ DB-backed Settings pages, not a code edit.
   See `tests/test_monitoring.py`'s `test_vm_snapshot_logs_stderr_on_failure` for the
   pattern.
 
-## Public page layout (`templates/sections/`)
+## Media activity (`integrations.py`, `templates/sections/media.html`)
 
-- Each of the 7 public-page content blocks (announcements, services, incidents &
-  maintenance, practical info, resources, VMs, Jellyfin activity) is its own partial
-  under `templates/sections/<key>.html`, each owning its own "is there anything to
-  show" guard. The topbar/status-hero/footer are page chrome, not content, and stay
-  hardcoded in `index.html` — deliberately never made reorderable.
+- **Four read-only views, one cache, one scheduled task** (`media_refresh`, 5 min):
+  the Radarr/Sonarr calendar, Jellyseerr requests, qBittorrent downloads, and
+  Prowlarr's per-indexer health. Request handlers only ever read
+  `integrations.get_cached_media()`, which returns **copies** so a template iterating a
+  list can't be tripped by the task replacing it mid-render.
+- **Every source is independent.** One unreachable app leaves the other three showing
+  real data, with its own entry in the cache's `errors` dict. Don't "simplify" this
+  into a single try/except around the whole refresh.
+- **A 404 from an *Arr app means "this app doesn't have that feature", not a failure.**
+  Every `arr` integration is asked for both a calendar and an indexer list because
+  which app it is isn't known here; Radarr/Sonarr answer the first and 404 the second,
+  Prowlarr the reverse. Recording those 404s as errors made a perfectly healthy setup
+  report "1 source(s) failed" (caught live). Anything *other* than a 404 is still
+  reported, so a genuinely broken Prowlarr doesn't quietly show an empty list.
+- **Which *Arr app a calendar entry came from is decided per item, not per app** — a
+  Sonarr entry carries a `series` object, a Radarr entry doesn't. One request, and it
+  can't get the answer wrong the way guessing from the integration's name could.
+- **qBittorrent is the only integration that logs in rather than presenting a key**, so
+  it has its own `username`/`password` columns and `fetch_integration_status()` routes
+  it differently. `Referer` is **required** on the login POST — qBittorrent rejects it
+  outright without one, as a CSRF defence for its own WebUI. The SID is deliberately
+  not cached across calls: expiry, invalidation on a password change and a stale cookie
+  looking exactly like wrong credentials are all real complications, for a request made
+  once every few minutes from a background task. A blank username is a valid
+  configuration ("Bypass authentication for clients on localhost"), not an error.
+- **The blank-secret-means-keep rule now covers the qBittorrent password too**, not
+  just `api_key` — forgetting it would silently break the integration on every
+  unrelated edit (a rename, a URL change).
+- **All four parts default to OFF, and the section is signed-in-only by default.**
+  Unlike the resource cards, this says what is in (or heading into) the library and who
+  asked for it. `media_requires_login` only *means* anything while Jellyfin sign-in is
+  enabled — with no sign-in configured there is no such thing as a signed-in visitor,
+  so enforcing it would hide the section from everybody rather than restrict it. Same
+  shape and same reasoning as `report_requires_login`.
+- **`eta == 8640000` is qBittorrent's "unknown"**, not 100 days. Rendering it literally
+  gives a nonsense countdown.
+- **Overseerr's request payload embeds media by id and usually carries no title**, which
+  is why that list once read "TMDB #438631". `fetch_seerr_detail()` resolves it from
+  Seerr's own `/api/v1/{movie,tv}/{id}` and caches the answer in-process forever - it's
+  immutable data keyed by a TMDB id, and twenty pending requests would otherwise mean
+  twenty extra calls per refresh. A *failed* lookup is deliberately not cached, or a
+  transient blip would pin "TMDB #..." until the next restart.
+- **Status badges are coloured from a stable key** (`SEERR_*_STATUS_KEY`), never by
+  matching the English label - a relabelling would otherwise silently turn every badge
+  grey. Every code in both status maps needs a key, and a test asserts that.
+- **A request's real availability lives in `media.status` or `media.status4k`,
+  never both, and which one depends on `entry.is4k` — reading `status`
+  unconditionally is a real bug, not a hypothetical one.** Seerr's own request-creation
+  code (`server/entity/MediaRequest.ts`) explicitly leaves the tier that *wasn't*
+  requested at `MediaStatus.UNKNOWN` forever (`status: !is4k ? PENDING : UNKNOWN,
+  status4k: is4k ? PENDING : UNKNOWN`), and its own frontend (`RequestCard`) reads
+  `media[is4k ? 'status4k' : 'status']` for exactly this reason. `fetch_seerr_requests()`
+  used to read `media.status` unconditionally, which is why a 4K request showed
+  "Unknown" no matter how long ago it was requested or how available it actually was —
+  not a display bug, a genuinely wrong field read, confirmed against Seerr's own source
+  rather than guessed at. This also silently broke the "something you requested has
+  arrived" notification for 4K requests specifically, since `seerr_alerts.
+  track_request_progress()` reads the same (now-fixed) `media_status` field from this
+  function's output.
+- **`SEERR_REQUEST_STATUS`/`SEERR_MEDIA_STATUS` must cover every code Seerr defines,
+  not just the ones seen in casual testing.** `MediaRequestStatus` has a 5th value
+  (`COMPLETED`) and `MediaStatus` has a 6th and 7th (`BLOCKLISTED`, `DELETED`) beyond
+  what these maps originally listed — verified against `server/constants/media.ts`.
+  Missing any of them silently fell back to "Unknown" for exactly the requests/media in
+  that state, the same failure shape as the `is4k` bug above but simpler: a genuinely
+  new/rare enum value maps to "Unknown" cleanly by design (the fallback exists on
+  purpose), but a value the enum has *always* had must not.
+- **The "Coming soon" window is `media_calendar_days`** (clamped 1-90). An open-ended
+  calendar pull lets one long-running series fill the list indefinitely.
+- **Use `.local-date` for something that happens on a day**, not `.local-time-short` -
+  the latter renders hour:minute *only*, so a release date came out as a bare "03:00".
+  Three classes now: `local-time` (full), `local-time-short` (clock only),
+  `local-date` (date only).
+
+## Public page layout (`templates/sections/`, `templates/public/`)
+
+- **The public page is split in two kinds of thing.** `PUBLIC_SECTIONS` (announcements,
+  services, incidents & maintenance) are blocks on the main page, reorderable by the
+  admin. `PUBLIC_PAGES` (resources, VMs, Jellyfin activity, media, practical info) are
+  pages of their own, reached from the shared `.page-nav` and summarised in one line on
+  the main page. The main page answers "is it working?"; everything else is a click away.
+- **Availability and content are two different questions, and the nav must only ask the
+  cheap one.** Each entry in `PUBLIC_PAGES` has an availability predicate (settings
+  only) *and* a context builder (which may poll the machine). Building the nav by
+  calling every context builder meant every public page ran a full resource snapshot —
+  200ms+, and worse when `monitoring`'s CPU cache is stale and `get_resource_snapshot()`
+  falls back to a blocking sample. Jellyfin activity was paying for a disk and CPU poll
+  it never displays, which is what made it look like it had hung. Anything touching the
+  filesystem, the network or psutil belongs in the builder, never the predicate.
+- **`_request_snapshot()` memoises the resource snapshot on `g`.** The main page wants
+  it twice (high-load badge, resources summary) and it's the most expensive thing a
+  public page does.
+- **A page's context builder is the single gate, used by the page *and* the nav *and*
+  the summary.** That is what stops a sub-page becoming a way around a `show_public_*`
+  setting or `media_requires_login`: if the builder returns `None` the route 404s, the
+  nav doesn't link it, and no summary mentions it — all three from the same call. Never
+  render a sub-page from anything other than `_render_public_page()`.
+- **A switched-off page 404s rather than rendering empty.** An empty page confirms the
+  feature exists and is merely hidden; 404 is the same answer a visitor would get if it
+  didn't exist.
+- **Auto-refresh lives in `public_base.html`, not `index.html`.** The public page used
+  to be one page that reloaded itself; after the split, putting the refresh script only
+  on the main page would silently freeze the resources and VM pages.
+- Each content block is its own partial under `templates/sections/<key>.html`, each
+  owning its own "is there anything to show" guard, and the sub-page templates under
+  `templates/public/` just include the matching partial — one copy of the markup, and
+  the guard still applies wherever it's rendered. The topbar/status-hero/footer are page
+  chrome, not content, and stay hardcoded — deliberately never made reorderable.
 - `app._public_section_order()` reads the `public_layout_order` setting
   (comma-separated section keys) and is the *only* place that decides render order —
   `index.html` just does `{% include 'sections/' ~ key ~ '.html' %}` in a loop.
-  **If you add an 8th section**, add its key to the `PUBLIC_SECTIONS` list in `app.py`
+  **If you add another main-page section**, add its key to the `PUBLIC_SECTIONS` list in `app.py`
   (which doubles as the label lookup for the admin reorder UI);
   `_public_section_order()` already appends any valid key missing from a stale stored
   value at the end, so an admin who saved a custom order before your new section
@@ -817,11 +1063,66 @@ DB-backed Settings pages, not a code edit.
   it. Same typed-confirmation UI pattern too (`static/js/admin_system_control.js`,
   mirroring `admin_host_control.js` — one confirm panel driving both trigger buttons
   via a `data-component` attribute instead of `data-action`).
-- **Never live-invoke `_restart_process()` for real in this sandbox or any shared
-  environment** — same rule as `monitoring.control_host()`. Verify exclusively by
-  mocking `app._restart_process()`/`discord_bot.restart()` in pytest and asserting the
-  route called them; a live smoke test should exit the confirm-panel flow right before
-  actually submitting, not click through it.
+- **`_restart_process()` and `control_host()` are not the same risk, and the rule
+  distinguishing them was learned the hard way.** `control_host()` reboots or shuts
+  down the *machine* and must never be live-invoked anywhere, full stop.
+  `_restart_process()` only re-execs *this app's own process*, and testing it
+  exclusively with mocks hid a real bug for months: under `python app.py` every
+  restart died with "Address already in use" and the portal never came back
+  (`docs/HISTORY.md` → "the restart that never came back"). A mocked test asserts that
+  the route *called* the function — it cannot tell you the process comes back up.
+  So: mocked tests remain the default and are what the route tests use, but **a change
+  to restart behaviour must also be exercised live at least once** against a
+  throwaway portal in this sandbox, checking the PID is unchanged and the port answers
+  again. Never against anything the user depends on, and never `control_host()`.
+
+## Restoring the database (`/admin/about/restore-db`, `db.py`)
+
+- **The order of operations is the safety machinery and is not rearrangeable**:
+  stage the upload to a temp file (live database untouched) → validate → snapshot the
+  *current* database → atomic replace → restart. A refusal at any point must leave the
+  live database byte-identical and take no snapshot; there are tests asserting exactly
+  that for junk files, foreign databases, bad zips and zip bombs.
+- **Validation is three checks, and the third is the one people forget.** The SQLite
+  header, then `PRAGMA integrity_check`, then **`RESTORE_REQUIRED_TABLES` must all be
+  present**. The first two only prove "a valid SQLite database" — which a Jellyfin
+  library, a browser cookie store or an *Arr database all also are, and restoring one
+  of those silently wipes the portal and leaves it unable to start. Validation opens
+  the file **read-only via a `file:...?mode=ro` URI**, so checking a file can never
+  create or modify one.
+- **The WAL sidecars must be deleted as part of the replace** (`db.restore_from_file`).
+  The database runs in WAL mode, so `portal.db-wal` holds committed pages belonging to
+  the *old* database; leaving it beside a new main file lets SQLite replay one file's
+  journal into another, which is a corrupt database rather than a failed restore.
+  Checkpoint first, replace, then remove both `-wal` and `-shm`.
+- **The staged upload is written next to `instance/portal.db`, never in the system temp
+  directory** — `os.replace()` is only atomic within one filesystem, and a 60 MB
+  upload shouldn't be able to fill a small `/tmp`.
+- **A zip's declared `file_size` is not trusted**: the extraction cap is enforced
+  against bytes actually read. Member names are never joined to a path at all (the one
+  member is streamed to a filename we chose), which is what makes zip-slip
+  structurally impossible here rather than merely guarded against.
+- **The two kinds of backup on the About page must stay visibly distinct.**
+  `updater.py`'s are **application code**, for undoing a bad update, and hold no data;
+  these are **database** snapshots and hold nothing else. Neither can restore the
+  other, and the page says so. Don't merge the two lists.
+- **`DB_RESTORE_MAX_BYTES` is applied per-request, not app-wide.** Flask 3.1 (hence
+  `Flask>=3.1` in `requirements.txt`) allows `request.max_content_length` to be set for
+  one request; raising `MAX_CONTENT_LENGTH` instead would hand every form on the site,
+  the public report form included, a 64 MB body allowance. The hook that sets it
+  **must be registered before `_check_csrf`**, because `_check_csrf` reads
+  `request.form`, which parses the body and would 413 a perfectly good upload before
+  the view ever runs.
+- **The staged upload's SQLite sidecars must be cleaned up too.** Validating it opens
+  the file with SQLite, and opening a WAL-mode database — which every backup of this app
+  is — creates `-wal`/`-shm` beside it, even read-only. `os.replace()` moves only the
+  main file, so without `_remove_sqlite_sidecars()` every restore *and every refusal*
+  left two orphaned files in `instance/` forever. Found by looking at the directory
+  after a release re-test; no route-level assertion would have noticed.
+- **`_prune_db_safety_backups()` reads `KEEP_DB_SAFETY_BACKUPS` inside the function**,
+  not as a default argument — a default arg binds at def time and silently ignores a
+  monkeypatched constant, the same trap that made `updater._prune_backups` pass for the
+  wrong reason once.
 
 ## Custom logo / branding (`app.py`, `static/uploads/`)
 
@@ -1126,6 +1427,137 @@ DB-backed Settings pages, not a code edit.
 - `config.SCHEDULER_TICK_SECONDS` (30s) is the granularity floor — a task set to
   "every 5 minutes" can only be as punctual as the tick allows. It's a check
   interval, hence an env var; everything per-task is a DB row.
+- **Three of this app's recurring jobs are deliberately *not* tasks, and must stay
+  that way** — the health-check loop (switching it off from a browser would also
+  switch off incident detection, which is the portal's whole job), resource polling
+  (runs every 10s, faster than `SCHEDULER_TICK_SECONDS`, so the scheduler physically
+  cannot drive it), and the Discord bot's refresh (lives inside discord.py's own
+  asyncio loop). They are registered read-only via **`scheduler.register_loop()`** so
+  `/admin/tasks` is still the complete answer to "what runs on a timer" instead of
+  two thirds of it. `is_alive` is a **callable**, not a value — a thread that died
+  since startup has to render as dead, and a value would freeze "alive" forever.
+  `alive is None` means "never started in this process", which reads differently from
+  "started and died" and must not be collapsed into it.
+- **`tests/test_conventions.py::test_no_new_bare_background_loops` counts `while
+  True:` per module against a named allow-list.** A fourth one fails the suite with
+  instructions. If a new loop genuinely can't be a task, register it as a loop *and*
+  add it there with the reason — don't just raise the number.
+- **The update check and the status-history prune are tasks** (`update_check` in
+  `updater.py`, `prune_status_history` in `app.py`), not hand-rolled "is it due yet"
+  checks bolted onto the health-check loop, which is what both used to be. The prune
+  in particular was tracked on a module-level float, so a portal restarted twice a
+  day never pruned at all — deriving the schedule from the stored `last_run_at` is
+  what fixes that, and is the general argument for the framework.
+- **Automatic update checking has exactly one switch.** `/admin/about`'s checkbox
+  writes the `update_check` task's own `enabled` flag (via `app._set_update_check_enabled()`,
+  preserving the rest of the schedule — it's an on/off switch, not a reschedule), and
+  `updater.update_check_enabled()` reads that row. Don't reintroduce a separate
+  `update_check_enabled` setting beside it: the two would drift, and the About page
+  would confidently contradict the Tasks page. The legacy setting is still read
+  **once, at import**, purely to seed the new task's default so upgrading preserves an
+  admin's existing "don't phone home" choice. `updater.py`'s import surface widened to
+  include `scheduler` for the registration — still config/db-only, still no Flask, so
+  the CLI is unaffected.
+- **`PORTAL_UPDATE_CHECK_INTERVAL_SECONDS` is now a *default*, not a fixed interval** —
+  it decides what the task's schedule starts as; after that the DB row wins and an
+  admin changes it from `/admin/tasks` with no restart.
+- **Each task card's schedule-editing form is collapsed by default**, behind a native
+  `<details>` (same technique as the combined wizard's "Advanced settings" block, zero
+  JS) - the info table (Last run/Result/Next run) and "Run now" stay visible either
+  way, only the enabled-checkbox/schedule-kind/interval-or-daily/Save form collapses.
+  The "Always-on background loops" section is deliberately left always-expanded -
+  informational/read-only, nothing to collapse away from.
+
+## Admin panel navigation (`templates/admin_base.html`)
+
+- **The nav is grouped by what an admin is trying to do** (Status · Content ·
+  Monitoring · Notifications · System), not by when a feature was added. Group
+  headings are `.admin-nav__group` spans, not nested lists — the nav is still a flat
+  sequence of `<a>` tags, which is what keeps the `active` matching trivial.
+- **Grouping is presentation only: no route ever moves for it.** Bookmarks are the
+  reason. A page that belongs in a new group gets a new nav position and keeps its
+  URL; if a genuinely new page is needed (as `/admin/notifications` was), add the
+  route rather than relocating an existing one.
+- **`.admin-nav` needs `overflow-y: auto`.** The grouped nav is ~966px tall and a
+  laptop viewport is ~650–720px, so without it the bottom entries (About, Two-factor
+  auth) are simply unreachable — invisible to every route-level test and obvious the
+  moment you open a browser at a real window height.
+- **A page's `<h1>`, its `{% block title %}` and its nav label must all match**, and
+  the nav label is now also the thing that decides the other two when they disagree.
+  Renaming a nav entry means checking all three (this is why "Discord Bot — Servers"
+  became "Discord servers" in three places at once).
+- **A sub-page reached only from its parent's own button gets no nav entry**, and sets
+  `active` to its *parent's* key so the nav still shows where you are. Discord servers
+  briefly had both a nav entry and an in-page button to the same place; the button won,
+  because it sits next to the bot settings the page is about.
+- **`.admin-table` is the wrapper `<div>`, never the `<table>` itself.** On a wrapper
+  its `overflow-x: auto` scrolls a too-wide table; on the table it does nothing and the
+  table drags the whole page sideways. The codebase had it both ways (nine pages one,
+  five the other), which is why one page got a bug report and eight stayed broken.
+  `tests/test_conventions.py` enforces it.
+- **`.admin-main` needs `min-width: 0`.** It's a flex item, and a flex item's default
+  `min-width: auto` means "never shrink below my content" — so a wide table pushed the
+  panel and the page sideways no matter how many `overflow-x: auto` containers sat
+  inside it. That one declaration is what makes all of them work.
+- **`.led`'s glow is an `::after` at `inset: -6px`, so the dot paints wider than it
+  measures.** It's suppressed inside `.admin-table` (`content: none`) because in a dense
+  table it lands on the text beside it — or, when a cell is narrow enough to wrap, on the
+  line beneath. That was the "green blob over the word yes" report. It stays on the
+  public status page, where the cards are big and drawing the eye is the point.
+- **Text from another system must be allowed to break mid-word** (`overflow-wrap:
+  anywhere` on `.empty-state`, `.field-hint`, `.admin-table td`, `code`). An error like
+  `HTTPConnectionPool(host='127.0.0.1', port=9)` has nothing to break at and pushes the
+  page sideways on a phone.
+- **Audit responsively by measuring, not by looking.** The script that found all of the
+  above walks every admin page at 320/360/390/480/640/768/1024px and reports two things:
+  any `.led` whose painted box (glow included) intersects a text rect, and
+  `documentElement.scrollWidth > clientWidth`. Five separate causes, only visible one at
+  a time.
+- **Toggling a boolean in an admin table uses `.switch`** (`static/css/style.css` +
+  `static/js/admin_toggle.js`), not a badge plus a separate Block/Allow button — that
+  made the reader work out the current state from two elements written in different
+  tones. The markup keeps a real focusable checkbox for keyboards and screen readers,
+  and a hidden field carrying the value to *become*, so the same form works with JS
+  (submit on change) and without it (a fallback button the script hides).
+
+## Notification channels (`/admin/notifications`, `notifications.py`)
+
+- **`notifications.channel_summary()` is the single list of what channels exist**, and
+  it lives next to `notify()` on purpose: those are the two places a new channel has
+  to appear, and keeping them adjacent is what stops a channel that sends perfectly
+  from being invisible on the admin page, or vice versa. The admin route just renders
+  whatever that function returns.
+- **Email is the third channel, and it needs no new dependency** — `smtplib` and
+  `email.message` are stdlib. It counts as configured only when host, from-address
+  *and* at least one recipient are all present; a half-filled block reads as "not set
+  up" rather than as a channel that fails on every send and fills the log with the same
+  error on every service blip.
+- **The recipient list is a DB setting (`smtp_recipients`), not an env var**, unlike the
+  rest of the SMTP block. That split is deliberate and worth keeping straight: host,
+  username and password are credentials and static deployment config; *who gets told* is
+  a routine choice an admin changes without editing a file and restarting.
+  `PORTAL_SMTP_TO` is still read as a fallback so an install configured before this moved
+  keeps working — don't remove it.
+- **`email_recipients()` must never raise**, because `notify()` never may: it runs on
+  the background health-check thread, where an exception would take the whole cycle down
+  over a notification. Reading a DB setting introduced a new way for that to happen, so
+  the read is wrapped and falls back to the env var.
+- **`send_email()` takes a `recipients` parameter** so per-user notifications can reuse
+  it without going near `PORTAL_SMTP_TO`, which is specifically the admin alert list.
+- **An unrecognised `PORTAL_SMTP_SECURITY` upgrades to STARTTLS, never downgrades to
+  plaintext.** Failing to connect is a far better outcome than quietly sending
+  credentials in the clear because someone typo'd the value.
+- **The HTML body is built with `html.escape()`, not a Jinja template.**
+  `notifications.py` is called from the background health-check thread, where there is
+  no app or request context to render a template in — and this module deliberately
+  doesn't import Flask. Plain text is set *first* because in `multipart/alternative`
+  the last part is the preferred one.
+- The channel status and "Send test" button **moved off `/admin/settings`** into this
+  page. The test button still calls `notifications.notify()` with a canned payload —
+  the real dispatch path, not a parallel one. It deliberately no longer refuses when
+  nothing is configured: `notify()` with no channels is already a no-op and the button
+  is disabled in the template, so the refusal was a third place to keep in step for no
+  benefit.
 
 ## Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0
 
@@ -1312,6 +1744,226 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   existed, and there's a test asserting it. This is the part most likely to regress
   unnoticed, since nobody testing while signed in would ever see it.
 
+## Per-user notifications (`user_notify.py`, `/admin/notifications/users`, `/account`)
+
+- **Nothing is ever sent from the request that triggered it.** An admin clicking
+  "reply" writes one row to `notification_queue` and returns; the `user_notifications`
+  scheduled task drains it. That's what stops a slow SMTP server making the admin panel
+  hang, and it's the same rule every other outbound call here follows.
+- **Matching a Jellyfin user to a Seerr user fails closed.** The only link followed is
+  Seerr's own `jellyfinUserId`. Matching on email or username would eventually deliver
+  one person's notifications to another, so an unmatched user is simply asked for their
+  details instead. An unreachable Seerr is treated identically to "no link" — both
+  correctly lead to asking.
+- **`integrations.push_seerr_contact()` is the only call in this app that modifies
+  another service.** One user, two contact fields, only from an explicit button press
+  on that person's own account page, with the current Seerr values shown first. It must
+  never become reachable from a sync or a background task.
+- **The gating preference is checked at *delivery* time, not enqueue time**, so
+  switching something off silences what's already queued too.
+- **"Nowhere to send it" counts as delivered, not failed.** No contact details, or the
+  preference switched off, will not be fixed by retrying in two minutes — and a row
+  that can never succeed must not sit in the queue burning attempts.
+- **Partial delivery counts as sent.** Retrying would re-deliver to the channel that
+  already worked.
+- **`DEFAULT_USER_PREFERENCES` must list every field `set_user_preferences()` can
+  write.** A missing key reads back as `None`, is coerced to `0`/`""` when some *other*
+  field is saved, and silently switches an on-by-default preference off. That happened
+  while this was being written; `test_every_writable_preference_has_a_declared_default`
+  now catches it.
+- **One preference column per channel per event, not one shared column per event
+  (added 2026-08-27).** `notify_own_reports`/`notify_service_events`/`notify_requests`
+  used to gate email *and* Discord DM together — someone couldn't ask for something by
+  email without also getting a DM. Split into `notify_email_reports`/
+  `notify_email_requests`/`notify_email_maintenance` and the Discord equivalents, plus a
+  Discord-only `notify_discord_seerr_events` (approvals/declines/availability/issues, on
+  by default — described in the UI as "Seerr events"). The three legacy columns stay
+  (never dropped) but are read by nothing; a one-time backfill in `init_db()` — guarded
+  by checking `PRAGMA table_info` for the new columns *before* calling `_ensure_column`
+  on them, since the existing anti-join backfill idiom doesn't apply to new columns on
+  an existing row — copies each legacy value into both of its new per-channel columns
+  so nobody's existing choice is silently reset. `EVENT_CHANNEL_PREFERENCE` (replacing
+  the old `EVENT_PREFERENCE`) maps each event to `{"email": col_or_None, "discord":
+  col_or_None}`; `deliver()` gates each channel independently, and a channel mapped to
+  `None` (email, for `seerr_event`) is never used regardless of contact info.
+  `db.users_opted_into()` now takes `*fields` (OR'd) since maintenance broadcast spans
+  two columns.
+- **Defaults: "things about my own reports" on, "something I requested" on, "anything
+  about services I use" off** (per channel now, not once for both). The first two are
+  a reply to something the person started, or news about something they asked for, and
+  almost always wanted; maintenance is chatty regardless of channel.
+- **Admin management of a user's preferences reuses the visitor's own `account.html`,
+  not a separate admin-only settings grid.** `/admin/users/<user_id>/account`
+  (`admin_user_account()`) renders the same template in an `admin_viewing=True` mode —
+  same `_save_account_prefs()` (app.py) the visitor's own POST uses, same
+  `user_notify.adopt_seerr_contact()` the auto-fill/manual-import paths use — scoped to
+  the path's `user_id` instead of `current_user()`. This is the deliberate alternative
+  to maintaining two UIs for the same preferences. The report thread is the one thing
+  hidden in admin-viewing mode (`/admin/reports` already covers that); everything else
+  user-facing (theme, contact, both notification tables, the Seerr account block)
+  stays. `admin_users.html`'s username links there now; the inline per-row
+  email/Discord-ID edit form is gone.
+- **Seerr keeps email and Discord ID in two different places, and this is the trap.**
+  Email is on the base `User` record (so it comes back with `/api/v1/user`); Discord IDs
+  live on a per-user `UserSettings` sub-resource at
+  `/api/v1/user/{id}/settings/notifications`. Reading only the user list therefore syncs
+  email perfectly and Discord not at all — not a flaky field, the wrong API surface.
+  `fetch_seerr_users(with_notification_settings=True)` does the extra per-user request;
+  it's an N+1 and that's the accepted cost, since it runs hourly in a background task and
+  only for users with a real Jellyfin link.
+- **It's `discordIds`, a list.** Current Seerr stores several per user; this portal sends
+  to the first non-empty one. The older singular `discordId` is still read as a fallback.
+- **Seerr's settings POSTs overwrite every field they read from the body**, so writing
+  one field erases the rest — the user's PGP key, Telegram chat, Pushover tokens, quotas.
+  `push_seerr_contact()` is therefore **read-modify-write on both endpoints**, and must
+  stay that way. An earlier version sent only the changed field (and sent `email` to the
+  notifications endpoint, which ignores it entirely). Verified against
+  `seerr-team/seerr`'s `server/routes/user/usersettings.ts` — note the project was
+  renamed from Jellyseerr to **Seerr** (`seerr-team/seerr`, docs.seerr.dev).
+- **Which Seerr is used comes from `integrations.seerr_integration()`**, one function
+  reading the `seerr_integration_id` setting, mirroring how the Jellyfin instance backing
+  sign-in is chosen. It replaced three separate "first enabled one" pickers in
+  `media_search`, `user_notify` and `seerr_alerts`, which could silently disagree — and
+  which meant the Integrations page could diagnose one server while search used another.
+- **Seerr owns contact details; this portal mirrors them.** `seerr_contacts` is a cache
+  replaced wholesale by the `seerr_contact_sync` task, exactly like the Jellyfin user
+  list and for the same two reasons: the delivery task must not call Seerr per message,
+  and a Seerr outage must not stop notifications to people whose details are already
+  known. A failed sync leaves the previous rows completely intact.
+- **Only accounts Seerr itself has linked to a Jellyfin user are cached.** Same
+  fail-closed rule as everywhere else here — matching on name or email would eventually
+  give one person another's notifications.
+- **Anything entered in this portal is written back to Seerr** via
+  `user_notify.save_contact()`, the single path both the admin users page and the
+  visitor prompt use. A failed write-back is *reported but not rolled back*: losing what
+  somebody just typed because another service was unreachable is the worse outcome, and
+  the local value is what delivery reads.
+- **The account page auto-fills from a linked Seerr account the first time it's opened
+  with both fields still blank**, rather than waiting for the manual "Use these
+  details here" button - `user_notify.adopt_seerr_contact(user_id, account)` is the one
+  write both paths use. The guard is "both fields blank", checked on every page load,
+  so it only ever fires once: as soon as either field has a value (typed, imported, or
+  from this auto-fill itself), the guard no longer holds, and clearing a field back out
+  does not bring the auto-fill back - a cleared field must stay cleared, not be
+  silently refilled forever.
+- **`contact_for()` prefers what was entered here over what Seerr last said.** That
+  sounds backwards for a source-of-truth arrangement, and is deliberate: the two agree
+  in the normal case because saving writes through, and the exception is a *failed*
+  write-back — where the value the person actually typed is the better one to use.
+- **The post-sign-in prompt is asked once and skipping is remembered**
+  (`contact_prompt_dismissed`). Being asked the same question on every sign-in is how a
+  prompt becomes something people learn to click past. An explicit `?next=` beats the
+  prompt — somebody who followed a link and got bounced through sign-in should land
+  where they were going.
+- **The admin page never lists recipients.** The queue is addressed to a Jellyfin
+  account; whose email or Discord ID that resolved to is that person's business.
+
+## Unified search (`media_search.py`, `/search`)
+
+- **This is the one place an outbound call happens inside a request handler, and it is
+  a deliberate carve-out, not an exception that has crept in.** A search query isn't
+  known until somebody types it, so there is nothing to pre-fetch into a cache. Do not
+  "fix" it by adding a cache, and do not use it as a precedent for anything that *can*
+  be background-refreshed.
+- **What makes the carve-out acceptable is the safety machinery, so don't remove any of
+  it**: `config.SEARCH_TIMEOUT_SECONDS` (6s, deliberately shorter than every other
+  timeout here) so a slow Jellyfin can't hold a request thread; each source failing
+  independently; and a distinct "search is unavailable right now" state that must never
+  be collapsed into "nothing found" — one is a system problem, the other is an answer.
+- **Signed-in visitors only, plus a per-session rate limit.** Three separate reasons:
+  the result set reveals the whole library, requesting is a write against Seerr that has
+  to be attributable to a person, and a search box wired to two external APIs is a
+  free denial-of-service amplifier. The limit is **per session**, unlike `_login_state`
+  and `_report_state` which are process-global — those defend a route open to anonymous
+  strangers, where a shared counter is the point; this one is already behind a sign-in,
+  so a global counter would let one enthusiastic searcher lock everybody else out.
+- **The Seerr search query must be percent-encoded, not form-encoded.** Seerr proxies
+  search to TMDB, and TMDB rejects `+` with HTTP 400 *"Parameter 'query' must be url
+  encoded. Its value may not contain reserved characters."* — so `params={"query": ...}`
+  (requests' default, which uses `+` for a space) worked for single words and failed for
+  every multi-word search. `_seerr_search_url()` builds it with
+  `urlencode(quote_via=quote)`; don't "simplify" it back to `params=`. The diagnostic
+  builds its URL the same way on purpose: when it didn't, it reported "both calls
+  succeeded" while search was broken, because it happened to use a one-word query.
+- **Anything the shared public nav renders must be passed by *every* route that renders
+  it.** `search_enabled` was computed only by `index()`, so the Search tab existed on the
+  Status page and nowhere else. `_render_public_page()` passes the same set.
+- **A page on its own needs an empty state; a block on a shared page doesn't.** The
+  Jellyfin activity partial guarded itself into rendering nothing when idle, which is
+  right inside a long scroll and reads as broken as a whole page. It now says so.
+- **Results appear while typing, from a server-rendered fragment.** `/search/live`
+  returns `sections/_search_results.html` - the *same* partial the full page includes -
+  so the incremental results and the submitted ones cannot drift apart. Same convention
+  as `/api/incidents/more`: this app has one JSON API (`/api/status`, for external
+  consumers) and no client-side templating.
+- **The debounce and the three-character minimum are the mechanism; the rate limit is
+  the backstop.** Both are enforced server-side too, because the client can't be trusted
+  to. `static/js/search_live.js` aborts an in-flight request when a newer keystroke
+  arrives - each one costs two outbound API calls, and only the newest question matters.
+- **Deduping is by title *and year*.** The two sources share no ids (Jellyfin has its
+  own, Seerr speaks TMDB), so the title is all there is to match on — and merging a 1984
+  film into its 2021 remake would be worse than showing both.
+- **A merged result must keep both ids.** Jellyfin's is what makes "Watch now"
+  possible; Seerr's TMDB id is what makes a request possible. Dropping either silently
+  disables one of the two actions on exactly the rows where both apply.
+- **Jellyfin wins on whether something is actually present.** It has the file; Seerr's
+  `mediaInfo.status` is an opinion about it.
+- **A request is attributed to the matching Seerr user via Seerr's own `jellyfinUserId`,
+  and the link is never guessed.** Same rule as per-user notifications. With no link the
+  request still goes through (unattributed) and the UI says so — an unattributed request
+  is a much smaller problem than one attributed to the wrong person.
+- **"Search says Seerr is down, Integrations says it's up" is not a contradiction, and
+  the timeout is not the cause.** The two facts come from different calls with different
+  dependencies: `/api/v1/status` is served by Seerr itself, while `/api/v1/search` makes
+  Seerr go out to **TMDB**, so a Seerr host with slow or blocked outbound internet fails
+  the second and passes the first. The Integrations page also reads a **cache** refreshed
+  on the health-check interval, so it can be showing something up to
+  `CHECK_INTERVAL_SECONDS` old. Search already has the *longer* timeout of the two, so
+  widening it fixes nothing — `integrations.diagnose_seerr()` (the "Diagnose search"
+  button on `/admin/integrations`) runs both calls back to back and says which applies.
+- **Search failures are described in words** (`describe_request_error()`), not as a bare
+  "couldn't be reached" — timed out, refused the API key, answered HTTP 500 and
+  couldn't connect have completely different fixes, and are logged at *warning*, not
+  info.
+- **A 409 from Seerr is "already requested", which is ordinary**, not an error worth
+  alarming anyone with — someone pressed the button twice.
+- **A TV request needs a season selection, and "all" is only the fallback** for a
+  caller that doesn't pass specific ones — see request configuration below for where a
+  real picker now exists. Seerr rejects a series request with no seasons at all.
+- **Posters are TMDB images (`image.tmdb.org`), one scoped CSP `img-src` exception** —
+  same class of named-host exception the `fonts.google*` entries already are, not a
+  general relaxation. `poster_path` was already threaded through `search_seerr()` →
+  `media_search.merge()`; only the rendering was missing. A Jellyfin-only result (no
+  Seerr/TMDB match) stays text-only rather than proxying Jellyfin's own image endpoint
+  through a request handler — that would be exactly the live-outbound-I/O-in-a-handler
+  problem this app avoids everywhere else.
+- **The detail page and the results list share one action partial**
+  (`templates/sections/_search_result_action.html`) — Watch now / Request / Already
+  requested / In the library, rendered identically in both places by construction, not
+  by discipline. `fetch_seerr_detail()` was extended (same forever-cache, no second
+  call) to carry `overview`/`genres`/`runtime`/`vote_average`/`seasons` alongside the
+  title/year it already resolved, since the detail page needs the same Seerr response
+  fetch_seerr_pending()/fetch_seerr_requests() already fetch for title resolution.
+- **The detail route (`/search/detail/<media_type>/<tmdb_id>`) trusts query-string
+  `in_library`/`jellyfin_id`/`requested`, sourced from the results link, rather than
+  re-deriving them.** There is no cheaper way to know a single TMDB id's Jellyfin/Seerr
+  status without a second live search — a deliberate, low-stakes scope choice (stale
+  display info, not anything the route writes), not an oversight.
+- **Request configuration**: "Request this" opens
+  `/search/request/configure` rather than submitting immediately. A season picker (all
+  seasons pre-checked, matching the old hardcoded `"all"`) is shown to **every**
+  signed-in visitor; root folder, quality profile and tags are shown - and honoured -
+  **only when the browser is also signed in as the portal admin**
+  (`session["logged_in"]`), since root folder values are real server filesystem paths.
+  `integrations.fetch_seerr_{radarr,sonarr}_{servers,detail}()` read Seerr's
+  `/service/radarr`/`/service/sonarr` endpoints and default to whichever server Seerr
+  flags `isDefault` (a picker between servers is only shown when there's more than one -
+  the common case has exactly one *Arr instance per kind). **The admin-only fields are
+  re-checked server-side in `search_request()`** (stripped to `None` unless
+  `session["logged_in"]`) - the configuration page not rendering them for a plain
+  visitor is not itself an authorization boundary, and a forged POST must not be able
+  to smuggle them in.
+
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
 - **When you add a rule to this file, ask whether it can be a test instead.** Prose in
@@ -1368,6 +2020,15 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   request needs *both* `-b cookiejar` (send) *and* `-c cookiejar` (save the response's
   possibly-updated cookie). `-b` alone silently reads a stale cookie and looks exactly
   like a real bug (a missing flash message, a "lost" session value).
+- **Never combine `curl -X POST` with `-L` against an admin route.** `-X` forces the
+  method on the redirect too, so curl re-POSTs to the redirect target - which for every
+  route here is a page whose form has a *different* CSRF token, giving a 400 that looks
+  exactly like the action having failed when it actually succeeded (302) a moment
+  earlier. Use `--data` without `-X` (curl then correctly switches to GET on 302), or
+  drop `-L` and check the 302 directly.
+- **Don't `pkill -f "python app.py"` from a Bash tool call.** `-f` matches full command
+  lines, and the shell running the command contains that string, so it kills its own
+  session. `kill $(lsof -t -i:5000)` targets the actual listener instead.
 - This sandbox is Linux. Hyper-V VM detection, Windows volume labels, CPU/disk
   temperature and per-disk I/O (all Windows-only, PowerShell/CIM-backed), real
   Jellyfin/*Arr/Jellyseerr instances, and a real Discord gateway connection can't be
@@ -1375,6 +2036,11 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   if the user reports a bug in one of these areas, ask for the actual error text first
   (most of these paths now log real errors instead of swallowing them) rather than
   guessing blind.
+- **Check what the test run and the smoke test left in `instance/` before finishing**,
+  not just that the tests passed. Two real problems have been found that way and by no
+  other means: restore tests writing real safety snapshots into the developer's own
+  `instance/db_backups/` (they now monkeypatch `DB_SAFETY_BACKUP_DIR`), and every
+  database restore orphaning `-wal`/`-shm` sidecars. `ls instance/` costs nothing.
 - Clean up after smoke testing: remove any `instance/portal.db` created during a test
   run, and any cookie jars, before finishing — don't leave a test admin password or
   fake data sitting in what could become the user's real database.

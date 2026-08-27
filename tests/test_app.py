@@ -1699,9 +1699,34 @@ def test_about_settings_saves_channel_and_clears_the_stale_cache(client):
                         follow_redirects=True)
     assert b"Update preferences saved" in resp.data
     assert db.get_setting("update_channel") == "unstable"
-    assert db.get_setting("update_check_enabled") == "1"
+    # Automatic checking is the `update_check` scheduled task's own enabled flag now,
+    # not a second setting beside it - /admin/about and /admin/tasks are two views of
+    # one row, so they can't drift into disagreeing.
+    assert db.get_task_row(app_module.updater.TASK_NAME)["enabled"] == 1
+    assert app_module.updater.update_check_enabled() is True
     # The cached "latest" belonged to the old channel.
     assert app_module.updater.get_cached_update_status() is None
+
+
+def test_about_settings_can_turn_automatic_checking_off(client):
+    _login(client)
+    client.post("/admin/about/settings", data={"update_channel": "stable"},
+                 follow_redirects=True)
+    assert db.get_task_row(app_module.updater.TASK_NAME)["enabled"] == 0
+    assert app_module.updater.update_check_enabled() is False
+
+
+def test_turning_checking_off_leaves_the_schedule_alone(client):
+    """The About page's checkbox is an on/off switch, not a reschedule - an admin who
+    set the check to run daily at 04:00 must not silently get it back on the default
+    interval just for unticking and re-ticking the box."""
+    _login(client)
+    scheduler.save_schedule(app_module.updater.TASK_NAME, enabled=True,
+                             schedule_kind="daily", interval_minutes=360, daily_at="04:00")
+    client.post("/admin/about/settings", data={"update_channel": "stable"},
+                 follow_redirects=True)
+    row = db.get_task_row(app_module.updater.TASK_NAME)
+    assert (row["enabled"], row["schedule_kind"], row["daily_at"]) == (0, "daily", "04:00")
 
 
 def test_about_settings_rejects_an_unknown_channel(client):
@@ -1854,32 +1879,40 @@ def test_admin_vm_control_route_rejects_unknown_action(client):
     assert b"Unknown VM action" in resp.data
 
 
-def test_public_section_order_defaults_to_original_order(isolated_db):
-    order = app_module._public_section_order()
-    assert order == ["announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"]
+def test_public_section_order_defaults_to_the_declared_order(isolated_db):
+    """Derived from PUBLIC_SECTIONS rather than hardcoding the list, so adding a
+    section doesn't fail this test for the wrong reason - what's being asserted is
+    "the default order is the declared order", not which sections happen to exist."""
+    assert app_module._public_section_order() == [k for k, _ in app_module.PUBLIC_SECTIONS]
 
 
 def test_public_section_order_respects_stored_setting(isolated_db):
-    db.set_setting("public_layout_order", "vms,services,announcements")
+    db.set_setting("public_layout_order", "incidents,services")
     order = app_module._public_section_order()
-    # Stored order first, then every other valid key appended in its default position.
-    assert order[:3] == ["vms", "services", "announcements"]
-    assert set(order) == {"announcements", "services", "incidents", "info", "resources", "vms", "jellyfin_activity"}
+    # Stored order first, then every other valid key appended in its default position -
+    # so a section added after the admin last saved an order still appears, at the end,
+    # rather than silently disappearing.
+    assert order[:2] == ["incidents", "services"]
+    assert set(order) == {k for k, _ in app_module.PUBLIC_SECTIONS}
 
 
 def test_public_section_order_drops_unknown_keys(isolated_db):
-    db.set_setting("public_layout_order", "vms,not-a-real-section,services")
+    """Also covers the keys of blocks that have since moved to their own pages: an
+    admin who saved an order back when "vms" was a main-page section keeps a working
+    order rather than a broken one."""
+    db.set_setting("public_layout_order", "incidents,not-a-real-section,vms,services")
     order = app_module._public_section_order()
     assert "not-a-real-section" not in order
-    assert order[:2] == ["vms", "services"]
+    assert "vms" not in order
+    assert order[:2] == ["incidents", "services"]
 
 
 def test_admin_settings_general_saves_layout_order(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/general", data={"layout_order": "vms,services,incidents,announcements,info,resources,jellyfin_activity"})
+    resp = client.post("/admin/settings/general", data={"layout_order": "incidents,services,announcements"})
     assert resp.status_code == 302
-    assert db.get_setting("public_layout_order") == "vms,services,incidents,announcements,info,resources,jellyfin_activity"
-    assert app_module._public_section_order()[0] == "vms"
+    assert db.get_setting("public_layout_order") == "incidents,services,announcements"
+    assert app_module._public_section_order()[0] == "incidents"
 
 
 def test_admin_settings_general_saves_service_defaults(client):
@@ -2168,16 +2201,27 @@ def test_public_history_days_blank_means_unlimited(client):
     assert app_module._public_history_days() is None
 
 
-def test_admin_settings_test_notification_sends_via_shared_dispatch(client, monkeypatch):
+def test_notifications_test_button_sends_via_shared_dispatch(client, monkeypatch):
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
     calls = []
     monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    resp = client.post("/admin/notifications/test", follow_redirects=True)
     assert resp.status_code == 200
     assert b"Test notification sent" in resp.data
     assert len(calls) == 1
     assert calls[0][0] == "Test notification"
+
+
+def test_notifications_page_lists_every_channel_and_its_state(client, monkeypatch):
+    monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    monkeypatch.setattr(app_module.config, "NTFY_URL", "")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/notifications")
+    assert resp.status_code == 200
+    assert b"PORTAL_DISCORD_WEBHOOK_URL" in resp.data
+    assert b"PORTAL_NTFY_URL" in resp.data
+    assert b"configured" in resp.data
 
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
@@ -2201,16 +2245,36 @@ def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     assert "settings" in tables
 
 
-def test_admin_settings_test_notification_refuses_when_unconfigured(client, monkeypatch):
+def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypatch):
+    """Replaces an older test that asserted the route refused to send. It doesn't need
+    to: notify() with nothing configured is a no-op, and the button is disabled in the
+    template, so the refusal was a third place to keep in step for no benefit."""
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "")
     monkeypatch.setattr(app_module.config, "NTFY_URL", "")
-    calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/test-notification", follow_redirects=True)
+    resp = client.get("/admin/notifications")
+    assert b"Set up a channel above first" in resp.data
+
+
+def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/settings/backup-db")
     assert resp.status_code == 200
-    assert b"No notification channel configured" in resp.data
-    assert calls == []
+    assert resp.mimetype == "application/zip"
+    assert "attachment" in resp.headers.get("Content-Disposition", "")
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        assert zf.namelist() == ["portal.db"]
+        # A real, openable SQLite file, not just arbitrary bytes under that name -
+        # confirms Connection.backup() actually produced a valid database.
+        extracted = zf.read("portal.db")
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(extracted)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+    assert "services" in tables
+    assert "settings" in tables
 
 
 def test_public_page_renders_sections_in_configured_order(client):
@@ -2279,13 +2343,19 @@ def test_service_without_url_hides_open_button(client):
 
 
 def test_public_page_shows_jellyfin_tasks_when_enabled(client):
+    """Jellyfin activity has its own page now; the main page links to it and summarises
+    it rather than carrying the whole block."""
     import integrations as integrations_module
     db.set_setting("show_public_jellyfin_tasks", "1")
     integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
 
-    resp = client.get("/")
-    assert b"Trickplay Image Extraction" in resp.data
-    assert b"Jellyfin activity" in resp.data
+    page = client.get("/activity")
+    assert b"Trickplay Image Extraction" in page.data
+
+    main = client.get("/")
+    assert b"Jellyfin activity" in main.data          # linked and summarised
+    assert b"1 task(s) running" in main.data
+    assert b"Trickplay Image Extraction" not in main.data
 
 
 def test_public_page_hides_jellyfin_tasks_when_disabled(client):
@@ -2297,11 +2367,84 @@ def test_public_page_hides_jellyfin_tasks_when_disabled(client):
     assert b"Trickplay Image Extraction" not in resp.data
 
 
-def test_public_page_hides_jellyfin_activity_section_when_no_tasks_running(client):
+def test_the_activity_page_says_so_when_nothing_is_running(client):
+    """The section used to disappear entirely when idle. As a page it stays reachable
+    and says nothing is running - a link that 404s half the time would be worse."""
     db.set_setting("show_public_jellyfin_tasks", "1")
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
-    resp = client.get("/")
-    assert b"Jellyfin activity" not in resp.data
+    page = client.get("/activity")
+    assert page.status_code == 200
+    # The page has to *say* it's idle - rendering nothing reads as broken.
+    assert b"idling at the moment" in page.data
+    assert b"Idle right now" in client.get("/").data
+
+
+# ---------------------------------------------------------------------------
+# The public page split: what stays, what moved, and who can reach it
+# ---------------------------------------------------------------------------
+def test_the_main_page_keeps_the_is_it_working_content(client, isolated_db):
+    """Status, services and incidents are what almost every visitor came for, so they
+    stay put rather than moving behind a link."""
+    db.create_service({"name": "Jellyfin", "url": "http://x", "description": "media",
+                        "status": "operational"})
+    body = client.get("/").data
+    assert b"Jellyfin" in body
+    assert b"service(s) tracked" in body
+
+
+@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
+    """The important half of the split. Moving a block to its own route must not become
+    a way around the setting that hides it - so a page whose content is switched off
+    404s rather than rendering empty, which would confirm the feature is merely
+    hidden."""
+    assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
+    """And it isn't advertised either: the nav is built from the same context builders
+    the pages use, so a link can never point at something that would 404."""
+    assert path.encode() not in client.get("/").data
+
+
+def test_switching_a_section_on_makes_its_page_reachable_and_linked(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    assert client.get("/resources").status_code == 200
+    assert b"/resources" in client.get("/").data
+
+
+def test_the_info_page_disappears_when_emptied(client, isolated_db):
+    """It ships with placeholder text, so it's there from the start - but an admin who
+    clears it shouldn't be left with an empty page linked from the nav."""
+    assert client.get("/info").status_code == 200
+    db.set_info_page("How to connect over Tailscale")
+    assert b"How to connect over Tailscale" in client.get("/info").data
+    db.set_info_page("   ")
+    assert client.get("/info").status_code == 404
+    assert b"/info" not in client.get("/").data
+
+
+def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_db, monkeypatch):
+    """Regression: the nav is shared, but `search_enabled` was only computed by the main
+    page's route - so the Search tab existed only on the page that happened to pass it."""
+    db.set_setting("show_public_cpu", "1")
+    db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1})
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    with client.session_transaction() as sess:
+        sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
+                               "authenticated_at": 0}
+    for path in ("/", "/resources", "/info"):
+        assert b'href="/search"' in client.get(path).data, path
+
+
+def test_every_sub_page_carries_the_shared_nav(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    body = client.get("/resources").data
+    assert b'class="page-nav"' in body
+    assert b">Status<" in body
 
 
 # ---------------------------------------------------------------------------
@@ -2461,13 +2604,26 @@ def test_uptime_cache_expires_after_its_ttl(isolated_db, monkeypatch):
     assert app_module._cached_uptime_percentages() == {sid: 50.0}
 
 
-def test_history_pruning_runs_once_a_day_not_every_cycle(isolated_db, monkeypatch):
-    calls = []
-    monkeypatch.setattr(db, "prune_status_history", lambda days: calls.append(days) or 0)
-    monkeypatch.setattr(app_module, "_last_history_prune", 0.0)
-    app_module._prune_status_history_if_due()
-    app_module._prune_status_history_if_due()
-    assert calls == [app_module.DEFAULT_HISTORY_RETENTION_DAYS]
+def test_history_prune_task_reports_what_it_removed(isolated_db, monkeypatch):
+    monkeypatch.setattr(db, "prune_status_history", lambda days: 12)
+    message = app_module._prune_status_history_task()
+    assert "12" in message and str(app_module.DEFAULT_HISTORY_RETENTION_DAYS) in message
+
+
+def test_history_prune_task_is_a_success_when_there_is_nothing_to_remove(isolated_db, monkeypatch):
+    """Not a TaskSkipped: "nothing was old enough to delete" is the job working, not
+    the job being unconfigured, and the two read very differently in the task list."""
+    monkeypatch.setattr(db, "prune_status_history", lambda days: 0)
+    message = app_module._prune_status_history_task()
+    assert "Nothing to remove" in message
+
+
+def test_history_prune_is_registered_as_a_daily_task(isolated_db):
+    """It used to be a "have 24 hours passed?" check on a module-level float inside the
+    health-check loop, which meant a portal restarted twice a day never pruned at all."""
+    task = scheduler.get_task("prune_status_history")
+    assert task is not None
+    assert task.defaults["schedule_kind"] == "daily"
 
 
 def test_history_retention_setting_is_honoured(isolated_db, monkeypatch):
@@ -3156,6 +3312,32 @@ def test_the_users_page_distinguishes_blocked_here_from_disabled_in_jellyfin(cli
     assert "disabled in Jellyfin" in body
 
 
+def test_portal_access_is_a_toggle_that_works_without_javascript(client, isolated_db):
+    """The switch is decorative markup around a real checkbox; the hidden field carries
+    the value to switch to, so the same form works whether JS submits it on change or
+    the visitor presses the fallback button."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    body = client.get("/admin/users").data.decode()
+    assert 'class="switch"' in body
+    # Currently allowed, so the form's hidden value must be the *other* state.
+    assert 'name="allow" value="0"' in body
+    assert "switch-form__fallback" in body
+
+    client.post("/admin/users/u1/access", data={"allow": "0"})
+    body = client.get("/admin/users").data.decode()
+    assert 'name="allow" value="1"' in body
+
+
+def test_a_user_disabled_in_jellyfin_gets_no_toggle(client, isolated_db):
+    """There is nothing for the admin to decide - the fix is in Jellyfin, and offering a
+    switch here would imply otherwise."""
+    _login(client)
+    db.replace_jellyfin_users([{"id": "u2", "name": "off", "is_disabled": True}])
+    body = client.get("/admin/users").data.decode()
+    assert 'class="switch"' not in body
+
+
 # ---------------------------------------------------------------------------
 # The sign-in control in the fixed page-actions cluster
 # ---------------------------------------------------------------------------
@@ -3335,7 +3517,9 @@ def test_saving_preferences_persists_them(client, user_auth, monkeypatch):
     resp = client.post("/account", data={"theme": "light", "contact": "me@example.invalid"},
                        follow_redirects=True)
     assert "settings have been saved" in resp.data.decode()
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "me@example.invalid"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "me@example.invalid"
 
 
 def test_an_explicit_theme_is_rendered_into_the_html_tag(client, user_auth, monkeypatch):
@@ -3364,7 +3548,12 @@ def test_the_theme_endpoint_updates_only_the_theme(client, user_auth, monkeypatc
     db.set_user_preferences("u1", theme="dark", contact="keep me")
     resp = client.post("/account/theme", data={"theme": "light"})
     assert resp.status_code == 204
-    assert db.get_user_preferences("u1") == {"theme": "light", "contact": "keep me"}
+    prefs = db.get_user_preferences("u1")
+    assert prefs["theme"] == "light"
+    assert prefs["contact"] == "keep me"
+    # The endpoint writes *only* the theme, so every notification preference has to
+    # come back untouched too - it knows nothing about them.
+    assert prefs["notify_email_reports"] is True
 
 
 def test_the_theme_endpoint_requires_a_signed_in_visitor(client, user_auth):

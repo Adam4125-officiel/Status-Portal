@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Search — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="container">
+  <div class="topbar">
+    <div>
+      <div class="topbar__brand">{{ site_name }}</div>
+      <div class="topbar__sub">Search the library, and ask for what isn't in it</div>
+    </div>
+    <a class="btn secondary" href="{{ url_for('index') }}">← Back to status</a>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <form method="GET" action="{{ url_for('search') }}" class="search-form">
+    <input type="search" name="q" value="{{ query }}" placeholder="Film or series title…"
+           autocomplete="off" autofocus maxlength="100" aria-label="Search the library">
+    <button type="submit" class="btn">Search</button>
+  </form>
+
+  <div id="search-results" data-live-url="{{ url_for('search_live') }}"
+       data-min-length="{{ min_query_length }}">
+    {% include 'sections/_search_results.html' %}
+  </div>
+</div>
+<script src="{{ asset_url('js/search_live.js') }}"></script>
+{% endblock %}

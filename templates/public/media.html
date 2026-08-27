@@ -1,0 +1,7 @@
+{% extends "public_base.html" %}
+{% block title %}Media activity — {{ site_name }}{% endblock %}
+{% block content %}
+{# Reuses the section partial the main page used to include, so the block's own
+   "is there anything to show" guard still applies and there is one copy of the markup. #}
+{% include 'sections/media.html' %}
+{% endblock %}

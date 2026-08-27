@@ -1,0 +1,98 @@
+{% extends "admin_base.html" %}
+{% block title %}Notification channels — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Notification channels</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  Where this portal sends you a push when something happens: an incident opening,
+  updating or resolving, a maintenance window starting or ending, and a disk crossing
+  the low-space threshold. Every channel is optional and they all fire together — a
+  channel that fails is logged and skipped, and never holds up the check that
+  triggered it.
+</p>
+
+<div class="form-panel">
+  <h2 style="margin-top: 0;">Channels</h2>
+  <div class="admin-table" style="font-size: 13px;">
+    <table>
+      <thead>
+        <tr><th style="width: 160px;">Channel</th><th style="width: 130px;">Status</th><th>Set with</th></tr>
+      </thead>
+      <tbody>
+        {% for c in channels %}
+        <tr>
+          <td><strong>{{ c.label }}</strong>
+            <div style="color: var(--text-dim); margin-top: 3px;">{{ c.description }}</div>
+          </td>
+          <td>
+            {% if c.configured %}
+              <span class="led ok"></span> configured
+            {% else %}
+              <span class="led maint"></span> <span style="color: var(--text-faint);">not set up</span>
+            {% endif %}
+          </td>
+          <td><code>{{ c.env_var }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="field-hint" style="margin-top: 12px;">
+    These are set in <code>.env</code> and need a restart, not an admin-panel field: a
+    webhook URL, an ntfy topic and an SMTP password are all credentials, and this app
+    keeps credentials out of the database and out of the browser. See
+    <code>.env.example</code> for the full list with comments.
+  </p>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Email recipients</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    Who gets incident, maintenance and low-disk alerts by email. Comma-separated for
+    several, the same format as the Discord ID lists elsewhere. Unlike the rest of the
+    SMTP settings this lives in the database, so changing it takes effect immediately and
+    needs no restart — the host, username and password stay in <code>.env</code> because
+    they're credentials.
+  </p>
+  {% if not email_host_configured %}
+    <p class="field-hint">
+      No SMTP host is configured yet (<code>PORTAL_SMTP_HOST</code>), so nothing will be
+      sent whatever you put here.
+    </p>
+  {% endif %}
+  {% if legacy_env_recipients %}
+    <p class="field-hint">
+      Currently coming from <code>PORTAL_SMTP_TO</code> in <code>.env</code>. Saving here
+      takes over from it — you can then remove that variable.
+    </p>
+  {% endif %}
+  <form method="POST">
+    <div class="field">
+      <label for="recipients">Recipients</label>
+      <textarea id="recipients" name="recipients" rows="2"
+                placeholder="you@example.com, someone-else@example.com">{{ recipients }}</textarea>
+      <div class="field-hint">Leave blank to send no email alerts at all.</div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save recipients</button>
+    </div>
+  </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Send a test</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    Sends a real notification through the same code path a genuine incident alert uses —
+    so this checks the whole chain (URL, topic, credentials, permissions), not just
+    whether a setting is filled in. Delivery is fire-and-forget, so the portal can't tell
+    you whether it arrived: go and look at the channel.
+  </p>
+  <form method="POST" action="{{ url_for('admin_notifications_test') }}">
+    <button type="submit" class="btn secondary" {{ 'disabled' if not any_configured }}>Send test notification</button>
+    {% if not any_configured %}
+    <span style="color: var(--text-faint); font-size: 12px; margin-left: 8px;">Set up a channel above first.</span>
+    {% endif %}
+  </form>
+</div>
+{% endblock %}

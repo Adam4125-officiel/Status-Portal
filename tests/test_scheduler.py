@@ -339,3 +339,42 @@ def test_start_launches_a_daemon_thread_when_tasks_exist(registry, monkeypatch):
     assert ran.wait(5), "start() did not actually run the scheduler loop"
     thread.join(5)
     assert thread.is_alive() is False
+
+
+# ---------------------------------------------------------------------------
+# Read-only background loops (the recurring jobs that deliberately aren't tasks)
+# ---------------------------------------------------------------------------
+def test_register_loop_reads_liveness_at_render_time_not_registration_time():
+    """A thread that has died since startup has to show as dead. Registering a value
+    instead of a callable would freeze whatever was true the moment the module was
+    imported, which is always "alive"."""
+    alive = {"value": True}
+    scheduler.register_loop("test_loop", "Test loop", "A loop.", 30, "PORTAL_X",
+                             lambda: alive["value"])
+    try:
+        assert scheduler.loop_view(scheduler._loops["test_loop"])["alive"] is True
+        alive["value"] = False
+        assert scheduler.loop_view(scheduler._loops["test_loop"])["alive"] is False
+    finally:
+        del scheduler._loops["test_loop"]
+
+
+def test_a_loop_whose_liveness_check_raises_still_renders():
+    """Reading liveness must never break the page that reports it - an unknown answer
+    is reported as unknown, not as a 500."""
+    def boom():
+        raise RuntimeError("no")
+    scheduler.register_loop("test_boom", "Boom", "A loop.", 30, "PORTAL_X", boom)
+    try:
+        assert scheduler.loop_view(scheduler._loops["test_boom"])["alive"] is None
+    finally:
+        del scheduler._loops["test_boom"]
+
+
+def test_the_three_real_background_loops_are_all_registered():
+    """/admin/tasks is meant to be the complete answer to "what runs on a timer". The
+    three loops that aren't tasks (see scheduler.BackgroundLoop) have to be listed
+    there, or the page silently answers two thirds of the question."""
+    import app  # noqa: F401 - importing is what registers them
+    names = {loop["name"] for loop in scheduler.list_loop_views()}
+    assert {"health_checks", "resource_polling", "discord_bot_refresh"} <= names

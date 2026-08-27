@@ -690,3 +690,69 @@ def test_the_update_source_is_hardcoded_to_this_repository():
     assert updater.RELEASES_API_URL.startswith("https://api.github.com/repos/")
     source = open(os.path.join(os.path.dirname(__file__), "..", "updater.py")).read()
     assert "verify=False" not in source
+
+
+# ---------------------------------------------------------------------------
+# Release notes (the changelog shown on /admin/about)
+# ---------------------------------------------------------------------------
+def _release(tag, body="notes", prerelease=False):
+    return {"tag_name": tag, "name": tag, "prerelease": prerelease, "draft": False,
+            "published_at": "2026-08-01T00:00:00Z", "body": body,
+            "html_url": f"https://example/{tag}", "assets": [], "zipball_url": None}
+
+
+def test_release_notes_cover_every_version_between_current_and_latest(monkeypatch):
+    """The point of showing notes at all: if several releases have accumulated, the
+    admin needs what changed in each, not only in the newest."""
+    releases = [_release("v1.8.0"), _release("v1.7.1"), _release("v1.7.0"), _release("v1.6.0")]
+    monkeypatch.setattr(updater, "fetch_releases", lambda channel=None:
+                        [updater._normalise_release(r, "stable") for r in releases])
+    monkeypatch.setattr(updater, "current_version", lambda: "1.7.0")
+    result = updater.check_for_update("stable")
+    assert [r["version"] for r in result["release_notes"]] == ["1.8.0", "1.7.1"]
+    assert result["release_notes_omitted"] == 0
+
+
+def test_release_notes_include_the_version_being_run(monkeypatch):
+    """"Should I take this?" is much easier to answer with the notes for what you're
+    already on sitting next to the notes for what's on offer."""
+    releases = [_release("v1.8.0"), _release("v1.7.0", body="what 1.7.0 changed")]
+    monkeypatch.setattr(updater, "fetch_releases", lambda channel=None:
+                        [updater._normalise_release(r, "stable") for r in releases])
+    monkeypatch.setattr(updater, "current_version", lambda: "1.7.0")
+    result = updater.check_for_update("stable")
+    assert result["current_notes"]["body"] == "what 1.7.0 changed"
+
+
+def test_release_notes_are_capped_and_report_what_was_omitted(monkeypatch):
+    """A portal left un-updated for a very long time must not render - or cache - a
+    page of unbounded length."""
+    releases = [_release(f"v1.{n}.0") for n in range(40, 0, -1)]
+    monkeypatch.setattr(updater, "fetch_releases", lambda channel=None:
+                        [updater._normalise_release(r, "stable") for r in releases])
+    monkeypatch.setattr(updater, "current_version", lambda: "1.0.0")
+    result = updater.check_for_update("stable")
+    assert len(result["release_notes"]) == updater.MAX_RELEASE_NOTES
+    # All 40 are newer than 1.0.0, so everything past the cap is reported as omitted
+    # rather than silently dropped.
+    assert result["release_notes_omitted"] == len(releases) - updater.MAX_RELEASE_NOTES
+
+
+def test_releases_are_ordered_by_version_not_publish_date(monkeypatch):
+    """Same rule fetch_latest_release() has always followed, now applied to the whole
+    list: republishing an old release must not reorder the changelog."""
+    releases = [_release("v1.7.0"), _release("v1.9.0"), _release("v1.8.0")]
+    monkeypatch.setattr(updater.requests, "get",
+                        lambda *a, **k: FakeResponse(json_data=releases))
+    assert [r["version"] for r in updater.fetch_releases("stable")] == ["1.9.0", "1.8.0", "1.7.0"]
+
+
+def test_a_failed_check_still_has_empty_note_fields(monkeypatch):
+    """The About page reads these unconditionally - a network failure must degrade to
+    "couldn't check", not to a template error."""
+    def boom(channel=None):
+        raise updater.UpdateError("no network")
+    monkeypatch.setattr(updater, "fetch_releases", boom)
+    result = updater.check_for_update("stable")
+    assert result["ok"] is False
+    assert result["release_notes"] == [] and result["current_notes"] is None

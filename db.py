@@ -32,6 +32,95 @@ def backup_to_file(dest_path):
     dest.close()
 
 
+# ---------------------------------------------------------------------------
+# Restoring the database from a backup (see app.py's /admin/about/restore-db)
+# ---------------------------------------------------------------------------
+# Every SQLite file starts with this exact 16-byte string. Checked first because it
+# rejects the overwhelmingly common mistake (a zip of the wrong thing, a text file
+# renamed) instantly and without handing the bytes to SQLite at all.
+SQLITE_HEADER = b"SQLite format 3\x00"
+
+# Tables a file must contain before this app will accept it as *its own* backup. The
+# header and an integrity check together only prove "a valid SQLite database" - which
+# a Jellyfin library, a browser cookie store or an *Arr database all also are, and
+# restoring one of those would silently wipe the portal and leave it unable to start.
+RESTORE_REQUIRED_TABLES = ("services", "settings", "incidents", "maintenance_windows")
+
+
+def validate_backup_file(path):
+    """Returns None if `path` is a well-formed SQLite database that looks like this
+    app's, otherwise a string explaining why not.
+
+    Deliberately returns a reason rather than raising: the caller is a form handler
+    whose entire job is to tell the admin what was wrong with their file, and the
+    difference between "that isn't a database" and "that's a database, but not this
+    app's" is exactly what they need to hear.
+
+    Runs entirely against a *temporary copy*. Nothing here touches the live database,
+    so a file that fails any check has cost nothing."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(len(SQLITE_HEADER))
+    except OSError as e:
+        return f"Could not read the uploaded file: {e}"
+    if header != SQLITE_HEADER:
+        return "That file isn't a SQLite database (its header doesn't match)."
+
+    conn = None
+    try:
+        # Read-only, and via a URI so SQLite cannot create or modify anything even if
+        # the path is wrong - a validation step must never have side effects.
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        if not result or result[0] != "ok":
+            detail = result[0] if result else "no result"
+            return f"That database failed SQLite's integrity check ({detail})."
+        names = {row[0] for row in
+                 conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    except sqlite3.DatabaseError as e:
+        return f"That file couldn't be opened as a database: {e}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    missing = [t for t in RESTORE_REQUIRED_TABLES if t not in names]
+    if missing:
+        return ("That's a valid SQLite database, but it isn't a Status Portal backup - "
+                f"it has no {', '.join(missing)} table(s).")
+    return None
+
+
+def restore_from_file(src_path):
+    """Replaces the live database with `src_path`. Assumes it has already been
+    validated - this function does the dangerous part, not the deciding.
+
+    The WAL sidecars are the subtle bit. The database runs in WAL mode, so
+    `portal.db-wal` holds committed pages belonging to the *old* database; leaving it
+    in place next to a *new* main file would let SQLite replay one file's journal into
+    another, which is a corrupt database rather than a failed restore. So: checkpoint
+    the live database to fold its WAL back into the main file, replace the main file,
+    then delete both sidecars.
+
+    os.replace() is atomic on both platforms, so a crash mid-restore leaves either the
+    old database or the new one - never half of either."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except sqlite3.DatabaseError:
+        # A live database too broken to checkpoint is precisely when someone is
+        # reaching for a restore. Pressing on is correct: the sidecars are removed
+        # below either way, and the file is about to be replaced wholesale.
+        _logger.warning("Could not checkpoint the database before restoring it", exc_info=True)
+
+    os.replace(src_path, DB_PATH)
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(DB_PATH + suffix)
+        except FileNotFoundError:
+            pass
+
+
 def _ensure_column(conn, table, column, ddl):
     """Adds `column` to `table` if an existing database predates it - CREATE TABLE IF
     NOT EXISTS only helps for brand-new databases; a table that already exists never
@@ -313,6 +402,31 @@ def init_db():
     # when a user disappears from Jellyfin - if the account comes back (or the sync
     # was simply wrong for a poll), their settings are still here.
     c.execute("""
+        CREATE TABLE IF NOT EXISTS seerr_contacts (
+            jellyfin_user_id TEXT PRIMARY KEY,
+            seerr_user_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            discord_id TEXT NOT NULL DEFAULT '',
+            synced_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notification_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            event TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            sent_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
             user_id TEXT PRIMARY KEY,
             theme TEXT NOT NULL DEFAULT 'auto',   -- auto | dark | light
@@ -351,6 +465,55 @@ def init_db():
     # Jellyfin-backed auth). Stored as the username, not the user id: it's shown to
     # the admin, and it has to stay readable for a user who was later removed from
     # Jellyfin entirely.
+    # qBittorrent authenticates with a username/password login rather than an API key,
+    # so it needs its own two fields. Every other integration leaves them blank.
+    # Per-user notification settings. On user_preferences rather than jellyfin_users
+    # because that table is rewritten wholesale by every sync - anything user-owned put
+    # there is silently wiped within the hour.
+    _ensure_column(conn, "user_preferences", "notify_email", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "user_preferences", "notify_discord_id", "TEXT NOT NULL DEFAULT ''")
+    # "Things about my own reports" defaults ON: it's a reply to something the person
+    # started, and almost always wanted. "Anything about services I use" defaults OFF:
+    # nobody wants a message for every maintenance window on every service.
+    _ensure_column(conn, "user_preferences", "notify_own_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_service_events", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_requests", "INTEGER NOT NULL DEFAULT 1")
+    # The three columns above are now legacy - kept (nothing is ever dropped here) but
+    # read by nothing, replaced by one column per channel x event below, so a person can
+    # ask for something by email without also getting it as a Discord DM (or vice
+    # versa). Same defaults per event as the legacy columns had; the new
+    # notify_discord_seerr_events category has no predecessor and is Discord-only.
+    _new_pref_columns_existed = "notify_email_reports" in {
+        row[1] for row in conn.execute("PRAGMA table_info(user_preferences)").fetchall()}
+    _ensure_column(conn, "user_preferences", "notify_email_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_email_requests", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_email_maintenance", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_discord_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_discord_requests", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_discord_maintenance", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_discord_seerr_events", "INTEGER NOT NULL DEFAULT 1")
+    if not _new_pref_columns_existed:
+        # One-time: carry each existing user's combined choice into both of its new
+        # per-channel columns, so splitting the setting doesn't silently reset anyone's
+        # existing choice. Guarded on the columns not existing yet (checked above,
+        # before _ensure_column added them) rather than on the legacy columns' current
+        # values, so this can never re-fire and re-overwrite a later, deliberate change
+        # to one of the new columns on a subsequent restart.
+        conn.execute("UPDATE user_preferences SET notify_email_reports=notify_own_reports, "
+                      "notify_discord_reports=notify_own_reports")
+        conn.execute("UPDATE user_preferences SET notify_email_requests=notify_requests, "
+                      "notify_discord_requests=notify_requests")
+        conn.execute("UPDATE user_preferences SET notify_email_maintenance=notify_service_events, "
+                      "notify_discord_maintenance=notify_service_events")
+        conn.commit()
+    # The linked Seerr account id, only ever set from a real Jellyfin<->Seerr link -
+    # never guessed from a matching email or username. Empty means "not linked", which
+    # is the fail-closed state.
+    _ensure_column(conn, "user_preferences", "seerr_user_id", "TEXT NOT NULL DEFAULT ''")
+    # "Don't ask me for contact details again." Set by skipping the post-sign-in prompt.
+    _ensure_column(conn, "user_preferences", "contact_prompt_dismissed", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
     # Whether this portal lets the user sign in, independently of whether Jellyfin
     # does. On by default: users appear here by being synced from Jellyfin, and
@@ -434,6 +597,10 @@ def init_db():
         # visit by a signed-in user.
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_reporter ON problem_reports (reporter_user_id)",
         "CREATE INDEX IF NOT EXISTS idx_report_messages_report ON report_messages (report_id)",
+        # The drain query is "unsent, oldest first", run every couple of minutes by the
+        # delivery task - covered so it stays an index scan as the table grows.
+        "CREATE INDEX IF NOT EXISTS idx_notification_queue_pending "
+        "ON notification_queue (sent_at, created_at)",
     ):
         conn.execute(ddl)
     conn.commit()
@@ -968,11 +1135,12 @@ def get_integration(iid):
 def create_integration(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id, show_on_public, auto_incident)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO integrations (name, kind, base_url, api_key, enabled, service_id,
+                                  show_on_public, auto_incident, username, password)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data.get("api_key", ""),
           int(data.get("enabled", 1)), data.get("service_id") or None, int(data.get("show_on_public", 0)),
-          int(data.get("auto_incident", 0))))
+          int(data.get("auto_incident", 0)), data.get("username", ""), data.get("password", "")))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -984,20 +1152,21 @@ def update_integration(iid, data):
     service_id = data.get("service_id") or None
     show_on_public = int(data.get("show_on_public", 0))
     auto_incident = int(data.get("auto_incident", 0))
+    conn.execute("""
+        UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?,
+        show_on_public=?, auto_incident=?, username=? WHERE id=?
+    """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
+          int(data.get("enabled", 1)), service_id, show_on_public, auto_incident,
+          data.get("username", ""), iid))
+    # Blank secret on the edit form means "keep the existing one" - never overwrite a
+    # stored credential with an empty string just because the admin left the field
+    # blank. Applies to the qBittorrent password for exactly the same reason it always
+    # has to the API key; forgetting it there would silently break the integration on
+    # every unrelated edit (renaming it, changing its URL).
     if data.get("api_key"):
-        conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, api_key=?, enabled=?, service_id=?,
-            show_on_public=?, auto_incident=? WHERE id=?
-        """, (data["name"], data["kind"], data["base_url"].rstrip("/"), data["api_key"],
-              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
-    else:
-        # Blank api_key on the edit form means "keep the existing one" - never overwrite
-        # a stored key with an empty string just because the admin left the field blank.
-        conn.execute("""
-            UPDATE integrations SET name=?, kind=?, base_url=?, enabled=?, service_id=?,
-            show_on_public=?, auto_incident=? WHERE id=?
-        """, (data["name"], data["kind"], data["base_url"].rstrip("/"),
-              int(data.get("enabled", 1)), service_id, show_on_public, auto_incident, iid))
+        conn.execute("UPDATE integrations SET api_key=? WHERE id=?", (data["api_key"], iid))
+    if data.get("password"):
+        conn.execute("UPDATE integrations SET password=? WHERE id=?", (data["password"], iid))
     conn.commit()
     conn.close()
 
@@ -1720,13 +1889,37 @@ def mark_replies_seen(user_id):
 
 # ---------- Per-user preferences (user-owned, unlike jellyfin_users) ----------
 USER_THEMES = ("auto", "dark", "light")
-DEFAULT_USER_PREFERENCES = {"theme": "auto", "contact": ""}
+# Must list every column set_user_preferences() writes, and with the same default the
+# schema declares. get_user_preferences() seeds from this for a user who has never
+# saved anything, and set_user_preferences() reads the *current* values to fill in the
+# fields a caller didn't name - so a key missing here becomes None, then 0, and an
+# "on by default" preference is silently switched off the first time the user saves
+# anything at all.
+DEFAULT_USER_PREFERENCES = {
+    "theme": "auto",
+    "contact": "",
+    "notify_email": "",
+    "notify_discord_id": "",
+    "notify_email_reports": True,
+    "notify_email_requests": True,
+    "notify_email_maintenance": False,
+    "notify_discord_reports": True,
+    "notify_discord_requests": True,
+    "notify_discord_maintenance": False,
+    "notify_discord_seerr_events": True,
+    "seerr_user_id": "",
+    "contact_prompt_dismissed": False,
+}
 
 
 def get_user_preferences(user_id):
     """Always returns a complete dict, so callers never branch on "has this user ever
     saved anything". An unrecognised stored theme falls back to the default rather
-    than being handed to a template that will render it into an HTML attribute."""
+    than being handed to a template that will render it into an HTML attribute.
+
+    notify_own_reports/notify_service_events/notify_requests are legacy columns (still
+    in the schema, never dropped, backfilled into the per-channel columns below by a
+    one-time migration in init_db()) and are deliberately not read here any more."""
     prefs = dict(DEFAULT_USER_PREFERENCES)
     if not user_id:
         return prefs
@@ -1736,22 +1929,264 @@ def get_user_preferences(user_id):
     if row:
         prefs["theme"] = row["theme"] if row["theme"] in USER_THEMES else "auto"
         prefs["contact"] = row["contact"] or ""
+        prefs["notify_email"] = row["notify_email"] or ""
+        prefs["notify_discord_id"] = row["notify_discord_id"] or ""
+        prefs["notify_email_reports"] = bool(row["notify_email_reports"])
+        prefs["notify_email_requests"] = bool(row["notify_email_requests"])
+        prefs["notify_email_maintenance"] = bool(row["notify_email_maintenance"])
+        prefs["notify_discord_reports"] = bool(row["notify_discord_reports"])
+        prefs["notify_discord_requests"] = bool(row["notify_discord_requests"])
+        prefs["notify_discord_maintenance"] = bool(row["notify_discord_maintenance"])
+        prefs["notify_discord_seerr_events"] = bool(row["notify_discord_seerr_events"])
+        prefs["seerr_user_id"] = row["seerr_user_id"] or ""
+        prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
     return prefs
 
 
-def set_user_preferences(user_id, theme=None, contact=None):
+# Every column set_user_preferences() can write, and how to coerce it. Named fields
+# only: a caller that knows about one setting (the floating theme toggle) must not be
+# able to blank out the others just by not mentioning them - which is exactly what a
+# "write the whole row" helper would do.
+_USER_PREFERENCE_FIELDS = {
+    "notify_email": str,
+    "notify_discord_id": str,
+    "notify_email_reports": lambda v: int(bool(v)),
+    "notify_email_requests": lambda v: int(bool(v)),
+    "notify_email_maintenance": lambda v: int(bool(v)),
+    "notify_discord_reports": lambda v: int(bool(v)),
+    "notify_discord_requests": lambda v: int(bool(v)),
+    "notify_discord_maintenance": lambda v: int(bool(v)),
+    "notify_discord_seerr_events": lambda v: int(bool(v)),
+    "seerr_user_id": str,
+    "contact_prompt_dismissed": lambda v: int(bool(v)),
+}
+
+
+def set_user_preferences(user_id, theme=None, contact=None, **fields):
     """Upsert. Only the named fields are written, so a caller that only knows about
     the theme (the toggle button's endpoint) can't blank out the contact."""
     if not user_id:
         return
+    unknown = set(fields) - set(_USER_PREFERENCE_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown user preference(s): {sorted(unknown)}")
     current = get_user_preferences(user_id)
     theme = theme if theme in USER_THEMES else current["theme"]
     contact = current["contact"] if contact is None else contact
+
+    values = {}
+    for name, coerce in _USER_PREFERENCE_FIELDS.items():
+        raw = fields.get(name, current.get(name))
+        values[name] = coerce(raw if raw is not None else "")
+
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    updates = ", ".join(f"{name}=excluded.{name}" for name in values)
     conn = get_db()
-    conn.execute("""
-        INSERT INTO user_preferences (user_id, theme, contact, updated_at) VALUES (?, ?, ?, ?)
+    conn.execute(f"""
+        INSERT INTO user_preferences (user_id, theme, contact, updated_at, {columns})
+        VALUES (?, ?, ?, ?, {placeholders})
         ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, contact=excluded.contact,
-                                            updated_at=excluded.updated_at
-    """, (user_id, theme, contact, now_iso()))
+                                            updated_at=excluded.updated_at, {updates}
+    """, (user_id, theme, contact, now_iso(), *values.values()))
     conn.commit()
     conn.close()
+
+
+# ---------- Cached Seerr contact details (see user_notify.py) ----------
+# Seerr is the source of truth for a person's email and Discord ID - they enter it once
+# there, and this portal reads it. What's stored here is a *cache*, replaced wholesale on
+# every sync exactly like the Jellyfin user list above, for the same two reasons: the
+# admin page and the delivery task must not have to call Seerr, and a Seerr outage must
+# not stop notifications going to people whose details were already known.
+#
+# Keyed by Jellyfin user id, because that's the only link this app will follow (Seerr's
+# own jellyfinUserId). A Seerr user with no Jellyfin link simply isn't cached - there is
+# no one here to attach them to.
+def replace_seerr_contacts(contacts):
+    """Full replace, in one transaction. Only ever called after a successful fetch, so a
+    failed sync leaves the previous details completely intact."""
+    stamp = now_iso()
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("DELETE FROM seerr_contacts")
+            conn.executemany("""
+                INSERT INTO seerr_contacts (jellyfin_user_id, seerr_user_id, display_name,
+                                             email, discord_id, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [(c["jellyfin_user_id"], str(c["seerr_user_id"]), c.get("display_name", ""),
+                   c.get("email", ""), c.get("discord_id", ""), stamp)
+                  for c in contacts if c.get("jellyfin_user_id")])
+    finally:
+        conn.close()
+
+
+def get_seerr_contact(jellyfin_user_id):
+    if not jellyfin_user_id:
+        return None
+    conn = get_db()
+    row = conn.execute("SELECT * FROM seerr_contacts WHERE jellyfin_user_id=?",
+                        (jellyfin_user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_seerr_contacts():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM seerr_contacts").fetchall()
+    conn.close()
+    return {r["jellyfin_user_id"]: dict(r) for r in rows}
+
+
+def upsert_seerr_contact(jellyfin_user_id, seerr_user_id, email=None, discord_id=None,
+                          display_name=None):
+    """Updates one cached row immediately after a successful write to Seerr, so the new
+    value is usable straight away rather than only after the next sync."""
+    if not jellyfin_user_id:
+        return
+    current = get_seerr_contact(jellyfin_user_id) or {}
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO seerr_contacts (jellyfin_user_id, seerr_user_id, display_name, email,
+                                     discord_id, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jellyfin_user_id) DO UPDATE SET
+            seerr_user_id=excluded.seerr_user_id, display_name=excluded.display_name,
+            email=excluded.email, discord_id=excluded.discord_id, synced_at=excluded.synced_at
+    """, (jellyfin_user_id, str(seerr_user_id),
+          current.get("display_name", "") if display_name is None else display_name,
+          current.get("email", "") if email is None else email,
+          current.get("discord_id", "") if discord_id is None else discord_id,
+          now_iso()))
+    conn.commit()
+    conn.close()
+
+
+def seerr_contacts_synced_at():
+    conn = get_db()
+    row = conn.execute("SELECT MAX(synced_at) AS s FROM seerr_contacts").fetchone()
+    conn.close()
+    return row["s"] if row and row["s"] else None
+
+
+# ---------- Per-user notification queue (see user_notify.py) ----------
+# Outbound delivery never happens in the request that triggered it - the request only
+# writes a row here, and a scheduled task drains it. Same rule every other outbound
+# call in this app follows, and the reason a slow SMTP server can't make an admin's
+# "reply" button hang.
+MAX_NOTIFICATION_ATTEMPTS = 5
+
+
+def enqueue_notification(user_id, event, subject, body):
+    """Queues one notification. Cheap enough to call from a request handler: one INSERT,
+    no network."""
+    if not user_id:
+        return None
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO notification_queue (user_id, event, subject, body, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, event, subject, body, now_iso()))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def pending_notifications(limit=50):
+    """Unsent, oldest first, excluding anything that has already failed too many times -
+    a permanently undeliverable row must not block the queue behind it forever."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM notification_queue
+        WHERE sent_at IS NULL AND attempts < ?
+        ORDER BY created_at LIMIT ?
+    """, (MAX_NOTIFICATION_ATTEMPTS, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_notification_sent(notification_id):
+    conn = get_db()
+    conn.execute("UPDATE notification_queue SET sent_at=?, last_error='' WHERE id=?",
+                  (now_iso(), notification_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_notification_failed(notification_id, error):
+    conn = get_db()
+    conn.execute("UPDATE notification_queue SET attempts=attempts+1, last_error=? WHERE id=?",
+                  (str(error)[:300], notification_id))
+    conn.commit()
+    conn.close()
+
+
+def prune_notification_queue(days=30):
+    """Delivered rows are history, not state. Kept briefly so an admin can see that
+    something went out, then removed - this table would otherwise grow forever like
+    status_history did."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_db()
+    cur = conn.execute("DELETE FROM notification_queue WHERE sent_at IS NOT NULL AND sent_at < ?",
+                        (cutoff,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
+
+
+def recent_notifications(limit=15):
+    """The most recent queue entries, for the admin page - so "did that actually go
+    out?" is answerable without reading the log."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM notification_queue ORDER BY created_at DESC, id DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def notification_queue_summary():
+    """Counts for the admin page: waiting, sent, and given up on."""
+    conn = get_db()
+    row = conn.execute("""
+        SELECT
+          SUM(CASE WHEN sent_at IS NULL AND attempts < ? THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) AS sent,
+          SUM(CASE WHEN sent_at IS NULL AND attempts >= ? THEN 1 ELSE 0 END) AS failed
+        FROM notification_queue
+    """, (MAX_NOTIFICATION_ATTEMPTS, MAX_NOTIFICATION_ATTEMPTS)).fetchone()
+    conn.close()
+    return {"pending": row["pending"] or 0, "sent": row["sent"] or 0, "failed": row["failed"] or 0}
+
+
+def users_opted_into(*fields):
+    """Jellyfin user ids who have switched at least one of `fields` on. Used for the
+    broadcast-style events (maintenance), where the alternative is reading every user's
+    preferences one at a time. Takes several fields (OR'd) because maintenance is now
+    split into notify_email_maintenance/notify_discord_maintenance - someone who wants
+    it via either channel needs to be queued, and deliver() decides per-channel from
+    there. Every name is checked against the same whitelist set_user_preferences() uses,
+    so building the WHERE clause from them carries no injection risk."""
+    unknown = [f for f in fields if f not in _USER_PREFERENCE_FIELDS]
+    if unknown:
+        raise ValueError(f"Unknown user preference(s): {unknown}")
+    conn = get_db()
+    where = " OR ".join(f"{f}=1" for f in fields)
+    rows = conn.execute(f"SELECT user_id FROM user_preferences WHERE {where}").fetchall()
+    conn.close()
+    return [r["user_id"] for r in rows]
+
+
+def user_id_for_seerr_user(seerr_user_id):
+    """The Jellyfin user who has linked this Seerr account, or None. Only ever finds a
+    link that was established from Seerr's own jellyfinUserId - never a guess."""
+    if not seerr_user_id:
+        return None
+    conn = get_db()
+    row = conn.execute("SELECT user_id FROM user_preferences WHERE seerr_user_id=?",
+                        (str(seerr_user_id),)).fetchone()
+    conn.close()
+    return row["user_id"] if row else None

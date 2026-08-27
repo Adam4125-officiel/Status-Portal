@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
@@ -31,11 +31,15 @@ import discord_bot
 import integrations
 import jellyfin_auth
 import logging_setup
+import media_search
 import monitoring
 import notifications
 import scheduler
+import seerr_alerts
 import twofactor
 import updater
+import user_notify
+import version_checks
 
 _logger = logging.getLogger(__name__)
 
@@ -86,7 +90,13 @@ def set_security_headers(response):
         "default-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
+        # image.tmdb.org is the one exception, for search-result posters - same class
+        # of scoped, named-host exception as the two fonts.google* hosts above, not a
+        # general relaxation. Jellyfin-only results (no TMDB poster_path) stay
+        # text-only rather than proxying Jellyfin's own image endpoint through a
+        # request handler, which the no-live-outbound-I/O rule elsewhere exists to
+        # avoid.
+        "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
         "frame-ancestors 'none'"
@@ -108,8 +118,12 @@ def handle_bad_request(e):
 
 @app.errorhandler(413)
 def handle_too_large(e):
+    # request.max_content_length, not the app-wide config value: the database-restore
+    # endpoint raises its own limit for that one request, and quoting 2 MB at someone
+    # whose 30 MB upload was actually allowed would be actively confusing.
+    limit = getattr(request, "max_content_length", None) or app.config["MAX_CONTENT_LENGTH"]
     return render_template("error.html", code=413, message="That file is too large "
-                            f"(max {app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB)."), 413
+                            f"(max {limit // (1024 * 1024)} MB)."), 413
 
 
 @app.errorhandler(500)
@@ -262,6 +276,12 @@ def _inject_admin_badges():
     return {
         "unread_reports_count": db.count_unread_problem_reports() + db.count_unseen_user_messages(),
         "update_available": bool(cached and cached.get("update_available")),
+        # How many *Arr apps the last version check found behind. Reads one stored
+        # setting - never checks anything here, same rule as the update badge above.
+        "arr_updates_count": version_checks.updates_available(),
+        # Requests waiting on the admin to approve them. Also a stored value, never a
+        # live call - and admin-only, which the /admin/ guard above already ensures.
+        "seerr_pending_count": seerr_alerts.pending_count(),
     }
 
 
@@ -300,6 +320,25 @@ def _start_admin_session():
     session.permanent = True
     session["logged_in"] = True
     session["last_seen"] = time.time()
+
+
+# Restoring the database means uploading one, and a real portal.db is far larger than
+# the 2 MB app-wide cap that exists for the logo upload. Flask 3.1 lets that cap be
+# raised for one request instead of for the whole app, which is the difference between
+# "the restore endpoint accepts a database" and "every form on the site, including the
+# public report form, now accepts 64 MB".
+DB_RESTORE_MAX_BYTES = 64 * 1024 * 1024
+
+
+# Registration order matters: Flask runs before_request hooks in the order they were
+# defined, and _check_csrf below reads request.form - which parses the body, and would
+# therefore hit the *old* limit and 413 a perfectly good upload before the view that
+# raises the limit ever runs. This has to be first. (Same class of ordering constraint
+# as _enforce_session_timeout needing to precede _check_csrf; see CLAUDE.md.)
+@app.before_request
+def _allow_large_upload_for_restore():
+    if request.method == "POST" and request.path == "/admin/about/restore-db":
+        request.max_content_length = DB_RESTORE_MAX_BYTES
 
 
 @app.before_request
@@ -373,7 +412,7 @@ def _enforce_user_session():
 
 # POST paths outside /admin/ that still need CSRF protection. /report is
 # conditional rather than listed here - see _csrf_required_for().
-_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme"}
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme", "/search/request"}
 
 
 def _csrf_required_for(path, method):
@@ -464,6 +503,17 @@ def is_first_run():
 # groundwork for the per-content visibility work on the ROADMAP, and is deliberately
 # *not* consulted anywhere in this app today. No password and no Jellyfin access
 # token ever goes in here: the session cookie is signed, not encrypted.
+def _contact_prompt_url_if_needed(user_id):
+    """Where to send someone after signing in: the contact prompt if they have nowhere
+    to be reached and haven't waved it away, otherwise None (carry on as before)."""
+    try:
+        return url_for("user_contact_prompt") if user_notify.needs_contact_details(user_id) else None
+    except Exception:
+        # A prompt is a nicety; it must never be the reason a sign-in fails.
+        _logger.exception("Could not decide whether to prompt for contact details")
+        return None
+
+
 def _start_user_session(user):
     session.permanent = True
     session["portal_user"] = {
@@ -705,6 +755,35 @@ _PUBLIC_RESOURCE_KEYS = ["show_public_cpu", "show_public_memory", "show_public_d
                          "show_public_network", "show_public_gpu",
                          "show_public_vms", "show_public_highload", "show_public_jellyfin_tasks"]
 
+# The Media section's four parts, each independently switchable. All default to OFF:
+# unlike the resource cards, these say something about what is in (or on its way into)
+# the library and who asked for it, which is a different kind of disclosure and has to
+# be opted into rather than appearing the moment an integration is configured.
+_PUBLIC_MEDIA_KEYS = ["show_public_calendar", "show_public_requests",
+                      "show_public_downloads", "show_public_indexers"]
+
+
+def _public_media_visibility():
+    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+            for key in _PUBLIC_MEDIA_KEYS}
+
+
+def _media_requires_login():
+    """Whether the Media section is for signed-in visitors only.
+
+    Defaults to on, and only *means* anything while Jellyfin sign-in is enabled - with
+    no sign-in configured there is no such thing as a signed-in visitor, so enforcing it
+    would make the section unreachable for everyone rather than restricted. Same shape
+    as report_requires_login."""
+    return db.get_setting("media_requires_login", "1") == "1"
+
+
+def _media_visible_to(user):
+    """Whether this viewer may see the Media section at all."""
+    if not jellyfin_auth.is_enabled():
+        return True
+    return bool(user) if _media_requires_login() else True
+
 
 def _public_resource_visibility():
     return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
@@ -750,14 +829,18 @@ def _service_defaults():
 # templates/sections/<key>.html partial, which owns its own "is there anything to
 # show" guard - index() doesn't filter this list by content, it's included
 # unconditionally in whatever order is configured, same as today's fixed order.
+# The main page's own content blocks, in the order an admin can rearrange them.
+#
+# Deliberately short. The public page used to carry nine of these in one scroll -
+# announcements, services, incidents, info, resources, VMs, Jellyfin activity, media
+# and search - which buried the thing almost every visitor actually came for ("is it
+# working?") under everything else. What's left here is that question; the rest moved
+# to pages of their own (PUBLIC_PAGES below) and appears here only as a one-line
+# summary linking through.
 PUBLIC_SECTIONS = [
     ("announcements", "Announcements"),
     ("services", "Services"),
     ("incidents", "Incidents & maintenance"),
-    ("info", "Practical info"),
-    ("resources", "Server resources"),
-    ("vms", "Virtual machines"),
-    ("jellyfin_activity", "Jellyfin activity"),
 ]
 _DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
 
@@ -850,6 +933,245 @@ def _group_services(services):
     return groups
 
 
+# ---------------------------------------------------------------------------
+# The public sub-pages
+# ---------------------------------------------------------------------------
+# Each of these was a block on the main page and is now a page of its own. The context
+# builder for each is shared between its page *and* the main page's summary line, which
+# is the point: the visibility rules (show_public_*, media_requires_login) are applied
+# once, in one place, so a sub-page cannot become a way around a setting that hides the
+# corresponding block. A page whose builder reports nothing to show is not linked and
+# 404s if requested directly - the same answer a visitor would get if it didn't exist,
+# rather than an empty page confirming the feature is there but switched off.
+def _request_snapshot():
+    """One resource snapshot per request, memoised on Flask's `g`.
+
+    The main page can want it twice - once for the high-load badge and once for the
+    "Server resources" summary line - and a snapshot is the single most expensive thing
+    a public page does (it reads every disk, and falls back to a blocking CPU sample
+    when monitoring's cache is stale). Taking it twice for one page is pure waste."""
+    if not hasattr(g, "_resource_snapshot"):
+        g._resource_snapshot = monitoring.get_resource_snapshot()
+    return g._resource_snapshot
+
+
+def _resources_context():
+    visible = _public_resource_visibility()
+    show_any = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
+    if not show_any:
+        return None
+    return {"visible": visible, "snapshot": _request_snapshot(), "show_any_resource": show_any}
+
+
+def _vms_context():
+    visible = _public_resource_visibility()
+    if not visible["vms"]:
+        return None
+    vms = monitoring.get_cached_vm_snapshot()
+    return {"visible": visible, "vms": vms}
+
+
+def _activity_context():
+    visible = _public_resource_visibility()
+    if not visible["jellyfin_tasks"]:
+        return None
+    activity = integrations.get_cached_jellyfin_activity()
+    # "Nothing is happening" is a real answer and the page has to be able to say it, so
+    # this returns a context even when both lists are empty - unlike the other builders,
+    # where empty means "not configured" and the page shouldn't exist at all.
+    return {"visible": visible, "jellyfin_activity": activity,
+            "activity_idle": not activity.get("running_tasks") and not activity.get("transcoding")}
+
+
+def _media_context():
+    media_visible = _public_media_visibility()
+    if not any(media_visible.values()) or not _media_visible_to(current_user()):
+        return None
+    return {"media": integrations.get_cached_media(), "media_visible": media_visible}
+
+
+def _info_context():
+    info = db.get_info_page()
+    if not (info or "").strip():
+        return None
+    return {"info": info}
+
+
+def _high_load():
+    """The high-load badge, which stays on the main page even though the resource cards
+    moved: it answers "is something wrong right now", which is the main page's job. Its
+    toggle is separate from the cards', so it needs its own snapshot when they're off."""
+    visible = _public_resource_visibility()
+    if not visible["highload"]:
+        return {"active": False, "reasons": []}
+    snapshot = _request_snapshot()
+    return integrations.evaluate_high_load(snapshot) if snapshot else {"active": False, "reasons": []}
+
+
+# Whether a page exists for this viewer, answered *without* building its content.
+#
+# This split is load-bearing for performance, not tidiness. The nav appears on every
+# public page, and building it by calling each page's context builder meant every page
+# load ran a full resource snapshot - 200ms+, and worse when monitoring's CPU cache is
+# stale and get_resource_snapshot() falls back to a blocking sample. Navigating to
+# Jellyfin activity was paying for a disk and CPU poll it never displays, which is
+# what made those pages look like they'd hung.
+#
+# Each predicate reads settings only. They must stay cheap: anything that talks to the
+# filesystem, the network or psutil belongs in the context builder, not here.
+def _resources_available():
+    visible = _public_resource_visibility()
+    return any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
+
+
+def _vms_available():
+    return _public_resource_visibility()["vms"]
+
+
+def _activity_available():
+    return _public_resource_visibility()["jellyfin_tasks"]
+
+
+def _media_available():
+    return any(_public_media_visibility().values()) and _media_visible_to(current_user())
+
+
+def _info_available():
+    return bool((db.get_info_page() or "").strip())
+
+
+def _resources_summary(ctx):
+    snapshot = ctx.get("snapshot") or {}
+    bits = []
+    if ctx["visible"].get("cpu") and snapshot.get("cpu_percent") is not None:
+        bits.append(f"CPU {snapshot['cpu_percent']}%")
+    if ctx["visible"].get("memory") and (snapshot.get("memory") or {}).get("percent") is not None:
+        bits.append(f"memory {snapshot['memory']['percent']}%")
+    if ctx["visible"].get("disks") and snapshot.get("disks"):
+        bits.append(f"{len(snapshot['disks'])} disk(s)")
+    return " · ".join(bits)
+
+
+def _vms_summary(ctx):
+    vms = ctx.get("vms") or []
+    if not vms:
+        return ""
+    running = sum(1 for vm in vms if (vm.get("state") or "").lower() == "running")
+    return f"{running} of {len(vms)} running"
+
+
+def _activity_summary(ctx):
+    activity = ctx.get("jellyfin_activity") or {}
+    bits = []
+    if activity.get("transcoding"):
+        bits.append(f"{activity['transcoding']} transcoding")
+    tasks = activity.get("running_tasks") or []
+    if tasks:
+        bits.append(f"{len(tasks)} task(s) running")
+    return " · ".join(bits) if bits else "Idle right now"
+
+
+def _media_summary(ctx):
+    media, visible = ctx["media"], ctx["media_visible"]
+    bits = []
+    if visible.get("downloads") and media.get("downloads"):
+        bits.append(f"{len(media['downloads'])} downloading")
+    if visible.get("calendar") and media.get("calendar"):
+        bits.append(f"{len(media['calendar'])} coming soon")
+    if visible.get("requests") and media.get("requests"):
+        bits.append(f"{len(media['requests'])} request(s)")
+    return " · ".join(bits)
+
+
+# key -> (label, endpoint, availability predicate, context builder, summary builder).
+# The summary is the line shown on the main page; returning a falsy summary still links
+# the page, it just has nothing to say about it yet.
+PUBLIC_PAGES = [
+    ("resources", "Server resources", "public_resources", _resources_available,
+     _resources_context, _resources_summary),
+    ("vms", "Virtual machines", "public_vms", _vms_available,
+     _vms_context, _vms_summary),
+    ("activity", "Jellyfin activity", "public_activity", _activity_available,
+     _activity_context, _activity_summary),
+    ("media", "Media activity", "public_media", _media_available,
+     _media_context, _media_summary),
+    ("info", "Practical info", "public_info", _info_available,
+     _info_context, lambda ctx: "How to connect, and what to do when something's wrong"),
+]
+
+
+def _public_page_links(include_summaries=False):
+    """Which sub-pages a visitor can see right now, for the nav and the summaries.
+
+    Availability comes from the cheap predicate; the (possibly expensive) context is
+    built only when a summary is actually wanted, i.e. on the main page. "Is it linked"
+    and "does it render" still agree, because the page route applies the same predicate
+    before rendering - a link to a page that would 404 is worse than no link."""
+    links = []
+    for key, label, endpoint, available, build_context, summarise in PUBLIC_PAGES:
+        if not available():
+            continue
+        entry = {"key": key, "label": label, "url": url_for(endpoint)}
+        if include_summaries:
+            try:
+                context = build_context()
+                entry["summary"] = (summarise(context) or "") if context else ""
+            except Exception:
+                # A summary is decoration; it must never be the reason a page 500s.
+                _logger.exception("Could not summarise public page '%s'", key)
+                entry["summary"] = ""
+        links.append(entry)
+    return links
+
+
+def _render_public_page(key):
+    """Shared body of every sub-page route."""
+    entry = next((p for p in PUBLIC_PAGES if p[0] == key), None)
+    if entry is None:
+        abort(404)
+    _, label, _, available, build_context, _ = entry
+    context = build_context() if available() else None
+    if context is None:
+        # Switched off, or not visible to this viewer. 404 rather than an empty page:
+        # "this doesn't exist here" is the honest answer, and an empty page would
+        # confirm the feature exists and is merely hidden.
+        abort(404)
+    return render_template(f"public/{key}.html", page_label=label, active_page=key,
+                            site_name=db.get_setting("site_name", "Server"),
+                            nav_links=_public_page_links(),
+                            # The nav is shared, so everything it renders has to be
+                            # passed everywhere it appears - without this the Search tab
+                            # existed only on the page that happened to compute it.
+                            search_enabled=bool(current_user()) and media_search.is_available(),
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            repo_url=updater.REPO_URL, **context)
+
+
+@app.route("/resources")
+def public_resources():
+    return _render_public_page("resources")
+
+
+@app.route("/vms")
+def public_vms():
+    return _render_public_page("vms")
+
+
+@app.route("/activity")
+def public_activity():
+    return _render_public_page("activity")
+
+
+@app.route("/media")
+def public_media():
+    return _render_public_page("media")
+
+
+@app.route("/info")
+def public_info():
+    return _render_public_page("info")
+
+
 @app.route("/")
 def index():
     services = _attach_integration_status(_enrich_services(db.list_services()))
@@ -861,25 +1183,23 @@ def index():
     # the filtered list is already empty, so this adds no query in the common case.
     incidents_hidden = not incidents and bool(db.list_incidents(limit=1))
     maintenance_windows = db.list_public_maintenance_windows()
-    info = db.get_info_page()
     overall = compute_overall_status(services)
     site_name = db.get_setting("site_name", "Server")
-    visible = _public_resource_visibility()
-    show_any_resource = any(visible[k] for k in ("cpu", "memory", "disks", "network", "gpu"))
-    # High-load detection needs a live snapshot even if none of the resource cards
-    # themselves are set to display - the badge is a separate toggle from them.
-    snapshot = monitoring.get_resource_snapshot() if (show_any_resource or visible["highload"]) else None
-    vms = monitoring.get_cached_vm_snapshot() if visible["vms"] else []
-    high_load = integrations.evaluate_high_load(snapshot) if (visible["highload"] and snapshot) \
-        else {"active": False, "reasons": []}
-    jellyfin_activity = integrations.get_cached_jellyfin_activity() if visible["jellyfin_tasks"] else None
+    # Signed-in visitors only, and only when there's something to search. Both halves
+    # matter: without sign-in the box would expose the whole library to anyone who can
+    # load the page, and without an integration it would be a box that does nothing.
+    search_enabled = bool(current_user()) and media_search.is_available()
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
-                            maintenance_windows=maintenance_windows, info=info, overall=overall,
+                            maintenance_windows=maintenance_windows, overall=overall,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            resource_refresh_seconds=config.RESOURCE_REFRESH_SECONDS,
-                            site_name=site_name, visible=visible, show_any_resource=show_any_resource,
-                            snapshot=snapshot, vms=vms, high_load=high_load, jellyfin_activity=jellyfin_activity,
+                            site_name=site_name,
+                            high_load=_high_load(),
+                            # Both the nav and the one-line summaries come from the same
+                            # builders the pages themselves use.
+                            nav_links=_public_page_links(),
+                            page_summaries=_public_page_links(include_summaries=True),
+                            search_enabled=search_enabled, active_page="status",
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -1190,6 +1510,15 @@ def admin_report_reply(rid):
         flash("Reply saved — but this report was submitted anonymously, so nobody can "
               "see it. Use the contact details if there are any.", "error")
     else:
+        # Queued, not sent: this is one INSERT and the delivery task does the rest, so
+        # a slow SMTP server can never make this button hang. A no-op unless the admin
+        # has switched per-user notifications on and the reporter has somewhere to be
+        # reached, which is why the flash below doesn't promise anything about it.
+        user_notify.notify_user(
+            report["reporter_user_id"], "report_reply",
+            "Your problem report got a reply",
+            f'The admin replied to the report you filed:\n\n"{report["message"][:200]}"\n\n'
+            "Open your account page on the status portal to read it and reply.")
         flash(f"Reply sent. {report['reporter_user']} will see it on their account page.",
               "success")
     return redirect(url_for("admin_reports"))
@@ -1224,6 +1553,11 @@ def admin_report_create_incident(rid):
     # Remembered so the reporter's account page can show what became of their report,
     # and keep showing that incident's current status as it progresses.
     db.set_problem_report_incident(rid, iid)
+    user_notify.notify_user(
+        report["reporter_user_id"], "report_incident",
+        "Your report is now a tracked incident",
+        f'The problem you reported has been turned into an incident: "{title}"\n\n'
+        "You can follow its progress on the status page.")
     flash("Incident created from report.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -1269,7 +1603,11 @@ def user_login():
             _register_user_login_success()
             _start_user_session(result["user"])
             _logger.info("Jellyfin user '%s' signed in", result["user"]["name"])
-            return redirect(next_url or url_for("index"))
+            # Asked once, and only when there's genuinely nowhere to reach them. An
+            # explicit ?next= still wins - somebody who clicked a link and got bounced
+            # through sign-in should land where they were going.
+            prompt = None if next_url else _contact_prompt_url_if_needed(result["user"]["id"])
+            return redirect(prompt or next_url or url_for("index"))
 
         reason = result.get("reason")
         if reason == "unreachable":
@@ -1297,6 +1635,23 @@ def user_login():
     return render_template("user_login.html", next_url=next_url)
 
 
+# The 7 checkbox names the account-settings form submits, shared by the visitor's own
+# POST handler and the admin-viewing-a-user's-account route (see
+# admin_user_account()) - one place naming the fields so the two can't drift apart.
+def _save_account_prefs(user_id, form):
+    db.set_user_preferences(
+        user_id, theme=form.get("theme", "auto"), contact=form.get("contact", "").strip()[:200],
+        notify_email=form.get("notify_email", "").strip()[:200],
+        notify_discord_id=form.get("notify_discord_id", "").strip()[:32],
+        notify_email_reports=bool(form.get("notify_email_reports")),
+        notify_email_requests=bool(form.get("notify_email_requests")),
+        notify_email_maintenance=bool(form.get("notify_email_maintenance")),
+        notify_discord_reports=bool(form.get("notify_discord_reports")),
+        notify_discord_requests=bool(form.get("notify_discord_requests")),
+        notify_discord_maintenance=bool(form.get("notify_discord_maintenance")),
+        notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")))
+
+
 @app.route("/account", methods=["GET", "POST"])
 @user_login_required
 def user_account():
@@ -1315,9 +1670,7 @@ def user_account():
     user_id = user["id"]
 
     if request.method == "POST":
-        theme = request.form.get("theme", "auto")
-        contact = request.form.get("contact", "").strip()[:200]
-        db.set_user_preferences(user_id, theme=theme, contact=contact)
+        _save_account_prefs(user_id, request.form)
         flash("Your settings have been saved.", "success")
         # saved=1 tells the page to bring this browser's own stored theme into line
         # with what was just saved - otherwise the setting would appear to do nothing
@@ -1328,9 +1681,26 @@ def user_account():
     # Opening the page is what marks the admin's messages as read; the write is
     # skipped entirely when there's nothing to mark, which is the common case.
     db.mark_replies_seen(user_id)
+    prefs = db.get_user_preferences(user_id)
+    # Looked up once, on page load, rather than per notification: the delivery task
+    # reads only what's stored here, so a Seerr outage can't stop notifications going
+    # out - it can only stop this page offering to prefill the fields.
+    seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    # Auto-populate rather than waiting for the manual "Use these details here" button:
+    # only when *both* fields are still blank here, so this never overwrites a choice
+    # the person already made (including a value this same fill-in wrote last time,
+    # which is exactly what stops it from repeating on every subsequent visit).
+    if seerr_account and not prefs["notify_email"] and not prefs["notify_discord_id"] \
+            and (seerr_account["email"] or seerr_account["discord_id"]):
+        user_notify.adopt_seerr_contact(user_id, seerr_account)
+        prefs = db.get_user_preferences(user_id)
+        flash("Filled in your contact details from Seerr — edit or clear them below.", "success")
     return render_template("account.html",
                             reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
-                            prefs=db.get_user_preferences(user_id),
+                            prefs=prefs,
+                            notifications_enabled=user_notify.is_enabled(),
+                            seerr_account=seerr_account,
+                            seerr_configured=user_notify.seerr_integration() is not None,
                             themes=db.USER_THEMES,
                             just_saved=bool(request.args.get("saved")),
                             site_name=db.get_setting("site_name", "Server"),
@@ -1365,6 +1735,260 @@ def user_report_reply(rid):
     else:
         flash("Write something first.", "error")
     return redirect(url_for("user_account"))
+
+
+@app.route("/account/contact", methods=["GET", "POST"])
+@user_login_required
+def user_contact_prompt():
+    """A one-time, skippable ask for somewhere to send notifications.
+
+    Shown right after signing in when the person has no contact details anywhere - which
+    is common, because Seerr doesn't require them either. Skipping is a real answer and
+    is remembered: being asked the same question on every sign-in is how a prompt turns
+    into an annoyance people learn to click past."""
+    user = current_user()
+    if request.method == "POST":
+        if request.form.get("skip"):
+            db.set_user_preferences(user["id"], contact_prompt_dismissed=True)
+            return redirect(url_for("index"))
+        ok, message = user_notify.save_contact(
+            user["id"],
+            email=request.form.get("notify_email", "").strip()[:200],
+            discord_id=request.form.get("notify_discord_id", "").strip()[:32])
+        # Asked and answered either way - a failed write-back to Seerr still saved the
+        # value here, so there's no reason to keep asking.
+        db.set_user_preferences(user["id"], contact_prompt_dismissed=True)
+        flash(message or "Saved.", "success" if ok else "error")
+        return redirect(url_for("index"))
+
+    if not user_notify.needs_contact_details(user["id"]):
+        return redirect(url_for("user_account"))
+    return render_template("contact_prompt.html",
+                            site_name=db.get_setting("site_name", "Server"),
+                            user=user, nav_links=_public_page_links(),
+                            search_enabled=bool(current_user()) and media_search.is_available(),
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            repo_url=updater.REPO_URL, active_page=None)
+
+
+@app.route("/account/seerr/import", methods=["POST"])
+@user_login_required
+def user_account_import_seerr_contact():
+    """Copies the contact details Seerr already holds into this portal.
+
+    A read, and one the visitor asked for by pressing a button - the details are shown
+    on the page first, so nobody's address appears in their settings without them
+    having seen where it came from."""
+    user = current_user()
+    account = user_notify.find_seerr_account(user["id"])
+    if not account:
+        flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
+        return redirect(url_for("user_account"))
+    user_notify.adopt_seerr_contact(user["id"], account)
+    flash("Copied your contact details from Seerr.", "success")
+    return redirect(url_for("user_account"))
+
+
+@app.route("/account/seerr/push", methods=["POST"])
+@user_login_required
+def user_account_push_seerr_contact():
+    """Sends this portal's contact details back to the visitor's Seerr account.
+
+    **The only place this application writes to another service.** It is therefore an
+    explicit button, pressed by the person whose details they are, affecting only their
+    own Seerr user and only the two contact fields - never a sync, never a side effect
+    of saving something else, and never something a background task can reach."""
+    user = current_user()
+    prefs = db.get_user_preferences(user["id"])
+    integration = user_notify.seerr_integration()
+    account = user_notify.find_seerr_account(user["id"])
+    if not integration or not account:
+        flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
+        return redirect(url_for("user_account"))
+    try:
+        integrations.push_seerr_contact(integration["base_url"], integration["api_key"],
+                                         account["id"],
+                                         email=prefs["notify_email"] or None,
+                                         discord_id=prefs["notify_discord_id"] or None)
+    except (requests.RequestException, ValueError) as e:
+        _logger.warning("Could not push contact details to Seerr: %s", e)
+        flash(f"Couldn't update Seerr: {e}", "error")
+        return redirect(url_for("user_account"))
+    db.set_user_preferences(user["id"], seerr_user_id=account["id"])
+    flash("Your Seerr account has been updated with these details.", "success")
+    return redirect(url_for("user_account"))
+
+
+# ---------------------------------------------------------------------------
+# Unified search (signed-in visitors only)
+# ---------------------------------------------------------------------------
+# Per *session*, not process-global like the login and report limiters. Those defend a
+# route open to anonymous strangers, where a shared counter is the point; this one is
+# behind a Jellyfin sign-in, so the meaningful unit is "this person", and a global
+# counter would let one enthusiastic searcher lock everybody else out.
+# Typing "dune" shouldn't search TMDB for "d". Enforced on both sides: the client to
+# avoid the request, the server because the client can't be trusted to.
+MIN_LIVE_QUERY_LENGTH = 3
+
+
+def _search_rate_limited():
+    now = time.time()
+    if now - session.get("search_window_start", 0) > config.SEARCH_RATE_WINDOW_SECONDS:
+        session["search_window_start"] = now
+        session["search_count"] = 0
+    return session.get("search_count", 0) >= config.SEARCH_RATE_LIMIT
+
+
+def _register_search():
+    session["search_count"] = session.get("search_count", 0) + 1
+
+
+@app.route("/search")
+@user_login_required
+def search():
+    """The one request handler in this app that makes a live outbound call.
+
+    Everything else reads a cache filled by a background task, because a request must
+    never wait on another server. A search query isn't known until someone types it, so
+    there is nothing to pre-fetch - see media_search.py for the safety machinery that
+    makes this carve-out acceptable rather than a quiet exception to the rule."""
+    user = current_user()
+    query = request.args.get("q", "").strip()[:100]
+    outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
+    limited = False
+
+    if query:
+        if _search_rate_limited():
+            limited = True
+        else:
+            _register_search()
+            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+
+    return render_template("search.html", query=query, outcome=outcome,
+                            rate_limited=limited,
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url,
+                            min_query_length=MIN_LIVE_QUERY_LENGTH,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/search/live")
+@user_login_required
+def search_live():
+    """The results block alone, for the incremental search that runs while typing.
+
+    A server-rendered HTML fragment rather than JSON, matching /api/incidents/more and
+    the maintenance history: this app has exactly one JSON API (/api/status, for
+    external consumers) and no client-side templating anywhere, so a fragment keeps the
+    live results and the submitted results provably identical - they're the same
+    template.
+
+    Behind the same sign-in and the same per-session rate limit as /search, because it
+    makes exactly the same outbound calls."""
+    user = current_user()
+    query = request.args.get("q", "").strip()[:100]
+    outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
+    limited = False
+
+    # Below the minimum, answer with nothing rather than searching two APIs for "a".
+    # The client enforces this too; this is the half that can't be bypassed.
+    if len(query) >= MIN_LIVE_QUERY_LENGTH:
+        if _search_rate_limited():
+            limited = True
+        else:
+            _register_search()
+            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+
+    return render_template("sections/_search_results.html", query=query, outcome=outcome,
+                            rate_limited=limited,
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url)
+
+
+@app.route("/search/detail/<media_type>/<int:tmdb_id>")
+@user_login_required
+def search_detail(media_type, tmdb_id):
+    """A single result's full detail - poster, overview, genres, runtime, rating -
+    reached by clicking a title in the search results. Counts against the same
+    per-session rate limit as searching, since it's another live outbound call.
+
+    in_library/jellyfin_id/requested arrive as query params from the results link
+    rather than being re-derived here - this route has no independent way to know a
+    single TMDB id's Jellyfin/Seerr status without a second live search, and they're
+    read-only display info, not anything this route writes."""
+    if _search_rate_limited():
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.args.get("q", "")))
+    _register_search()
+    detail = media_search.detail(media_type, tmdb_id)
+    if not detail:
+        return render_template("error.html", code=404,
+                               message="Couldn't find that title."), 404
+    item = {
+        "title": detail["title"], "year": detail["year"], "media_type": media_type,
+        "tmdb_id": tmdb_id, "poster_path": detail["poster_path"],
+        "in_library": request.args.get("in_library") == "1",
+        "jellyfin_id": request.args.get("jellyfin_id") or "",
+        "requested": request.args.get("requested") == "1",
+    }
+    return render_template("search_detail.html", item=item, detail=detail,
+                            query=request.args.get("q", ""),
+                            can_request=media_search.seerr_integration() is not None,
+                            jellyfin_url=media_search.jellyfin_item_url,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/search/request/configure")
+@user_login_required
+def search_request_configure():
+    """Shows what a request will actually contain before submitting it, rather than
+    submitting with Seerr's silent defaults - a season picker for everyone signed in,
+    plus root folder/quality profile/tags only when the browser is *also* signed in as
+    the portal admin (session["logged_in"]), since those reveal server filesystem
+    paths an ordinary visitor has no business seeing."""
+    media_type = request.args.get("media_type", "")
+    tmdb_id = request.args.get("tmdb_id", "")
+    is_admin = bool(session.get("logged_in"))
+    config = media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+    if not config:
+        return render_template("error.html", code=404, message="Couldn't find that title."), 404
+    return render_template("search_request_configure.html", config=config,
+                            media_type=media_type, tmdb_id=tmdb_id,
+                            query=request.args.get("q", ""), is_admin=is_admin,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/search/request", methods=["POST"])
+@user_login_required
+def search_request():
+    """Asks Seerr for something on the signed-in visitor's behalf.
+
+    A write against another service, so it's a POST, it's CSRF-protected (see
+    _csrf_required_for), it requires a signed-in visitor, and it counts against the same
+    per-session rate limit as searching."""
+    user = current_user()
+    if _search_rate_limited():
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.form.get("q", "")))
+    _register_search()
+    media_type = request.form.get("media_type", "")
+    seasons = ([int(s) for s in request.form.getlist("seasons") if s.isdigit()]
+               if media_type == "tv" else None)
+    root_folder = request.form.get("root_folder") or None
+    profile_id = request.form.get("profile_id") or None
+    tags = request.form.getlist("tags") or None
+    # Root folder/profile/tags are only ever honoured when the browser is also signed
+    # in as the portal admin - the configuration page never renders those fields for
+    # anyone else, but a forged POST must not be able to smuggle them in regardless of
+    # what the form actually showed.
+    if not session.get("logged_in"):
+        root_folder = profile_id = tags = None
+    ok, message = media_search.request(media_type, request.form.get("tmdb_id", ""),
+                                        user["id"], user.get("name", ""),
+                                        seasons=seasons, root_folder=root_folder,
+                                        profile_id=profile_id, tags=tags)
+    flash(message, "success" if ok else "error")
+    return redirect(url_for("search", q=request.form.get("q", "")))
 
 
 @app.route("/account/theme", methods=["POST"])
@@ -1784,6 +2408,36 @@ def admin_vm_control():
 
 # ---- System (this app's own process/components - separate from Resources above,
 # which is about the host machine's hardware) ----
+def _release_dev_server_socket():
+    """Closes the listening socket Werkzeug's development server deliberately leaks
+    across exec, so a restart can rebind the port.
+
+    Only ever does anything under `python app.py`. `werkzeug.serving.run_simple()`
+    calls `socket.set_inheritable(True)` on its listening socket and exports the
+    descriptor as WERKZEUG_SERVER_FD, so that its auto-reloader can hand the same
+    bound port to a child process. That socket therefore survives os.execv - but the
+    re-executed process only *adopts* WERKZEUG_SERVER_FD when the reloader is active,
+    which it never is here (debug=False). The result was a portal that restarted
+    straight into "Address already in use" and died: same PID gone, nothing listening,
+    and no trace anywhere but the console.
+
+    Production runs `serve_waitress.py`, and waitress never marks its socket
+    inheritable, so that path was always fine - which is exactly why this went
+    unnoticed. Anyone following the README's `python app.py` had a restart button, a
+    self-updater and (now) a database restore that all took the portal down for good.
+
+    Failure here is deliberately swallowed: not being able to close a socket must never
+    be the reason a restart doesn't happen, and on the waitress path there is nothing
+    to close in the first place."""
+    raw_fd = os.environ.pop("WERKZEUG_SERVER_FD", None)
+    if raw_fd is None:
+        return
+    try:
+        os.close(int(raw_fd))
+    except (ValueError, OSError):
+        _logger.info("Could not close the inherited development-server socket", exc_info=True)
+
+
 def _restart_process():
     """Replaces the running process image in place via os.execv - same PID, works
     identically whether launched as `python app.py`, `python serve_waitress.py`, or
@@ -1794,6 +2448,9 @@ def _restart_process():
     instead of shelling out to the OS to restart the whole machine."""
     def _do():
         time.sleep(1)
+        # After the sleep, so the response the admin is waiting on has already gone out
+        # over this socket's accepted connection.
+        _release_dev_server_socket()
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_do, daemon=True).start()
 
@@ -1958,14 +2615,46 @@ def admin_system_restart():
 
 
 # ---- About / self-update (see updater.py for everything that actually happens) ----
+def _update_check_task_view():
+    """The `update_check` task's row as the admin page sees it, or None if updater.py
+    somehow didn't register it (a build with the task removed shouldn't 500 here)."""
+    task = scheduler.get_task(updater.TASK_NAME)
+    return scheduler.task_view(task) if task else None
+
+
+def _update_check_schedule_label():
+    """How often the check runs, in words, for the About page - which shouldn't have
+    to know that a schedule can be either an interval or a daily time."""
+    view = _update_check_task_view()
+    if not view:
+        return "on a schedule"
+    if view["schedule_kind"] == "daily":
+        return f"daily at {view['daily_at']} UTC"
+    minutes = view["interval_minutes"] or 0
+    if minutes >= 120 and minutes % 60 == 0:
+        return f"every {minutes // 60}h"
+    return f"every {minutes} min"
+
+
+def _set_update_check_enabled(enabled):
+    """Flips the scheduled task on or off without touching its schedule."""
+    view = _update_check_task_view()
+    if not view:
+        return
+    scheduler.save_schedule(updater.TASK_NAME, enabled=enabled,
+                             schedule_kind=view["schedule_kind"],
+                             interval_minutes=view["interval_minutes"],
+                             daily_at=view["daily_at"])
+
+
 @app.route("/admin/about")
 @login_required
 def admin_about():
     """Reads the update-check cache only - never checks GitHub inline. The cache is
-    refreshed by the background health-check loop (see run_health_checks) on its own
-    much longer TTL, same pattern as _integration_status_cache. A cache miss (nothing
-    checked yet this process, or checking disabled) renders as "not checked yet"
-    rather than blocking the page on an outbound call."""
+    refreshed by the `update_check` scheduled task (see /admin/tasks), same
+    read-the-cache pattern as _integration_status_cache. A cache miss (nothing checked
+    yet this process, or checking disabled) renders as "not checked yet" rather than
+    blocking the page on an outbound call."""
     return render_template(
         "admin_about.html",
         version=config.VERSION,
@@ -1975,11 +2664,12 @@ def admin_about():
         channel=updater.get_channel(),
         channels=updater.CHANNELS,
         check_enabled=updater.update_check_enabled(),
-        check_interval_hours=round(config.UPDATE_CHECK_INTERVAL_SECONDS / 3600, 1),
+        check_schedule=_update_check_schedule_label(),
         inapp_update_enabled=config.ENABLE_INAPP_UPDATE,
         repo_url=updater.REPO_URL,
         releases_url=updater.RELEASES_PAGE_URL,
         backups=list(reversed(updater.list_backups()))[:5],
+        db_backups=list_db_safety_backups(),
         python_version=sys.version.split()[0],
         platform_name=f"{platform.system()} {platform.release()}".strip(),
         db_path=db.DB_PATH,
@@ -2018,7 +2708,11 @@ def admin_about_settings():
         flash("Unknown update channel.", "error")
         return redirect(url_for("admin_about"))
     db.set_setting("update_channel", channel)
-    db.set_setting("update_check_enabled", "1" if request.form.get("update_check_enabled") else "0")
+    # Writes the scheduled task's own enabled flag rather than a second setting beside
+    # it: /admin/about and /admin/tasks are two views of one row, so they cannot drift
+    # into disagreeing about whether the portal checks for updates. The rest of the
+    # schedule is preserved - this checkbox is an on/off switch, not a reschedule.
+    _set_update_check_enabled(bool(request.form.get("update_check_enabled")))
     # The cached result belongs to the old channel - drop it so the page doesn't show
     # a stale "latest stable" reading next to a freshly-selected unstable channel.
     updater.clear_update_cache()
@@ -2089,6 +2783,222 @@ def admin_update():
     return redirect(url_for("admin_about"))
 
 
+# ---------------------------------------------------------------------------
+# Restoring the database from a backup zip
+# ---------------------------------------------------------------------------
+# The counterpart to Settings' "download a backup" button, and by some distance the
+# most destructive thing in this admin panel: it replaces the entire live database with
+# an uploaded file. It lives on the About page rather than in Settings because someone
+# reaching for a restore is usually recovering from something and will look next to the
+# update-rollback machinery first.
+#
+# Do not confuse the two kinds of backup on that page, and do not let the UI confuse
+# them either. updater.py's backups are **application code**, taken to undo a bad
+# update, and contain no data. These are **database** snapshots and contain nothing
+# else. Neither can restore the other.
+DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
+KEEP_DB_SAFETY_BACKUPS = 5
+
+# An extracted database is capped separately from the upload itself, so a small zip that
+# expands to an enormous file (a zip bomb) is refused before it is written out.
+MAX_EXTRACTED_DB_BYTES = DB_RESTORE_MAX_BYTES
+
+
+def _write_uploaded_database(upload, dest_path):
+    """The uploaded file -> a plain .db at `dest_path`. Returns None, or a reason.
+
+    Accepts either the zip the backup button produces or a bare .db, because an admin
+    who unzipped it to look inside should not be told their own backup is invalid.
+
+    Nothing here inspects the *contents*; that's db.validate_backup_file()'s job. This
+    only gets the bytes safely onto disk - which for a zip means never trusting the
+    declared size, and never trusting a member name (a member called `../../app.py` is
+    the classic zip-slip, avoided here by never joining a member name to a path at all:
+    the single member is streamed to a filename we chose)."""
+    filename = (upload.filename or "").lower()
+    try:
+        if filename.endswith(".zip"):
+            with zipfile.ZipFile(upload.stream) as zf:
+                members = [m for m in zf.infolist()
+                            if not m.is_dir() and m.filename.lower().endswith(".db")]
+                if not members:
+                    return "That zip doesn't contain a .db file."
+                if len(members) > 1:
+                    return f"That zip contains {len(members)} .db files - expected exactly one."
+                member = members[0]
+                if member.file_size > MAX_EXTRACTED_DB_BYTES:
+                    return (f"The database inside that zip is too large "
+                            f"({member.file_size // (1024 * 1024)} MB).")
+                written = 0
+                with zf.open(member) as src, open(dest_path, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        # Checked against what was actually read, not against the
+                        # header's declared file_size, which a hostile zip can lie about.
+                        written += len(chunk)
+                        if written > MAX_EXTRACTED_DB_BYTES:
+                            return "The database inside that zip is too large."
+                        out.write(chunk)
+        else:
+            upload.save(dest_path)
+    except zipfile.BadZipFile:
+        return "That file isn't a readable zip."
+    except OSError as e:
+        return f"Could not read the uploaded file: {e}"
+    return None
+
+
+def _remove_sqlite_sidecars(path):
+    """Deletes the -wal/-shm files SQLite creates beside `path`, if any.
+
+    Opening a WAL-mode database creates them even for a read-only connection, so simply
+    validating an uploaded backup leaves two files next to the staged copy. Best-effort:
+    failing to tidy up must never turn a successful restore into a reported failure."""
+    if not path:
+        return
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+
+
+def _db_safety_snapshot():
+    """A consistent snapshot of the database as it is *right now*, taken before it is
+    replaced. This is the whole reason a bad restore isn't unrecoverable, so it happens
+    after validation (no point snapshotting for a file we're going to reject) and before
+    a single byte of the live database is touched.
+
+    Uses db.backup_to_file(), i.e. SQLite's own online backup API - a plain file copy
+    could catch a torn write from the background health-check thread."""
+    os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"portal-before-restore-{stamp}.db")
+    db.backup_to_file(path)
+    return path
+
+
+def list_db_safety_backups():
+    """Newest first. A local os.listdir + stat, the same cheap class of call as
+    asset_url()'s getmtime - not the kind of slow outbound I/O the no-blocking-in-a-
+    request-handler rule is about, and not worth a cache."""
+    try:
+        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR) if n.endswith(".db")]
+    except OSError:
+        return []
+    entries = []
+    for name in names:
+        path = os.path.join(DB_SAFETY_BACKUP_DIR, name)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        entries.append({"name": name, "path": path,
+                        "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                        "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()})
+    return sorted(entries, key=lambda e: e["created_at"], reverse=True)
+
+
+def _prune_db_safety_backups():
+    """Keeps the newest KEEP_DB_SAFETY_BACKUPS. Reads the module constant inside the
+    function rather than as a default argument, so a monkeypatched value in a test is
+    actually honoured - a default arg binds at def time, the same trap that made
+    updater._prune_backups pass for the wrong reason once."""
+    for entry in list_db_safety_backups()[KEEP_DB_SAFETY_BACKUPS:]:
+        try:
+            os.remove(entry["path"])
+        except OSError:
+            _logger.warning("Could not prune old database snapshot %s", entry["name"])
+
+
+@app.route("/admin/about/restore-db", methods=["POST"])
+@login_required
+def admin_restore_db():
+    """Replaces the live database with an uploaded backup, then restarts.
+
+    Behind _require_totp() like the other actions where a stolen session cookie alone
+    must not be enough (host restart/shutdown, app restart, self-update) - this one
+    replaces every piece of data the portal holds, so it belongs in that set rather than
+    beside the harmless cache buttons.
+
+    The order below is the safety machinery and is not rearrangeable:
+      1. write the upload to a temp file - the live database is untouched;
+      2. validate it is a well-formed SQLite database *and* one of ours;
+      3. snapshot the current database, so a regretted restore is still recoverable;
+      4. atomically replace, dealing with the WAL sidecars (see db.restore_from_file);
+      5. restart, because every existing connection still points at the old file.
+    """
+    blocked = _require_totp("Enter your 2FA code to restore the database.", "admin_about")
+    if blocked:
+        return blocked
+
+    upload = request.files.get("backup")
+    if not upload or not upload.filename:
+        flash("Choose a backup file to restore.", "error")
+        return redirect(url_for("admin_about"))
+
+    # Staged next to the database rather than in the system temp directory, so the final
+    # os.replace() is a rename within one filesystem (atomic) rather than a cross-device
+    # copy - and so a large upload can't fill a small /tmp.
+    os.makedirs(os.path.dirname(db.DB_PATH), exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix="restore-", suffix=".db",
+                                   dir=os.path.dirname(db.DB_PATH))
+    os.close(fd)
+    snapshot = None
+    installed = None
+    try:
+        error = _write_uploaded_database(upload, staged)
+        if error is None:
+            error = db.validate_backup_file(staged)
+        if error:
+            flash(f"Restore refused: {error} Your database has not been touched.", "error")
+            return redirect(url_for("admin_about"))
+
+        try:
+            snapshot = _db_safety_snapshot()
+        except Exception as e:
+            _logger.exception("Could not snapshot the database before restoring")
+            flash(f"Restore aborted: couldn't back up your current database first ({e}). "
+                  "Nothing has been changed.", "error")
+            return redirect(url_for("admin_about"))
+
+        try:
+            db.restore_from_file(staged)
+        except Exception as e:
+            _logger.exception("Database restore failed")
+            flash(f"Restore failed: {e}. Your previous database was saved to "
+                  f"{snapshot} before the attempt.", "error")
+            return redirect(url_for("admin_about"))
+        # The staged file has been renamed onto the live path, so it must not be
+        # deleted below - but its sidecars still need clearing, hence the separate flag
+        # rather than just dropping the name.
+        installed = staged
+        staged = None
+        _prune_db_safety_backups()
+    finally:
+        if staged and os.path.exists(staged):
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+        # Validating the upload opens it with SQLite, and opening a WAL-mode database -
+        # which every backup of this app is - creates -wal/-shm sidecars beside it. The
+        # rename above moves only the main file, so without this every restore left two
+        # orphaned files in instance/ forever. Found by looking at the directory after a
+        # release re-test, not by any test.
+        _remove_sqlite_sidecars(installed or staged)
+
+    _logger.warning("Database restored from an uploaded backup; previous database saved to %s",
+                     os.path.basename(snapshot))
+    flash(f"Database restored. Your previous database was saved as "
+          f"{os.path.basename(snapshot)} in instance/db_backups/. Restarting now - this "
+          f"page will be briefly unreachable.", "success")
+    _restart_process()
+    return redirect(url_for("admin_about"))
+
+
 # ---- Integrations (read-only Jellyfin/Jellyseerr/*Arr status) ----
 @app.route("/admin/integrations")
 @login_required
@@ -2096,7 +3006,17 @@ def admin_integrations():
     configured = db.list_integrations()
     statuses = {i["id"]: _integration_status_cache.get(i["id"]) for i in configured if i["enabled"]}
     return render_template("admin_integrations.html", integrations=configured, statuses=statuses,
-                            check_interval=config.CHECK_INTERVAL_SECONDS, active="integrations")
+                            check_interval=config.CHECK_INTERVAL_SECONDS,
+                            version_check=version_checks.get_results(),
+                            seerr_choices=[i for i in db.list_integrations()
+                                            if i["kind"] == "jellyseerr" and i["enabled"]],
+                            seerr_chosen=db.get_setting(integrations.SEERR_INTEGRATION_SETTING, ""),
+                            seerr_in_use=integrations.seerr_integration(),
+                            # Popped, so the report shows once after the button is
+                            # pressed rather than sticking around looking like live state.
+                            seerr_diagnosis=session.pop("seerr_diagnosis", None),
+                            version_task=scheduler.task_view(scheduler.get_task(version_checks.TASK_NAME)),
+                            active="integrations")
 
 
 @app.route("/admin/integrations/<int:iid>/check", methods=["POST"])
@@ -2113,6 +3033,45 @@ def admin_integration_check_now(iid):
     _integration_status_cache[iid] = {"status": status, "checked_at": db.now_iso()}
     flash("Reachable." if status["reachable"] else f"Unreachable: {status['error']}",
           "success" if status["reachable"] else "error")
+    return redirect(url_for("admin_integrations"))
+
+
+@app.route("/admin/integrations/seerr-instance", methods=["POST"])
+@login_required
+def admin_seerr_instance():
+    """Which Seerr backs search, requests, approval alerts and contact sync.
+
+    Same shape as the Jellyfin instance that backs user sign-in. It matters once more
+    than one exists: before this, each feature independently took "the first enabled
+    one", so the Integrations page could be diagnosing one server while search talked
+    to another."""
+    raw = request.form.get("seerr_integration_id", "").strip()
+    db.set_setting(integrations.SEERR_INTEGRATION_SETTING, raw if raw.isdigit() else "")
+    integrations.clear_caches()
+    flash("Seerr instance saved.", "success")
+    return redirect(url_for("admin_integrations"))
+
+
+@app.route("/admin/integrations/<int:iid>/diagnose", methods=["POST"])
+@login_required
+def admin_integration_diagnose(iid):
+    """Runs Seerr's health check and its search call back to back and reports both.
+
+    A sanctioned explicit-slow-action, exactly like "Check now" beside it. It exists
+    because "search says Seerr is down, this page says it's up" is a genuinely confusing
+    pair of facts, and the two come from different calls with different dependencies -
+    the health endpoint is local to Seerr, search proxies to TMDB. Rather than guess
+    which difference mattered, this measures both against the real instance."""
+    integration = db.get_integration(iid)
+    if not integration or integration["kind"] != "jellyseerr":
+        flash("Search diagnostics only apply to a Jellyseerr/Overseerr integration.", "error")
+        return redirect(url_for("admin_integrations"))
+    # The admin's own failing search term, so the diagnostic reproduces the actual
+    # problem rather than proving that the word "test" works. A 400 that only happens
+    # for real queries is a 400 about the query.
+    query = request.form.get("query", "").strip()[:100] or "test"
+    report = integrations.diagnose_seerr(integration["base_url"], integration["api_key"], query)
+    session["seerr_diagnosis"] = report
     return redirect(url_for("admin_integrations"))
 
 
@@ -2226,12 +3185,14 @@ def admin_settings():
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            show_media=_public_media_visibility(),
+                            media_calendar_days=integrations.calendar_days(),
+                            max_calendar_days=integrations.MAX_CALENDAR_DAYS,
+                            media_requires_login=_media_requires_login(),
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=db.get_setting("site_name", "Server"),
                             show_public=_public_resource_visibility(),
                             highload_thresholds=integrations.high_load_thresholds(),
-                            discord_configured=bool(config.DISCORD_WEBHOOK_URL),
-                            ntfy_configured=bool(config.NTFY_URL),
                             section_order=section_order, section_labels=section_labels,
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
@@ -2252,6 +3213,12 @@ def admin_settings_general():
     db.set_setting("site_name", request.form.get("site_name", "").strip() or "Server")
     for key in _PUBLIC_RESOURCE_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
+    for key in _PUBLIC_MEDIA_KEYS:
+        db.set_setting(key, "1" if request.form.get(key) else "0")
+    calendar_days = request.form.get("media_calendar_days", "").strip()
+    db.set_setting("media_calendar_days",
+                    calendar_days if calendar_days.isdigit() else str(integrations.DEFAULT_CALENDAR_DAYS))
+    db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
         raw = request.form.get(f"highload_{key}", "").strip()
         db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)
@@ -2287,16 +3254,104 @@ def admin_settings_general():
     return redirect(url_for("admin_settings"))
 
 
-@app.route("/admin/settings/test-notification", methods=["POST"])
+# ---- Notifications ----
+@app.route("/admin/notifications", methods=["GET", "POST"])
 @login_required
-def admin_settings_test_notification():
-    if not config.DISCORD_WEBHOOK_URL and not config.NTFY_URL:
-        flash("No notification channel configured - set PORTAL_DISCORD_WEBHOOK_URL or PORTAL_NTFY_URL first.", "error")
-    else:
-        notifications.notify("Test notification",
-                              "This is a test notification from the Status Portal admin panel.")
-        flash("Test notification sent - check your configured channel(s).", "success")
-    return redirect(url_for("admin_settings"))
+def admin_notifications():
+    """The hub for everything notification-related, which used to be scattered: the
+    channel status lived in a paragraph at the bottom of Settings, and the Discord bot
+    had its own top-level nav entry unrelated to either. Grouping them means "how do I
+    get told about this" has one answer."""
+    if request.method == "POST":
+        db.set_setting(notifications.RECIPIENTS_SETTING,
+                        notifications.normalize_recipients(request.form.get("recipients", "")))
+        flash("Email recipients saved.", "success")
+        return redirect(url_for("admin_notifications"))
+    channels = notifications.channel_summary()
+    return render_template("admin_notifications.html", channels=channels,
+                            any_configured=any(c["configured"] for c in channels),
+                            recipients=", ".join(notifications.email_recipients()),
+                            email_host_configured=bool(config.SMTP_HOST),
+                            legacy_env_recipients=bool(config.SMTP_TO)
+                                and not db.get_setting(notifications.RECIPIENTS_SETTING, "").strip(),
+                            active="notifications")
+
+
+@app.route("/admin/notifications/users", methods=["GET", "POST"])
+@login_required
+def admin_user_notifications():
+    """The master switch for per-user notifications, plus what the delivery queue is
+    doing. The per-*person* settings deliberately aren't here: what someone wants to be
+    told about, and where, is theirs to set on their own account page."""
+    if request.method == "POST":
+        db.set_setting("user_notifications_enabled",
+                        "1" if request.form.get("enabled") else "0")
+        flash("Per-user notification settings saved.", "success")
+        return redirect(url_for("admin_user_notifications"))
+
+    task = scheduler.get_task(user_notify.TASK_NAME)
+    channels = notifications.channel_summary()
+    return render_template(
+        "admin_user_notifications.html",
+        enabled=user_notify.is_enabled(),
+        queue=db.notification_queue_summary(),
+        recent=db.recent_notifications(),
+        email_ready=next((c["configured"] for c in channels if c["key"] == "email"), False),
+        bot_ready=bool(config.DISCORD_BOT_TOKEN) and discord_bot.get_status()["connected"],
+        bot_token_configured=bool(config.DISCORD_BOT_TOKEN),
+        seerr_configured=user_notify.seerr_integration() is not None,
+        max_attempts=db.MAX_NOTIFICATION_ATTEMPTS,
+        task=scheduler.task_view(task) if task else None,
+        active="user-notifications")
+
+
+@app.route("/admin/notifications/seerr", methods=["GET", "POST"])
+@login_required
+def admin_seerr_alerts():
+    """Seerr approval alerts: how many requests are waiting, and who gets DM'd when a
+    new one arrives.
+
+    Under Notifications rather than Integrations because the interesting part is the
+    delivery - the count is one number, the DM configuration is the feature. The count
+    is deliberately admin-only and never appears on the public page: it's operational
+    information about a queue, not a signal about whether anything is working."""
+    if request.method == "POST":
+        db.set_setting(seerr_alerts.DM_ENABLED_SETTING,
+                        "1" if request.form.get("dm_enabled") else "0")
+        db.set_setting("discordbot_dm_user_ids",
+                        discord_bot.normalize_dm_user_ids(request.form.get("dm_user_ids", "")))
+        flash("Seerr alert settings saved.", "success")
+        return redirect(url_for("admin_seerr_alerts"))
+
+    task = scheduler.get_task(seerr_alerts.TASK_NAME)
+    return render_template(
+        "admin_seerr_alerts.html",
+        integration=seerr_alerts.seerr_integration(),
+        pending_count=seerr_alerts.pending_count(),
+        last_checked_at=seerr_alerts.last_checked_at(),
+        dm_enabled=seerr_alerts.dm_enabled(),
+        dm_user_ids=db.get_setting("discordbot_dm_user_ids", ""),
+        bot_token_configured=bool(config.DISCORD_BOT_TOKEN),
+        bot_status=discord_bot.get_status(),
+        task=scheduler.task_view(task) if task else None,
+        active="seerr-alerts")
+
+
+@app.route("/admin/notifications/test", methods=["POST"])
+@login_required
+def admin_notifications_test():
+    """Goes through notifications.notify() with a canned payload - the exact dispatch
+    path a real incident alert takes, not a parallel one, so this confirms the whole
+    chain rather than just that a setting is non-empty. notify() is deliberately
+    fire-and-forget (it catches and logs every failure and never raises), so this
+    can't report per-channel success; the admin checks their channel, which is the
+    point of the button."""
+    notifications.notify("Test notification",
+                          "This is a test from your status portal. If you can read this, "
+                          "notifications are working.")
+    flash("Test notification sent. Check your channel(s) - delivery failures are "
+          "logged, not reported back here.", "success")
+    return redirect(url_for("admin_notifications"))
 
 
 @app.route("/admin/settings/backup-db")
@@ -2433,6 +3488,9 @@ def _user_session_timeout_seconds():
 @login_required
 def admin_users():
     return render_template("admin_users.html",
+                            contacts=db.list_seerr_contacts(),
+                            contacts_synced_at=db.seerr_contacts_synced_at(),
+                            notifications_enabled=user_notify.is_enabled(),
                             summary=jellyfin_auth.status_summary(),
                             jellyfin_integrations=[i for i in db.list_integrations()
                                                    if i["kind"] == "jellyfin" and i["enabled"]],
@@ -2487,6 +3545,86 @@ def admin_user_access(user_id):
 
 
 # ---- Discord bot (separate from the simple webhook notifications above) ----
+@app.route("/admin/users/<user_id>/contact", methods=["POST"])
+@login_required
+def admin_user_contact(user_id):
+    """Fills in a Jellyfin user's email/Discord ID on their behalf.
+
+    Seerr is where this data lives, so this writes through to Seerr rather than keeping
+    a private copy - see user_notify.save_contact(). It exists because Seerr often
+    simply doesn't have these filled in, and an admin who knows the answer shouldn't
+    have to go and set it up in another app first."""
+    user = db.get_jellyfin_user(user_id)
+    next_url = _safe_next_url(request.form.get("next")) or url_for("admin_users")
+    if not user:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(next_url)
+    ok, message = user_notify.save_contact(
+        user_id,
+        email=request.form.get("notify_email", "").strip()[:200],
+        discord_id=request.form.get("notify_discord_id", "").strip()[:32])
+    flash(f"{user['name']}: {message}" if message else f"Saved for {user['name']}.",
+          "success" if ok else "error")
+    return redirect(next_url)
+
+
+@app.route("/admin/users/<user_id>/account", methods=["GET", "POST"])
+@login_required
+def admin_user_account(user_id):
+    """The admin's view of one visitor's own account.html page - the "better
+    alternative" to a separate admin-only settings grid: one template, one set of
+    fields, so the two audiences can't drift apart. Reuses _save_account_prefs() (the
+    visitor's own POST handler's logic) and user_notify.adopt_seerr_contact() (the
+    auto-fill/manual-import logic) rather than re-implementing either.
+
+    The report thread is deliberately not shown here - /admin/reports is already the
+    admin's UI for that, and reusing this page for it would be exactly the second UI
+    this route exists to avoid."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        return render_template("error.html", code=404,
+                               message="No such user in the cached Jellyfin user list."), 404
+
+    if request.method == "POST":
+        _save_account_prefs(user_id, request.form)
+        flash(f"Saved settings for {target['name']}.", "success")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+
+    prefs = db.get_user_preferences(user_id)
+    seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    return render_template("account.html",
+                            admin_viewing=True,
+                            target_user=target,
+                            reports=[],
+                            prefs=prefs,
+                            notifications_enabled=user_notify.is_enabled(),
+                            seerr_account=seerr_account,
+                            seerr_configured=user_notify.seerr_integration() is not None,
+                            themes=db.USER_THEMES,
+                            just_saved=False,
+                            site_name=db.get_setting("site_name", "Server"),
+                            report_statuses=REPORT_STATUS_LABELS)
+
+
+@app.route("/admin/users/<user_id>/seerr/import", methods=["POST"])
+@login_required
+def admin_user_account_import_seerr(user_id):
+    """The admin-viewing-a-user's-account equivalent of the visitor's own "Use these
+    details here" button - same underlying write (user_notify.adopt_seerr_contact()),
+    triggered by the admin instead of the person themselves."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    account = user_notify.find_seerr_account(user_id)
+    if not account:
+        flash(f"Couldn't find a Seerr account linked to {target['name']}'s Jellyfin login.", "error")
+    else:
+        user_notify.adopt_seerr_contact(user_id, account)
+        flash(f"Copied {target['name']}'s contact details from Seerr.", "success")
+    return redirect(url_for("admin_user_account", user_id=user_id))
+
+
 @app.route("/admin/discord-bot", methods=["GET", "POST"])
 @login_required
 def admin_discord_bot():
@@ -2535,6 +3673,10 @@ def admin_discord_bot_guilds():
                             token_configured=bool(config.DISCORD_BOT_TOKEN),
                             connected=status["connected"], guilds=status["guilds"],
                             channel_whitelist=db.get_setting("discordbot_channel_whitelist", ""),
+                            # Reached from the Discord bot page's own button rather than
+                            # from the nav, so it highlights its parent - a sub-page with
+                            # no nav entry of its own must not leave the nav showing
+                            # nothing selected.
                             active="discord-bot")
 
 
@@ -2544,6 +3686,7 @@ def admin_discord_bot_guilds():
 @login_required
 def admin_tasks():
     return render_template("admin_tasks.html", tasks=scheduler.list_task_views(),
+                            loops=scheduler.list_loop_views(),
                             tick_seconds=config.SCHEDULER_TICK_SECONDS, active="tasks")
 
 
@@ -2587,10 +3730,18 @@ def _process_maintenance_and_notify():
     for event in db.process_maintenance_windows():
         service_name = event["service"]["name"]
         window_title = event["window"]["title"]
-        if event["event"] == "maintenance_started":
-            notifications.notify("Maintenance started", f"{service_name}: {window_title}")
-        else:
-            notifications.notify("Maintenance ended", f"{service_name}: {window_title}")
+        started = event["event"] == "maintenance_started"
+        title = "Maintenance started" if started else "Maintenance ended"
+        notifications.notify(title, f"{service_name}: {window_title}")
+        # And the visitors who asked to hear about service events. Queued from this
+        # background thread exactly as it would be from a request handler - the queue
+        # is what keeps delivery off whichever thread noticed the event.
+        user_notify.notify_service_subscribers(
+            "maintenance",
+            f"{title}: {service_name}",
+            (f"{service_name} is now under maintenance ({window_title})."
+             if started else
+             f"Maintenance on {service_name} has finished ({window_title})."))
 
 
 def _check_status_for_response(r, elapsed_ms, slow_threshold_ms):
@@ -2726,30 +3877,45 @@ def _merge_dependency_health(status, dependency_statuses):
 # an admin can go look at more history than the uptime figure covers if they want to.
 DEFAULT_HISTORY_RETENTION_DAYS = 90
 
-# Pruning only needs to happen roughly daily, not on every 120s check cycle.
-_PRUNE_INTERVAL_SECONDS = 24 * 3600
-# Deliberately in-process rather than persisted in SQLite, unlike the low-disk alert
-# state: an extra prune after a restart is idempotent and costs one indexed DELETE,
-# whereas re-firing a notification would be user-visible noise. Nothing here needs to
-# survive a restart.
-_last_history_prune = 0.0
-
-
 def _history_retention_days():
     raw = db.get_setting("status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS))
     return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_HISTORY_RETENTION_DAYS
 
 
-def _prune_status_history_if_due():
-    global _last_history_prune
-    now = time.monotonic()
-    if _last_history_prune and now - _last_history_prune < _PRUNE_INTERVAL_SECONDS:
-        return
-    _last_history_prune = now
-    deleted = db.prune_status_history(_history_retention_days())
+def _prune_status_history_task():
+    """Body of the `prune_status_history` scheduled task.
+
+    status_history is the only unbounded table in this app, and every query against it
+    runs on a public page load - so this is what keeps the covering index doing an
+    index scan over a bounded range instead of an ever-growing one.
+
+    This used to be a "have 24 hours passed?" check inside the health-check loop,
+    tracked in a module-level float. Being a real task instead means the schedule
+    survives a restart (a portal restarted twice a day would otherwise never prune at
+    all, because the in-process clock reset every time) and that an admin can see when
+    it last ran and how much it removed."""
+    days = _history_retention_days()
+    deleted = db.prune_status_history(days)
     if deleted:
-        _logger.info("Pruned %d status_history rows older than %d days",
-                      deleted, _history_retention_days())
+        _logger.info("Pruned %d status_history rows older than %d days", deleted, days)
+        return f"Removed {deleted} check result(s) older than {days} days."
+    # A normal success, not a TaskSkipped: there was nothing to do because the table
+    # is already inside its retention window, which is the job working, not the job
+    # being unconfigured.
+    return f"Nothing to remove - no check results are older than {days} days."
+
+
+scheduler.register(
+    "prune_status_history",
+    "Prune old check results",
+    "Deletes individual health-check results older than the retention window set "
+    "under Settings. This is the only table in the portal that grows without limit, "
+    "and every public page load reads it, so keeping it trimmed is what stops the "
+    "page getting slower every week.",
+    _prune_status_history_task,
+    default_schedule_kind="daily",
+    default_daily_at="03:30",
+)
 
 
 def _lowdisk_threshold():
@@ -2817,12 +3983,12 @@ def run_health_checks():
                     _handle_incident_lifecycle(s, previous_status, status)
             _refresh_integration_cache()
             _check_low_disk_space(monitoring.get_resource_snapshot())
-            _prune_status_history_if_due()
-            # Reuses this existing background thread rather than starting another one:
-            # it no-ops until its own (much longer) TTL has elapsed, so a 120s health
-            # -check interval doesn't turn into a GitHub API call every 120s. The
-            # About page only ever reads the cache this populates.
-            updater.refresh_update_cache_if_stale()
+            # Pruning old history and checking GitHub for releases used to be tacked
+            # on here, each with its own hand-rolled "is it due yet" check. Both are
+            # scheduled tasks now (see /admin/tasks) - this loop is back to being only
+            # the things that genuinely have to happen on the health-check cycle:
+            # maintenance windows first, then every service's status, then the
+            # integration cache that _merge_api_health() reads from.
         except Exception:
             _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)
@@ -2905,9 +4071,64 @@ def _handle_integration_incident_lifecycle(integration, previous_reachable, new_
                 "resolved")
 
 
+# The health-check thread, held only so /admin/tasks can report whether it is still
+# alive. threading.excepthook already logs a thread dying from something outside its
+# own try/except (see logging_setup.py), but "services just stopped updating" is
+# exactly the symptom nobody thinks to look in a log file for.
+_health_thread = {"thread": None}
+
+
+def _health_thread_alive():
+    thread = _health_thread["thread"]
+    return None if thread is None else thread.is_alive()
+
+
 def start_background_checker():
-    t = threading.Thread(target=run_health_checks, daemon=True)
+    t = threading.Thread(target=run_health_checks, daemon=True, name="health-checks")
     t.start()
+    _health_thread["thread"] = t
+    return t
+
+
+# ---------------------------------------------------------------------------
+# The recurring jobs that are deliberately *not* scheduled tasks
+# ---------------------------------------------------------------------------
+# Registered read-only so /admin/tasks can answer "what does this portal do on a
+# timer" completely, rather than listing the two thirds of the answer that happen to
+# be controllable. Each one's reason for staying a plain loop is on the entry itself;
+# the general argument is in scheduler.BackgroundLoop's docstring.
+scheduler.register_loop(
+    "health_checks",
+    "Service health checks",
+    "Requests every service's check URL, records the result, applies maintenance "
+    "windows, and opens or resolves automatic incidents. Not a task you can switch "
+    "off here on purpose: turning it off would also turn off incident detection, "
+    "which is the portal's whole job.",
+    interval_seconds=config.CHECK_INTERVAL_SECONDS,
+    configured_by="PORTAL_CHECK_INTERVAL_SECONDS",
+    is_alive=_health_thread_alive,
+)
+scheduler.register_loop(
+    "resource_polling",
+    "Resource polling",
+    "Samples CPU, memory, disks and network into the cache the Resources page reads, "
+    "plus the Windows-only queries (Hyper-V VMs, temperatures). Runs far faster than "
+    "the scheduler's tick, so the scheduler could not drive it even if it were "
+    "listed as a task.",
+    interval_seconds=config.RESOURCE_REFRESH_SECONDS,
+    configured_by="PORTAL_RESOURCE_REFRESH_SECONDS",
+    is_alive=monitoring.refresh_thread_alive,
+)
+scheduler.register_loop(
+    "discord_bot_refresh",
+    "Discord bot refresh",
+    "Updates the bot's presence and re-edits its tracked live status message. Runs "
+    "inside discord.py's own event loop, where it belongs - driving it from here "
+    "would mean scheduling coroutines across threads for no benefit.",
+    interval_seconds=config.DISCORD_BOT_REFRESH_SECONDS,
+    configured_by="PORTAL_DISCORD_BOT_REFRESH_SECONDS",
+    is_alive=lambda: discord_bot.get_status()["connected"] if config.DISCORD_BOT_TOKEN else None,
+)
 
 
 # ---------------------------------------------------------------------------

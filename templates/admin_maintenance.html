@@ -13,31 +13,33 @@
 </p>
 
 {% if windows %}
-<table class="admin-table">
-  <thead><tr><th>Service</th><th>Title</th><th>Starts</th><th>Ends</th><th>State</th><th></th></tr></thead>
-  <tbody>
-    {% for w in windows %}
-    <tr>
-      <td>{{ w.service_names or '—' }}</td>
-      <td>{{ w.title }}</td>
-      <td>{{ w.starts_at[:16].replace('T', ' ') }}</td>
-      <td>{{ w.ends_at[:16].replace('T', ' ') }}</td>
-      <td>
-        {% if w.ended %}<span class="badge resolved">Ended</span>
-        {% elif w.applied %}<span class="badge investigating">Active</span>
-        {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
-      </td>
-      <td class="actions">
-        <a href="{{ url_for('admin_maintenance_edit', mid=w.id) }}">Edit</a>
-        <form action="{{ url_for('admin_maintenance_delete', mid=w.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Delete this maintenance window?{{ ' This will restore its service(s) immediately.' if w.applied and not w.ended else '' }}');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="admin-table">
+  <table>
+    <thead><tr><th>Service</th><th>Title</th><th>Starts</th><th>Ends</th><th>State</th><th></th></tr></thead>
+    <tbody>
+      {% for w in windows %}
+      <tr>
+        <td>{{ w.service_names or '—' }}</td>
+        <td>{{ w.title }}</td>
+        <td>{{ w.starts_at[:16].replace('T', ' ') }}</td>
+        <td>{{ w.ends_at[:16].replace('T', ' ') }}</td>
+        <td>
+          {% if w.ended %}<span class="badge resolved">Ended</span>
+          {% elif w.applied %}<span class="badge investigating">Active</span>
+          {% else %}<span class="badge monitoring">Scheduled</span>{% endif %}
+        </td>
+        <td class="actions">
+          <a href="{{ url_for('admin_maintenance_edit', mid=w.id) }}">Edit</a>
+          <form action="{{ url_for('admin_maintenance_delete', mid=w.id) }}" method="POST" style="display:inline"
+                onsubmit="return confirm('Delete this maintenance window?{{ ' This will restore its service(s) immediately.' if w.applied and not w.ended else '' }}');">
+            <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <div class="empty-state">No maintenance windows scheduled.</div>
 {% endif %}

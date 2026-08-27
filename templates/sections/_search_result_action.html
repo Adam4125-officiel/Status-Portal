@@ -1,0 +1,19 @@
+{# The one action a search result offers: watch it, see it's already requested, request
+   it, or (if nothing else applies) note that it isn't in the library. Shared by
+   _search_results.html and search_detail.html so the two can't render this differently -
+   see CLAUDE.md under "Unified search". Expects `item`, `can_request`, `jellyfin_url`
+   and `query` in scope. #}
+{% if item.in_library %}
+  {% set link = jellyfin_url(item.jellyfin_id) if item.jellyfin_id else '' %}
+  {% if link %}
+    <a class="btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Watch now ↗</a>
+  {% else %}
+    <span class="pill ok">In the library</span>
+  {% endif %}
+{% elif item.requested %}
+  <span class="pill warn">Already requested</span>
+{% elif can_request and item.tmdb_id %}
+  <a class="btn secondary" href="{{ url_for('search_request_configure', media_type=item.media_type, tmdb_id=item.tmdb_id, q=query) }}">Request this</a>
+{% else %}
+  <span class="pill">Not in the library</span>
+{% endif %}

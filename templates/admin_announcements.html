@@ -7,26 +7,28 @@
 </div>
 
 {% if announcements %}
-<table class="admin-table">
-  <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th></th></tr></thead>
-  <tbody>
-    {% for a in announcements %}
-    <tr>
-      <td>{{ a.title }}</td>
-      <td>{{ a.type }}</td>
-      <td>{{ 'yes' if a.pinned else 'no' }}</td>
-      <td>{{ a.created_at[:16].replace('T', ' ') }}</td>
-      <td class="actions">
-        <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Edit</a>
-        <form action="{{ url_for('admin_announcement_delete', aid=a.id) }}" method="POST" style="display:inline"
-              onsubmit="return confirm('Delete this announcement?');">
-          <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="admin-table">
+  <table>
+    <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th></th></tr></thead>
+    <tbody>
+      {% for a in announcements %}
+      <tr>
+        <td>{{ a.title }}</td>
+        <td>{{ a.type }}</td>
+        <td>{{ 'yes' if a.pinned else 'no' }}</td>
+        <td>{{ a.created_at[:16].replace('T', ' ') }}</td>
+        <td class="actions">
+          <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Edit</a>
+          <form action="{{ url_for('admin_announcement_delete', aid=a.id) }}" method="POST" style="display:inline"
+                onsubmit="return confirm('Delete this announcement?');">
+            <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <div class="empty-state">No announcements yet.</div>
 {% endif %}

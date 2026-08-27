@@ -1,0 +1,97 @@
+{% extends "admin_base.html" %}
+{% block title %}Seerr approvals — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Seerr approvals</h1>
+  {% if task %}
+  <form action="{{ url_for('admin_task_run', name=task.name) }}" method="POST" style="display:inline;">
+    <button type="submit" class="btn secondary"{{ ' disabled' if task.running }}>
+      {{ 'Checking…' if task.running else 'Check now' }}
+    </button>
+  </form>
+  {% endif %}
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  How many Jellyseerr/Overseerr requests are waiting for you to approve them, and who
+  gets a Discord DM when a new one arrives. This count is <strong>admin-only</strong> and
+  never appears on the public page — it's operational information about a queue, not a
+  signal about whether anything is working.
+</p>
+
+<div class="form-panel">
+  <h2 style="margin-top: 0;">Waiting for approval</h2>
+  {% if not integration %}
+    <div class="empty-state">
+      No enabled Jellyseerr/Overseerr integration — add one under
+      <a href="{{ url_for('admin_integrations') }}">Integrations</a> and this starts working.
+    </div>
+  {% else %}
+    <div style="display: flex; align-items: baseline; gap: 12px;">
+      <span style="font-size: 30px; font-weight: 600;">{{ pending_count }}</span>
+      <span style="color: var(--text-dim); font-size: 13px;">
+        pending in <strong>{{ integration.name }}</strong>
+      </span>
+    </div>
+    <div class="resource-card__sub" style="margin-top: 8px;">
+      {% if last_checked_at %}
+        Last checked <span class="local-time" data-utc="{{ last_checked_at }}">{{ last_checked_at[:16].replace('T', ' ') }} UTC</span>
+      {% else %}
+        Not checked yet — press “Check now”, or wait for the scheduled run.
+      {% endif %}
+      {% if task %}
+        · runs {% if task.schedule_kind == 'daily' %}daily at {{ task.daily_at }} UTC{% else %}every {{ task.interval_minutes }} min{% endif %}
+        (<a href="{{ url_for('admin_tasks') }}">change</a>){% if not task.enabled %} — <strong>currently disabled</strong>{% endif %}
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Direct messages</h2>
+  {% if not bot_token_configured %}
+    <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+      The Discord bot isn't set up (<code>PORTAL_DISCORD_BOT_TOKEN</code> is blank), so
+      there's nothing to send DMs with. See
+      <a href="{{ url_for('admin_discord_bot') }}">Discord bot</a>.
+    </p>
+  {% elif not bot_status.connected %}
+    <p class="flash error" style="margin-top: 0;">
+      The bot isn't connected right now, so DMs can't be delivered. They'll be sent on the
+      next check once it reconnects — nothing is lost, because a request is only marked as
+      announced once it actually reached somebody.
+    </p>
+  {% endif %}
+
+  <form method="POST">
+    <div class="field-check">
+      <input type="checkbox" name="dm_enabled" id="dm_enabled" {{ 'checked' if dm_enabled }}>
+      <label for="dm_enabled">Send a Discord DM when a new request needs approval</label>
+    </div>
+    <div class="field">
+      <label for="dm_user_ids">Discord user IDs to message</label>
+      <textarea id="dm_user_ids" name="dm_user_ids" rows="3"
+                placeholder="123456789012345678, 234567890123456789">{{ dm_user_ids }}</textarea>
+      <div class="field-hint">
+        Comma- or newline-separated, same format as the bot's other ID lists. To find an
+        ID: enable Developer Mode in Discord (Settings → Advanced), then right-click a
+        user → Copy User ID.
+      </div>
+      <div class="field-hint">
+        <strong>Empty means nobody gets messaged.</strong> That's deliberately the opposite
+        of the bot's other lists — those decide who may <em>ask</em> the bot for something,
+        this decides who it messages unprompted.
+      </div>
+      <div class="field-hint">
+        <strong>Discord's own limitation:</strong> a bot can only DM someone who shares a
+        server with it and who hasn't turned off “Direct Messages from server members”.
+        A perfectly valid ID can still be undeliverable — that shows up as a failure on the
+        <a href="{{ url_for('admin_tasks') }}">Scheduled tasks</a> page with the reason,
+        rather than being retried forever.
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

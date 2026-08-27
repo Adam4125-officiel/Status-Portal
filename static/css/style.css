@@ -299,6 +299,11 @@ body.no-visitor-controls .topbar { padding-right: 46px; }
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
+  /* The ::after glow below sits at inset -6px, so the dot *paints* 6px wider than it
+     *measures* on every side. Without this margin that glow lands on top of whatever
+     text follows - which on a narrow screen is exactly the reported "green blob over
+     the word yes". Must stay >= the glow inset. */
+  margin-right: 7px;
 }
 .led::after {
   content: "";
@@ -674,7 +679,20 @@ footer.foot {
   position: sticky;
   top: 0;
   height: 100vh;
+  /* Grouping headings made the nav taller than a laptop viewport. Without this the
+     bottom entries (About, Two-factor) are simply unreachable on a short screen. */
+  overflow-y: auto;
 }
+.admin-nav__group {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 0 10px 5px;
+  margin-top: 14px;
+}
+.admin-nav__group:first-of-type { margin-top: 0; }
 .admin-nav__brand {
   font-family: var(--font-display);
   font-weight: 600;
@@ -714,7 +732,16 @@ footer.foot {
   color: var(--text-faint);
 }
 
-.admin-main { flex: 1; padding: 30px 36px 60px; max-width: 900px; }
+.admin-main {
+  flex: 1;
+  padding: 30px 36px 60px;
+  max-width: 900px;
+  /* A flex item's min-width defaults to auto, meaning "never shrink below my content".
+     A table wider than the column therefore pushed this panel - and with it the whole
+     page - sideways, instead of scrolling inside its own .admin-table container. This
+     one declaration is what makes every overflow-x: auto below it actually work. */
+  min-width: 0;
+}
 
 .admin-header {
   display: flex;
@@ -816,13 +843,24 @@ footer.foot {
 .core-bar__fill.warn { background: var(--warn); }
 .core-bar__fill.crit { background: var(--crit); }
 
+/* .admin-table is the *wrapper*, never the <table> itself. It used to be both,
+   depending on the page, which is why some admin tables were silently clipped on a
+   phone (overflow: hidden on a wrapper hides the overflow) while others pushed the
+   whole page sideways (the same class on a <table>, where it does nothing useful).
+   One shape, and a convention test keeps it that way. */
 .admin-table {
   width: 100%;
-  border-collapse: collapse;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  /* Scrolls rather than clips: a table too wide for the viewport must still be
+     readable by scrolling it, and must not drag the page sideways with it. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.admin-table > table {
+  width: 100%;
+  border-collapse: collapse;
 }
 .admin-table th, .admin-table td {
   text-align: left;
@@ -841,6 +879,18 @@ footer.foot {
 .admin-table tr:last-child td { border-bottom: none; }
 .admin-table td.actions { white-space: nowrap; text-align: right; }
 .admin-table td.actions a, .admin-table td.actions button { margin-left: 8px; }
+
+@media (max-width: 720px) {
+  /* Below this, a multi-column data table crushes rather than shrinking gracefully, so
+     let it keep a readable width and scroll inside its own container.
+
+     Scoped to tables with a <thead>, which is what distinguishes a real data table from
+     the two-column label/value tables used inside panels - forcing a minimum width on
+     "Last run | 12:04" would make something that already fits scroll for no reason.
+     Browsers without :has() simply don't apply it and get the previous behaviour. */
+  .admin-table > table:has(thead) { min-width: 520px; }
+  .admin-table th, .admin-table td { padding: 9px 10px; }
+}
 
 /* Label/value pairs inside a .form-panel (the About page's version, paths and
    project metadata) - unlike .admin-table this sits *within* a panel that already
@@ -1003,3 +1053,371 @@ footer.foot {
   .admin-nav { width: 100%; height: auto; position: static; }
   .admin-main { padding: 22px 16px 50px; }
 }
+
+/* Release notes on /admin/about. The body is GitHub Markdown rendered through the
+   richtext filter, which escapes first and supports only bold/links/line breaks - so
+   headings and bullets arrive as the literal characters the release author typed.
+   Deliberately no white-space: pre-wrap here: richtext already turns every newline
+   into a <br>, so preserving the newlines as well would double every line break. */
+.release-notes {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-panel-raised);
+}
+.release-notes > summary {
+  cursor: pointer;
+  font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.release-notes__body {
+  margin: 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-dim);
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+/* Media activity section (calendar / requests / downloads / indexers). One row shape
+   serves all four, so the section reads as one thing rather than four small tables. */
+.section__subtitle {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin: 18px 0 8px;
+}
+.section__subtitle:first-of-type { margin-top: 0; }
+.section__footnote { font-size: 12px; color: var(--text-faint); margin-top: 14px; }
+.media-list { display: flex; flex-direction: column; gap: 6px; }
+.media-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+/* min-width: 0 is what lets the long name below actually truncate instead of forcing
+   the row wider than its container. */
+.media-row__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.media-row__name {
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-row__meta { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.media-row__pct { font-variant-numeric: tabular-nums; color: var(--text-dim); min-width: 48px; text-align: right; }
+.media-progress {
+  flex: 0 0 120px;
+  height: 6px;
+  background: var(--bg-panel-raised);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.media-progress__bar { height: 100%; background: var(--brand); border-radius: 999px; }
+
+@media (max-width: 620px) {
+  /* The progress bar is the first thing worth dropping on a phone - the percentage
+     next to it says the same thing in less space. */
+  .media-progress { display: none; }
+  .media-row__meta { white-space: normal; }
+}
+
+/* Unified search (public page box + /search results). */
+.search-form { display: flex; gap: 8px; margin-bottom: 16px; }
+.search-form input[type="search"] {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+}
+.search-form input[type="search"]:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+.search-results { display: flex; flex-direction: column; gap: 8px; }
+.search-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.search-result__poster {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 69px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--bg-panel-raised);
+  /* A poster that fails to load (TMDB unreachable, blocked, slow) falls back to its
+     alt text, which a browser renders at normal size regardless of the box - without
+     this the title can overflow a 46x69 box and spill into the row below it. */
+  overflow: hidden;
+  color: transparent;
+  font-size: 0;
+}
+.search-result__poster--placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+}
+.search-result__poster--large { width: 140px; height: 210px; font-size: 48px; }
+.search-result--detail { align-items: flex-start; padding: 20px; gap: 20px; }
+
+@media (max-width: 620px) {
+  .search-result--detail { flex-direction: column; align-items: center; text-align: center; }
+}
+.search-result__main { flex: 1; min-width: 0; }
+.search-result__title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.search-result__year { color: var(--text-faint); font-weight: 400; }
+.search-result__overview {
+  margin-top: 5px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+/* Keeps the action column from being squeezed to nothing by a long overview. */
+.search-result__action { flex: 0 0 auto; }
+
+@media (max-width: 620px) {
+  .search-result { flex-direction: column; align-items: stretch; gap: 10px; }
+  .search-result__action .btn { width: 100%; }
+}
+
+/* Toggle switch for admin tables (portal access, and anything else that's a plain
+   on/off per row). Built as a reusable component rather than one-off markup: a badge
+   plus a separate Block/Allow button made the reader work out the current state from
+   two elements that disagreed in tone. */
+.switch-form { display: inline-flex; align-items: center; gap: 8px; }
+.switch { position: relative; display: inline-block; flex: 0 0 auto; line-height: 0; }
+/* The real checkbox stays in the DOM and focusable - it is what a keyboard and a
+   screen reader interact with - it just isn't what's painted. */
+.switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.switch__track {
+  display: block;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.switch__thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.switch input:checked + .switch__track {
+  background: var(--brand-dim);
+  border-color: var(--brand);
+}
+.switch input:checked + .switch__track .switch__thumb {
+  transform: translateX(16px);
+  background: var(--brand);
+}
+.switch input:focus-visible + .switch__track { outline: 2px solid var(--brand); outline-offset: 2px; }
+.switch input:disabled + .switch__track { opacity: 0.5; }
+.switch-form__label { font-size: 12.5px; color: var(--text-dim); white-space: nowrap; }
+
+/* Seerr request/media status badges. Previously every one of these rendered in the
+   same washed-out pill, so a list of ten requests gave no clue which needed attention -
+   the whole job of this list is being scannable. Keyed on a stable status key rather
+   than the English label. */
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.status-pill--available,
+.status-pill--completed  { background: rgba(46, 160, 87, 0.16);  color: #4ade80; border-color: rgba(46, 160, 87, 0.4); }
+.status-pill--approved   { background: rgba(56, 132, 255, 0.16); color: #7dabff; border-color: rgba(56, 132, 255, 0.4); }
+.status-pill--processing { background: rgba(214, 158, 46, 0.16); color: #f0b849; border-color: rgba(214, 158, 46, 0.4); }
+.status-pill--partial    { background: rgba(214, 158, 46, 0.12); color: #d6a35c; border-color: rgba(214, 158, 46, 0.3); }
+.status-pill--pending    { background: rgba(168, 85, 247, 0.16); color: #c4a0f5; border-color: rgba(168, 85, 247, 0.4); }
+.status-pill--declined,
+.status-pill--blocklisted,
+.status-pill--failed     { background: rgba(220, 76, 70, 0.16);  color: #f28b82; border-color: rgba(220, 76, 70, 0.4); }
+.status-pill--unknown,
+.status-pill--deleted    { background: var(--bg-panel-raised);   color: var(--text-faint); border-color: var(--border); }
+
+.media-row__year { color: var(--text-faint); font-weight: 400; }
+
+/* Contexts that already space their children with a flex gap don't need the led's own
+   margin on top of it - it would just read as a wide gap. */
+.media-row .led,
+.switch-form .led { margin-right: 0; }
+
+/* No breathing glow on a status dot inside a dense admin table.
+   The ring is an ::after at inset -6px, so it paints outside the dot's own layout box
+   and lands on whatever sits beside it - or, when a cell is narrow enough for its label
+   to wrap, on the line underneath. That is the "green blob over the word yes" bug, and
+   the margin-right on .led only fixes the horizontal half of it.
+
+   The glow earns its place on the public status page, where the cards are large and the
+   point is to draw the eye. In a table of ten rows of 12px text it is noise that
+   collides with the text it is meant to annotate, so it goes. The dot itself, with its
+   box-shadow, still reads perfectly well. */
+.admin-table .led::after { content: none; }
+
+/* Panel header: a title on the left, its actions on the right. Was four near-identical
+   inline styles, which is exactly how one of them came to lack a wrap rule and push the
+   Integrations page 30px wider than a 360px phone. */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  /* The actions drop under the title rather than off the side of the screen. */
+  flex-wrap: wrap;
+}
+.panel-header > :last-child { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Text that comes from another system - an error message, a URL, a version string -
+   has no spaces to break at, so it pushes its container (and the page) sideways on a
+   narrow screen. "HTTPConnectionPool(host='127.0.0.1', port=9)" was the one that found
+   this. Anywhere the portal renders text it didn't write, let it break mid-word. */
+.empty-state,
+.field-hint,
+.admin-table td,
+.form-panel code,
+.resource-card__sub { overflow-wrap: anywhere; }
+
+/* Public page navigation and the "More" summary cards.
+   The public page used to be one long scroll of nine blocks; these are what replaced
+   the five that moved to pages of their own. */
+.page-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+}
+.page-nav a {
+  padding: 7px 12px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -3px;
+}
+.page-nav a:hover { color: var(--text-primary); text-decoration: none; }
+.page-nav a.active { color: var(--brand); border-bottom-color: var(--brand); }
+.brand__link { color: inherit; }
+.brand__link:hover { text-decoration: none; }
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+}
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+.summary-card:hover { border-color: var(--brand-dim); text-decoration: none; }
+.summary-card__label { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.summary-card__value { font-size: 12.5px; color: var(--text-dim); }
+.summary-card__go { font-size: 11.5px; color: var(--brand); margin-top: 2px; }
+
+/* Navigation loading bar (static/js/page_loading.js). Server-rendered pages leave the
+   old page on screen while the next one loads, so without this a slow response is
+   indistinguishable from a stuck one. Width animates toward - but never reaches - 100%,
+   because the page arriving is what ends it. */
+.page-loading {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 0;
+  background: var(--brand);
+  box-shadow: 0 0 8px var(--brand);
+  z-index: 9999;
+  transition: width 8s cubic-bezier(0.1, 0.85, 0.25, 1);
+}
+.page-loading--on { width: 92%; }
+
+@media (prefers-reduced-motion: reduce) {
+  /* No crawling bar; still a visible indication that something is happening. */
+  .page-loading { transition: none; }
+  .page-loading--on { width: 100%; opacity: 0.5; }
+}
+
+/* Skeleton placeholders, for content a page knows it has but hasn't got yet. */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-panel) 25%, var(--bg-panel-raised) 50%, var(--bg-panel) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes skeleton-sweep {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+
+/* While an incremental search is in flight, the results already on screen are the
+   previous query's - dimming them says "these are stale" without the jarring blank of
+   clearing them first. */
+.search-results--loading { opacity: 0.55; transition: opacity 0.12s ease; }
