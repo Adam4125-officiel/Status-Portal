@@ -1629,6 +1629,23 @@ def user_login():
     return render_template("user_login.html", next_url=next_url)
 
 
+# The 7 checkbox names the account-settings form submits, shared by the visitor's own
+# POST handler and the admin-viewing-a-user's-account route (see
+# admin_user_account()) - one place naming the fields so the two can't drift apart.
+def _save_account_prefs(user_id, form):
+    db.set_user_preferences(
+        user_id, theme=form.get("theme", "auto"), contact=form.get("contact", "").strip()[:200],
+        notify_email=form.get("notify_email", "").strip()[:200],
+        notify_discord_id=form.get("notify_discord_id", "").strip()[:32],
+        notify_email_reports=bool(form.get("notify_email_reports")),
+        notify_email_requests=bool(form.get("notify_email_requests")),
+        notify_email_maintenance=bool(form.get("notify_email_maintenance")),
+        notify_discord_reports=bool(form.get("notify_discord_reports")),
+        notify_discord_requests=bool(form.get("notify_discord_requests")),
+        notify_discord_maintenance=bool(form.get("notify_discord_maintenance")),
+        notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")))
+
+
 @app.route("/account", methods=["GET", "POST"])
 @user_login_required
 def user_account():
@@ -1647,15 +1664,7 @@ def user_account():
     user_id = user["id"]
 
     if request.method == "POST":
-        theme = request.form.get("theme", "auto")
-        contact = request.form.get("contact", "").strip()[:200]
-        db.set_user_preferences(
-            user_id, theme=theme, contact=contact,
-            notify_email=request.form.get("notify_email", "").strip()[:200],
-            notify_discord_id=request.form.get("notify_discord_id", "").strip()[:32],
-            notify_own_reports=bool(request.form.get("notify_own_reports")),
-            notify_service_events=bool(request.form.get("notify_service_events")),
-            notify_requests=bool(request.form.get("notify_requests")))
+        _save_account_prefs(user_id, request.form)
         flash("Your settings have been saved.", "success")
         # saved=1 tells the page to bring this browser's own stored theme into line
         # with what was just saved - otherwise the setting would appear to do nothing
@@ -3474,16 +3483,74 @@ def admin_user_contact(user_id):
     simply doesn't have these filled in, and an admin who knows the answer shouldn't
     have to go and set it up in another app first."""
     user = db.get_jellyfin_user(user_id)
+    next_url = _safe_next_url(request.form.get("next")) or url_for("admin_users")
     if not user:
         flash("No such user in the cached Jellyfin user list.", "error")
-        return redirect(url_for("admin_users"))
+        return redirect(next_url)
     ok, message = user_notify.save_contact(
         user_id,
         email=request.form.get("notify_email", "").strip()[:200],
         discord_id=request.form.get("notify_discord_id", "").strip()[:32])
     flash(f"{user['name']}: {message}" if message else f"Saved for {user['name']}.",
           "success" if ok else "error")
-    return redirect(url_for("admin_users"))
+    return redirect(next_url)
+
+
+@app.route("/admin/users/<user_id>/account", methods=["GET", "POST"])
+@login_required
+def admin_user_account(user_id):
+    """The admin's view of one visitor's own account.html page - the "better
+    alternative" to a separate admin-only settings grid: one template, one set of
+    fields, so the two audiences can't drift apart. Reuses _save_account_prefs() (the
+    visitor's own POST handler's logic) and user_notify.adopt_seerr_contact() (the
+    auto-fill/manual-import logic) rather than re-implementing either.
+
+    The report thread is deliberately not shown here - /admin/reports is already the
+    admin's UI for that, and reusing this page for it would be exactly the second UI
+    this route exists to avoid."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        return render_template("error.html", code=404,
+                               message="No such user in the cached Jellyfin user list."), 404
+
+    if request.method == "POST":
+        _save_account_prefs(user_id, request.form)
+        flash(f"Saved settings for {target['name']}.", "success")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+
+    prefs = db.get_user_preferences(user_id)
+    seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    return render_template("account.html",
+                            admin_viewing=True,
+                            target_user=target,
+                            reports=[],
+                            prefs=prefs,
+                            notifications_enabled=user_notify.is_enabled(),
+                            seerr_account=seerr_account,
+                            seerr_configured=user_notify.seerr_integration() is not None,
+                            themes=db.USER_THEMES,
+                            just_saved=False,
+                            site_name=db.get_setting("site_name", "Server"),
+                            report_statuses=REPORT_STATUS_LABELS)
+
+
+@app.route("/admin/users/<user_id>/seerr/import", methods=["POST"])
+@login_required
+def admin_user_account_import_seerr(user_id):
+    """The admin-viewing-a-user's-account equivalent of the visitor's own "Use these
+    details here" button - same underlying write (user_notify.adopt_seerr_contact()),
+    triggered by the admin instead of the person themselves."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    account = user_notify.find_seerr_account(user_id)
+    if not account:
+        flash(f"Couldn't find a Seerr account linked to {target['name']}'s Jellyfin login.", "error")
+    else:
+        user_notify.adopt_seerr_contact(user_id, account)
+        flash(f"Copied {target['name']}'s contact details from Seerr.", "success")
+    return redirect(url_for("admin_user_account", user_id=user_id))
 
 
 @app.route("/admin/discord-bot", methods=["GET", "POST"])

@@ -58,11 +58,25 @@ def test_an_unknown_event_is_refused(enabled):
 def test_service_events_go_only_to_people_who_opted_in(enabled):
     """"Anything about services I use" defaults off - nobody wants a message for every
     maintenance window on every service."""
-    db.set_user_preferences("wants", notify_service_events=True)
-    db.set_user_preferences("doesnt", notify_service_events=False)
+    db.set_user_preferences("wants", notify_email_maintenance=True)
+    db.set_user_preferences("doesnt", notify_email_maintenance=False)
     user_notify.notify_service_subscribers("maintenance", "Maintenance", "Body")
     queued = {n["user_id"] for n in db.pending_notifications()}
     assert queued == {"wants"}
+
+
+def test_maintenance_subscribers_are_opted_in_via_either_channel(enabled):
+    """notify_service_subscribers() queues a row for anyone opted in via email OR
+    Discord - deliver() is what decides per-channel from there."""
+    db.set_user_preferences("email_only", notify_email_maintenance=True,
+                             notify_discord_maintenance=False)
+    db.set_user_preferences("discord_only", notify_email_maintenance=False,
+                             notify_discord_maintenance=True)
+    db.set_user_preferences("neither", notify_email_maintenance=False,
+                             notify_discord_maintenance=False)
+    user_notify.notify_service_subscribers("maintenance", "Maintenance", "Body")
+    queued = {n["user_id"] for n in db.pending_notifications()}
+    assert queued == {"email_only", "discord_only"}
 
 
 # ---------------------------------------------------------------------------
@@ -92,14 +106,45 @@ def test_a_user_with_no_contact_details_is_not_retried_forever(enabled, monkeypa
 def test_the_preference_is_checked_at_delivery_time(enabled, monkeypatch):
     """So switching something off silences what's already queued, not just what comes
     next."""
-    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_own_reports=True)
+    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_email_reports=True)
     user_notify.notify_user("u1", "report_reply", "Subject", "Body")
-    db.set_user_preferences("u1", notify_own_reports=False)
+    db.set_user_preferences("u1", notify_email_reports=False)
     sent = []
     monkeypatch.setattr(notifications, "send_email",
                         lambda s, b, recipients=None: sent.append(s) or True)
     user_notify.run_delivery_task()
     assert sent == []
+
+
+def test_channels_are_gated_independently(enabled, monkeypatch):
+    """The point of the schema split: wanting an event by email but not Discord (or the
+    other way round) must produce exactly that, not both or neither."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_discord_id="123",
+                             notify_email_reports=True, notify_discord_reports=False)
+    emails, dms = [], []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    user_notify.notify_user("u1", "report_reply", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == [["me@example.invalid"]]
+    assert dms == []
+
+
+def test_seerr_events_are_discord_only(enabled, monkeypatch):
+    """There is no email column for "seerr_event" - even a user with email notify_*
+    switched on everywhere else and an email address on file must not get one, since the
+    preference the template shows for this category only ever appears under Discord."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_discord_id="123",
+                             notify_discord_seerr_events=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (True, ""))
+    user_notify.notify_user("u1", "seerr_event", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == []
+    assert db.notification_queue_summary()["sent"] == 1
 
 
 def test_a_failed_send_is_retried_then_given_up_on(enabled, monkeypatch):
@@ -315,12 +360,16 @@ def test_a_visitor_can_save_their_own_contact_details(signed_in_visitor):
     signed_in_visitor.post("/account", data={
         "theme": "auto", "contact": "",
         "notify_email": "me@example.invalid", "notify_discord_id": "123456789012345678",
-        "notify_own_reports": "on"}, follow_redirects=True)
+        "notify_email_reports": "on", "notify_discord_seerr_events": "on"},
+        follow_redirects=True)
     prefs = db.get_user_preferences("u1")
     assert prefs["notify_email"] == "me@example.invalid"
     assert prefs["notify_discord_id"] == "123456789012345678"
+    assert prefs["notify_email_reports"] is True
+    assert prefs["notify_discord_seerr_events"] is True
     # Unticked boxes are absences, so these have to come back off.
-    assert prefs["notify_service_events"] is False
+    assert prefs["notify_email_maintenance"] is False
+    assert prefs["notify_discord_reports"] is False
 
 
 def test_importing_from_seerr_copies_the_details_and_records_the_link(signed_in_visitor, monkeypatch):
@@ -543,12 +592,91 @@ def test_the_admin_can_set_a_users_contact_details(client, isolated_db, monkeypa
     assert user_notify.contact_for("u1")[0] == "set-by-admin@x"
 
 
-def test_the_admin_contact_form_only_shows_when_notifications_are_on(client, isolated_db):
+def test_the_admin_contact_column_only_shows_when_notifications_are_on(client, isolated_db):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
-    assert b"contact-form" not in client.get("/admin/users").data
+    assert b"Contact (from Seerr)" not in client.get("/admin/users").data
     db.set_setting("user_notifications_enabled", "1")
-    assert b"contact-form" in client.get("/admin/users").data
+    assert b"Contact (from Seerr)" in client.get("/admin/users").data
+
+
+def test_a_username_in_the_admin_list_links_to_their_account_view(client, isolated_db):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    resp = client.get("/admin/users")
+    assert b'href="/admin/users/u1/account"' in resp.data
+
+
+# ---------------------------------------------------------------------------
+# The admin's view of a user's account page - the "better alternative" to a
+# separate admin-only settings grid
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def admin(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    return client
+
+
+def test_the_admin_account_view_requires_login(client, isolated_db):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    assert client.get("/admin/users/u1/account").status_code == 302
+
+
+def test_the_admin_account_view_404s_for_an_unknown_user(admin, isolated_db):
+    assert admin.get("/admin/users/nope/account").status_code == 404
+
+
+def test_the_admin_account_view_shows_the_targets_preferences(admin, isolated_db):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="adam@example.invalid")
+    resp = admin.get("/admin/users/u1/account")
+    assert resp.status_code == 200
+    assert b"adam" in resp.data
+    assert b"adam@example.invalid" in resp.data
+    assert b"Your reports" not in resp.data
+
+
+def test_the_admin_account_view_saves_the_targets_prefs_not_the_admins(admin, isolated_db):
+    """The admin viewing this page might also happen to have their own portal_user
+    session in the same browser - the write must go to the path's user_id regardless."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}, {"id": "u2", "name": "eve"}])
+    db.set_setting("user_notifications_enabled", "1")
+    admin.post("/admin/users/u1/account", data={
+        "theme": "auto", "contact": "", "notify_email": "adam@example.invalid",
+        "notify_email_reports": "on"}, follow_redirects=True)
+    assert db.get_user_preferences("u1")["notify_email"] == "adam@example.invalid"
+    assert db.get_user_preferences("u2")["notify_email"] == ""
+
+
+def test_the_admin_can_import_seerr_details_for_a_user(admin, isolated_db, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "adam@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = admin.post("/admin/users/u1/seerr/import", follow_redirects=True)
+    assert resp.request.path == "/admin/users/u1/account"
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "adam@example.invalid"
+    assert prefs["notify_discord_id"] == "999"
+
+
+def test_pushing_from_the_admin_view_redirects_back_to_it(admin, isolated_db, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam", "email": "old@x",
+                                 "discord_id": "", "jellyfin_user_id": "u1"}])
+    monkeypatch.setattr(integrations, "push_seerr_contact", lambda *a, **k: True)
+    resp = admin.post("/admin/users/u1/contact",
+                       data={"notify_email": "new@x", "notify_discord_id": "",
+                             "next": "/admin/users/u1/account"},
+                       follow_redirects=True)
+    assert resp.request.path == "/admin/users/u1/account"
 
 
 def test_a_visitor_with_nowhere_to_be_reached_is_prompted(signed_in_visitor):

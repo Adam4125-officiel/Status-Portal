@@ -1348,22 +1348,6 @@ footer.foot {
 .summary-card__value { font-size: 12.5px; color: var(--text-dim); }
 .summary-card__go { font-size: 11.5px; color: var(--brand); margin-top: 2px; }
 
-/* Inline contact entry in the admin user list. Narrow inputs so the row stays a row;
-   the table scrolls rather than the fields shrinking to unusable. */
-.contact-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.contact-form input {
-  width: 150px;
-  padding: 5px 8px;
-  font-size: 12px;
-  background: var(--bg-panel-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-family: inherit;
-}
-.contact-form input:focus { outline: none; border-color: var(--brand); }
-.contact-form .btn { padding: 4px 10px; font-size: 12px; }
-
 /* Navigation loading bar (static/js/page_loading.js). Server-rendered pages leave the
    old page on screen while the next one loads, so without this a slow response is
    indistinguishable from a stuck one. Width animates toward - but never reaches - 100%,

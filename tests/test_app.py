@@ -3553,7 +3553,7 @@ def test_the_theme_endpoint_updates_only_the_theme(client, user_auth, monkeypatc
     assert prefs["contact"] == "keep me"
     # The endpoint writes *only* the theme, so every notification preference has to
     # come back untouched too - it knows nothing about them.
-    assert prefs["notify_own_reports"] is True
+    assert prefs["notify_email_reports"] is True
 
 
 def test_the_theme_endpoint_requires_a_signed_in_visitor(client, user_auth):

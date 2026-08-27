@@ -125,7 +125,7 @@
     <tbody>
       {% for u in users %}
       <tr>
-        <td>{{ u.name }}</td>
+        <td><a href="{{ url_for('admin_user_account', user_id=u.id) }}">{{ u.name }}</a></td>
         <td>
           {% if u.is_disabled %}<span class="badge investigating">disabled</span>
           {% elif u.is_administrator %}<span class="badge monitoring">administrator</span>
@@ -158,20 +158,13 @@
         {% if notifications_enabled %}
         {% set c = contacts.get(u.id, {}) %}
         <td>
-          {# Seerr is where this data belongs, so the form writes through to it rather
-             than keeping a private second copy. It's here because Seerr frequently has
-             these blank, and an admin who knows the answer shouldn't have to go and set
-             it up in another app first. #}
-          <form action="{{ url_for('admin_user_contact', user_id=u.id) }}" method="POST"
-                class="contact-form">
-            <input type="email" name="notify_email" value="{{ c.email or '' }}"
-                   placeholder="email" aria-label="Email for {{ u.name }}">
-            <input type="text" name="notify_discord_id" value="{{ c.discord_id or '' }}"
-                   inputmode="numeric" placeholder="Discord ID" aria-label="Discord ID for {{ u.name }}">
-            <button type="submit" class="btn secondary">Save</button>
-          </form>
-          {% if not c %}
-            <div class="field-hint">No linked Seerr account.</div>
+          {# Read-only summary - editing (and the notification-preference toggles that
+             go with it) lives on the full account view now, one click away via the
+             username link, rather than a second copy of the same form here. #}
+          {% if c and (c.email or c.discord_id) %}
+            {{ c.email or 'no email' }}{% if c.discord_id %}, Discord ID {{ c.discord_id }}{% endif %}
+          {% else %}
+            <span class="field-hint">Not set</span>
           {% endif %}
         </td>
         {% endif %}

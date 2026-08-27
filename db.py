@@ -478,6 +478,34 @@ def init_db():
     _ensure_column(conn, "user_preferences", "notify_own_reports", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "user_preferences", "notify_service_events", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "user_preferences", "notify_requests", "INTEGER NOT NULL DEFAULT 1")
+    # The three columns above are now legacy - kept (nothing is ever dropped here) but
+    # read by nothing, replaced by one column per channel x event below, so a person can
+    # ask for something by email without also getting it as a Discord DM (or vice
+    # versa). Same defaults per event as the legacy columns had; the new
+    # notify_discord_seerr_events category has no predecessor and is Discord-only.
+    _new_pref_columns_existed = "notify_email_reports" in {
+        row[1] for row in conn.execute("PRAGMA table_info(user_preferences)").fetchall()}
+    _ensure_column(conn, "user_preferences", "notify_email_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_email_requests", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_email_maintenance", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_discord_reports", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_discord_requests", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "user_preferences", "notify_discord_maintenance", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_discord_seerr_events", "INTEGER NOT NULL DEFAULT 1")
+    if not _new_pref_columns_existed:
+        # One-time: carry each existing user's combined choice into both of its new
+        # per-channel columns, so splitting the setting doesn't silently reset anyone's
+        # existing choice. Guarded on the columns not existing yet (checked above,
+        # before _ensure_column added them) rather than on the legacy columns' current
+        # values, so this can never re-fire and re-overwrite a later, deliberate change
+        # to one of the new columns on a subsequent restart.
+        conn.execute("UPDATE user_preferences SET notify_email_reports=notify_own_reports, "
+                      "notify_discord_reports=notify_own_reports")
+        conn.execute("UPDATE user_preferences SET notify_email_requests=notify_requests, "
+                      "notify_discord_requests=notify_requests")
+        conn.execute("UPDATE user_preferences SET notify_email_maintenance=notify_service_events, "
+                      "notify_discord_maintenance=notify_service_events")
+        conn.commit()
     # The linked Seerr account id, only ever set from a real Jellyfin<->Seerr link -
     # never guessed from a matching email or username. Empty means "not linked", which
     # is the fail-closed state.
@@ -1872,9 +1900,13 @@ DEFAULT_USER_PREFERENCES = {
     "contact": "",
     "notify_email": "",
     "notify_discord_id": "",
-    "notify_own_reports": True,
-    "notify_service_events": False,
-    "notify_requests": True,
+    "notify_email_reports": True,
+    "notify_email_requests": True,
+    "notify_email_maintenance": False,
+    "notify_discord_reports": True,
+    "notify_discord_requests": True,
+    "notify_discord_maintenance": False,
+    "notify_discord_seerr_events": True,
     "seerr_user_id": "",
     "contact_prompt_dismissed": False,
 }
@@ -1883,7 +1915,11 @@ DEFAULT_USER_PREFERENCES = {
 def get_user_preferences(user_id):
     """Always returns a complete dict, so callers never branch on "has this user ever
     saved anything". An unrecognised stored theme falls back to the default rather
-    than being handed to a template that will render it into an HTML attribute."""
+    than being handed to a template that will render it into an HTML attribute.
+
+    notify_own_reports/notify_service_events/notify_requests are legacy columns (still
+    in the schema, never dropped, backfilled into the per-channel columns below by a
+    one-time migration in init_db()) and are deliberately not read here any more."""
     prefs = dict(DEFAULT_USER_PREFERENCES)
     if not user_id:
         return prefs
@@ -1895,9 +1931,13 @@ def get_user_preferences(user_id):
         prefs["contact"] = row["contact"] or ""
         prefs["notify_email"] = row["notify_email"] or ""
         prefs["notify_discord_id"] = row["notify_discord_id"] or ""
-        prefs["notify_own_reports"] = bool(row["notify_own_reports"])
-        prefs["notify_service_events"] = bool(row["notify_service_events"])
-        prefs["notify_requests"] = bool(row["notify_requests"])
+        prefs["notify_email_reports"] = bool(row["notify_email_reports"])
+        prefs["notify_email_requests"] = bool(row["notify_email_requests"])
+        prefs["notify_email_maintenance"] = bool(row["notify_email_maintenance"])
+        prefs["notify_discord_reports"] = bool(row["notify_discord_reports"])
+        prefs["notify_discord_requests"] = bool(row["notify_discord_requests"])
+        prefs["notify_discord_maintenance"] = bool(row["notify_discord_maintenance"])
+        prefs["notify_discord_seerr_events"] = bool(row["notify_discord_seerr_events"])
         prefs["seerr_user_id"] = row["seerr_user_id"] or ""
         prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
     return prefs
@@ -1910,9 +1950,13 @@ def get_user_preferences(user_id):
 _USER_PREFERENCE_FIELDS = {
     "notify_email": str,
     "notify_discord_id": str,
-    "notify_own_reports": lambda v: int(bool(v)),
-    "notify_service_events": lambda v: int(bool(v)),
-    "notify_requests": lambda v: int(bool(v)),
+    "notify_email_reports": lambda v: int(bool(v)),
+    "notify_email_requests": lambda v: int(bool(v)),
+    "notify_email_maintenance": lambda v: int(bool(v)),
+    "notify_discord_reports": lambda v: int(bool(v)),
+    "notify_discord_requests": lambda v: int(bool(v)),
+    "notify_discord_maintenance": lambda v: int(bool(v)),
+    "notify_discord_seerr_events": lambda v: int(bool(v)),
     "seerr_user_id": str,
     "contact_prompt_dismissed": lambda v: int(bool(v)),
 }
@@ -2118,14 +2162,20 @@ def notification_queue_summary():
     return {"pending": row["pending"] or 0, "sent": row["sent"] or 0, "failed": row["failed"] or 0}
 
 
-def users_opted_into(field):
-    """Jellyfin user ids who have switched `field` on. Used for the broadcast-style
-    events (maintenance), where the alternative is reading every user's preferences
-    one at a time."""
-    if field not in _USER_PREFERENCE_FIELDS:
-        raise ValueError(f"Unknown user preference: {field}")
+def users_opted_into(*fields):
+    """Jellyfin user ids who have switched at least one of `fields` on. Used for the
+    broadcast-style events (maintenance), where the alternative is reading every user's
+    preferences one at a time. Takes several fields (OR'd) because maintenance is now
+    split into notify_email_maintenance/notify_discord_maintenance - someone who wants
+    it via either channel needs to be queued, and deliver() decides per-channel from
+    there. Every name is checked against the same whitelist set_user_preferences() uses,
+    so building the WHERE clause from them carries no injection risk."""
+    unknown = [f for f in fields if f not in _USER_PREFERENCE_FIELDS]
+    if unknown:
+        raise ValueError(f"Unknown user preference(s): {unknown}")
     conn = get_db()
-    rows = conn.execute(f"SELECT user_id FROM user_preferences WHERE {field}=1").fetchall()
+    where = " OR ".join(f"{f}=1" for f in fields)
+    rows = conn.execute(f"SELECT user_id FROM user_preferences WHERE {where}").fetchall()
     conn.close()
     return [r["user_id"] for r in rows]
 

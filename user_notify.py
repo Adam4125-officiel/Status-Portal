@@ -38,15 +38,18 @@ _logger = logging.getLogger(__name__)
 
 TASK_NAME = "user_notifications"
 
-# Which preference gates which event. A queued row whose user has since switched the
-# relevant preference off is dropped rather than sent - the preference is checked at
-# delivery time, not at enqueue time, so turning something off silences what's already
-# waiting too.
-EVENT_PREFERENCE = {
-    "report_reply": "notify_own_reports",
-    "report_incident": "notify_own_reports",
-    "maintenance": "notify_service_events",
-    "request_update": "notify_requests",
+# Which preference gates which event, per channel. A queued row whose user has since
+# switched the relevant preference off is dropped rather than sent - the preference is
+# checked at delivery time, not at enqueue time, so turning something off silences
+# what's already waiting too. A channel mapped to None is never used for that event
+# regardless of whether the person has contact details there - "seerr_event" is
+# Discord-only, there is no email equivalent to gate.
+EVENT_CHANNEL_PREFERENCE = {
+    "report_reply": {"email": "notify_email_reports", "discord": "notify_discord_reports"},
+    "report_incident": {"email": "notify_email_reports", "discord": "notify_discord_reports"},
+    "maintenance": {"email": "notify_email_maintenance", "discord": "notify_discord_maintenance"},
+    "request_update": {"email": "notify_email_requests", "discord": "notify_discord_requests"},
+    "seerr_event": {"email": None, "discord": "notify_discord_seerr_events"},
 }
 
 
@@ -64,20 +67,24 @@ def notify_user(user_id, event, subject, body):
     including a request handler, and a no-op when the feature is off."""
     if not user_id or not is_enabled():
         return None
-    if event not in EVENT_PREFERENCE:
+    if event not in EVENT_CHANNEL_PREFERENCE:
         raise ValueError(f"Unknown notification event: {event}")
     return db.enqueue_notification(user_id, event, subject, body)
 
 
 def notify_service_subscribers(event, subject, body, exclude_user_id=None):
-    """Queues the same message for everyone opted into service events.
+    """Queues the same message for everyone opted into this event via at least one
+    channel.
 
     Used for maintenance, which isn't attributable to one person. Reads the opted-in
-    ids in a single query rather than every user's preferences one at a time."""
+    ids in a single query rather than every user's preferences one at a time - opted in
+    via *either* channel, since deliver() decides per-channel which one(s) actually
+    fire for a given row."""
     if not is_enabled():
         return 0
+    columns = [c for c in EVENT_CHANNEL_PREFERENCE[event].values() if c]
     queued = 0
-    for user_id in db.users_opted_into(EVENT_PREFERENCE[event]):
+    for user_id in db.users_opted_into(*columns):
         if user_id and user_id != exclude_user_id:
             db.enqueue_notification(user_id, event, subject, body)
             queued += 1
@@ -240,23 +247,31 @@ scheduler.register(
 def deliver(row):
     """Sends one queued notification. Returns (ok, detail).
 
-    "Nowhere to send it" counts as done, not as a failure to retry: the person has no
-    contact details or has switched the relevant preference off, and neither will be
-    fixed by trying again in two minutes."""
-    preference = EVENT_PREFERENCE.get(row["event"])
+    Each channel is gated independently against its own preference column (see
+    EVENT_CHANNEL_PREFERENCE) - someone who wants an event by email but not Discord (or
+    the other way around) must get exactly that, not both or neither. "Nowhere to send
+    it" counts as done, not as a failure to retry: the person has no contact details or
+    has every applicable channel switched off, and neither is fixed by trying again in
+    two minutes."""
+    channel_prefs = EVENT_CHANNEL_PREFERENCE.get(row["event"], {})
     prefs = db.get_user_preferences(row["user_id"])
-    if preference and not prefs.get(preference):
+    email, discord_id = prefs["notify_email"], prefs["notify_discord_id"]
+
+    email_pref = channel_prefs.get("email")
+    discord_pref = channel_prefs.get("discord")
+    send_email = bool(email) and email_pref is not None and prefs.get(email_pref)
+    send_discord = bool(discord_id) and discord_pref is not None and prefs.get(discord_pref)
+
+    if not send_email and not send_discord:
+        if not email and not discord_id:
+            return True, "no contact details"
         return True, "recipient has this switched off"
 
-    email, discord_id = prefs["notify_email"], prefs["notify_discord_id"]
-    if not email and not discord_id:
-        return True, "no contact details"
-
     delivered, errors = [], []
-    if discord_id:
+    if send_discord:
         ok, error = discord_bot.send_dm(discord_id, f"**{row['subject']}**\n{row['body']}")
         delivered.append("discord") if ok else errors.append(f"discord: {error}")
-    if email:
+    if send_email:
         if notifications.send_email(row["subject"], row["body"], recipients=[email]):
             delivered.append("email")
         else:

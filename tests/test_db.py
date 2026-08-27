@@ -994,8 +994,11 @@ def test_saving_one_preference_leaves_the_on_by_default_ones_on(isolated_db):
     """The concrete version of the check above."""
     db.set_user_preferences("u1", notify_email="a@example.invalid")
     prefs = db.get_user_preferences("u1")
-    assert prefs["notify_own_reports"] is True
-    assert prefs["notify_service_events"] is False
+    assert prefs["notify_email_reports"] is True
+    assert prefs["notify_discord_reports"] is True
+    assert prefs["notify_discord_seerr_events"] is True
+    assert prefs["notify_email_maintenance"] is False
+    assert prefs["notify_discord_maintenance"] is False
 
 
 def test_preferences_round_trip(isolated_db):
@@ -1007,14 +1010,70 @@ def test_preferences_round_trip(isolated_db):
 
 def test_notification_preferences_round_trip(isolated_db):
     db.set_user_preferences("u1", notify_email="me@example.invalid",
-                             notify_discord_id="123", notify_service_events=True,
-                             notify_own_reports=False, seerr_user_id="7")
+                             notify_discord_id="123", notify_email_maintenance=True,
+                             notify_email_reports=False, seerr_user_id="7")
     prefs = db.get_user_preferences("u1")
     assert prefs["notify_email"] == "me@example.invalid"
     assert prefs["notify_discord_id"] == "123"
-    assert prefs["notify_service_events"] is True
-    assert prefs["notify_own_reports"] is False
+    assert prefs["notify_email_maintenance"] is True
+    assert prefs["notify_email_reports"] is False
     assert prefs["seerr_user_id"] == "7"
+
+
+def test_the_per_channel_split_backfills_existing_choices(tmp_path, monkeypatch):
+    """A database that predates the email/Discord split (three shared booleans instead
+    of one per channel) must not have those choices silently reset when the new columns
+    appear - each legacy value is carried into both of its new per-channel columns."""
+    old_db_path = tmp_path / "pre_split.db"
+    conn = sqlite3.connect(old_db_path)
+    conn.execute("""
+        CREATE TABLE user_preferences (
+            user_id TEXT PRIMARY KEY, theme TEXT NOT NULL DEFAULT 'auto',
+            contact TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+            notify_email TEXT NOT NULL DEFAULT '', notify_discord_id TEXT NOT NULL DEFAULT '',
+            notify_own_reports INTEGER NOT NULL DEFAULT 1,
+            notify_service_events INTEGER NOT NULL DEFAULT 0,
+            notify_requests INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute("""INSERT INTO user_preferences
+        (user_id, updated_at, notify_email, notify_own_reports, notify_service_events, notify_requests)
+        VALUES ('u1', '2026-01-01T00:00:00', 'a@example.invalid', 0, 1, 0)""")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", str(old_db_path))
+    db.init_db()
+    prefs = db.get_user_preferences("u1")
+    # This user had turned "own reports" off and "service events" (maintenance) on -
+    # both choices must survive into both channels, not silently reset to the new
+    # columns' own defaults.
+    assert prefs["notify_email_reports"] is False
+    assert prefs["notify_discord_reports"] is False
+    assert prefs["notify_email_maintenance"] is True
+    assert prefs["notify_discord_maintenance"] is True
+    assert prefs["notify_email_requests"] is False
+    assert prefs["notify_discord_requests"] is False
+    # No predecessor for this one - stays at its own default for everyone.
+    assert prefs["notify_discord_seerr_events"] is True
+
+    # A restart after the migration (columns now exist) must not re-run the backfill and
+    # stomp a later, deliberate change back to the legacy columns' old values.
+    db.set_user_preferences("u1", notify_email_reports=True)
+    db.init_db()
+    assert db.get_user_preferences("u1")["notify_email_reports"] is True
+
+
+def test_users_opted_into_ors_several_columns(isolated_db):
+    db.set_user_preferences("a", notify_email_maintenance=True, notify_discord_maintenance=False)
+    db.set_user_preferences("b", notify_email_maintenance=False, notify_discord_maintenance=True)
+    db.set_user_preferences("c", notify_email_maintenance=False, notify_discord_maintenance=False)
+    assert set(db.users_opted_into("notify_email_maintenance", "notify_discord_maintenance")) == {"a", "b"}
+
+
+def test_users_opted_into_refuses_an_unknown_field(isolated_db):
+    with pytest.raises(ValueError):
+        db.users_opted_into("not_a_real_field")
 
 
 def test_an_unknown_preference_is_refused_rather_than_ignored(isolated_db):
