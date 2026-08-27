@@ -2111,6 +2111,15 @@ the user on a 16-item batch, where the agreed cadence was one pre-release at the
 the whole batch). The stable-release trigger above still governs promoting a
 pre-release or cutting a fresh full release.
 
+**Promoting a feature branch to stable means merging its PR with a regular merge
+commit (`gh pr merge N --merge`), never squash or rebase.** Every past PR on this repo
+merged this way (`git log main --merges` shows it), and it's not a style preference —
+squashing would collapse a branch's carefully separated per-fix commits into one,
+which defeats the entire point of the commit-cadence convention above (`git bisect`/
+`git revert` need the individual commits to still exist on `main`). Do this *before*
+bumping `VERSION` to the stable number, since the version bump and tag belong on `main`
+after the merge, not on the feature branch.
+
 0. **Bump `VERSION` first — a required step, not a formality.** The `VERSION` file at
    the repo root must contain the exact version being released, *without* the leading
    `v` (`1.5.0`, `1.5.0-rc.1`), committed before the tag is created, so the tagged
