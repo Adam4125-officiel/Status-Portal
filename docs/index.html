@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Status Portal — a personal status page for your home server</title>
+<meta name="description" content="Status Portal is a self-hosted Flask/SQLite status page for home labs — health checks with auto-incidents, a Discord bot, Hyper-V VM controls, self-updating with rollback, Jellyfin sign-in and unified search. No Flask knowledge required.">
+<meta name="theme-color" content="#0b0d12">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Status Portal — a personal status page for your home server">
+<meta property="og:description" content="Self-hosted, single admin, no user accounts. Discord bot, Hyper-V controls, self-updating with rollback, and a full status/incident/maintenance system — all editable from the admin panel.">
+<meta property="og:image" content="https://adam4125-officiel.github.io/Status-Portal/images/screenshots/public-desktop-dark.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script>
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem("status-portal-landing-theme"); } catch (e) {}
+    if (saved === "dark" || saved === "light") {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  })();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#top"><span class="brand-dot" aria-hidden="true"></span>Status Portal</a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#integrations">Integrations</a>
+      <a href="#screenshots">Screenshots</a>
+      <a href="#quickstart">Quick start</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle color theme">🌙</button>
+      <a class="btn btn-primary btn-sm" href="https://github.com/Adam4125-officiel/Status-Portal" target="_blank" rel="noopener">GitHub</a>
+      <button class="icon-btn nav-toggle" id="nav-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-menu">☰</button>
+    </div>
+  </div>
+  <nav id="mobile-menu" aria-label="Mobile">
+    <a href="#features">Features</a>
+    <a href="#integrations">Integrations</a>
+    <a href="#screenshots">Screenshots</a>
+    <a href="#quickstart">Quick start</a>
+  </nav>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="wrap hero-inner">
+    <span class="kicker">Self-hosted · Flask + SQLite · AGPL-3.0</span>
+    <h1>Status Portal</h1>
+    <p class="hero-tagline">A personal status portal for your home server — no Flask knowledge or HTML editing required.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="https://github.com/Adam4125-officiel/Status-Portal" target="_blank" rel="noopener">View on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/Adam4125-officiel/Status-Portal/wiki" target="_blank" rel="noopener">Read the docs</a>
+      <a class="btn btn-ghost" href="#quickstart">Quick start ↓</a>
+    </div>
+    <div class="badges">
+      <a href="https://github.com/Adam4125-officiel/Status-Portal/stargazers" target="_blank" rel="noopener">
+        <img src="https://img.shields.io/github/stars/Adam4125-officiel/Status-Portal?style=flat-square&label=stars&color=6c8cff" alt="GitHub stars" loading="lazy">
+      </a>
+      <a href="https://github.com/Adam4125-officiel/Status-Portal/releases/latest" target="_blank" rel="noopener">
+        <img src="https://img.shields.io/github/v/release/Adam4125-officiel/Status-Portal?style=flat-square&label=release&color=3ddc97" alt="Latest release" loading="lazy">
+      </a>
+      <a href="https://github.com/Adam4125-officiel/Status-Portal/blob/main/LICENSE" target="_blank" rel="noopener">
+        <img src="https://img.shields.io/github/license/Adam4125-officiel/Status-Portal?style=flat-square&color=a08bff" alt="AGPL-3.0 license" loading="lazy">
+      </a>
+    </div>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <span class="frame-dot"></span><span class="frame-dot"></span><span class="frame-dot"></span>
+        <span class="frame-url">home-lab-status.local</span>
+      </div>
+      <div class="frame-body">
+        <img class="shot-light" src="images/screenshots/public-desktop-light.png" alt="Status Portal public status page showing service groups, an announcement banner and live incidents, light mode" loading="eager" width="1440" height="900">
+        <img class="shot-dark" src="images/screenshots/public-desktop-dark.png" alt="Status Portal public status page showing service groups, an announcement banner and live incidents, dark mode" loading="eager" width="1440" height="900">
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="differentiators">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="kicker">Why this one</span>
+      <h2>Built for a home lab, not a SaaS dashboard</h2>
+      <p>Three things most status pages don't even attempt.</p>
+    </div>
+    <div class="diff-grid">
+      <div class="diff-card reveal">
+        <span class="num">01</span>
+        <div class="diff-icon">🤖</div>
+        <h3>Discord bot integration</h3>
+        <p>A real Discord bot — not just a webhook — that keeps a self-editing status message live in a channel and answers a <code>/snapshot</code> slash command with full incident detail on demand. Per-server, per-channel and per-user access controls included.</p>
+      </div>
+      <div class="diff-card reveal">
+        <span class="num">02</span>
+        <div class="diff-icon">🖥️</div>
+        <h3>Hyper-V VM &amp; host controls</h3>
+        <p>Restart or shut down the host machine, or start and stop individual Hyper-V VMs, straight from the admin panel — gated behind step-up two-factor confirmation before anything destructive actually runs.</p>
+      </div>
+      <div class="diff-card reveal">
+        <span class="num">03</span>
+        <div class="diff-icon">🔄</div>
+        <h3>Self-updating, with rollback</h3>
+        <p>One click in the admin panel, or one <code>update.py</code> command, pulls the latest release, verifies its integrity, and installs it — backing itself up first, so a bad update rolls back instead of taking your portal down.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" class="section-alt">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="kicker">Everything else</span>
+      <h2>A full status page, admin panel, and notification system</h2>
+      <p>Nothing here needs a restart to change, and almost nothing needs a code edit.</p>
+    </div>
+    <div class="feature-grid">
+      <div class="feature-card reveal"><span class="feature-icon">🩺</span><div><h4>Automated health checks</h4><p>Per-service checks with retries, a startup grace period, and a "slow" tier — not just up or down.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🚨</span><div><h4>Auto-opened incidents</h4><p>A service going down opens an incident by itself; recovering resolves it. No manual bookkeeping.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🛠️</span><div><h4>Scheduled maintenance</h4><p>Windows that flip services to "maintenance" and back automatically, covering multiple services at once.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">⏱️</span><div><h4>Scheduled tasks</h4><p>An admin page for every recurring background job the portal runs — enable, reschedule, or run any of them now.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">👤</span><div><h4>Jellyfin-backed sign-in</h4><p>Optional visitor accounts backed by your real Jellyfin logins, fully separate from the admin account.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🔎</span><div><h4>Unified search</h4><p>Search Jellyfin and Jellyseerr together, and request anything that's missing in one click.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🚩</span><div><h4>Report a problem</h4><p>A public form feeds a real admin inbox, with two-way replies per report.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🔔</span><div><h4>Discord / ntfy / email</h4><p>Three independent notification channels, all optional, all firing together.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">🔐</span><div><h4>Two-factor auth</h4><p>TOTP for the admin login, plus step-up confirmation before any destructive action.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">📛</span><div><h4>Custom branding</h4><p>Your own logo and favicon from the admin panel — no template to fork.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">📈</span><div><h4>Uptime &amp; badges</h4><p>30-day uptime tracking with embeddable SVG badges for any service.</p></div></div>
+      <div class="feature-card reveal"><span class="feature-icon">📰</span><div><h4>RSS feed</h4><p>Subscribe to incidents and maintenance windows the old-fashioned way.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="integrations">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="kicker">Speaks your stack</span>
+      <h2>Reads live health &amp; activity from the services you already run</h2>
+      <p>Every integration is optional — add only what you run, and each one degrades independently if it's down.</p>
+    </div>
+    <div class="integrations-grid">
+      <div class="integration-card reveal"><div class="integration-icon" style="background:var(--brand-soft);">🎬</div><span>Jellyfin</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--crit) 18%, transparent);">🎥</div><span>Radarr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--brand) 18%, transparent);">📺</div><span>Sonarr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--maint) 18%, transparent);">🛰️</div><span>Prowlarr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--ok) 18%, transparent);">💬</div><span>Bazarr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--warn) 18%, transparent);">⚙️</div><span>Tdarr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--text-faint) 18%, transparent);">🛡️</div><span>Byparr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:var(--brand-soft);">🙋</div><span>Seerr</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--ok) 18%, transparent);">⬇️</div><span>qBittorrent</span></div>
+      <div class="integration-card reveal"><div class="integration-icon" style="background:color-mix(in srgb, var(--maint) 18%, transparent);">🖥️</div><span>Hyper-V</span></div>
+    </div>
+    <p class="integrations-note reveal">Trademarks belong to their respective projects. Status Portal isn't affiliated with any of them — it just talks to their APIs.</p>
+  </div>
+</section>
+
+<section id="screenshots" class="section-alt">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="kicker">See it</span>
+      <h2>The public page and the admin panel</h2>
+      <p>Real screenshots, not mockups — including the demo data seeded for documentation.</p>
+    </div>
+    <div class="gallery-tabs reveal">
+      <button class="gallery-tab active" data-filter="all" type="button">All</button>
+      <button class="gallery-tab" data-filter="public" type="button">Public page</button>
+      <button class="gallery-tab" data-filter="admin" type="button">Admin panel</button>
+    </div>
+    <div class="gallery-grid">
+      <div class="gallery-item reveal" data-group="public">
+        <div class="gallery-shot"><img class="shot-light" src="images/screenshots/public-desktop-light.png" alt="Public status page, light mode" loading="lazy" width="1440" height="900"><img class="shot-dark" src="images/screenshots/public-desktop-dark.png" alt="Public status page, dark mode" loading="lazy" width="1440" height="900"></div>
+        <div class="gallery-caption"><strong>Public status page</strong><span class="tag">desktop</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="public">
+        <div class="gallery-shot"><img class="shot-light" src="images/screenshots/public-mobile-light.png" alt="Public status page on mobile, light mode" loading="lazy" width="390" height="844"><img class="shot-dark" src="images/screenshots/public-mobile-dark.png" alt="Public status page on mobile, dark mode" loading="lazy" width="390" height="844"></div>
+        <div class="gallery-caption"><strong>Public status page</strong><span class="tag">mobile</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="public">
+        <img src="images/screenshots/incident-detail-desktop.png" alt="Incidents and maintenance timeline on the public page" loading="lazy" width="1440" height="900">
+        <div class="gallery-caption"><strong>Incidents &amp; maintenance</strong><span class="tag">desktop</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="admin">
+        <img src="images/screenshots/admin-dashboard-desktop.png" alt="Admin services dashboard listing every monitored service" loading="lazy" width="1440" height="900">
+        <div class="gallery-caption"><strong>Services dashboard</strong><span class="tag">admin</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="admin">
+        <img src="images/screenshots/admin-tasks-desktop.png" alt="Admin scheduled tasks page showing background jobs and their last run" loading="lazy" width="1440" height="900">
+        <div class="gallery-caption"><strong>Scheduled tasks</strong><span class="tag">admin</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="admin">
+        <img src="images/screenshots/admin-notifications-desktop.png" alt="Admin notification channels page for Discord, ntfy and email" loading="lazy" width="1440" height="900">
+        <div class="gallery-caption"><strong>Notification channels</strong><span class="tag">admin</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="admin">
+        <img src="images/screenshots/login-desktop.png" alt="Admin panel login screen" loading="lazy" width="1440" height="900">
+        <div class="gallery-caption"><strong>Admin login</strong><span class="tag">admin</span></div>
+      </div>
+      <div class="gallery-item reveal" data-group="admin">
+        <img src="images/screenshots/admin-dashboard-mobile.png" alt="Admin services dashboard on mobile" loading="lazy" width="390" height="844">
+        <div class="gallery-caption"><strong>Services dashboard</strong><span class="tag">mobile</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="quickstart-layout">
+      <div class="terminal reveal">
+        <div class="frame-bar">
+          <span class="frame-dot"></span><span class="frame-dot"></span><span class="frame-dot"></span>
+          <span class="frame-url">bash</span>
+        </div>
+        <pre><span class="c"># clone and install</span>
+git clone https://github.com/Adam4125-officiel/Status-Portal.git
+<span class="p">cd</span> Status-Portal
+pip install -r requirements.txt
+
+<span class="c"># optional: configure webhooks, ports, etc.</span>
+cp .env.example .env
+
+<span class="c"># run it</span>
+python app.py</pre>
+      </div>
+      <div class="terminal-side reveal">
+        <span class="kicker">Quick start</span>
+        <h3>Running in under a minute</h3>
+        <p>Open <code>http://localhost:5000</code> for the public page and <code>http://localhost:5000/admin</code> to set the admin password on first launch — the database is a single SQLite file, created automatically.</p>
+        <ul>
+          <li>For continuous or production use, run <code>python serve_waitress.py</code> instead of <code>app.py</code>.</li>
+          <li>Docker is also supported, via the included <code>Dockerfile</code> and <code>docker-compose.yml</code>.</li>
+          <li>Updating later is one click in the admin panel, or <code>python update.py</code>.</li>
+        </ul>
+        <a class="btn btn-primary" href="https://github.com/Adam4125-officiel/Status-Portal/wiki" target="_blank" rel="noopener">Full install &amp; config guide on the Wiki →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-inner">
+      <a class="brand" href="#top"><span class="brand-dot" aria-hidden="true"></span>Status Portal</a>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/Adam4125-officiel/Status-Portal" target="_blank" rel="noopener">Repository</a>
+        <a href="https://github.com/Adam4125-officiel/Status-Portal/issues" target="_blank" rel="noopener">Issues</a>
+        <a href="https://github.com/Adam4125-officiel/Status-Portal/wiki" target="_blank" rel="noopener">Wiki</a>
+        <a href="https://github.com/Adam4125-officiel/Status-Portal/blob/main/LICENSE" target="_blank" rel="noopener">AGPL-3.0 License</a>
+      </nav>
+    </div>
+    <p class="footer-note">© <span id="year"></span> Status Portal. Not affiliated with Jellyfin, the *Arr projects, Seerr, qBittorrent, Discord or Microsoft Hyper-V — this page just documents an app that talks to their APIs.</p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
