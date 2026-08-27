@@ -1172,6 +1172,12 @@ footer.foot {
   border-radius: var(--radius-sm);
   object-fit: cover;
   background: var(--bg-panel-raised);
+  /* A poster that fails to load (TMDB unreachable, blocked, slow) falls back to its
+     alt text, which a browser renders at normal size regardless of the box - without
+     this the title can overflow a 46x69 box and spill into the row below it. */
+  overflow: hidden;
+  color: transparent;
+  font-size: 0;
 }
 .search-result__poster--placeholder {
   display: flex;
