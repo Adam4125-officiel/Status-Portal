@@ -187,8 +187,79 @@ def detail(media_type, tmdb_id):
     return integrations.fetch_seerr_detail(seerr["base_url"], seerr["api_key"], media_type, tmdb_id)
 
 
-def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name=""):
+def request_configuration(media_type, tmdb_id, include_admin_fields):
+    """Everything the request-configuration page needs to show before submitting:
+    title/poster/year and, for a tv show, its season list - shown to every signed-in
+    visitor - plus, only when include_admin_fields is true, the root folder/quality
+    profile/tag options for whichever Radarr/Sonarr server Seerr has set as default.
+    Root folder values are real filesystem paths, which is why those three are gated to
+    the portal admin rather than shown to anyone signed in.
+
+    None when Seerr isn't configured or the item can't be resolved at all - a genuinely
+    unusable page either way. A failure fetching the *admin* fields specifically (server
+    list/detail) degrades to the plain, non-admin config rather than failing the whole
+    page, since the season picker is still perfectly usable on its own."""
+    seerr = seerr_integration()
+    if not seerr:
+        return None
+    item_detail = detail(media_type, tmdb_id)
+    if not item_detail:
+        return None
+
+    config = {
+        "title": item_detail["title"], "year": item_detail["year"],
+        "poster_path": item_detail["poster_path"],
+        # Season 0 is Seerr's "Specials" - excluded here to match "seasons: all"'s own
+        # existing meaning (every real season, no specials), not a separate omission.
+        "seasons": [s for s in item_detail["seasons"] if s["season_number"] != 0]
+                   if media_type == "tv" else [],
+        "servers": [], "profiles": [], "root_folders": [], "tags": [],
+        "selected_server_id": None, "active_profile_id": None, "active_root_folder": "",
+    }
+    if not include_admin_fields:
+        return config
+
+    fetch_servers = (integrations.fetch_seerr_radarr_servers if media_type == "movie"
+                      else integrations.fetch_seerr_sonarr_servers)
+    fetch_server_detail = (integrations.fetch_seerr_radarr_detail if media_type == "movie"
+                            else integrations.fetch_seerr_sonarr_detail)
+    try:
+        servers = fetch_servers(seerr["base_url"], seerr["api_key"])
+    except (requests.RequestException, ValueError) as e:
+        _logger.info("Could not list Seerr's %s servers: %s", media_type, e)
+        return config
+    config["servers"] = servers
+    if not servers:
+        return config
+
+    # The server flagged as Seerr's own default, falling back to the first - a picker
+    # for which server is only worth showing when there's more than one to choose from,
+    # which is the common single-*Arr-instance case handled with no extra UI at all.
+    default_server = next((s for s in servers if s["is_default"]), servers[0])
+    config["selected_server_id"] = default_server["id"]
+    try:
+        server_detail = fetch_server_detail(seerr["base_url"], seerr["api_key"], default_server["id"])
+    except (requests.RequestException, ValueError) as e:
+        _logger.info("Could not read Seerr's %s server detail: %s", media_type, e)
+        return config
+    config.update({
+        "profiles": server_detail["profiles"],
+        "root_folders": server_detail["root_folders"],
+        "tags": server_detail["tags"],
+        "active_profile_id": server_detail["active_profile_id"],
+        "active_root_folder": server_detail["active_root_folder"],
+    })
+    return config
+
+
+def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name="",
+            seasons=None, root_folder=None, profile_id=None, tags=None):
     """Asks Seerr for something. Returns (ok, message).
+
+    seasons/root_folder/profile_id/tags are the optional configuration shown on the
+    request confirmation page before submitting - see search_request_configure.html.
+    Only passed through when provided; see request_via_seerr() for what an ordinary
+    visitor's plain "seasons only" submission still gets from Seerr's own defaults.
 
     Never raises: this is reached from a form POST, and every outcome an ordinary person
     can cause - already requested, Seerr down, no permission - has to come back as a
@@ -206,7 +277,9 @@ def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name=""):
     seerr_user_id = seerr_user_id_for(jellyfin_user_id)
     try:
         integrations.request_via_seerr(seerr["base_url"], seerr["api_key"],
-                                        media_type, tmdb_id, seerr_user_id)
+                                        media_type, tmdb_id, seerr_user_id,
+                                        seasons=seasons, root_folder=root_folder,
+                                        profile_id=profile_id, tags=tags)
     except requests.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         if status == 409:

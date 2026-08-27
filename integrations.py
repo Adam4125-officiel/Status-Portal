@@ -518,26 +518,87 @@ def search_seerr(base_url, api_key, query, limit=12):
     return items
 
 
-def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None):
+def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None,
+                       seasons=None, root_folder=None, profile_id=None, tags=None):
     """Asks Seerr for something, on behalf of a specific Seerr user where one is known.
 
     `userId` is what makes the request show up in Seerr's own approval queue attributed
     to the person who actually asked, rather than to whoever owns the API key. It is
     only ever passed when a *real* Jellyfin-to-Seerr link exists - see media_search.py
-    for why that link is never guessed."""
+    for why that link is never guessed.
+
+    seasons/root_folder/profile_id/tags are all optional and only included in the
+    payload when actually provided, so a caller that doesn't pass them (or passes only
+    `seasons`) gets exactly today's behaviour for the rest - Seerr's own configured
+    defaults for root folder/profile/tags."""
     base_url = base_url.rstrip("/")
     payload = {"mediaType": media_type, "mediaId": int(tmdb_id)}
     if seerr_user_id:
         payload["userId"] = int(seerr_user_id)
     if media_type == "tv":
-        # Seerr requires a season selection for series; "all" is the only sane default
-        # for a portal that isn't going to render a season picker.
-        payload["seasons"] = "all"
+        # Seerr requires a season selection for series; "all" (every season but the
+        # specials) is the fallback default when the caller doesn't pick specific ones.
+        payload["seasons"] = seasons if seasons is not None else "all"
+    if root_folder is not None:
+        payload["rootFolder"] = root_folder
+    if profile_id is not None:
+        payload["profileId"] = int(profile_id)
+    if tags is not None:
+        payload["tags"] = [int(t) for t in tags]
     r = requests.post(f"{base_url}/api/v1/request",
                        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
                        json=payload, timeout=config.SEARCH_TIMEOUT_SECONDS)
     r.raise_for_status()
     return r.json() if r.content else {}
+
+
+def _seerr_servers(base_url, api_key, kind):
+    """Non-sensitive Radarr/Sonarr server list - id, name, and which one is default."""
+    r = requests.get(f"{base_url.rstrip('/')}/api/v1/service/{kind}",
+                      headers={"X-Api-Key": api_key}, timeout=TIMEOUT)
+    r.raise_for_status()
+    servers = r.json()
+    if not isinstance(servers, list):
+        raise ValueError(f"Unexpected response from /api/v1/service/{kind}")
+    return [{"id": s["id"], "name": s.get("name") or f"{kind.title()} #{s['id']}",
+             "is_default": bool(s.get("isDefault"))} for s in servers]
+
+
+def _seerr_server_detail(base_url, api_key, kind, server_id):
+    """One Radarr/Sonarr server's quality profiles, root folders and tags, plus which
+    profile/folder it's currently configured to use by default - what the request
+    configuration page pre-selects."""
+    r = requests.get(f"{base_url.rstrip('/')}/api/v1/service/{kind}/{server_id}",
+                      headers={"X-Api-Key": api_key}, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, dict):
+        raise ValueError(f"Unexpected response from /api/v1/service/{kind}/{server_id}")
+    server = data.get("server") or {}
+    return {
+        "profiles": [{"id": p["id"], "name": p["name"]} for p in (data.get("profiles") or [])],
+        "root_folders": [{"path": f["path"]} for f in (data.get("rootFolders") or [])],
+        "tags": [{"id": t["id"], "name": t.get("label") or t.get("name") or ""}
+                 for t in (data.get("tags") or [])],
+        "active_profile_id": server.get("activeProfileId"),
+        "active_root_folder": server.get("activeDirectory") or "",
+    }
+
+
+def fetch_seerr_radarr_servers(base_url, api_key):
+    return _seerr_servers(base_url, api_key, "radarr")
+
+
+def fetch_seerr_radarr_detail(base_url, api_key, server_id):
+    return _seerr_server_detail(base_url, api_key, "radarr", server_id)
+
+
+def fetch_seerr_sonarr_servers(base_url, api_key):
+    return _seerr_servers(base_url, api_key, "sonarr")
+
+
+def fetch_seerr_sonarr_detail(base_url, api_key, server_id):
+    return _seerr_server_detail(base_url, api_key, "sonarr", server_id)
 
 
 # ---------------------------------------------------------------------------

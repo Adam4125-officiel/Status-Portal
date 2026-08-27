@@ -1938,6 +1938,26 @@ def search_detail(media_type, tmdb_id):
                             site_name=db.get_setting("site_name", "Server"))
 
 
+@app.route("/search/request/configure")
+@user_login_required
+def search_request_configure():
+    """Shows what a request will actually contain before submitting it, rather than
+    submitting with Seerr's silent defaults - a season picker for everyone signed in,
+    plus root folder/quality profile/tags only when the browser is *also* signed in as
+    the portal admin (session["logged_in"]), since those reveal server filesystem
+    paths an ordinary visitor has no business seeing."""
+    media_type = request.args.get("media_type", "")
+    tmdb_id = request.args.get("tmdb_id", "")
+    is_admin = bool(session.get("logged_in"))
+    config = media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+    if not config:
+        return render_template("error.html", code=404, message="Couldn't find that title."), 404
+    return render_template("search_request_configure.html", config=config,
+                            media_type=media_type, tmdb_id=tmdb_id,
+                            query=request.args.get("q", ""), is_admin=is_admin,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
 @app.route("/search/request", methods=["POST"])
 @user_login_required
 def search_request():
@@ -1951,9 +1971,22 @@ def search_request():
         flash("You've made a lot of requests just now - give it a minute.", "error")
         return redirect(url_for("search", q=request.form.get("q", "")))
     _register_search()
-    ok, message = media_search.request(request.form.get("media_type", ""),
-                                        request.form.get("tmdb_id", ""),
-                                        user["id"], user.get("name", ""))
+    media_type = request.form.get("media_type", "")
+    seasons = ([int(s) for s in request.form.getlist("seasons") if s.isdigit()]
+               if media_type == "tv" else None)
+    root_folder = request.form.get("root_folder") or None
+    profile_id = request.form.get("profile_id") or None
+    tags = request.form.getlist("tags") or None
+    # Root folder/profile/tags are only ever honoured when the browser is also signed
+    # in as the portal admin - the configuration page never renders those fields for
+    # anyone else, but a forged POST must not be able to smuggle them in regardless of
+    # what the form actually showed.
+    if not session.get("logged_in"):
+        root_folder = profile_id = tags = None
+    ok, message = media_search.request(media_type, request.form.get("tmdb_id", ""),
+                                        user["id"], user.get("name", ""),
+                                        seasons=seasons, root_folder=root_folder,
+                                        profile_id=profile_id, tags=tags)
     flash(message, "success" if ok else "error")
     return redirect(url_for("search", q=request.form.get("q", "")))
 

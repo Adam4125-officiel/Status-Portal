@@ -205,7 +205,7 @@ def test_a_request_is_attributed_to_the_linked_seerr_user(isolated_db, stub, mon
     db.set_user_preferences("u1", seerr_user_id="7")
     sent = {}
     monkeypatch.setattr(integrations, "request_via_seerr",
-                        lambda url, key, mt, tid, uid=None: sent.update(
+                        lambda url, key, mt, tid, uid=None, **kw: sent.update(
                             {"media_type": mt, "tmdb_id": tid, "user": uid}))
     ok, message = media_search.request("movie", 438631, "u1", "adam")
     assert ok is True
@@ -223,7 +223,7 @@ def test_an_unlinked_user_still_gets_their_request_but_is_told_it_is_unattribute
     ]})
     sent = {}
     monkeypatch.setattr(integrations, "request_via_seerr",
-                        lambda url, key, mt, tid, uid=None: sent.update({"user": uid}))
+                        lambda url, key, mt, tid, uid=None, **kw: sent.update({"user": uid}))
     ok, message = media_search.request("movie", 1, "u1", "adam")
     assert ok is True
     assert sent["user"] is None
@@ -268,9 +268,10 @@ def test_a_nonsense_request_is_refused_before_reaching_seerr(isolated_db, stub, 
     assert ok is False
 
 
-def test_a_series_request_asks_for_every_season(isolated_db, stub, monkeypatch):
-    """Seerr rejects a TV request with no season selection, and this portal isn't going
-    to render a season picker."""
+def test_a_series_request_asks_for_every_season_by_default(isolated_db, stub, monkeypatch):
+    """Seerr rejects a TV request with no season selection - "all" is the fallback a
+    caller gets by not passing seasons explicitly (see test_specific_seasons_can_be_
+    requested_instead below for the configuration page's own picker)."""
     _configure(stub, jellyfin=False)
     sent = {}
     monkeypatch.setattr(integrations.requests, "post",
@@ -280,6 +281,61 @@ def test_a_series_request_asks_for_every_season(isolated_db, stub, monkeypatch):
                         })())
     integrations.request_via_seerr(stub, "k", "tv", 1399)
     assert sent["seasons"] == "all"
+
+
+def test_specific_seasons_can_be_requested_instead(isolated_db, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    sent = {}
+    monkeypatch.setattr(integrations.requests, "post",
+                        lambda url, headers=None, json=None, timeout=None:
+                        sent.update(json or {}) or type("R", (), {
+                            "raise_for_status": lambda self: None, "content": b"",
+                        })())
+    integrations.request_via_seerr(stub, "k", "tv", 1399, seasons=[1, 2])
+    assert sent["seasons"] == [1, 2]
+
+
+def test_root_folder_profile_and_tags_are_only_sent_when_provided(isolated_db, stub, monkeypatch):
+    """An ordinary visitor's submission (seasons only) must behave exactly as before -
+    Seerr's own configured defaults for the rest."""
+    _configure(stub, jellyfin=False)
+    sent = {}
+    monkeypatch.setattr(integrations.requests, "post",
+                        lambda url, headers=None, json=None, timeout=None:
+                        sent.update(json or {}) or type("R", (), {
+                            "raise_for_status": lambda self: None, "content": b"",
+                        })())
+    integrations.request_via_seerr(stub, "k", "movie", 1)
+    assert "rootFolder" not in sent and "profileId" not in sent and "tags" not in sent
+
+    integrations.request_via_seerr(stub, "k", "movie", 1, root_folder="/movies",
+                                    profile_id="3", tags=["1", "2"])
+    assert sent["rootFolder"] == "/movies"
+    assert sent["profileId"] == 3
+    assert sent["tags"] == [1, 2]
+
+
+def test_radarr_servers_and_detail_are_read_from_seerrs_service_endpoints(stub):
+    route("/api/v1/service/radarr", [
+        {"id": 0, "name": "Radarr Main", "isDefault": True},
+        {"id": 1, "name": "Radarr 4K", "isDefault": False},
+    ])
+    servers = integrations.fetch_seerr_radarr_servers(stub, "k")
+    assert servers == [{"id": 0, "name": "Radarr Main", "is_default": True},
+                        {"id": 1, "name": "Radarr 4K", "is_default": False}]
+
+    route("/api/v1/service/radarr/0", {
+        "server": {"activeProfileId": 6, "activeDirectory": "/movies"},
+        "profiles": [{"id": 6, "name": "HD-1080p"}, {"id": 7, "name": "Ultra-HD"}],
+        "rootFolders": [{"id": 1, "path": "/movies", "freeSpace": 0, "totalSpace": 0}],
+        "tags": [{"id": 4, "label": "kids"}],
+    })
+    detail = integrations.fetch_seerr_radarr_detail(stub, "k", 0)
+    assert detail["profiles"] == [{"id": 6, "name": "HD-1080p"}, {"id": 7, "name": "Ultra-HD"}]
+    assert detail["root_folders"] == [{"path": "/movies"}]
+    assert detail["tags"] == [{"id": 4, "name": "kids"}]
+    assert detail["active_profile_id"] == 6
+    assert detail["active_root_folder"] == "/movies"
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +636,84 @@ def test_the_detail_page_carries_library_status_from_the_query_string(visitor, s
     route("/api/v1/movie/1", {"title": "X", "releaseDate": "2020-01-01"})
     resp = visitor.get("/search/detail/movie/1?requested=1")
     assert b"Already requested" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# Request configuration page - seasons for everyone, root folder/profile/tags
+# only for a browser that's also signed in as the portal admin
+# ---------------------------------------------------------------------------
+def test_the_configure_page_shows_seasons_to_a_plain_visitor(visitor, stub):
+    _configure(stub, jellyfin=False)
+    route("/api/v1/tv/1399", {"name": "Foundation", "firstAirDate": "2021-09-24",
+                               "seasons": [{"seasonNumber": 0, "episodeCount": 3},
+                                           {"seasonNumber": 1, "episodeCount": 10}]})
+    resp = visitor.get("/search/request/configure?media_type=tv&tmdb_id=1399")
+    assert resp.status_code == 200
+    assert b"Season 1" in resp.data
+    assert b"Season 0" not in resp.data          # specials excluded, matching "all"
+    assert b"root_folder" not in resp.data       # admin-only fields absent
+
+
+def test_the_configure_page_shows_admin_fields_when_also_admin_logged_in(visitor, stub):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    route("/api/v1/movie/1", {"title": "X", "releaseDate": "2020-01-01"})
+    route("/api/v1/service/radarr", [{"id": 0, "name": "Radarr", "isDefault": True}])
+    route("/api/v1/service/radarr/0", {
+        "server": {"activeProfileId": 6, "activeDirectory": "/movies"},
+        "profiles": [{"id": 6, "name": "HD-1080p"}],
+        "rootFolders": [{"id": 1, "path": "/movies"}],
+        "tags": [],
+    })
+    resp = visitor.get("/search/request/configure?media_type=movie&tmdb_id=1")
+    assert b"Root folder" in resp.data
+    assert b"/movies" in resp.data
+    assert b"HD-1080p" in resp.data
+
+
+def test_the_configure_page_404s_for_an_unresolvable_item(visitor, stub):
+    _configure(stub, jellyfin=False)
+    assert visitor.get("/search/request/configure?media_type=movie&tmdb_id=9999").status_code == 404
+
+
+def test_a_plain_visitors_post_cannot_smuggle_in_admin_only_fields(visitor, stub, monkeypatch):
+    """The configuration page never renders root folder/profile/tags for a non-admin
+    visitor - but a forged POST must not be able to set them anyway."""
+    _configure(stub, jellyfin=False)
+    sent = {}
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, seasons=None, root_folder=None,
+                               profile_id=None, tags=None:
+                        sent.update({"root_folder": root_folder, "profile_id": profile_id,
+                                     "tags": tags}))
+    visitor.post("/search/request", data={
+        "media_type": "movie", "tmdb_id": "1", "root_folder": "/sneaky",
+        "profile_id": "99", "tags": ["1"]})
+    assert sent == {"root_folder": None, "profile_id": None, "tags": None}
+
+
+def test_an_admin_signed_in_visitors_post_honours_admin_fields(visitor, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sent = {}
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, seasons=None, root_folder=None,
+                               profile_id=None, tags=None:
+                        sent.update({"root_folder": root_folder, "profile_id": profile_id}))
+    visitor.post("/search/request", data={
+        "media_type": "movie", "tmdb_id": "1", "root_folder": "/movies", "profile_id": "6"})
+    assert sent == {"root_folder": "/movies", "profile_id": "6"}
+
+
+def test_selected_seasons_are_sent_as_a_list_of_ints(visitor, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    sent = {}
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, seasons=None, root_folder=None,
+                               profile_id=None, tags=None: sent.update({"seasons": seasons}))
+    visitor.post("/search/request", data={"media_type": "tv", "tmdb_id": "1",
+                                           "seasons": ["1", "2"]})
+    assert sent["seasons"] == [1, 2]
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Request {{ config.title }} — {{ site_name }}{% endblock %}
+{% block body %}
+<div class="container">
+  <div class="topbar">
+    <div>
+      <div class="topbar__brand">{{ site_name }}</div>
+      <div class="topbar__sub">Request configuration</div>
+    </div>
+    <a class="btn secondary" href="{{ url_for('search', q=query) }}">← Back to search</a>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+      <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+
+  <div class="search-result search-result--detail">
+    {% if config.poster_path %}
+      <img class="search-result__poster search-result__poster--large" loading="lazy"
+           src="https://image.tmdb.org/t/p/w154{{ config.poster_path }}" alt="{{ config.title }}">
+    {% else %}
+      <div class="search-result__poster search-result__poster--large search-result__poster--placeholder" aria-hidden="true">🎬</div>
+    {% endif %}
+    <div class="search-result__main">
+      <div class="search-result__title" style="font-size: 18px;">
+        {{ config.title }}{% if config.year %} <span class="search-result__year">({{ config.year }})</span>{% endif %}
+        <span class="pill">{{ 'Series' if media_type == 'tv' else 'Film' }}</span>
+      </div>
+      <p class="field-hint">
+        This confirms what gets requested before it's sent to Seerr - nothing is
+        submitted until you press "Request" below.
+      </p>
+
+      <form method="POST" action="{{ url_for('search_request') }}" class="form-panel">
+        <input type="hidden" name="media_type" value="{{ media_type }}">
+        <input type="hidden" name="tmdb_id" value="{{ tmdb_id }}">
+        <input type="hidden" name="q" value="{{ query }}">
+
+        {% if media_type == 'tv' %}
+          <div class="field">
+            <label>Seasons to request</label>
+            {% if config.seasons %}
+              <div class="checkbox-list">
+                {% for s in config.seasons %}
+                  <label class="field-check">
+                    <input type="checkbox" name="seasons" value="{{ s.season_number }}" checked>
+                    Season {{ s.season_number }}{% if s.episode_count %} ({{ s.episode_count }} episodes){% endif %}
+                  </label>
+                {% endfor %}
+              </div>
+              <div class="field-hint">All seasons are selected by default - untick any you don't want.</div>
+            {% else %}
+              <div class="field-hint">Season information isn't available - every season will be requested.</div>
+            {% endif %}
+          </div>
+        {% else %}
+          <p class="field-hint">This will request the whole film.</p>
+        {% endif %}
+
+        {% if is_admin %}
+          <hr style="border: none; border-top: 1px solid var(--border); margin: 18px 0;">
+          <p class="field-hint" style="margin-top: 0;">
+            Shown because you're signed in as the admin - these aren't offered to
+            ordinary visitors, since they reveal server folder paths.
+          </p>
+          {% if config.root_folders %}
+            <div class="field">
+              <label for="root_folder">Root folder</label>
+              <select id="root_folder" name="root_folder">
+                {% for f in config.root_folders %}
+                  <option value="{{ f.path }}" {{ 'selected' if f.path == config.active_root_folder }}>{{ f.path }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          {% endif %}
+          {% if config.profiles %}
+            <div class="field">
+              <label for="profile_id">Quality profile</label>
+              <select id="profile_id" name="profile_id">
+                {% for p in config.profiles %}
+                  <option value="{{ p.id }}" {{ 'selected' if p.id == config.active_profile_id }}>{{ p.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          {% endif %}
+          {% if config.tags %}
+            <div class="field">
+              <label>Tags</label>
+              <div class="checkbox-list">
+                {% for t in config.tags %}
+                  <label class="field-check">
+                    <input type="checkbox" name="tags" value="{{ t.id }}"> {{ t.name }}
+                  </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% endif %}
+          {% if not config.servers %}
+            <div class="field-hint">
+              Couldn't read Radarr/Sonarr's configuration right now - requesting will
+              still use Seerr's own defaults.
+            </div>
+          {% endif %}
+        {% endif %}
+
+        <div class="form-actions">
+          <button type="submit" class="btn">Request</button>
+          <a href="{{ url_for('search', q=query) }}" class="btn secondary">Cancel</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

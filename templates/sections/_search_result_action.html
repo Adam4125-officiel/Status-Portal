@@ -13,12 +13,7 @@
 {% elif item.requested %}
   <span class="pill warn">Already requested</span>
 {% elif can_request and item.tmdb_id %}
-  <form method="POST" action="{{ url_for('search_request') }}">
-    <input type="hidden" name="media_type" value="{{ item.media_type }}">
-    <input type="hidden" name="tmdb_id" value="{{ item.tmdb_id }}">
-    <input type="hidden" name="q" value="{{ query }}">
-    <button type="submit" class="btn secondary">Request this</button>
-  </form>
+  <a class="btn secondary" href="{{ url_for('search_request_configure', media_type=item.media_type, tmdb_id=item.tmdb_id, q=query) }}">Request this</a>
 {% else %}
   <span class="pill">Not in the library</span>
 {% endif %}
