@@ -31,6 +31,25 @@
       Pin to the top of the list
     </label>
   </div>
+
+  <hr style="border: none; border-top: 1px solid var(--border); margin: 18px 0;">
+  <div class="field">
+    <label>Also send as a notification (optional)</label>
+    <div class="checkbox-list">
+      <label class="field-check">
+        <input type="checkbox" name="channels" value="email" {{ 'disabled' if not email_notify_enabled }}>
+        Email {% if not email_notify_enabled %}(per-user notifications are switched off — see Notifications){% endif %}
+      </label>
+      <label class="field-check">
+        <input type="checkbox" name="channels" value="discord" {{ 'disabled' if not discord_channel_configured }}>
+        Discord {% if not discord_channel_configured %}(no announcement channel configured — see Discord bot → Discord servers){% endif %}
+      </label>
+    </div>
+    <div class="field-hint">
+      Leave both unchecked to just save/publish the banner, same as before this existed.
+    </div>
+  </div>
+
   <div class="form-actions">
     <button type="submit" class="btn">{{ 'Save' if announcement else 'Publish' }}</button>
     <a href="{{ url_for('admin_announcements') }}" class="btn secondary">Cancel</a>

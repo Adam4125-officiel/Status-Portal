@@ -9,7 +9,7 @@
 {% if announcements %}
 <div class="admin-table">
   <table>
-    <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th></th></tr></thead>
+    <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th>Send as notification</th><th></th></tr></thead>
     <tbody>
       {% for a in announcements %}
       <tr>
@@ -17,6 +17,20 @@
         <td>{{ a.type }}</td>
         <td>{{ 'yes' if a.pinned else 'no' }}</td>
         <td>{{ a.created_at[:16].replace('T', ' ') }}</td>
+        <td>
+          <form action="{{ url_for('admin_announcement_send', aid=a.id) }}" method="POST"
+                style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <label class="field-check" style="font-size: 12px;">
+              <input type="checkbox" name="channels" value="email" {{ 'disabled' if not email_notify_enabled }}>
+              Email
+            </label>
+            <label class="field-check" style="font-size: 12px;">
+              <input type="checkbox" name="channels" value="discord" {{ 'disabled' if not discord_channel_configured }}>
+              Discord
+            </label>
+            <button type="submit" class="btn secondary" style="padding: 4px 10px; font-size: 12px;">Send</button>
+          </form>
+        </td>
         <td class="actions">
           <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Edit</a>
           <form action="{{ url_for('admin_announcement_delete', aid=a.id) }}" method="POST" style="display:inline"
@@ -31,5 +45,33 @@
 </div>
 {% else %}
 <div class="empty-state">No announcements yet.</div>
+{% endif %}
+
+<h2 class="section-title" style="margin-top: 28px;">Send history</h2>
+{% if sends %}
+<div class="admin-table">
+  <table>
+    <thead><tr><th style="width: 160px;">When</th><th>Title</th><th>Channels</th><th style="width: 110px;">Recipients</th><th>Discord</th></tr></thead>
+    <tbody>
+      {% for s in sends %}
+      <tr>
+        <td><span class="local-time" data-utc="{{ s.sent_at }}">{{ s.sent_at[:16].replace('T', ' ') }} UTC</span></td>
+        <td>{{ s.title }}</td>
+        <td>{{ s.channels }}</td>
+        <td>{{ s.recipient_count if 'email' in s.channels else '—' }}</td>
+        <td>
+          {% if 'discord' not in s.channels %}—
+          {% elif not s.discord_detail %}<span class="led warn"></span> sending…
+          {% elif s.discord_detail == 'Posted.' %}<span class="led ok"></span> posted
+          {% else %}<span class="led crit"></span> {{ s.discord_detail }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">Nothing sent yet.</div>
 {% endif %}
 {% endblock %}

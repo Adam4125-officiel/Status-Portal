@@ -50,6 +50,11 @@ EVENT_CHANNEL_PREFERENCE = {
     "maintenance": {"email": "notify_email_maintenance", "discord": "notify_discord_maintenance"},
     "request_update": {"email": "notify_email_requests", "discord": "notify_discord_requests"},
     "seerr_event": {"email": None, "discord": "notify_discord_seerr_events"},
+    # Discord is None here for a different reason than seerr_event's None above: an
+    # announcement's Discord half is one post to one configured channel, not a
+    # per-user DM, so there is no per-user Discord preference to gate it by. The email
+    # half does fan out per-user (notify_service_subscribers()) and is gated normally.
+    "announcement": {"email": "notify_email_announcements", "discord": None},
 }
 
 

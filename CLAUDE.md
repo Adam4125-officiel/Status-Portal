@@ -1906,10 +1906,73 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   *after* the override runs — those people get the (possibly since-changed) default,
   not a retroactive guarantee of the override's value. `field` is checked against
   `NOTIFICATION_TOGGLE_FIELDS` before being interpolated into the `UPDATE` — it is a
-  fixed set of 7 known column names, never raw form input, but the whitelist check
-  stays regardless of source. The route re-reads `db.notification_defaults()[field]`
-  for the value to apply rather than trusting anything posted alongside the button, so
-  an override can never apply a value other than what's currently saved as the default.
+  fixed set of known column names (8, as of the `notify_email_announcements` addition
+  below), never raw form input, but the whitelist check stays regardless of source.
+  The route re-reads `db.notification_defaults()[field]` for the value to apply rather
+  than trusting anything posted alongside the button, so an override can never apply a
+  value other than what's currently saved as the default.
+
+## Announcements pushed as notifications (`app.py`, `db.py` — added 2026-08-28)
+
+- **Additive to the existing `announcements` table/feature, not a second concept.** An
+  announcement is still just a public status-page banner (and still shows in the
+  Discord bot's `/status` embed via `build_status_data()`) until an admin explicitly
+  sends it — creating or editing one with no channel checked behaves exactly as it did
+  before this existed, and there's a test (`test_creating_with_no_channels_checked_
+  behaves_as_before`) pinning that. Deliberately *not* a standalone broadcast tool with
+  its own history unrelated to the banners — asked and confirmed when this was
+  designed, to avoid two overlapping "tell everyone something" concepts.
+- **One shared implementation, three entry points.** `app._dispatch_announcement_send
+  (aid, title, message, channels)` is what actually sends — the create form's "Publish
+  and send" (checkboxes on the same form as title/message, not a separate page),
+  the edit form's equivalent, and the list page's per-row "Send" (for re-sending: a
+  typo fixed and re-sent, or sent by email first and Discord later) all call it. Don't
+  reimplement the dispatch in any of the three routes.
+- **Email fans out through the existing per-user queue, nothing new needed there.**
+  `EVENT_CHANNEL_PREFERENCE["announcement"] = {"email": "notify_email_announcements",
+  "discord": None}` — one more entry in the same dict `report_reply`/`maintenance`/etc.
+  already use, gated by a `notify_email_announcements` column added to
+  `user_preferences` (`_ensure_column`, default on — same reasoning as
+  reports/requests: an announcement is something the admin chose to say to everyone,
+  not routine per-service noise). `user_notify.notify_service_subscribers("announcement",
+  title, message)` does the fan-out; nothing in `user_notify.deliver()` needed to change.
+- **Discord is `None` for a different reason than `seerr_event`'s `None`.**
+  `seerr_event`'s email slot is `None` because there's no email equivalent at all.
+  `announcement`'s **discord** slot is `None` because the Discord half is one post to
+  one configured channel (`discordbot_announcement_channel_id`, a plain text field on
+  `/admin/discord-bot/guilds` — copy the ID from the channel table already on that
+  page, the same pattern as the existing channel whitelist field, not a `<select>`
+  populated from `guilds`), not a per-user DM — there is no per-user Discord
+  preference to gate a channel post by.
+- **`discord_bot.send_channel_message(channel_id, text)` (new) deliberately does not
+  retry, unlike `_edit_tracked_status_message()`'s periodic retry loop.** Same
+  `asyncio.run_coroutine_threadsafe` bridge and cache-then-`fetch_channel()`
+  resolution as `send_dm()`/`_fetch_channel()`, but this is a discrete one-shot send
+  with a caller-visible outcome (the send-history row) to record — retrying would
+  just delay that outcome being known, unlike the periodic refresh loop where "try
+  again next tick" is the right answer because there's no such outcome to report.
+- **The Discord post runs on a one-shot background thread from the admin route**
+  (`app._send_announcement_discord`), the same shape `_restart_process()` already
+  uses for a delayed one-off action — not a `while True` loop, so it isn't subject to
+  (and doesn't need adding to) `test_no_new_bare_background_loops`'s allow-list.
+  **The send-history row is written before the Discord result is known**
+  (`db.record_announcement_send()` returns immediately; the background thread calls
+  `db.set_announcement_send_detail()` once Discord actually answers) — so the history
+  page always reflects that a send happened, with `discord_detail == ""` read by the
+  template as "sending…" until it's filled in.
+- **`announcement_sends` is `ON DELETE SET NULL` on `announcement_id`, not CASCADE.**
+  The send history is a record of what was sent and must outlive the announcement
+  being deleted later — same reasoning `problem_reports.incident_id` uses for a
+  deleted incident. It's a brand-new table, so a plain `CREATE TABLE IF NOT EXISTS` is
+  correct with no `_ensure_column()` migration needed.
+- **`db.create_announcement()` now returns the new row's id** (`cur.lastrowid`) —
+  needed so "Publish and send" can attach the send-history row to the announcement
+  that was just created in the same request. Every pre-existing caller already
+  ignored the return value, so this is a strictly additive change.
+- **`channels` is whitelisted server-side against exactly `("email", "discord")`**
+  in every one of the three entry points, never trusted verbatim from
+  `request.form.getlist("channels")` — the same "server re-checks what the UI merely
+  hides" reasoning as the search page's admin-only request-configuration fields.
 
 ## Unified search (`media_search.py`, `/search`)
 
