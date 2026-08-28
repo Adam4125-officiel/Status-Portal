@@ -1860,12 +1860,16 @@ of personal settings. Reached by clicking the username in the sign-in chip.
 - **`send_direct(user_id, channel, subject, body)` (added 2026-08-28) is a deliberate
   second path around `EVENT_CHANNEL_PREFERENCE`, not a bug.** It backs the per-user
   "test notification" buttons (`/admin/users/<id>/test/discord`,
-  `/admin/users/<id>/test/email`) and is meant to back a future admin-to-user custom
-  message the same way. Both are one-to-one admin-initiated actions, not automated
-  events, so they **bypass the recipient's channel preferences entirely** — a person
-  who switched Discord off still needs to be reachable for an admin test or a direct
-  message. It still resolves contact info through `contact_for()`, so it fails the
-  same way `deliver()` does when there's genuinely nothing to send to. **Runs
+  `/admin/users/<id>/test/email`) *and* the free-text "Send a message" panel
+  (`/admin/users/<id>/message`, `app.admin_user_message()`) the same way — both are
+  one-to-one admin-initiated actions, not automated events, so they **bypass the
+  recipient's channel preferences entirely** — a person who switched Discord off
+  still needs to be reachable for an admin test or a direct message. It still
+  resolves contact info through `contact_for()`, so it fails the same way `deliver()`
+  does when there's genuinely nothing to send to. **The custom message keeps no
+  history** (unlike the announcement send log) — scoped deliberately as a one-off,
+  not something an admin needs to look back on later; if that ever changes, it's a
+  new table, not retrofitting `announcement_sends` for an unrelated sender. **Runs
   synchronously in the request**, not queued — the same sanctioned one-shot-admin-
   action exception `admin_notifications_test()` already uses, bounded by
   `discord_bot.DM_TIMEOUT_SECONDS` (15s) and `config.SMTP_TIMEOUT_SECONDS` (10s) — and

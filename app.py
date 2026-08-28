@@ -3788,6 +3788,39 @@ def admin_user_test_email(user_id):
     return _send_test_notification(user_id, "email")
 
 
+@app.route("/admin/users/<user_id>/message", methods=["POST"])
+@login_required
+def admin_user_message(user_id):
+    """A free-text message to one person, sent right now on the admin's chosen
+    channel. Uses the same user_notify.send_direct() the test-notification buttons
+    do, for the same reason: an explicit one-to-one admin action, so it bypasses the
+    recipient's own channel preferences (it only fails when there's no contact detail
+    for the chosen channel at all) and runs synchronously so the flash can report the
+    real outcome. No history is kept - unlike the announcement send log, this was
+    scoped as a one-off, not something an admin needs to look back on later."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    channel = request.form.get("channel", "")
+    body = request.form.get("body", "").strip()
+    if channel not in ("discord", "email"):
+        flash("Choose a channel to send on.", "error")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+    if not body:
+        flash("Message can't be empty.", "error")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+    site_name = db.get_setting("site_name", "Server")
+    ok, detail = user_notify.send_direct(user_id, channel, f"Message from {site_name}", body)
+    label = "Discord DM" if channel == "discord" else "email"
+    if ok:
+        flash(f"Message sent to {target['name']} by {label}." + (f" {detail}" if detail else ""),
+              "success")
+    else:
+        flash(f"Message to {target['name']} by {label} failed: {detail}", "error")
+    return redirect(url_for("admin_user_account", user_id=user_id))
+
+
 @app.route("/admin/discord-bot", methods=["GET", "POST"])
 @login_required
 def admin_discord_bot():

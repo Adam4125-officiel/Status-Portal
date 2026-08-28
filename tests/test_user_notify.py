@@ -402,6 +402,80 @@ def test_admin_test_route_404s_for_an_unknown_user(client):
 
 
 # ---------------------------------------------------------------------------
+# Custom message to a specific user (admin-only)
+# ---------------------------------------------------------------------------
+def test_admin_message_route_sends_by_email(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    sent = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: sent.append((s, b, recipients)) or True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "Your report is being looked at."},
+                       follow_redirects=True)
+    assert b"Message sent to adam by email" in resp.data
+    assert sent == [("Message from Server", "Your report is being looked at.", ["me@example.invalid"])]
+
+
+def test_admin_message_route_ignores_the_recipients_own_preferences(client, monkeypatch):
+    """Same rule as send_direct() itself: a direct admin message must reach the person
+    even if they've switched every channel preference off."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_reports=False, notify_email_requests=False,
+                            notify_email_maintenance=False)
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "Hi there"}, follow_redirects=True)
+    assert b"Message sent" in resp.data
+
+
+def test_admin_message_route_reports_no_contact_detail(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "discord", "body": "Hi there"}, follow_redirects=True)
+    assert b"no Discord ID on file" in resp.data
+
+
+def test_admin_message_route_rejects_an_empty_body(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "   "}, follow_redirects=True)
+    assert b"Message can&#39;t be empty" in resp.data or b"Message can't be empty" in resp.data
+
+
+def test_admin_message_route_rejects_an_unknown_channel(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "sms", "body": "hi"}, follow_redirects=True)
+    assert b"Choose a channel" in resp.data
+
+
+def test_admin_message_route_404s_for_an_unknown_user(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/nope/message",
+                       data={"channel": "email", "body": "hi"}, follow_redirects=True)
+    assert b"No such user" in resp.data
+
+
+def test_admin_message_route_keeps_no_history(client, monkeypatch):
+    """Explicitly scoped as a one-off, unlike the announcement send log."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/users/u1/message", data={"channel": "email", "body": "hi"})
+    assert db.notification_queue_summary() == {"pending": 0, "sent": 0, "failed": 0}
+
+
+# ---------------------------------------------------------------------------
 # Request progress
 # ---------------------------------------------------------------------------
 def _request(rid, status, by="3", title="Some Film", request_status_key="pending"):

@@ -246,6 +246,42 @@
     </p>
     {% endif %}
   </div>
+
+  <div class="form-panel" style="margin-top: 16px;">
+    <h3 style="font-size: 14px; margin-top: 0;">Send a message</h3>
+    <p class="field-hint" style="margin-top: 0;">
+      Sent immediately, on the channel you pick below — unlike the notifications above,
+      this reaches {{ target_user.name }} even if they've turned that channel off for
+      themselves, since it's a direct message from you rather than an automated event.
+    </p>
+    <form method="POST" action="{{ url_for('admin_user_message', user_id=target_user.id) }}">
+      <div class="field">
+        <label for="message-body">Message</label>
+        <textarea id="message-body" name="body" rows="3" required></textarea>
+      </div>
+      <div class="field">
+        <label>Send by</label>
+        <div class="checkbox-list">
+          <label class="field-check">
+            <input type="radio" name="channel" value="discord" required
+                   {{ 'disabled' if not prefs.notify_discord_id }}>
+            Discord DM
+          </label>
+          <label class="field-check">
+            <input type="radio" name="channel" value="email"
+                   {{ 'disabled' if not prefs.notify_email }}>
+            Email
+          </label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn secondary"
+                {{ 'disabled' if not prefs.notify_discord_id and not prefs.notify_email }}>
+          Send
+        </button>
+      </div>
+    </form>
+  </div>
   {% endif %}
 
   {% if notifications_enabled and seerr_configured %}
