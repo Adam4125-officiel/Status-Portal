@@ -1912,6 +1912,48 @@ DEFAULT_USER_PREFERENCES = {
 }
 
 
+# Every per-channel/per-event toggle an admin can set a portal-wide default for (see
+# notification_defaults()/override_user_preference() below), in the order the admin
+# settings page renders them. Deliberately just the boolean toggles - not
+# notify_email/notify_discord_id (those are contact details, not event preferences;
+# there's no sensible "default" for someone else's email address) and not
+# contact_prompt_dismissed/seerr_user_id (bookkeeping, not a preference).
+NOTIFICATION_TOGGLE_FIELDS = (
+    "notify_email_reports", "notify_email_requests", "notify_email_maintenance",
+    "notify_discord_reports", "notify_discord_requests", "notify_discord_maintenance",
+    "notify_discord_seerr_events",
+)
+
+NOTIFICATION_TOGGLE_LABELS = {
+    "notify_email_reports": ("Email", "Replies to problem reports, and when one becomes an incident"),
+    "notify_email_requests": ("Email", "When something requested becomes available"),
+    "notify_email_maintenance": ("Email", "Maintenance on any service"),
+    "notify_discord_reports": ("Discord DM", "Replies to problem reports, and when one becomes an incident"),
+    "notify_discord_requests": ("Discord DM", "When something requested becomes available"),
+    "notify_discord_maintenance": ("Discord DM", "Maintenance on any service"),
+    "notify_discord_seerr_events": ("Discord DM", "Seerr events — approvals, declines, availability, and issues"),
+}
+
+NOTIFY_DEFAULT_SETTING_PREFIX = "notify_default_"
+
+
+def notification_defaults():
+    """The admin-configured baseline for each toggle in NOTIFICATION_TOGGLE_FIELDS,
+    read from its own `settings` row (one admin can change live, no restart - the
+    standard config split applied to this app's built-in defaults). A toggle the admin
+    has never touched falls back to DEFAULT_USER_PREFERENCES, so this is a no-op until
+    an admin actually visits the defaults panel.
+
+    Used by get_user_preferences() to seed a user who has never saved anything of
+    their own - "unconfigured" means no user_preferences row at all, not merely
+    agreeing with the defaults."""
+    result = {}
+    for field in NOTIFICATION_TOGGLE_FIELDS:
+        raw = get_setting(f"{NOTIFY_DEFAULT_SETTING_PREFIX}{field}", None)
+        result[field] = (raw == "1") if raw is not None else DEFAULT_USER_PREFERENCES[field]
+    return result
+
+
 def get_user_preferences(user_id):
     """Always returns a complete dict, so callers never branch on "has this user ever
     saved anything". An unrecognised stored theme falls back to the default rather
@@ -1940,6 +1982,10 @@ def get_user_preferences(user_id):
         prefs["notify_discord_seerr_events"] = bool(row["notify_discord_seerr_events"])
         prefs["seerr_user_id"] = row["seerr_user_id"] or ""
         prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
+    else:
+        # No row means genuinely unconfigured, not "agrees with the defaults" - see
+        # notification_defaults()'s docstring.
+        prefs.update(notification_defaults())
     return prefs
 
 
@@ -1960,6 +2006,24 @@ _USER_PREFERENCE_FIELDS = {
     "seerr_user_id": str,
     "contact_prompt_dismissed": lambda v: int(bool(v)),
 }
+
+
+def override_user_preference(field, value):
+    """Force-sets one notification toggle for every *existing* user_preferences row,
+    discarding each of their own individual choices for it. This is the destructive
+    half of the default/override pair - notification_defaults() only ever affects
+    someone with no row yet, this reaches everyone who already has one.
+
+    field is whitelisted against _USER_PREFERENCE_FIELDS (never interpolated from raw
+    form input) and must be one of NOTIFICATION_TOGGLE_FIELDS - the contact/bookkeeping
+    columns in _USER_PREFERENCE_FIELDS have no "default" concept to override with."""
+    if field not in NOTIFICATION_TOGGLE_FIELDS:
+        raise ValueError(f"Not an overridable notification toggle: {field}")
+    coerced = _USER_PREFERENCE_FIELDS[field](value)
+    conn = get_db()
+    conn.execute(f"UPDATE user_preferences SET {field}=?, updated_at=?", (coerced, now_iso()))
+    conn.commit()
+    conn.close()
 
 
 def set_user_preferences(user_id, theme=None, contact=None, **fields):

@@ -53,6 +53,22 @@ EVENT_CHANNEL_PREFERENCE = {
 }
 
 
+# Events sourced from Seerr, which already emails its own users about these directly -
+# see seerr_email_enabled() below. Both map to an email preference today only through
+# request_update (seerr_event's own email slot is already None in the table above), but
+# this set is checked by event, not by column, so a future email preference added for
+# seerr_event would automatically be covered by the same switch without touching this
+# list again.
+SEERR_SOURCED_EVENTS = {"request_update", "seerr_event"}
+
+
+def seerr_email_enabled():
+    """Off by default - Seerr already sends its own email for these, so this portal's
+    copy would otherwise double up on every install upgrading into this feature.
+    Discord DMs are unaffected; this only ever suppresses the email channel."""
+    return db.get_setting("seerr_email_events_enabled", "0") == "1"
+
+
 def is_enabled():
     """Off unless the admin has switched per-user notifications on. Enabling it means
     the portal starts messaging visitors, which has to be deliberate."""
@@ -289,6 +305,8 @@ def deliver(row):
     email_pref = channel_prefs.get("email")
     discord_pref = channel_prefs.get("discord")
     send_email = bool(email) and email_pref is not None and prefs.get(email_pref)
+    if row["event"] in SEERR_SOURCED_EVENTS and not seerr_email_enabled():
+        send_email = False
     send_discord = bool(discord_id) and discord_pref is not None and prefs.get(discord_pref)
 
     if not send_email and not send_discord:

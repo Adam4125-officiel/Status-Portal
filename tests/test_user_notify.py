@@ -147,6 +147,83 @@ def test_seerr_events_are_discord_only(enabled, monkeypatch):
     assert db.notification_queue_summary()["sent"] == 1
 
 
+def test_seerr_sourced_email_is_suppressed_by_default(enabled, monkeypatch):
+    """seerr_email_events_enabled() defaults off - request_update is the one event with
+    a real email preference column, so it's the one this can actually be observed on."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_requests=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "request_update", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == []
+    assert db.notification_queue_summary()["sent"] == 1
+
+
+def test_seerr_sourced_email_sends_once_the_admin_turns_it_on(enabled, monkeypatch):
+    db.set_setting("seerr_email_events_enabled", "1")
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_requests=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "request_update", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == [["me@example.invalid"]]
+
+
+def test_seerr_email_suppression_does_not_touch_discord(enabled, monkeypatch):
+    """The switch is email-only - a Seerr-sourced Discord DM must still go out
+    regardless of this setting."""
+    db.set_user_preferences("u1", notify_discord_id="123", notify_discord_seerr_events=True)
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    user_notify.notify_user("u1", "seerr_event", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert dms == ["123"]
+
+
+def test_seerr_email_suppression_does_not_touch_non_seerr_events(enabled, monkeypatch):
+    """The switch only ever gates request_update/seerr_event - report_reply must be
+    completely unaffected regardless of the setting."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_email_reports=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "report_reply", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == [["me@example.invalid"]]
+
+
+def test_admin_notification_defaults_route_saves_and_flags_forward_only(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/notifications/users/defaults",
+                       data={"notify_email_reports": "on", "notify_discord_reports": "on"},
+                       follow_redirects=True)
+    assert resp.status_code == 200
+    assert db.notification_defaults()["notify_email_reports"] is True
+    assert db.notification_defaults()["notify_email_maintenance"] is False  # left unchecked
+
+
+def test_admin_notification_override_route_applies_to_everyone(client):
+    db.set_user_preferences("a", notify_email_maintenance=False)
+    db.set_user_preferences("b", notify_email_maintenance=False)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/notifications/users/defaults",
+               data={"notify_email_maintenance": "on"})
+    client.post("/admin/notifications/users/override", data={"field": "notify_email_maintenance"})
+    assert db.get_user_preferences("a")["notify_email_maintenance"] is True
+    assert db.get_user_preferences("b")["notify_email_maintenance"] is True
+
+
+def test_admin_notification_override_route_rejects_a_bad_field(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/notifications/users/override",
+                       data={"field": "notify_email"}, follow_redirects=True)
+    assert b"Unknown setting" in resp.data
+
+
 def test_a_failed_send_is_retried_then_given_up_on(enabled, monkeypatch):
     db.set_user_preferences("u1", notify_email="me@example.invalid")
     monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: False)

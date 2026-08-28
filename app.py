@@ -3281,11 +3281,15 @@ def admin_notifications():
 @login_required
 def admin_user_notifications():
     """The master switch for per-user notifications, plus what the delivery queue is
-    doing. The per-*person* settings deliberately aren't here: what someone wants to be
-    told about, and where, is theirs to set on their own account page."""
+    doing, plus the portal-wide baseline every unconfigured user starts from. The
+    per-*person* settings deliberately aren't here: what someone wants to be told
+    about, and where, is theirs to set on their own account page - "Default"/
+    "Override" below are two different, explicit ways to reach past that."""
     if request.method == "POST":
         db.set_setting("user_notifications_enabled",
                         "1" if request.form.get("enabled") else "0")
+        db.set_setting("seerr_email_events_enabled",
+                        "1" if request.form.get("seerr_email_events_enabled") else "0")
         flash("Per-user notification settings saved.", "success")
         return redirect(url_for("admin_user_notifications"))
 
@@ -3294,6 +3298,7 @@ def admin_user_notifications():
     return render_template(
         "admin_user_notifications.html",
         enabled=user_notify.is_enabled(),
+        seerr_email_events_enabled=user_notify.seerr_email_enabled(),
         queue=db.notification_queue_summary(),
         recent=db.recent_notifications(),
         email_ready=next((c["configured"] for c in channels if c["key"] == "email"), False),
@@ -3302,7 +3307,46 @@ def admin_user_notifications():
         seerr_configured=user_notify.seerr_integration() is not None,
         max_attempts=db.MAX_NOTIFICATION_ATTEMPTS,
         task=scheduler.task_view(task) if task else None,
+        toggle_fields=db.NOTIFICATION_TOGGLE_FIELDS,
+        toggle_labels=db.NOTIFICATION_TOGGLE_LABELS,
+        defaults=db.notification_defaults(),
         active="user-notifications")
+
+
+@app.route("/admin/notifications/users/defaults", methods=["POST"])
+@login_required
+def admin_notification_defaults():
+    """Saves the portal-wide baseline for each toggle - what a user who has never set
+    their own preferences starts with. Never touches anyone who already has, which is
+    exactly what makes this the non-destructive half of the pair; see
+    admin_notification_override() for the other one."""
+    for field in db.NOTIFICATION_TOGGLE_FIELDS:
+        db.set_setting(f"{db.NOTIFY_DEFAULT_SETTING_PREFIX}{field}",
+                        "1" if request.form.get(field) else "0")
+    flash("Default notification settings saved. This only applies to new or "
+          "unconfigured users - it does not change anyone's existing choice.", "success")
+    return redirect(url_for("admin_user_notifications"))
+
+
+@app.route("/admin/notifications/users/override", methods=["POST"])
+@login_required
+def admin_notification_override():
+    """Force-applies one already-saved default to every existing user right now,
+    discarding their individual choice for that one setting. Reads the *saved* default
+    rather than trusting a value posted alongside the button, so this can never apply
+    something other than what the admin sees checked on this page - and reads it fresh
+    with defaults()[field] rather than trusting stale form state to describe what
+    "the default" currently is."""
+    field = request.form.get("field", "")
+    if field not in db.NOTIFICATION_TOGGLE_FIELDS:
+        flash("Unknown setting.", "error")
+        return redirect(url_for("admin_user_notifications"))
+    value = db.notification_defaults()[field]
+    db.override_user_preference(field, value)
+    label = db.NOTIFICATION_TOGGLE_LABELS[field]
+    flash(f"Applied \"{label[0]}: {label[1]}\" = {'on' if value else 'off'} to every "
+          "existing user, discarding their own choice for this one setting.", "success")
+    return redirect(url_for("admin_user_notifications"))
 
 
 @app.route("/admin/notifications/seerr", methods=["GET", "POST"])

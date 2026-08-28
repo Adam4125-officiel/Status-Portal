@@ -1871,6 +1871,45 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   `discord_bot.DM_TIMEOUT_SECONDS` (15s) and `config.SMTP_TIMEOUT_SECONDS` (10s) — and
   the point of doing it inline is that the admin gets the *real* failure back
   ("Discord refused the DM…"), not a queued row they'd have to go check on.
+- **`seerr_email_enabled()` (setting `seerr_email_events_enabled`, added 2026-08-28,
+  default off) suppresses only the email channel for Seerr-sourced events
+  (`SEERR_SOURCED_EVENTS = {"request_update", "seerr_event"}`), never Discord.** Seerr
+  already emails its own users directly about these, so this ships off - upgrading to
+  this feature silences a duplicate rather than changing what a fresh install does.
+  Checked by *event*, not by preference column, in `deliver()` right after `send_email`
+  is computed - `seerr_event` already has no email preference column at all
+  (`EVENT_CHANNEL_PREFERENCE["seerr_event"]["email"] is None`), so today this only has
+  a visible effect on `request_update`, but a future email preference added for
+  `seerr_event` would automatically be covered by the same switch with no second edit.
+- **Admin-configurable notification defaults (`db.notification_defaults()`,
+  `db.NOTIFICATION_TOGGLE_FIELDS`, added 2026-08-28) are new ground, not a pattern that
+  existed before** — every other preference in this app has a fixed code-level default
+  (`DEFAULT_USER_PREFERENCES`) only. **"Unconfigured" means no `user_preferences` row
+  at all**, checked in `get_user_preferences()`'s `else` branch (no row) — a user who
+  has saved *anything* already has a row and is permanently past the defaults, even if
+  every value they saved happens to match. `adopt_seerr_contact()` is an instructive
+  edge case: it creates a row (writing only 3 fields), so a user auto-filled from Seerr
+  is "configured" for defaults purposes from that moment, even though they never saw a
+  checkbox — this is `set_user_preferences()`'s existing "fill unset fields from
+  `current`" behavior interacting correctly with the new defaults with zero
+  special-casing, since `current` already comes from `get_user_preferences()`.
+  Defaults are stored one `settings` row per toggle (`notify_default_<field>`), not a
+  single JSON blob, so the admin panel can save one row at a time without a hidden
+  dependency on submitting the whole form.
+- **Override (`db.override_user_preference()`) is `default` and `override` — genuinely
+  two different actions, not one setting with a checkbox.** Saving a default never
+  touches an existing row, full stop; override is a separate, explicit, confirmed
+  action (`static/js/admin_pref_override.js`, same `data-*`-attribute pattern as
+  `admin_vm_control.js` — see the XSS note above for why that pattern and not an inline
+  `onsubmit`) that runs one `UPDATE user_preferences SET <field>=?` with no `WHERE`,
+  reaching every row that exists *right now*. It does not touch anyone who saves a row
+  *after* the override runs — those people get the (possibly since-changed) default,
+  not a retroactive guarantee of the override's value. `field` is checked against
+  `NOTIFICATION_TOGGLE_FIELDS` before being interpolated into the `UPDATE` — it is a
+  fixed set of 7 known column names, never raw form input, but the whitelist check
+  stays regardless of source. The route re-reads `db.notification_defaults()[field]`
+  for the value to apply rather than trusting anything posted alongside the button, so
+  an override can never apply a value other than what's currently saved as the default.
 
 ## Unified search (`media_search.py`, `/search`)
 
