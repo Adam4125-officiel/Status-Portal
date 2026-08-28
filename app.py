@@ -3625,6 +3625,41 @@ def admin_user_account_import_seerr(user_id):
     return redirect(url_for("admin_user_account", user_id=user_id))
 
 
+def _send_test_notification(user_id, channel):
+    """Shared body of the two test-notification routes below. Runs synchronously - the
+    same sanctioned one-shot-admin-action exception admin_notifications_test() already
+    uses - so the flash can report the real outcome (e.g. "Discord refused the DM")
+    rather than "queued, check back later"."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    site_name = db.get_setting("site_name", "Server")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    ok, detail = user_notify.send_direct(
+        user_id, channel, "Test notification",
+        f"This is a test notification from {site_name}, sent at {stamp}.")
+    label = "Discord DM" if channel == "discord" else "email"
+    if ok:
+        flash(f"Test {label} to {target['name']} sent." + (f" {detail}" if detail else ""),
+              "success")
+    else:
+        flash(f"Test {label} to {target['name']} failed: {detail}", "error")
+    return redirect(url_for("admin_user_account", user_id=user_id))
+
+
+@app.route("/admin/users/<user_id>/test/discord", methods=["POST"])
+@login_required
+def admin_user_test_discord(user_id):
+    return _send_test_notification(user_id, "discord")
+
+
+@app.route("/admin/users/<user_id>/test/email", methods=["POST"])
+@login_required
+def admin_user_test_email(user_id):
+    return _send_test_notification(user_id, "email")
+
+
 @app.route("/admin/discord-bot", methods=["GET", "POST"])
 @login_required
 def admin_discord_bot():

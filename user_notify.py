@@ -242,6 +242,35 @@ scheduler.register(
 
 
 # ---------------------------------------------------------------------------
+# One-off admin-initiated sends (test notifications, a direct message) - always
+# immediate, always bypassing the recipient's channel preferences. Both are explicit
+# one-to-one admin actions, not automated events, so the only thing that can stop one
+# is the person having no contact detail on that channel at all. Callers run these
+# synchronously in the request, the same sanctioned exception admin_notifications_test()
+# already uses: both discord_bot.send_dm() and notifications.send_email() carry their
+# own hard timeouts, so this is bounded, and the admin gets the real error back
+# ("Discord refused the DM...") instead of a queued row they'd have to go check.
+# ---------------------------------------------------------------------------
+def send_direct(user_id, channel, subject, body):
+    """Sends one message to one person on one channel right now. Returns (ok, detail).
+
+    channel is 'discord' or 'email'. Never touches EVENT_CHANNEL_PREFERENCE - this is
+    not a queued, preference-gated notification."""
+    email, discord_id = contact_for(user_id)
+    if channel == "discord":
+        if not discord_id:
+            return False, "This person has no Discord ID on file."
+        return discord_bot.send_dm(discord_id, f"**{subject}**\n{body}")
+    if channel == "email":
+        if not email:
+            return False, "This person has no email address on file."
+        if notifications.send_email(subject, body, recipients=[email]):
+            return True, f"Sent to {email}."
+        return False, "Send failed (see the log)."
+    raise ValueError(f"Unknown channel: {channel}")
+
+
+# ---------------------------------------------------------------------------
 # Delivery
 # ---------------------------------------------------------------------------
 def deliver(row):

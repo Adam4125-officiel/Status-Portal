@@ -1857,6 +1857,20 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   where they were going.
 - **The admin page never lists recipients.** The queue is addressed to a Jellyfin
   account; whose email or Discord ID that resolved to is that person's business.
+- **`send_direct(user_id, channel, subject, body)` (added 2026-08-28) is a deliberate
+  second path around `EVENT_CHANNEL_PREFERENCE`, not a bug.** It backs the per-user
+  "test notification" buttons (`/admin/users/<id>/test/discord`,
+  `/admin/users/<id>/test/email`) and is meant to back a future admin-to-user custom
+  message the same way. Both are one-to-one admin-initiated actions, not automated
+  events, so they **bypass the recipient's channel preferences entirely** — a person
+  who switched Discord off still needs to be reachable for an admin test or a direct
+  message. It still resolves contact info through `contact_for()`, so it fails the
+  same way `deliver()` does when there's genuinely nothing to send to. **Runs
+  synchronously in the request**, not queued — the same sanctioned one-shot-admin-
+  action exception `admin_notifications_test()` already uses, bounded by
+  `discord_bot.DM_TIMEOUT_SECONDS` (15s) and `config.SMTP_TIMEOUT_SECONDS` (10s) — and
+  the point of doing it inline is that the admin gets the *real* failure back
+  ("Discord refused the DM…"), not a queued row they'd have to go check on.
 
 ## Unified search (`media_search.py`, `/search`)
 

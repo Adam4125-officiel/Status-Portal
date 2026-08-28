@@ -252,6 +252,79 @@ def test_contact_lookup_reads_stored_preferences_only(enabled, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# send_direct() - one-off admin sends, always bypassing preferences
+# ---------------------------------------------------------------------------
+def test_send_direct_email_uses_the_stored_address(isolated_db, monkeypatch):
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    sent = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: sent.append((s, b, recipients)) or True)
+    ok, detail = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert ok and sent == [("Subject", "Body", ["me@example.invalid"])]
+
+
+def test_send_direct_email_with_no_address_fails_clearly(isolated_db):
+    ok, detail = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert not ok and "no email" in detail.lower()
+
+
+def test_send_direct_discord_uses_the_stored_id(isolated_db, monkeypatch):
+    db.set_user_preferences("u1", notify_discord_id="123")
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    ok, detail = user_notify.send_direct("u1", "discord", "Subject", "Body")
+    assert ok and dms == ["123"]
+
+
+def test_send_direct_discord_with_no_id_fails_clearly(isolated_db):
+    ok, detail = user_notify.send_direct("u1", "discord", "Subject", "Body")
+    assert not ok and "no discord id" in detail.lower()
+
+
+def test_send_direct_ignores_the_recipients_own_preferences(isolated_db, monkeypatch):
+    """Unlike deliver(), send_direct() is a direct one-to-one admin action - it must
+    reach the person even if they've switched every channel preference off."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_reports=False, notify_email_requests=False,
+                            notify_email_maintenance=False)
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    ok, _ = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert ok
+
+
+def test_send_direct_rejects_an_unknown_channel(isolated_db):
+    with pytest.raises(ValueError):
+        user_notify.send_direct("u1", "carrier-pigeon", "Subject", "Body")
+
+
+def test_admin_test_discord_route_reports_the_real_failure(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_discord_id="123")
+    monkeypatch.setattr(discord_bot, "send_dm",
+                        lambda uid, text: (False, "The Discord bot isn't connected."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/test/discord", follow_redirects=True)
+    assert b"Discord bot isn&#39;t connected" in resp.data or b"isn't connected" in resp.data
+
+
+def test_admin_test_email_route_succeeds(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/test/email", follow_redirects=True)
+    assert resp.status_code == 200
+    assert db.notification_queue_summary()["pending"] == 0  # never queued - sent inline
+
+
+def test_admin_test_route_404s_for_an_unknown_user(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/nope/test/email", follow_redirects=True)
+    assert resp.status_code == 200  # redirects to admin_users with a flash, not a 404
+    assert b"No such user" in resp.data
+
+
+# ---------------------------------------------------------------------------
 # Request progress
 # ---------------------------------------------------------------------------
 def _request(rid, status, by="3", title="Some Film", request_status_key="pending"):

@@ -209,6 +209,41 @@
     </div>
   </form>
 
+  {% if admin_viewing %}
+  {# Admin-only. Outside the settings form above for the same reason the Seerr panel
+     below is: separate POSTs to separate endpoints, and forms can't nest. #}
+  <div class="form-panel" style="margin-top: 16px;">
+    <h3 style="font-size: 14px; margin-top: 0;">Test notifications</h3>
+    <p class="field-hint" style="margin-top: 0;">
+      Sends a real message right now, through the same channel a real notification
+      would use, so you can confirm it actually reaches {{ target_user.name }}.
+    </p>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+      <form method="POST" action="{{ url_for('admin_user_test_discord', user_id=target_user.id) }}">
+        <button type="submit" class="btn secondary" {{ 'disabled' if not prefs.notify_discord_id }}>
+          Send test Discord DM
+        </button>
+      </form>
+      <form method="POST" action="{{ url_for('admin_user_test_email', user_id=target_user.id) }}">
+        <button type="submit" class="btn secondary" {{ 'disabled' if not prefs.notify_email }}>
+          Send test email
+        </button>
+      </form>
+    </div>
+    {% if not prefs.notify_discord_id or not prefs.notify_email %}
+    <p class="field-hint">
+      {% if not prefs.notify_discord_id and not prefs.notify_email %}
+        {{ target_user.name }} has no Discord ID or email on file, so both buttons are disabled.
+      {% elif not prefs.notify_discord_id %}
+        {{ target_user.name }} has no Discord ID on file, so that button is disabled.
+      {% else %}
+        {{ target_user.name }} has no email on file, so that button is disabled.
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% if notifications_enabled and seerr_configured %}
   {# Kept outside the settings form above: these are two separate POSTs to two separate
      endpoints, and nesting a form inside a form isn't valid HTML. #}
