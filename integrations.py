@@ -10,6 +10,7 @@ kind of service it's showing:
     {"reachable": bool, "version": str|None, "issues": [{"level", "message"}], "error": str|None}
 """
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
@@ -1013,6 +1014,14 @@ def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=F
     return users
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Discord snowflake IDs are unsigned 64-bit integers, currently 17-19 digits as text
+# (growing over time) - not a format Seerr validates itself, so a stray non-numeric
+# value (a pasted username, a typo) would otherwise be written straight into Seerr's
+# discordIds list with nothing ever checking it.
+_DISCORD_ID_RE = re.compile(r"^\d{15,25}$")
+
+
 def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=None):
     """Writes contact details back to a Seerr user's own settings.
 
@@ -1020,6 +1029,18 @@ def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=
     deliberately narrow: exactly one user, exactly the two contact fields, and only ever
     from an explicit button press with the change shown first. It must never be
     reachable from a sync or a background task.
+
+    **Validated here, not only in the form the value first came from** - both
+    admin_user_contact() and user_account_push_seerr_contact() (app.py) already show
+    the value on the page before this is ever called, but neither actually checks its
+    shape, and a value can also arrive here via save_contact() straight from an
+    unvalidated text field. This is the one function that actually reaches Seerr, so a
+    malformed value ("j", "test@", a pasted username instead of a numeric Discord ID)
+    is refused here rather than being read-modify-write'd over whatever Seerr already
+    had - the whole reason this function exists is to avoid clobbering the rest of
+    that settings object, and a bad value getting through would defeat that. Refuses
+    with ValueError, which every caller already catches. A blank value (clearing the
+    field) is never rejected - only a non-empty value that doesn't look right is.
 
     Three things about Seerr's API make this less obvious than it looks, all verified
     against seerr-team/seerr's server/routes/user/usersettings.ts:
@@ -1034,6 +1055,13 @@ def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=
       chat, Pushover tokens and quotas. So each write is read-modify-write: fetch the
       current settings, change the one value, send the whole object back.
     """
+    if email and not _EMAIL_RE.match(email):
+        raise ValueError(f"'{email}' doesn't look like a complete email address - refusing "
+                         "to send it to Seerr.")
+    if discord_id and not _DISCORD_ID_RE.match(discord_id):
+        raise ValueError(f"'{discord_id}' doesn't look like a Discord user ID (should be "
+                         "numbers only) - refusing to send it to Seerr.")
+
     base_url = base_url.rstrip("/")
     headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
     changed = False

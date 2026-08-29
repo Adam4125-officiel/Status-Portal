@@ -1134,9 +1134,9 @@ def test_writing_a_discord_id_does_not_wipe_the_rest_of_the_settings(seerr_stub)
     """Seerr's POST overwrites every field it reads from the body, so sending only the
     one being changed erases the user's PGP key, Telegram chat and Pushover tokens.
     Read-modify-write is not optional here."""
-    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="111")
+    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="111111111111111111")
     saved = _SeerrStub.state["notifications"]
-    assert saved["discordIds"] == ["111"]
+    assert saved["discordIds"] == ["111111111111111111"]
     assert saved["pgpKey"] == "KEEP-ME"
     assert saved["telegramChatId"] == "123"
 
@@ -1154,6 +1154,52 @@ def test_writing_an_email_goes_to_the_general_settings_not_notifications(seerr_s
 def test_clearing_a_discord_id_sends_an_empty_list(seerr_stub):
     integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="")
     assert _SeerrStub.state["notifications"]["discordIds"] == []
+
+
+# ---------------------------------------------------------------------------
+# push_seerr_contact() refuses a malformed value rather than sending it
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("email", ["j", "test@", "not-an-email", "a@b", "a b@example.invalid"])
+def test_an_incomplete_email_is_refused_before_any_request_is_made(seerr_stub, email):
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, email=email)
+    # Nothing was touched - the existing value is exactly what it was before.
+    assert _SeerrStub.state["main"]["email"] == "adam@seerr.lan"
+
+
+@pytest.mark.parametrize("discord_id", ["abc", "123", "12345abc", "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5"])
+def test_a_malformed_discord_id_is_refused_before_any_request_is_made(seerr_stub, discord_id):
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id=discord_id)
+    assert _SeerrStub.state["notifications"]["discordIds"] == ["999"]  # unchanged
+
+
+def test_a_valid_email_and_discord_id_are_still_accepted(seerr_stub):
+    integrations.push_seerr_contact(seerr_stub, "k", 7, email="valid@example.invalid",
+                                    discord_id="123456789012345678")
+    assert _SeerrStub.state["main"]["email"] == "valid@example.invalid"
+    assert _SeerrStub.state["notifications"]["discordIds"] == ["123456789012345678"]
+
+
+def test_a_bad_discord_id_blocks_a_good_email_in_the_same_call(seerr_stub):
+    """Both fields go together as one confirmed action (the confirm dialog shows both),
+    so this is all-or-nothing rather than silently applying half the change."""
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, email="valid@example.invalid",
+                                        discord_id="not-numeric")
+    assert _SeerrStub.state["main"]["email"] == "adam@seerr.lan"  # email never touched either
+
+
+def test_an_invalid_value_from_save_contact_is_reported_not_swallowed(enabled, monkeypatch):
+    """save_contact() must surface the refusal as a normal (ok=False) result, the same
+    as any other failed push - not let the ValueError escape uncaught."""
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam", "email": "old@example.invalid",
+                                 "discord_id": "", "jellyfin_user_id": "u1"}])
+    ok, message = user_notify.save_contact("u1", email="not-an-email")
+    assert not ok
+    assert "doesn't look like a complete email address" in message
 
 
 def test_the_sync_now_captures_discord_ids(enabled, seerr_stub):

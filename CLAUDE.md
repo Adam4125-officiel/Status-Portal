@@ -1828,6 +1828,23 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   notifications endpoint, which ignores it entirely). Verified against
   `seerr-team/seerr`'s `server/routes/user/usersettings.ts` — note the project was
   renamed from Jellyseerr to **Seerr** (`seerr-team/seerr`, docs.seerr.dev).
+- **`push_seerr_contact()` validates `email`/`discord_id` before making any request, not
+  after (added 2026-08-29).** Neither `account.html`'s free-text inputs nor
+  `admin_user_contact()`'s form handling checked the shape of what they collected — a
+  malformed value could reach Seerr's real settings and get read-modify-write'd
+  straight over a previously-good one, with nothing catching it anywhere in the chain.
+  `_EMAIL_RE` (a pragmatic `local@domain.tld` shape, not full RFC 5322) and
+  `_DISCORD_ID_RE` (`\d{15,25}` — a Discord snowflake is currently 17-19 digits, with
+  headroom for growth) both raise `ValueError` before either endpoint's GET/POST runs;
+  every existing caller (`save_contact()`, `user_account_push_seerr_contact()`) already
+  catches `ValueError` and reports it as a normal failure, so no caller needed to
+  change. **A blank value is never rejected** — clearing a field is a legitimate
+  action, distinct from a non-empty value that doesn't look right, so the check is
+  `if email and not _EMAIL_RE.match(email)`, not `if not _EMAIL_RE.match(email)`.
+  **Deliberately all-or-nothing**: an invalid `discord_id` blocks a valid `email` in
+  the same call rather than pushing the good half and silently dropping the bad one —
+  both fields are shown together in the one confirmation dialog before this is ever
+  called, so partial application would contradict what was actually confirmed.
 - **Which Seerr is used comes from `integrations.seerr_integration()`**, one function
   reading the `seerr_integration_id` setting, mirroring how the Jellyfin instance backing
   sign-in is chosen. It replaced three separate "first enabled one" pickers in
