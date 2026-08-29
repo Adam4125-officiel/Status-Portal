@@ -1548,7 +1548,7 @@ def test_admin_resources_vm_table_does_not_use_inline_onsubmit_with_vm_name(clie
 
     assert resp.status_code == 200
     assert b"onsubmit" not in resp.data
-    assert b'class="vm-control-form"' in resp.data
+    assert b"vm-control-trigger" in resp.data
     assert b'data-vm-name="evil' in resp.data
 
 
@@ -1943,6 +1943,32 @@ def test_admin_vm_control_route_rejects_unknown_action(client):
     assert resp.status_code == 302
     resp = client.get("/admin/resources")
     assert b"Unknown VM action" in resp.data
+
+
+def test_admin_vm_control_step_up_2fa_blocks_without_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_vm",
+                         lambda name, action: calls.append((name, action)) or (True, "VM command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+
+    resp = client.post("/admin/resources/vm-control",
+                        data={"name": "web01", "action": "restart"}, follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []  # control_vm must never have been called
+
+
+def test_admin_vm_control_step_up_2fa_allows_with_correct_code(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_vm",
+                         lambda name, action: calls.append((name, action)) or (True, "VM command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/resources/vm-control",
+                        data={"name": "web01", "action": "restart", "totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert calls == [("web01", "restart")]
 
 
 def test_public_section_order_defaults_to_the_declared_order(isolated_db):

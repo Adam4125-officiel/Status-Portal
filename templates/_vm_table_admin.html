@@ -9,12 +9,8 @@
         <td>{{ vm.uptime }}</td>
         <td class="actions">
           {% for action, label in [('start', 'Start'), ('restart', 'Restart'), ('stop', 'Stop')] %}
-          <form action="{{ url_for('admin_vm_control') }}" method="POST" style="display:inline"
-                class="vm-control-form" data-label="{{ label }}" data-vm-name="{{ vm.name }}">
-            <input type="hidden" name="name" value="{{ vm.name }}">
-            <input type="hidden" name="action" value="{{ action }}">
-            <button type="submit" class="btn secondary" style="padding:4px 10px;">{{ label }}</button>
-          </form>
+          <button type="button" class="btn secondary vm-control-trigger" style="padding:4px 10px;"
+                  data-vm-name="{{ vm.name }}" data-action="{{ action }}" data-label="{{ label }}">{{ label }}</button>
           {% endfor %}
         </td>
       </tr>

@@ -2492,11 +2492,17 @@ def admin_host_control():
 @app.route("/admin/resources/vm-control", methods=["POST"])
 @login_required
 def admin_vm_control():
+    """Same step-up reasoning as admin_host_control above: a stolen/replayed
+    session cookie alone must not be enough to stop or restart a VM."""
     name = request.form.get("name", "")
     action = request.form.get("action", "")
     if action not in ("start", "stop", "restart"):
         flash("Unknown VM action.", "error")
         return redirect(url_for("admin_resources"))
+    blocked = _require_totp("Incorrect or missing 2FA code - VM action cancelled.",
+                            "admin_resources")
+    if blocked:
+        return blocked
     success, message = monitoring.control_vm(name, action)
     flash(message, "success" if success else "error")
     return redirect(url_for("admin_resources"))
