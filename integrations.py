@@ -708,7 +708,6 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
     for entry in results:
         media = entry.get("media") or {}
         requested_by = entry.get("requestedBy") or {}
-        media_type = media.get("mediaType") or entry.get("type") or ""
         title, year, _poster_path = _resolved_seerr_media(base_url, api_key, media)
         # Seerr tracks availability separately per quality tier: `media.status` is the
         # non-4K copy, `media.status4k` the 4K one, and a request only ever moves the

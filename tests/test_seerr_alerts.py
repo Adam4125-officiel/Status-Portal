@@ -6,7 +6,6 @@ does prove is the threading bridge, the edge-triggering, and the failure handlin
 what it cannot prove is that Discord actually delivers a DM. See docs/HISTORY.md.
 """
 import json
-import threading
 
 import pytest
 

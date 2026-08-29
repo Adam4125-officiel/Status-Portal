@@ -10,7 +10,7 @@ their documented response shapes.
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 import pytest
 

@@ -27,7 +27,6 @@ import logging
 
 import requests
 
-import config
 import db
 import discord_bot
 import integrations

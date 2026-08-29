@@ -7,7 +7,6 @@ so no test can ever write into the real repository. Nothing here makes a network
 call (requests is always mocked) and nothing here ever restarts anything.
 """
 import io
-import json
 import os
 import zipfile
 

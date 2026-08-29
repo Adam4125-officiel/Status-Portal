@@ -457,7 +457,7 @@ def test_the_window_is_actually_sent_to_the_arr_app(isolated_db, stub, monkeypat
     db.set_setting("media_calendar_days", "3")
     monkeypatch.setattr(integrations.requests, "get", spy)
     integrations.fetch_arr_calendar(stub, "key")
-    from datetime import datetime, timezone
+    from datetime import datetime
     start = datetime.fromisoformat(seen["start"]).date()
     end = datetime.fromisoformat(seen["end"]).date()
     assert (end - start).days == 3

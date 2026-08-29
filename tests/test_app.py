@@ -1238,7 +1238,7 @@ def test_admin_maintenance_new_form_has_no_services_preselected(client):
 def test_admin_maintenance_edit_form_preselects_only_its_own_services(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     services = db.list_services()
-    s1, s2 = services[0]["id"], services[1]["id"]
+    s1 = services[0]["id"]
 
     client.post("/admin/maintenance/new", data={
         "service_id": [str(s1)], "title": "Upgrade",
@@ -2128,8 +2128,8 @@ def test_api_incidents_more_returns_html_fragment(client):
 
 def test_api_incidents_more_empty_past_the_end(client):
     sid = db.list_services()[0]["id"]
-    ids = [db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
-           for n in range(2)]
+    for n in range(2):
+        db.create_incident({"service_id": sid, "title": f"Incident {n}", "status": "resolved"})
     all_seen = ",".join(str(i) for i in db_all_incident_ids())
     resp = client.get(f"/api/incidents/more?seen={all_seen}")
     assert resp.status_code == 200
@@ -2645,7 +2645,6 @@ def test_secret_key_persists_across_reimport(tmp_path, monkeypatch):
     """The whole point: a restart must not invalidate every session cookie. This is
     what "a refresh randomly logs me out" was - config.SECRET_KEY used to be a fresh
     os.urandom() per process whenever PORTAL_SECRET_KEY wasn't set."""
-    import importlib
     import config as config_module
 
     monkeypatch.delenv("PORTAL_SECRET_KEY", raising=False)
