@@ -247,7 +247,13 @@ def _query_volume_label(mountpoint, device):
     """Best-effort human-readable volume/partition label (e.g. "Media" instead of a
     bare drive letter or mountpoint). Returns None if unavailable - unlabeled
     partitions, or a lookup method that isn't supported here - callers fall back to
-    showing the raw path instead."""
+    showing the raw path instead.
+
+    Exception handling is narrowed to what these two lookups can actually raise
+    (OSError from a filesystem/WinAPI call that fails, TypeError/AttributeError from
+    a ctypes argument or attribute mismatch on an unexpected Windows configuration)
+    rather than a bare `except Exception`, so a real bug here surfaces as a real
+    traceback instead of silently reading as just another unlabeled disk."""
     try:
         if os.name == "nt":
             import ctypes
@@ -262,8 +268,8 @@ def _query_volume_label(mountpoint, device):
             for entry in os.listdir(by_label_dir):
                 if os.path.realpath(os.path.join(by_label_dir, entry)) == real_device:
                     return entry
-    except Exception:
-        pass
+    except (OSError, TypeError, AttributeError) as exc:
+        _logger.debug("Could not read volume label for %s (%s): %s", mountpoint, device, exc)
     return None
 
 

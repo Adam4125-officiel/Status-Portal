@@ -459,6 +459,40 @@ def test_volume_label_is_looked_up_once_per_device(monkeypatch):
     monitoring._volume_label_cache.clear()
 
 
+def test_query_volume_label_swallows_oserror_and_logs_at_debug(monkeypatch, caplog):
+    """Regression test for the security-audit fix narrowing this from a bare
+    `except Exception: pass`: an OSError from the /dev/disk/by-label lookup (e.g. a
+    permissions problem or a race with the directory disappearing) is still the
+    expected "can't read a label here" case and must still degrade to None, now with
+    a debug-level trace instead of total silence."""
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    monkeypatch.setattr(monitoring.os.path, "isdir", lambda p: True)
+
+    def raise_oserror(p):
+        raise OSError("Permission denied")
+    monkeypatch.setattr(monitoring.os, "listdir", raise_oserror)
+
+    with caplog.at_level("DEBUG", logger="monitoring"):
+        result = monitoring._query_volume_label("/mnt/media", "/dev/sdb1")
+    assert result is None
+    assert "Could not read volume label" in caplog.text
+
+
+def test_query_volume_label_no_longer_swallows_unexpected_exceptions(monkeypatch):
+    """The old bare `except Exception: pass` would have hidden this; narrowing to
+    (OSError, TypeError, AttributeError) means a genuine bug here (anything else)
+    must propagate instead of quietly reading as "no label available"."""
+    monkeypatch.setattr(monitoring.os, "name", "posix")
+    monkeypatch.setattr(monitoring.os.path, "isdir", lambda p: True)
+
+    def raise_value_error(p):
+        raise ValueError("something actually went wrong")
+    monkeypatch.setattr(monitoring.os, "listdir", raise_value_error)
+
+    with pytest.raises(ValueError):
+        monitoring._query_volume_label("/mnt/media", "/dev/sdb1")
+
+
 def test_background_refresh_now_starts_on_every_platform(monkeypatch):
     """It used to return early off Windows. The CPU half of the loop applies
     everywhere, and that's what keeps the blocking sample out of the request path."""
