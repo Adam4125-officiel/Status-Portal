@@ -147,6 +147,83 @@ def test_seerr_events_are_discord_only(enabled, monkeypatch):
     assert db.notification_queue_summary()["sent"] == 1
 
 
+def test_seerr_sourced_email_is_suppressed_by_default(enabled, monkeypatch):
+    """seerr_email_events_enabled() defaults off - request_update is the one event with
+    a real email preference column, so it's the one this can actually be observed on."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_requests=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "request_update", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == []
+    assert db.notification_queue_summary()["sent"] == 1
+
+
+def test_seerr_sourced_email_sends_once_the_admin_turns_it_on(enabled, monkeypatch):
+    db.set_setting("seerr_email_events_enabled", "1")
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_requests=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "request_update", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == [["me@example.invalid"]]
+
+
+def test_seerr_email_suppression_does_not_touch_discord(enabled, monkeypatch):
+    """The switch is email-only - a Seerr-sourced Discord DM must still go out
+    regardless of this setting."""
+    db.set_user_preferences("u1", notify_discord_id="123", notify_discord_seerr_events=True)
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    user_notify.notify_user("u1", "seerr_event", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert dms == ["123"]
+
+
+def test_seerr_email_suppression_does_not_touch_non_seerr_events(enabled, monkeypatch):
+    """The switch only ever gates request_update/seerr_event - report_reply must be
+    completely unaffected regardless of the setting."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_email_reports=True)
+    emails = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: emails.append(recipients) or True)
+    user_notify.notify_user("u1", "report_reply", "Subject", "Body")
+    user_notify.run_delivery_task()
+    assert emails == [["me@example.invalid"]]
+
+
+def test_admin_notification_defaults_route_saves_and_flags_forward_only(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/notifications/users/defaults",
+                       data={"notify_email_reports": "on", "notify_discord_reports": "on"},
+                       follow_redirects=True)
+    assert resp.status_code == 200
+    assert db.notification_defaults()["notify_email_reports"] is True
+    assert db.notification_defaults()["notify_email_maintenance"] is False  # left unchecked
+
+
+def test_admin_notification_override_route_applies_to_everyone(client):
+    db.set_user_preferences("a", notify_email_maintenance=False)
+    db.set_user_preferences("b", notify_email_maintenance=False)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/notifications/users/defaults",
+               data={"notify_email_maintenance": "on"})
+    client.post("/admin/notifications/users/override", data={"field": "notify_email_maintenance"})
+    assert db.get_user_preferences("a")["notify_email_maintenance"] is True
+    assert db.get_user_preferences("b")["notify_email_maintenance"] is True
+
+
+def test_admin_notification_override_route_rejects_a_bad_field(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/notifications/users/override",
+                       data={"field": "notify_email"}, follow_redirects=True)
+    assert b"Unknown setting" in resp.data
+
+
 def test_a_failed_send_is_retried_then_given_up_on(enabled, monkeypatch):
     db.set_user_preferences("u1", notify_email="me@example.invalid")
     monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: False)
@@ -249,6 +326,153 @@ def test_contact_lookup_reads_stored_preferences_only(enabled, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call Seerr")))
     db.set_user_preferences("u1", notify_email="stored@example.invalid")
     assert user_notify.contact_for("u1") == ("stored@example.invalid", "")
+
+
+# ---------------------------------------------------------------------------
+# send_direct() - one-off admin sends, always bypassing preferences
+# ---------------------------------------------------------------------------
+def test_send_direct_email_uses_the_stored_address(isolated_db, monkeypatch):
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    sent = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: sent.append((s, b, recipients)) or True)
+    ok, detail = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert ok and sent == [("Subject", "Body", ["me@example.invalid"])]
+
+
+def test_send_direct_email_with_no_address_fails_clearly(isolated_db):
+    ok, detail = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert not ok and "no email" in detail.lower()
+
+
+def test_send_direct_discord_uses_the_stored_id(isolated_db, monkeypatch):
+    db.set_user_preferences("u1", notify_discord_id="123")
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    ok, detail = user_notify.send_direct("u1", "discord", "Subject", "Body")
+    assert ok and dms == ["123"]
+
+
+def test_send_direct_discord_with_no_id_fails_clearly(isolated_db):
+    ok, detail = user_notify.send_direct("u1", "discord", "Subject", "Body")
+    assert not ok and "no discord id" in detail.lower()
+
+
+def test_send_direct_ignores_the_recipients_own_preferences(isolated_db, monkeypatch):
+    """Unlike deliver(), send_direct() is a direct one-to-one admin action - it must
+    reach the person even if they've switched every channel preference off."""
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_reports=False, notify_email_requests=False,
+                            notify_email_maintenance=False)
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    ok, _ = user_notify.send_direct("u1", "email", "Subject", "Body")
+    assert ok
+
+
+def test_send_direct_rejects_an_unknown_channel(isolated_db):
+    with pytest.raises(ValueError):
+        user_notify.send_direct("u1", "carrier-pigeon", "Subject", "Body")
+
+
+def test_admin_test_discord_route_reports_the_real_failure(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_discord_id="123")
+    monkeypatch.setattr(discord_bot, "send_dm",
+                        lambda uid, text: (False, "The Discord bot isn't connected."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/test/discord", follow_redirects=True)
+    assert b"Discord bot isn&#39;t connected" in resp.data or b"isn't connected" in resp.data
+
+
+def test_admin_test_email_route_succeeds(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/test/email", follow_redirects=True)
+    assert resp.status_code == 200
+    assert db.notification_queue_summary()["pending"] == 0  # never queued - sent inline
+
+
+def test_admin_test_route_404s_for_an_unknown_user(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/nope/test/email", follow_redirects=True)
+    assert resp.status_code == 200  # redirects to admin_users with a flash, not a 404
+    assert b"No such user" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# Custom message to a specific user (admin-only)
+# ---------------------------------------------------------------------------
+def test_admin_message_route_sends_by_email(client, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    sent = []
+    monkeypatch.setattr(notifications, "send_email",
+                        lambda s, b, recipients=None: sent.append((s, b, recipients)) or True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "Your report is being looked at."},
+                       follow_redirects=True)
+    assert b"Message sent to adam by email" in resp.data
+    assert sent == [("Message from Server", "Your report is being looked at.", ["me@example.invalid"])]
+
+
+def test_admin_message_route_ignores_the_recipients_own_preferences(client, monkeypatch):
+    """Same rule as send_direct() itself: a direct admin message must reach the person
+    even if they've switched every channel preference off."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid",
+                            notify_email_reports=False, notify_email_requests=False,
+                            notify_email_maintenance=False)
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "Hi there"}, follow_redirects=True)
+    assert b"Message sent" in resp.data
+
+
+def test_admin_message_route_reports_no_contact_detail(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "discord", "body": "Hi there"}, follow_redirects=True)
+    assert b"no Discord ID on file" in resp.data
+
+
+def test_admin_message_route_rejects_an_empty_body(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "email", "body": "   "}, follow_redirects=True)
+    assert b"Message can&#39;t be empty" in resp.data or b"Message can't be empty" in resp.data
+
+
+def test_admin_message_route_rejects_an_unknown_channel(client):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/u1/message",
+                       data={"channel": "sms", "body": "hi"}, follow_redirects=True)
+    assert b"Choose a channel" in resp.data
+
+
+def test_admin_message_route_404s_for_an_unknown_user(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/users/nope/message",
+                       data={"channel": "email", "body": "hi"}, follow_redirects=True)
+    assert b"No such user" in resp.data
+
+
+def test_admin_message_route_keeps_no_history(client, monkeypatch):
+    """Explicitly scoped as a one-off, unlike the announcement send log."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_user_preferences("u1", notify_email="me@example.invalid")
+    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/users/u1/message", data={"channel": "email", "body": "hi"})
+    assert db.notification_queue_summary() == {"pending": 0, "sent": 0, "failed": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +923,39 @@ def test_the_admin_account_view_saves_the_targets_prefs_not_the_admins(admin, is
     assert db.get_user_preferences("u2")["notify_email"] == ""
 
 
+def test_the_admin_view_auto_fills_from_a_linked_seerr_account(admin, isolated_db, monkeypatch):
+    """Same guarantee test_opening_the_account_page_auto_fills_from_a_linked_seerr_
+    account pins for a visitor's own page - an admin browsing a user's account must
+    not need an extra manual "Use these details here" click either, since this route
+    already claimed to reuse that same auto-fill logic but never actually called it."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "adam@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = admin.get("/admin/users/u1/account")
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "adam@example.invalid"
+    assert prefs["notify_discord_id"] == "999"
+    assert b"Filled in adam" in resp.data
+
+
+def test_the_admin_view_auto_fill_never_overwrites_an_existing_choice(admin, isolated_db, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    db.set_user_preferences("u1", notify_email="mine@example.invalid")
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "seerr@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = admin.get("/admin/users/u1/account")
+    assert db.get_user_preferences("u1")["notify_email"] == "mine@example.invalid"
+    assert b"Filled in adam" not in resp.data
+
+
 def test_the_admin_can_import_seerr_details_for_a_user(admin, isolated_db, monkeypatch):
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
     db.set_setting("user_notifications_enabled", "1")
@@ -877,9 +1134,9 @@ def test_writing_a_discord_id_does_not_wipe_the_rest_of_the_settings(seerr_stub)
     """Seerr's POST overwrites every field it reads from the body, so sending only the
     one being changed erases the user's PGP key, Telegram chat and Pushover tokens.
     Read-modify-write is not optional here."""
-    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="111")
+    integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="111111111111111111")
     saved = _SeerrStub.state["notifications"]
-    assert saved["discordIds"] == ["111"]
+    assert saved["discordIds"] == ["111111111111111111"]
     assert saved["pgpKey"] == "KEEP-ME"
     assert saved["telegramChatId"] == "123"
 
@@ -897,6 +1154,52 @@ def test_writing_an_email_goes_to_the_general_settings_not_notifications(seerr_s
 def test_clearing_a_discord_id_sends_an_empty_list(seerr_stub):
     integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id="")
     assert _SeerrStub.state["notifications"]["discordIds"] == []
+
+
+# ---------------------------------------------------------------------------
+# push_seerr_contact() refuses a malformed value rather than sending it
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("email", ["j", "test@", "not-an-email", "a@b", "a b@example.invalid"])
+def test_an_incomplete_email_is_refused_before_any_request_is_made(seerr_stub, email):
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, email=email)
+    # Nothing was touched - the existing value is exactly what it was before.
+    assert _SeerrStub.state["main"]["email"] == "adam@seerr.lan"
+
+
+@pytest.mark.parametrize("discord_id", ["abc", "123", "12345abc", "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5"])
+def test_a_malformed_discord_id_is_refused_before_any_request_is_made(seerr_stub, discord_id):
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, discord_id=discord_id)
+    assert _SeerrStub.state["notifications"]["discordIds"] == ["999"]  # unchanged
+
+
+def test_a_valid_email_and_discord_id_are_still_accepted(seerr_stub):
+    integrations.push_seerr_contact(seerr_stub, "k", 7, email="valid@example.invalid",
+                                    discord_id="123456789012345678")
+    assert _SeerrStub.state["main"]["email"] == "valid@example.invalid"
+    assert _SeerrStub.state["notifications"]["discordIds"] == ["123456789012345678"]
+
+
+def test_a_bad_discord_id_blocks_a_good_email_in_the_same_call(seerr_stub):
+    """Both fields go together as one confirmed action (the confirm dialog shows both),
+    so this is all-or-nothing rather than silently applying half the change."""
+    with pytest.raises(ValueError):
+        integrations.push_seerr_contact(seerr_stub, "k", 7, email="valid@example.invalid",
+                                        discord_id="not-numeric")
+    assert _SeerrStub.state["main"]["email"] == "adam@seerr.lan"  # email never touched either
+
+
+def test_an_invalid_value_from_save_contact_is_reported_not_swallowed(enabled, monkeypatch):
+    """save_contact() must surface the refusal as a normal (ok=False) result, the same
+    as any other failed push - not let the ValueError escape uncaught."""
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam", "email": "old@example.invalid",
+                                 "discord_id": "", "jellyfin_user_id": "u1"}])
+    ok, message = user_notify.save_contact("u1", email="not-an-email")
+    assert not ok
+    assert "doesn't look like a complete email address" in message
 
 
 def test_the_sync_now_captures_discord_ids(enabled, seerr_stub):

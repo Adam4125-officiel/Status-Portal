@@ -168,6 +168,24 @@ def init_db():
         )
     """)
 
+    # A log of "an admin pushed this announcement out as a notification", separate
+    # from the announcement itself - one announcement can be sent more than once (a
+    # typo fixed and re-sent, or sent by email first and Discord later), and each send
+    # is its own row rather than a field on announcements. Brand new table, so a plain
+    # CREATE TABLE IF NOT EXISTS is fine - no _ensure_column() needed.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS announcement_sends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            announcement_id INTEGER,
+            title TEXT NOT NULL,
+            channels TEXT NOT NULL,  -- comma-separated: "email", "discord", or "email,discord"
+            recipient_count INTEGER NOT NULL DEFAULT 0,  -- email fan-out count; 0 for discord-only
+            discord_detail TEXT NOT NULL DEFAULT '',  -- '' until the background send finishes
+            sent_at TEXT NOT NULL,
+            FOREIGN KEY (announcement_id) REFERENCES announcements (id) ON DELETE SET NULL
+        )
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS incidents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -512,6 +530,10 @@ def init_db():
     _ensure_column(conn, "user_preferences", "seerr_user_id", "TEXT NOT NULL DEFAULT ''")
     # "Don't ask me for contact details again." Set by skipping the post-sign-in prompt.
     _ensure_column(conn, "user_preferences", "contact_prompt_dismissed", "INTEGER NOT NULL DEFAULT 0")
+    # Admin-authored announcements pushed by email - on by default like reports/
+    # requests, unlike maintenance, since an announcement is something the admin chose
+    # to say to everyone, not routine noise about one service.
+    _ensure_column(conn, "user_preferences", "notify_email_announcements", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
@@ -769,13 +791,15 @@ def get_announcement(aid):
 
 def create_announcement(data):
     conn = get_db()
-    conn.execute("""
+    cur = conn.execute("""
         INSERT INTO announcements (title, message, type, pinned, created_at)
         VALUES (?, ?, ?, ?, ?)
     """, (data["title"], data["message"], data.get("type", "info"),
           int(data.get("pinned", 0)), now_iso()))
     conn.commit()
+    aid = cur.lastrowid
     conn.close()
+    return aid
 
 
 def update_announcement(aid, data):
@@ -793,6 +817,38 @@ def delete_announcement(aid):
     conn.execute("DELETE FROM announcements WHERE id=?", (aid,))
     conn.commit()
     conn.close()
+
+
+# ---------- Announcement send history (see app.py's admin_announcement_send()) ----------
+def record_announcement_send(announcement_id, title, channels, recipient_count=0):
+    """One row per send. discord_detail starts blank and is filled in later by
+    set_announcement_send_detail() once the background Discord post finishes - the
+    row is written immediately (before that result is known) so the history page
+    reflects the send even while Discord is still in flight."""
+    conn = get_db()
+    cur = conn.execute("""
+        INSERT INTO announcement_sends (announcement_id, title, channels, recipient_count, sent_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (announcement_id, title, channels, recipient_count, now_iso()))
+    conn.commit()
+    send_id = cur.lastrowid
+    conn.close()
+    return send_id
+
+
+def set_announcement_send_detail(send_id, discord_detail):
+    conn = get_db()
+    conn.execute("UPDATE announcement_sends SET discord_detail=? WHERE id=?", (discord_detail, send_id))
+    conn.commit()
+    conn.close()
+
+
+def list_announcement_sends(limit=20):
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM announcement_sends ORDER BY sent_at DESC LIMIT ?",
+                         (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ---------- Incidents ----------
@@ -1909,7 +1965,52 @@ DEFAULT_USER_PREFERENCES = {
     "notify_discord_seerr_events": True,
     "seerr_user_id": "",
     "contact_prompt_dismissed": False,
+    "notify_email_announcements": True,
 }
+
+
+# Every per-channel/per-event toggle an admin can set a portal-wide default for (see
+# notification_defaults()/override_user_preference() below), in the order the admin
+# settings page renders them. Deliberately just the boolean toggles - not
+# notify_email/notify_discord_id (those are contact details, not event preferences;
+# there's no sensible "default" for someone else's email address) and not
+# contact_prompt_dismissed/seerr_user_id (bookkeeping, not a preference).
+NOTIFICATION_TOGGLE_FIELDS = (
+    "notify_email_reports", "notify_email_requests", "notify_email_maintenance",
+    "notify_email_announcements",
+    "notify_discord_reports", "notify_discord_requests", "notify_discord_maintenance",
+    "notify_discord_seerr_events",
+)
+
+NOTIFICATION_TOGGLE_LABELS = {
+    "notify_email_reports": ("Email", "Replies to problem reports, and when one becomes an incident"),
+    "notify_email_requests": ("Email", "When something requested becomes available"),
+    "notify_email_maintenance": ("Email", "Maintenance on any service"),
+    "notify_email_announcements": ("Email", "Announcements the admin sends out"),
+    "notify_discord_reports": ("Discord DM", "Replies to problem reports, and when one becomes an incident"),
+    "notify_discord_requests": ("Discord DM", "When something requested becomes available"),
+    "notify_discord_maintenance": ("Discord DM", "Maintenance on any service"),
+    "notify_discord_seerr_events": ("Discord DM", "Seerr events — approvals, declines, availability, and issues"),
+}
+
+NOTIFY_DEFAULT_SETTING_PREFIX = "notify_default_"
+
+
+def notification_defaults():
+    """The admin-configured baseline for each toggle in NOTIFICATION_TOGGLE_FIELDS,
+    read from its own `settings` row (one admin can change live, no restart - the
+    standard config split applied to this app's built-in defaults). A toggle the admin
+    has never touched falls back to DEFAULT_USER_PREFERENCES, so this is a no-op until
+    an admin actually visits the defaults panel.
+
+    Used by get_user_preferences() to seed a user who has never saved anything of
+    their own - "unconfigured" means no user_preferences row at all, not merely
+    agreeing with the defaults."""
+    result = {}
+    for field in NOTIFICATION_TOGGLE_FIELDS:
+        raw = get_setting(f"{NOTIFY_DEFAULT_SETTING_PREFIX}{field}", None)
+        result[field] = (raw == "1") if raw is not None else DEFAULT_USER_PREFERENCES[field]
+    return result
 
 
 def get_user_preferences(user_id):
@@ -1940,6 +2041,11 @@ def get_user_preferences(user_id):
         prefs["notify_discord_seerr_events"] = bool(row["notify_discord_seerr_events"])
         prefs["seerr_user_id"] = row["seerr_user_id"] or ""
         prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
+        prefs["notify_email_announcements"] = bool(row["notify_email_announcements"])
+    else:
+        # No row means genuinely unconfigured, not "agrees with the defaults" - see
+        # notification_defaults()'s docstring.
+        prefs.update(notification_defaults())
     return prefs
 
 
@@ -1957,9 +2063,28 @@ _USER_PREFERENCE_FIELDS = {
     "notify_discord_requests": lambda v: int(bool(v)),
     "notify_discord_maintenance": lambda v: int(bool(v)),
     "notify_discord_seerr_events": lambda v: int(bool(v)),
+    "notify_email_announcements": lambda v: int(bool(v)),
     "seerr_user_id": str,
     "contact_prompt_dismissed": lambda v: int(bool(v)),
 }
+
+
+def override_user_preference(field, value):
+    """Force-sets one notification toggle for every *existing* user_preferences row,
+    discarding each of their own individual choices for it. This is the destructive
+    half of the default/override pair - notification_defaults() only ever affects
+    someone with no row yet, this reaches everyone who already has one.
+
+    field is whitelisted against _USER_PREFERENCE_FIELDS (never interpolated from raw
+    form input) and must be one of NOTIFICATION_TOGGLE_FIELDS - the contact/bookkeeping
+    columns in _USER_PREFERENCE_FIELDS have no "default" concept to override with."""
+    if field not in NOTIFICATION_TOGGLE_FIELDS:
+        raise ValueError(f"Not an overridable notification toggle: {field}")
+    coerced = _USER_PREFERENCE_FIELDS[field](value)
+    conn = get_db()
+    conn.execute(f"UPDATE user_preferences SET {field}=?, updated_at=?", (coerced, now_iso()))
+    conn.commit()
+    conn.close()
 
 
 def set_user_preferences(user_id, theme=None, contact=None, **fields):

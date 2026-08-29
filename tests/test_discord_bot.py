@@ -375,6 +375,106 @@ def _discord_error(cls, status=404, reason="Not Found"):
     return cls(response, {"message": reason, "code": 0})
 
 
+# ---------------------------------------------------------------------------
+# send_channel_message() - the announcement-posting bridge
+# ---------------------------------------------------------------------------
+def test_send_channel_message_when_not_connected():
+    discord_bot._runtime["client"] = None
+    discord_bot._runtime["loop"] = None
+    ok, error = discord_bot.send_channel_message(123, "hi")
+    assert not ok and "isn't connected" in error
+
+
+def test_send_channel_message_when_discord_py_missing(monkeypatch):
+    monkeypatch.setitem(discord_bot._runtime, "client", object())
+    monkeypatch.setitem(discord_bot._runtime, "loop", object())
+    monkeypatch.setitem(discord_bot._state, "connected", True)
+    monkeypatch.setattr(discord_bot, "_try_import_discord", lambda: (None, None, None))
+    ok, error = discord_bot.send_channel_message(123, "hi")
+    assert not ok and "discord.py isn't installed" in error
+
+
+def _start_fake_channel_runtime(channel):
+    """Same shape as _start_fake_bot_runtime() above, but the fake client also answers
+    get_channel()/fetch_channel() - what send_channel_message() actually needs to
+    exercise the real asyncio.run_coroutine_threadsafe bridge, not just a mocked-away
+    call to the whole function."""
+    loop = asyncio.new_event_loop()
+
+    class FakeClient:
+        def get_channel(self, cid):
+            return channel
+
+        async def fetch_channel(self, cid):
+            return channel
+
+        async def close(self):
+            loop.call_soon_threadsafe(loop.stop)
+
+    client = FakeClient()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    discord_bot._runtime["client"] = client
+    discord_bot._runtime["loop"] = loop
+    discord_bot._state["connected"] = True
+    thread.start()
+    deadline = time.time() + 2
+    while not loop.is_running() and time.time() < deadline:
+        time.sleep(0.01)
+    return client, loop, thread
+
+
+def _stop_fake_channel_runtime(client, loop, thread):
+    asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=2)
+    thread.join(timeout=2)
+    discord_bot._runtime["client"] = None
+    discord_bot._runtime["loop"] = None
+    discord_bot._state["connected"] = False
+
+
+def test_send_channel_message_posts_via_get_channel_cache_hit():
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    client, loop, thread = _start_fake_channel_runtime(channel)
+    try:
+        ok, error = discord_bot.send_channel_message(123, "Hello, channel")
+        assert ok and error == ""
+        channel.send.assert_awaited_once_with("Hello, channel")
+    finally:
+        _stop_fake_channel_runtime(client, loop, thread)
+
+
+def test_send_channel_message_reports_forbidden():
+    import discord
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=_discord_error(discord.Forbidden, status=403, reason="Forbidden"))
+    client, loop, thread = _start_fake_channel_runtime(channel)
+    try:
+        ok, error = discord_bot.send_channel_message(123, "hi")
+        assert not ok and "permission" in error.lower()
+    finally:
+        _stop_fake_channel_runtime(client, loop, thread)
+
+
+def test_send_channel_message_reports_not_found():
+    import discord
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=_discord_error(discord.NotFound))
+    client, loop, thread = _start_fake_channel_runtime(channel)
+    try:
+        ok, error = discord_bot.send_channel_message(123, "hi")
+        assert not ok and "no channel" in error.lower()
+    finally:
+        _stop_fake_channel_runtime(client, loop, thread)
+
+
 def test_edit_tracked_status_message_succeeds_without_retry(isolated_db, monkeypatch):
     bot = _build_bot()
     channel = MagicMock()

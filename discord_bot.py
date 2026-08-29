@@ -217,6 +217,43 @@ def broadcast_dm(text, user_ids=None):
     return sent, failures
 
 
+def send_channel_message(channel_id, text):
+    """Posts one message to one channel. Returns (ok, error) - never raises.
+
+    Same asyncio.run_coroutine_threadsafe bridge as send_dm(), for the same reason: an
+    admin action decides to post from outside the bot's own event loop, not from inside
+    a command handler. get_channel()-then-fetch_channel() is the same cache-then-fetch
+    resolution _fetch_channel() uses internally for the tracked /status message - a
+    cold gateway cache right after a restart must not look identical to "channel
+    deleted". Unlike _edit_tracked_status_message()'s periodic retry loop, this is a
+    discrete one-shot send with its own caller-visible outcome (an announcement's send
+    history) to record, so it tries once and reports what happened - the same shape
+    send_dm() already uses - rather than silently retrying and delaying that outcome."""
+    client, loop = _runtime["client"], _runtime["loop"]
+    if client is None or loop is None or not _state["connected"]:
+        return False, "The Discord bot isn't connected."
+    discord, _, _ = _try_import_discord()
+    if discord is None:
+        return False, "discord.py isn't installed."
+
+    async def _deliver():
+        channel = client.get_channel(int(channel_id)) or await client.fetch_channel(int(channel_id))
+        await channel.send(text)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_deliver(), loop).result(timeout=DM_TIMEOUT_SECONDS)
+        return True, ""
+    except discord.Forbidden:
+        return False, "The bot doesn't have permission to post in that channel."
+    except discord.NotFound:
+        return False, "No channel with that ID, or the bot can't see it."
+    except ValueError:
+        return False, f"'{channel_id}' isn't a valid channel ID."
+    except Exception as e:
+        _logger.exception("Could not post to Discord channel %s", channel_id)
+        return False, str(e)
+
+
 def _overall_status(services):
     """Mirrors app.compute_overall_status() - a service with ignore_in_overall_status
     set is excluded from this aggregate the same way, so the two never disagree."""

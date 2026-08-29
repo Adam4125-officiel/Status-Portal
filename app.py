@@ -1635,7 +1635,7 @@ def user_login():
     return render_template("user_login.html", next_url=next_url)
 
 
-# The 7 checkbox names the account-settings form submits, shared by the visitor's own
+# The 8 checkbox names the account-settings form submits, shared by the visitor's own
 # POST handler and the admin-viewing-a-user's-account route (see
 # admin_user_account()) - one place naming the fields so the two can't drift apart.
 def _save_account_prefs(user_id, form):
@@ -1649,7 +1649,8 @@ def _save_account_prefs(user_id, form):
         notify_discord_reports=bool(form.get("notify_discord_reports")),
         notify_discord_requests=bool(form.get("notify_discord_requests")),
         notify_discord_maintenance=bool(form.get("notify_discord_maintenance")),
-        notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")))
+        notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")),
+        notify_email_announcements=bool(form.get("notify_email_announcements")))
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -2172,7 +2173,57 @@ def admin_service_delete(service_id):
 @login_required
 def admin_announcements():
     announcements = db.list_announcements()
-    return render_template("admin_announcements.html", announcements=announcements, active="announcements")
+    return render_template("admin_announcements.html", announcements=announcements,
+                            sends=db.list_announcement_sends(), active="announcements",
+                            **_announcement_channel_context())
+
+
+def _announcement_channel_context():
+    return dict(discord_channel_configured=bool(db.get_setting("discordbot_announcement_channel_id", "")),
+                email_notify_enabled=user_notify.is_enabled())
+
+
+def _send_announcement_discord(send_id, channel_id, text):
+    """Runs on its own one-shot thread, the same shape _restart_process() uses for a
+    delayed one-off action - the caller returns immediately, and this records the
+    real outcome once Discord actually answers (or times out) rather than making the
+    admin's page load wait on a network round trip they didn't ask to watch."""
+    ok, detail = discord_bot.send_channel_message(channel_id, text)
+    db.set_announcement_send_detail(send_id, "Posted." if ok else f"Failed: {detail}")
+
+
+def _dispatch_announcement_send(aid, title, message, channels):
+    """Fans one announcement out over the requested channels and returns a list of
+    short status notes for the flash message. Shared by the create/edit form's
+    "Publish and send" and the list page's "Send" button, so there's exactly one
+    implementation of what a send actually does.
+
+    Email fans out per-recipient through the existing queue+task machinery
+    (notify_service_subscribers(), respecting each user's own opt-out); Discord is one
+    post to one configured channel, not a DM broadcast, so it can't hit Discord's
+    per-DM rate limits the way messaging every user individually would."""
+    recipient_count = 0
+    notes = []
+    if "email" in channels:
+        if not user_notify.is_enabled():
+            notes.append("email: per-user notifications are switched off — see Notifications.")
+        else:
+            recipient_count = user_notify.notify_service_subscribers("announcement", title, message)
+            notes.append(f"email: queued for {recipient_count} recipient(s).")
+
+    send_id = db.record_announcement_send(aid, title, ",".join(channels), recipient_count)
+
+    if "discord" in channels:
+        channel_id = db.get_setting("discordbot_announcement_channel_id", "")
+        if not channel_id:
+            notes.append("discord: no announcement channel configured — see Discord bot → Discord servers.")
+            db.set_announcement_send_detail(send_id, "No announcement channel configured.")
+        else:
+            text = f"**{title}**\n{message}"
+            threading.Thread(target=_send_announcement_discord,
+                             args=(send_id, channel_id, text), daemon=True).start()
+            notes.append("discord: posting now — check the send history below shortly.")
+    return notes
 
 
 @app.route("/admin/announcements/new", methods=["GET", "POST"])
@@ -2181,10 +2232,16 @@ def admin_announcement_new():
     if request.method == "POST":
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
-        db.create_announcement(data)
-        flash("Announcement published.", "success")
+        aid = db.create_announcement(data)
+        channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
+        if channels:
+            notes = _dispatch_announcement_send(aid, data["title"], data["message"], channels)
+            flash("Announcement published. " + " ".join(notes), "success")
+        else:
+            flash("Announcement published.", "success")
         return redirect(url_for("admin_announcements"))
-    return render_template("admin_announcement_form.html", announcement=None, active="announcements")
+    return render_template("admin_announcement_form.html", announcement=None, active="announcements",
+                            **_announcement_channel_context())
 
 
 @app.route("/admin/announcements/<int:aid>/edit", methods=["GET", "POST"])
@@ -2198,9 +2255,15 @@ def admin_announcement_edit(aid):
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
         db.update_announcement(aid, data)
-        flash("Announcement updated.", "success")
+        channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
+        if channels:
+            notes = _dispatch_announcement_send(aid, data["title"], data["message"], channels)
+            flash("Announcement updated. " + " ".join(notes), "success")
+        else:
+            flash("Announcement updated.", "success")
         return redirect(url_for("admin_announcements"))
-    return render_template("admin_announcement_form.html", announcement=announcement, active="announcements")
+    return render_template("admin_announcement_form.html", announcement=announcement, active="announcements",
+                            **_announcement_channel_context())
 
 
 @app.route("/admin/announcements/<int:aid>/delete", methods=["POST"])
@@ -2208,6 +2271,27 @@ def admin_announcement_edit(aid):
 def admin_announcement_delete(aid):
     db.delete_announcement(aid)
     flash("Announcement deleted.", "success")
+    return redirect(url_for("admin_announcements"))
+
+
+@app.route("/admin/announcements/<int:aid>/send", methods=["POST"])
+@login_required
+def admin_announcement_send(aid):
+    """Re-sends an already-published announcement - the list page's counterpart to
+    "Publish and send" on the create/edit form, for a typo fixed and re-sent, or sent
+    by email first and Discord later."""
+    announcement = db.get_announcement(aid)
+    if not announcement:
+        flash("Announcement not found.", "error")
+        return redirect(url_for("admin_announcements"))
+
+    channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
+    if not channels:
+        flash("Choose at least one channel to send on.", "error")
+        return redirect(url_for("admin_announcements"))
+
+    notes = _dispatch_announcement_send(aid, announcement["title"], announcement["message"], channels)
+    flash(" ".join(notes), "success")
     return redirect(url_for("admin_announcements"))
 
 
@@ -3281,11 +3365,15 @@ def admin_notifications():
 @login_required
 def admin_user_notifications():
     """The master switch for per-user notifications, plus what the delivery queue is
-    doing. The per-*person* settings deliberately aren't here: what someone wants to be
-    told about, and where, is theirs to set on their own account page."""
+    doing, plus the portal-wide baseline every unconfigured user starts from. The
+    per-*person* settings deliberately aren't here: what someone wants to be told
+    about, and where, is theirs to set on their own account page - "Default"/
+    "Override" below are two different, explicit ways to reach past that."""
     if request.method == "POST":
         db.set_setting("user_notifications_enabled",
                         "1" if request.form.get("enabled") else "0")
+        db.set_setting("seerr_email_events_enabled",
+                        "1" if request.form.get("seerr_email_events_enabled") else "0")
         flash("Per-user notification settings saved.", "success")
         return redirect(url_for("admin_user_notifications"))
 
@@ -3294,6 +3382,7 @@ def admin_user_notifications():
     return render_template(
         "admin_user_notifications.html",
         enabled=user_notify.is_enabled(),
+        seerr_email_events_enabled=user_notify.seerr_email_enabled(),
         queue=db.notification_queue_summary(),
         recent=db.recent_notifications(),
         email_ready=next((c["configured"] for c in channels if c["key"] == "email"), False),
@@ -3302,7 +3391,46 @@ def admin_user_notifications():
         seerr_configured=user_notify.seerr_integration() is not None,
         max_attempts=db.MAX_NOTIFICATION_ATTEMPTS,
         task=scheduler.task_view(task) if task else None,
+        toggle_fields=db.NOTIFICATION_TOGGLE_FIELDS,
+        toggle_labels=db.NOTIFICATION_TOGGLE_LABELS,
+        defaults=db.notification_defaults(),
         active="user-notifications")
+
+
+@app.route("/admin/notifications/users/defaults", methods=["POST"])
+@login_required
+def admin_notification_defaults():
+    """Saves the portal-wide baseline for each toggle - what a user who has never set
+    their own preferences starts with. Never touches anyone who already has, which is
+    exactly what makes this the non-destructive half of the pair; see
+    admin_notification_override() for the other one."""
+    for field in db.NOTIFICATION_TOGGLE_FIELDS:
+        db.set_setting(f"{db.NOTIFY_DEFAULT_SETTING_PREFIX}{field}",
+                        "1" if request.form.get(field) else "0")
+    flash("Default notification settings saved. This only applies to new or "
+          "unconfigured users - it does not change anyone's existing choice.", "success")
+    return redirect(url_for("admin_user_notifications"))
+
+
+@app.route("/admin/notifications/users/override", methods=["POST"])
+@login_required
+def admin_notification_override():
+    """Force-applies one already-saved default to every existing user right now,
+    discarding their individual choice for that one setting. Reads the *saved* default
+    rather than trusting a value posted alongside the button, so this can never apply
+    something other than what the admin sees checked on this page - and reads it fresh
+    with defaults()[field] rather than trusting stale form state to describe what
+    "the default" currently is."""
+    field = request.form.get("field", "")
+    if field not in db.NOTIFICATION_TOGGLE_FIELDS:
+        flash("Unknown setting.", "error")
+        return redirect(url_for("admin_user_notifications"))
+    value = db.notification_defaults()[field]
+    db.override_user_preference(field, value)
+    label = db.NOTIFICATION_TOGGLE_LABELS[field]
+    flash(f"Applied \"{label[0]}: {label[1]}\" = {'on' if value else 'off'} to every "
+          "existing user, discarding their own choice for this one setting.", "success")
+    return redirect(url_for("admin_user_notifications"))
 
 
 @app.route("/admin/notifications/seerr", methods=["GET", "POST"])
@@ -3575,7 +3703,7 @@ def admin_user_account(user_id):
     alternative" to a separate admin-only settings grid: one template, one set of
     fields, so the two audiences can't drift apart. Reuses _save_account_prefs() (the
     visitor's own POST handler's logic) and user_notify.adopt_seerr_contact() (the
-    auto-fill/manual-import logic) rather than re-implementing either.
+    auto-fill/manual-import logic, on GET below) rather than re-implementing either.
 
     The report thread is deliberately not shown here - /admin/reports is already the
     admin's UI for that, and reusing this page for it would be exactly the second UI
@@ -3592,6 +3720,18 @@ def admin_user_account(user_id):
 
     prefs = db.get_user_preferences(user_id)
     seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    # Same auto-fill user_account() does for a visitor's own first visit - this route
+    # used to only reach adopt_seerr_contact() via the manual "Use these details here"
+    # button, which meant an admin browsing many users always had one extra click per
+    # user even though the visitor-facing page already did this automatically. Same
+    # "both fields still blank" guard, so it still only ever fires once per user and
+    # never overwrites a choice (theirs or a previous auto-fill) already on file.
+    if seerr_account and not prefs["notify_email"] and not prefs["notify_discord_id"] \
+            and (seerr_account["email"] or seerr_account["discord_id"]):
+        user_notify.adopt_seerr_contact(user_id, seerr_account)
+        prefs = db.get_user_preferences(user_id)
+        flash(f"Filled in {target['name']}'s contact details from Seerr — edit or clear them below.",
+              "success")
     return render_template("account.html",
                             admin_viewing=True,
                             target_user=target,
@@ -3622,6 +3762,74 @@ def admin_user_account_import_seerr(user_id):
     else:
         user_notify.adopt_seerr_contact(user_id, account)
         flash(f"Copied {target['name']}'s contact details from Seerr.", "success")
+    return redirect(url_for("admin_user_account", user_id=user_id))
+
+
+def _send_test_notification(user_id, channel):
+    """Shared body of the two test-notification routes below. Runs synchronously - the
+    same sanctioned one-shot-admin-action exception admin_notifications_test() already
+    uses - so the flash can report the real outcome (e.g. "Discord refused the DM")
+    rather than "queued, check back later"."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    site_name = db.get_setting("site_name", "Server")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    ok, detail = user_notify.send_direct(
+        user_id, channel, "Test notification",
+        f"This is a test notification from {site_name}, sent at {stamp}.")
+    label = "Discord DM" if channel == "discord" else "email"
+    if ok:
+        flash(f"Test {label} to {target['name']} sent." + (f" {detail}" if detail else ""),
+              "success")
+    else:
+        flash(f"Test {label} to {target['name']} failed: {detail}", "error")
+    return redirect(url_for("admin_user_account", user_id=user_id))
+
+
+@app.route("/admin/users/<user_id>/test/discord", methods=["POST"])
+@login_required
+def admin_user_test_discord(user_id):
+    return _send_test_notification(user_id, "discord")
+
+
+@app.route("/admin/users/<user_id>/test/email", methods=["POST"])
+@login_required
+def admin_user_test_email(user_id):
+    return _send_test_notification(user_id, "email")
+
+
+@app.route("/admin/users/<user_id>/message", methods=["POST"])
+@login_required
+def admin_user_message(user_id):
+    """A free-text message to one person, sent right now on the admin's chosen
+    channel. Uses the same user_notify.send_direct() the test-notification buttons
+    do, for the same reason: an explicit one-to-one admin action, so it bypasses the
+    recipient's own channel preferences (it only fails when there's no contact detail
+    for the chosen channel at all) and runs synchronously so the flash can report the
+    real outcome. No history is kept - unlike the announcement send log, this was
+    scoped as a one-off, not something an admin needs to look back on later."""
+    target = db.get_jellyfin_user(user_id)
+    if not target:
+        flash("No such user in the cached Jellyfin user list.", "error")
+        return redirect(url_for("admin_users"))
+    channel = request.form.get("channel", "")
+    body = request.form.get("body", "").strip()
+    if channel not in ("discord", "email"):
+        flash("Choose a channel to send on.", "error")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+    if not body:
+        flash("Message can't be empty.", "error")
+        return redirect(url_for("admin_user_account", user_id=user_id))
+    site_name = db.get_setting("site_name", "Server")
+    ok, detail = user_notify.send_direct(user_id, channel, f"Message from {site_name}", body)
+    label = "Discord DM" if channel == "discord" else "email"
+    if ok:
+        flash(f"Message sent to {target['name']} by {label}." + (f" {detail}" if detail else ""),
+              "success")
+    else:
+        flash(f"Message to {target['name']} by {label} failed: {detail}", "error")
     return redirect(url_for("admin_user_account", user_id=user_id))
 
 
@@ -3666,13 +3874,16 @@ def admin_discord_bot_guilds():
     if request.method == "POST":
         db.set_setting("discordbot_channel_whitelist",
                         discord_bot.normalize_channel_ids(request.form.get("channel_whitelist", "")))
-        flash("Channel whitelist saved.", "success")
+        db.set_setting("discordbot_announcement_channel_id",
+                        request.form.get("announcement_channel_id", "").strip())
+        flash("Channel settings saved.", "success")
         return redirect(url_for("admin_discord_bot_guilds"))
     status = discord_bot.get_status()
     return render_template("admin_discord_bot_guilds.html",
                             token_configured=bool(config.DISCORD_BOT_TOKEN),
                             connected=status["connected"], guilds=status["guilds"],
                             channel_whitelist=db.get_setting("discordbot_channel_whitelist", ""),
+                            announcement_channel_id=db.get_setting("discordbot_announcement_channel_id", ""),
                             # Reached from the Discord bot page's own button rather than
                             # from the nav, so it highlights its parent - a sub-page with
                             # no nav entry of its own must not leave the nav showing

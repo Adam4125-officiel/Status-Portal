@@ -50,7 +50,28 @@ EVENT_CHANNEL_PREFERENCE = {
     "maintenance": {"email": "notify_email_maintenance", "discord": "notify_discord_maintenance"},
     "request_update": {"email": "notify_email_requests", "discord": "notify_discord_requests"},
     "seerr_event": {"email": None, "discord": "notify_discord_seerr_events"},
+    # Discord is None here for a different reason than seerr_event's None above: an
+    # announcement's Discord half is one post to one configured channel, not a
+    # per-user DM, so there is no per-user Discord preference to gate it by. The email
+    # half does fan out per-user (notify_service_subscribers()) and is gated normally.
+    "announcement": {"email": "notify_email_announcements", "discord": None},
 }
+
+
+# Events sourced from Seerr, which already emails its own users about these directly -
+# see seerr_email_enabled() below. Both map to an email preference today only through
+# request_update (seerr_event's own email slot is already None in the table above), but
+# this set is checked by event, not by column, so a future email preference added for
+# seerr_event would automatically be covered by the same switch without touching this
+# list again.
+SEERR_SOURCED_EVENTS = {"request_update", "seerr_event"}
+
+
+def seerr_email_enabled():
+    """Off by default - Seerr already sends its own email for these, so this portal's
+    copy would otherwise double up on every install upgrading into this feature.
+    Discord DMs are unaffected; this only ever suppresses the email channel."""
+    return db.get_setting("seerr_email_events_enabled", "0") == "1"
 
 
 def is_enabled():
@@ -242,6 +263,35 @@ scheduler.register(
 
 
 # ---------------------------------------------------------------------------
+# One-off admin-initiated sends (test notifications, a direct message) - always
+# immediate, always bypassing the recipient's channel preferences. Both are explicit
+# one-to-one admin actions, not automated events, so the only thing that can stop one
+# is the person having no contact detail on that channel at all. Callers run these
+# synchronously in the request, the same sanctioned exception admin_notifications_test()
+# already uses: both discord_bot.send_dm() and notifications.send_email() carry their
+# own hard timeouts, so this is bounded, and the admin gets the real error back
+# ("Discord refused the DM...") instead of a queued row they'd have to go check.
+# ---------------------------------------------------------------------------
+def send_direct(user_id, channel, subject, body):
+    """Sends one message to one person on one channel right now. Returns (ok, detail).
+
+    channel is 'discord' or 'email'. Never touches EVENT_CHANNEL_PREFERENCE - this is
+    not a queued, preference-gated notification."""
+    email, discord_id = contact_for(user_id)
+    if channel == "discord":
+        if not discord_id:
+            return False, "This person has no Discord ID on file."
+        return discord_bot.send_dm(discord_id, f"**{subject}**\n{body}")
+    if channel == "email":
+        if not email:
+            return False, "This person has no email address on file."
+        if notifications.send_email(subject, body, recipients=[email]):
+            return True, f"Sent to {email}."
+        return False, "Send failed (see the log)."
+    raise ValueError(f"Unknown channel: {channel}")
+
+
+# ---------------------------------------------------------------------------
 # Delivery
 # ---------------------------------------------------------------------------
 def deliver(row):
@@ -260,6 +310,8 @@ def deliver(row):
     email_pref = channel_prefs.get("email")
     discord_pref = channel_prefs.get("discord")
     send_email = bool(email) and email_pref is not None and prefs.get(email_pref)
+    if row["event"] in SEERR_SOURCED_EVENTS and not seerr_email_enabled():
+        send_email = False
     send_discord = bool(discord_id) and discord_pref is not None and prefs.get(discord_pref)
 
     if not send_email and not send_discord:

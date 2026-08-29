@@ -1798,10 +1798,18 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   same `_save_account_prefs()` (app.py) the visitor's own POST uses, same
   `user_notify.adopt_seerr_contact()` the auto-fill/manual-import paths use — scoped to
   the path's `user_id` instead of `current_user()`. This is the deliberate alternative
-  to maintaining two UIs for the same preferences. The report thread is the one thing
-  hidden in admin-viewing mode (`/admin/reports` already covers that); everything else
-  user-facing (theme, contact, both notification tables, the Seerr account block)
-  stays. `admin_users.html`'s username links there now; the inline per-row
+  to maintaining two UIs for the same preferences. **The auto-fill-on-first-visit half
+  of that sharing was missing until 2026-08-29** — the GET handler only ever called
+  `adopt_seerr_contact()` via the manual "Use these details here" button, not on page
+  load the way `user_account()` (the visitor's own route) does, so an admin always paid
+  one extra click per user despite the docstring already claiming the two were unified.
+  Fixed by copying `user_account()`'s exact "both fields still blank" guard block into
+  `admin_user_account()`'s `GET` path — same idempotency guarantee, same flash message
+  shape, just naming the target user instead of "your." If you touch one of these two
+  auto-fill blocks, check the other didn't just drift again. The report thread is the
+  one thing hidden in admin-viewing mode (`/admin/reports` already covers that);
+  everything else user-facing (theme, contact, both notification tables, the Seerr
+  account block) stays. `admin_users.html`'s username links there now; the inline per-row
   email/Discord-ID edit form is gone.
 - **Seerr keeps email and Discord ID in two different places, and this is the trap.**
   Email is on the base `User` record (so it comes back with `/api/v1/user`); Discord IDs
@@ -1820,6 +1828,23 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   notifications endpoint, which ignores it entirely). Verified against
   `seerr-team/seerr`'s `server/routes/user/usersettings.ts` — note the project was
   renamed from Jellyseerr to **Seerr** (`seerr-team/seerr`, docs.seerr.dev).
+- **`push_seerr_contact()` validates `email`/`discord_id` before making any request, not
+  after (added 2026-08-29).** Neither `account.html`'s free-text inputs nor
+  `admin_user_contact()`'s form handling checked the shape of what they collected — a
+  malformed value could reach Seerr's real settings and get read-modify-write'd
+  straight over a previously-good one, with nothing catching it anywhere in the chain.
+  `_EMAIL_RE` (a pragmatic `local@domain.tld` shape, not full RFC 5322) and
+  `_DISCORD_ID_RE` (`\d{15,25}` — a Discord snowflake is currently 17-19 digits, with
+  headroom for growth) both raise `ValueError` before either endpoint's GET/POST runs;
+  every existing caller (`save_contact()`, `user_account_push_seerr_contact()`) already
+  catches `ValueError` and reports it as a normal failure, so no caller needed to
+  change. **A blank value is never rejected** — clearing a field is a legitimate
+  action, distinct from a non-empty value that doesn't look right, so the check is
+  `if email and not _EMAIL_RE.match(email)`, not `if not _EMAIL_RE.match(email)`.
+  **Deliberately all-or-nothing**: an invalid `discord_id` blocks a valid `email` in
+  the same call rather than pushing the good half and silently dropping the bad one —
+  both fields are shown together in the one confirmation dialog before this is ever
+  called, so partial application would contradict what was actually confirmed.
 - **Which Seerr is used comes from `integrations.seerr_integration()`**, one function
   reading the `seerr_integration_id` setting, mirroring how the Jellyfin instance backing
   sign-in is chosen. It replaced three separate "first enabled one" pickers in
@@ -1857,6 +1882,126 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   where they were going.
 - **The admin page never lists recipients.** The queue is addressed to a Jellyfin
   account; whose email or Discord ID that resolved to is that person's business.
+- **`send_direct(user_id, channel, subject, body)` (added 2026-08-28) is a deliberate
+  second path around `EVENT_CHANNEL_PREFERENCE`, not a bug.** It backs the per-user
+  "test notification" buttons (`/admin/users/<id>/test/discord`,
+  `/admin/users/<id>/test/email`) *and* the free-text "Send a message" panel
+  (`/admin/users/<id>/message`, `app.admin_user_message()`) the same way — both are
+  one-to-one admin-initiated actions, not automated events, so they **bypass the
+  recipient's channel preferences entirely** — a person who switched Discord off
+  still needs to be reachable for an admin test or a direct message. It still
+  resolves contact info through `contact_for()`, so it fails the same way `deliver()`
+  does when there's genuinely nothing to send to. **The custom message keeps no
+  history** (unlike the announcement send log) — scoped deliberately as a one-off,
+  not something an admin needs to look back on later; if that ever changes, it's a
+  new table, not retrofitting `announcement_sends` for an unrelated sender. **Runs
+  synchronously in the request**, not queued — the same sanctioned one-shot-admin-
+  action exception `admin_notifications_test()` already uses, bounded by
+  `discord_bot.DM_TIMEOUT_SECONDS` (15s) and `config.SMTP_TIMEOUT_SECONDS` (10s) — and
+  the point of doing it inline is that the admin gets the *real* failure back
+  ("Discord refused the DM…"), not a queued row they'd have to go check on.
+- **`seerr_email_enabled()` (setting `seerr_email_events_enabled`, added 2026-08-28,
+  default off) suppresses only the email channel for Seerr-sourced events
+  (`SEERR_SOURCED_EVENTS = {"request_update", "seerr_event"}`), never Discord.** Seerr
+  already emails its own users directly about these, so this ships off - upgrading to
+  this feature silences a duplicate rather than changing what a fresh install does.
+  Checked by *event*, not by preference column, in `deliver()` right after `send_email`
+  is computed - `seerr_event` already has no email preference column at all
+  (`EVENT_CHANNEL_PREFERENCE["seerr_event"]["email"] is None`), so today this only has
+  a visible effect on `request_update`, but a future email preference added for
+  `seerr_event` would automatically be covered by the same switch with no second edit.
+- **Admin-configurable notification defaults (`db.notification_defaults()`,
+  `db.NOTIFICATION_TOGGLE_FIELDS`, added 2026-08-28) are new ground, not a pattern that
+  existed before** — every other preference in this app has a fixed code-level default
+  (`DEFAULT_USER_PREFERENCES`) only. **"Unconfigured" means no `user_preferences` row
+  at all**, checked in `get_user_preferences()`'s `else` branch (no row) — a user who
+  has saved *anything* already has a row and is permanently past the defaults, even if
+  every value they saved happens to match. `adopt_seerr_contact()` is an instructive
+  edge case: it creates a row (writing only 3 fields), so a user auto-filled from Seerr
+  is "configured" for defaults purposes from that moment, even though they never saw a
+  checkbox — this is `set_user_preferences()`'s existing "fill unset fields from
+  `current`" behavior interacting correctly with the new defaults with zero
+  special-casing, since `current` already comes from `get_user_preferences()`.
+  Defaults are stored one `settings` row per toggle (`notify_default_<field>`), not a
+  single JSON blob, so the admin panel can save one row at a time without a hidden
+  dependency on submitting the whole form.
+- **Override (`db.override_user_preference()`) is `default` and `override` — genuinely
+  two different actions, not one setting with a checkbox.** Saving a default never
+  touches an existing row, full stop; override is a separate, explicit, confirmed
+  action (`static/js/admin_pref_override.js`, same `data-*`-attribute pattern as
+  `admin_vm_control.js` — see the XSS note above for why that pattern and not an inline
+  `onsubmit`) that runs one `UPDATE user_preferences SET <field>=?` with no `WHERE`,
+  reaching every row that exists *right now*. It does not touch anyone who saves a row
+  *after* the override runs — those people get the (possibly since-changed) default,
+  not a retroactive guarantee of the override's value. `field` is checked against
+  `NOTIFICATION_TOGGLE_FIELDS` before being interpolated into the `UPDATE` — it is a
+  fixed set of known column names (8, as of the `notify_email_announcements` addition
+  below), never raw form input, but the whitelist check stays regardless of source.
+  The route re-reads `db.notification_defaults()[field]` for the value to apply rather
+  than trusting anything posted alongside the button, so an override can never apply a
+  value other than what's currently saved as the default.
+
+## Announcements pushed as notifications (`app.py`, `db.py` — added 2026-08-28)
+
+- **Additive to the existing `announcements` table/feature, not a second concept.** An
+  announcement is still just a public status-page banner (and still shows in the
+  Discord bot's `/status` embed via `build_status_data()`) until an admin explicitly
+  sends it — creating or editing one with no channel checked behaves exactly as it did
+  before this existed, and there's a test (`test_creating_with_no_channels_checked_
+  behaves_as_before`) pinning that. Deliberately *not* a standalone broadcast tool with
+  its own history unrelated to the banners — asked and confirmed when this was
+  designed, to avoid two overlapping "tell everyone something" concepts.
+- **One shared implementation, three entry points.** `app._dispatch_announcement_send
+  (aid, title, message, channels)` is what actually sends — the create form's "Publish
+  and send" (checkboxes on the same form as title/message, not a separate page),
+  the edit form's equivalent, and the list page's per-row "Send" (for re-sending: a
+  typo fixed and re-sent, or sent by email first and Discord later) all call it. Don't
+  reimplement the dispatch in any of the three routes.
+- **Email fans out through the existing per-user queue, nothing new needed there.**
+  `EVENT_CHANNEL_PREFERENCE["announcement"] = {"email": "notify_email_announcements",
+  "discord": None}` — one more entry in the same dict `report_reply`/`maintenance`/etc.
+  already use, gated by a `notify_email_announcements` column added to
+  `user_preferences` (`_ensure_column`, default on — same reasoning as
+  reports/requests: an announcement is something the admin chose to say to everyone,
+  not routine per-service noise). `user_notify.notify_service_subscribers("announcement",
+  title, message)` does the fan-out; nothing in `user_notify.deliver()` needed to change.
+- **Discord is `None` for a different reason than `seerr_event`'s `None`.**
+  `seerr_event`'s email slot is `None` because there's no email equivalent at all.
+  `announcement`'s **discord** slot is `None` because the Discord half is one post to
+  one configured channel (`discordbot_announcement_channel_id`, a plain text field on
+  `/admin/discord-bot/guilds` — copy the ID from the channel table already on that
+  page, the same pattern as the existing channel whitelist field, not a `<select>`
+  populated from `guilds`), not a per-user DM — there is no per-user Discord
+  preference to gate a channel post by.
+- **`discord_bot.send_channel_message(channel_id, text)` (new) deliberately does not
+  retry, unlike `_edit_tracked_status_message()`'s periodic retry loop.** Same
+  `asyncio.run_coroutine_threadsafe` bridge and cache-then-`fetch_channel()`
+  resolution as `send_dm()`/`_fetch_channel()`, but this is a discrete one-shot send
+  with a caller-visible outcome (the send-history row) to record — retrying would
+  just delay that outcome being known, unlike the periodic refresh loop where "try
+  again next tick" is the right answer because there's no such outcome to report.
+- **The Discord post runs on a one-shot background thread from the admin route**
+  (`app._send_announcement_discord`), the same shape `_restart_process()` already
+  uses for a delayed one-off action — not a `while True` loop, so it isn't subject to
+  (and doesn't need adding to) `test_no_new_bare_background_loops`'s allow-list.
+  **The send-history row is written before the Discord result is known**
+  (`db.record_announcement_send()` returns immediately; the background thread calls
+  `db.set_announcement_send_detail()` once Discord actually answers) — so the history
+  page always reflects that a send happened, with `discord_detail == ""` read by the
+  template as "sending…" until it's filled in.
+- **`announcement_sends` is `ON DELETE SET NULL` on `announcement_id`, not CASCADE.**
+  The send history is a record of what was sent and must outlive the announcement
+  being deleted later — same reasoning `problem_reports.incident_id` uses for a
+  deleted incident. It's a brand-new table, so a plain `CREATE TABLE IF NOT EXISTS` is
+  correct with no `_ensure_column()` migration needed.
+- **`db.create_announcement()` now returns the new row's id** (`cur.lastrowid`) —
+  needed so "Publish and send" can attach the send-history row to the announcement
+  that was just created in the same request. Every pre-existing caller already
+  ignored the return value, so this is a strictly additive change.
+- **`channels` is whitelisted server-side against exactly `("email", "discord")`**
+  in every one of the three entry points, never trusted verbatim from
+  `request.form.getlist("channels")` — the same "server re-checks what the UI merely
+  hides" reasoning as the search page's admin-only request-configuration fields.
 
 ## Unified search (`media_search.py`, `/search`)
 

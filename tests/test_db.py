@@ -990,6 +990,62 @@ def test_every_writable_preference_has_a_declared_default(isolated_db):
     assert not missing, f"Missing from DEFAULT_USER_PREFERENCES: {sorted(missing)}"
 
 
+# ---------------------------------------------------------------------------
+# Admin-configured notification defaults and overrides
+# ---------------------------------------------------------------------------
+def test_notification_defaults_fall_back_to_the_hardcoded_ones(isolated_db):
+    """No admin defaults set anywhere - notification_defaults() must be a pure
+    pass-through to DEFAULT_USER_PREFERENCES, or upgrading to this feature would
+    silently change behaviour for every install that never visits the new panel."""
+    assert db.notification_defaults() == {f: db.DEFAULT_USER_PREFERENCES[f]
+                                           for f in db.NOTIFICATION_TOGGLE_FIELDS}
+
+
+def test_an_admin_default_seeds_an_unconfigured_user(isolated_db):
+    db.set_setting(f"{db.NOTIFY_DEFAULT_SETTING_PREFIX}notify_email_maintenance", "1")
+    prefs = db.get_user_preferences("brand-new-user")
+    assert prefs["notify_email_maintenance"] is True
+    # Untouched toggles still fall back to the hardcoded default.
+    assert prefs["notify_discord_maintenance"] is False
+
+
+def test_admin_defaults_never_touch_a_user_who_already_saved_something(isolated_db):
+    """The whole point of the default/override split: changing the default after
+    someone has already made their own choice must not silently change it."""
+    db.set_user_preferences("u1", notify_email_maintenance=False)
+    db.set_setting(f"{db.NOTIFY_DEFAULT_SETTING_PREFIX}notify_email_maintenance", "1")
+    assert db.get_user_preferences("u1")["notify_email_maintenance"] is False
+
+
+def test_override_forces_the_value_on_every_existing_user(isolated_db):
+    db.set_user_preferences("a", notify_email_maintenance=False)
+    db.set_user_preferences("b", notify_email_maintenance=False)
+    db.override_user_preference("notify_email_maintenance", True)
+    assert db.get_user_preferences("a")["notify_email_maintenance"] is True
+    assert db.get_user_preferences("b")["notify_email_maintenance"] is True
+
+
+def test_override_does_not_create_rows_for_users_with_none(isolated_db):
+    """Override only ever reaches people who already have a row - someone with none
+    yet gets the (possibly just-changed) default instead, the next time they're read."""
+    db.set_user_preferences("a", notify_email_maintenance=False)
+    db.override_user_preference("notify_email_maintenance", True)
+    conn = db.get_db()
+    count = conn.execute("SELECT COUNT(*) AS n FROM user_preferences").fetchone()["n"]
+    conn.close()
+    assert count == 1
+
+
+def test_override_rejects_an_unknown_field(isolated_db):
+    """Whitelisted against NOTIFICATION_TOGGLE_FIELDS, not interpolated from raw
+    input - a contact/bookkeeping column (or a made-up name) must be refused, not
+    silently written into a dynamic SQL UPDATE."""
+    with pytest.raises(ValueError):
+        db.override_user_preference("notify_email", "somebody@example.invalid")
+    with pytest.raises(ValueError):
+        db.override_user_preference("seerr_user_id; DROP TABLE user_preferences;--", "1")
+
+
 def test_saving_one_preference_leaves_the_on_by_default_ones_on(isolated_db):
     """The concrete version of the check above."""
     db.set_user_preferences("u1", notify_email="a@example.invalid")

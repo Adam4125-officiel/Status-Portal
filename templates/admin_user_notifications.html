@@ -32,10 +32,71 @@
       deliberate choice — and nothing is sent to anyone who hasn't entered contact details
       of their own.
     </p>
+    <hr style="border: none; border-top: 1px solid var(--border); margin: 18px 0;">
+    <div class="field-check">
+      <input type="checkbox" name="seerr_email_events_enabled" id="seerr_email_events_enabled"
+             {{ 'checked' if seerr_email_events_enabled }}>
+      <label for="seerr_email_events_enabled">Send email for Seerr events</label>
+    </div>
+    <p class="field-hint">
+      Off by default. Seerr already emails its own users directly when something they
+      requested is approved, declined, or becomes available — leaving this off avoids a
+      duplicate. This only suppresses the <strong>email</strong> copy of Seerr-sourced
+      events; Discord DMs for the same events are unaffected.
+    </p>
     <div class="form-actions">
       <button type="submit" class="btn">Save</button>
     </div>
   </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Default notification settings</h2>
+  <p class="field-hint" style="margin-top: 0;">
+    The baseline a user starts with if they've never saved their own notification
+    preferences. Changing and saving this here never touches anyone who already has —
+    for that, use "Apply to all users" on the setting you want to force, which
+    immediately overwrites <strong>every existing user's own choice</strong> for that one
+    setting. Default is quiet and forward-looking; Override is loud and immediate.
+  </p>
+  <form method="POST" action="{{ url_for('admin_notification_defaults') }}">
+    <div class="checkbox-list">
+      {% for field in toggle_fields %}
+      <label class="field-check">
+        <input type="checkbox" name="{{ field }}" {{ 'checked' if defaults[field] }}>
+        {{ toggle_labels[field][0] }}: {{ toggle_labels[field][1] }}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn">Save defaults</button>
+    </div>
+  </form>
+
+  <div class="admin-table" style="font-size: 13px; margin-top: 16px;">
+    <table>
+      <thead><tr><th>Setting</th><th style="width: 90px;">Default</th><th style="width: 170px;"></th></tr></thead>
+      <tbody>
+        {% for field in toggle_fields %}
+        <tr>
+          <td>{{ toggle_labels[field][0] }}: {{ toggle_labels[field][1] }}</td>
+          <td>{{ 'On' if defaults[field] else 'Off' }}</td>
+          <td>
+            <form method="POST" action="{{ url_for('admin_notification_override') }}"
+                  class="notification-override-form"
+                  data-label="{{ toggle_labels[field][0] }}: {{ toggle_labels[field][1] }}"
+                  data-value="{{ 'on' if defaults[field] else 'off' }}">
+              <input type="hidden" name="field" value="{{ field }}">
+              <button type="submit" class="btn secondary" style="padding: 4px 10px; font-size: 12px;">
+                Apply to all users
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 
 <div class="form-panel" style="margin-top: 16px;">
@@ -126,4 +187,5 @@
   <div class="empty-state">Nothing has been queued yet.</div>
   {% endif %}
 </div>
+<script src="{{ asset_url('js/admin_pref_override.js') }}"></script>
 {% endblock %}
