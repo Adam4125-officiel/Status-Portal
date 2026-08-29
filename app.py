@@ -598,13 +598,25 @@ def _require_totp(failure_message, redirect_endpoint):
     Why this exists as one function rather than inline at each site: the check is
     "does a stolen/replayed session cookie alone suffice to do this?", and three
     hand-maintained copies of that check is three chances for one of them to quietly
-    stop matching the others."""
+    stop matching the others.
+
+    Shares _login_state (the same counter the login page's own TOTP step uses)
+    rather than keeping a separate one - a stolen session cookie is exactly the
+    threat this function exists for, and an unthrottled code-guessing loop against
+    it would otherwise make the "fresh code required" guarantee above hollow. This
+    deliberately means 5 wrong guesses here also locks the login page for 5
+    minutes, and vice versa: one counter protecting one identity, not two."""
     if not twofactor.is_enabled():
         return None
+    if _login_locked():
+        flash("Too many incorrect attempts - try again in a few minutes.", "error")
+        return redirect(url_for(redirect_endpoint))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
     if twofactor.verify_code(secret, code):
+        _register_login_success()
         return None
+    _register_login_failure()
     flash(failure_message, "error")
     return redirect(url_for(redirect_endpoint))
 

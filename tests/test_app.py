@@ -403,6 +403,72 @@ def test_admin_host_control_step_up_2fa_allows_with_correct_code(client, monkeyp
     assert calls == ["restart"]
 
 
+def test_require_totp_step_up_shares_the_login_lockout_counter(client, monkeypatch):
+    """_require_totp() must throttle against the same _login_state counter the
+    login page's own TOTP step uses, not accept unlimited guesses against a
+    stolen/replayed session cookie."""
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    _enable_totp_directly()
+
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/admin/resources/host-control", data={"action": "restart", "totp_code": "000000"})
+    assert app_module._login_locked() is True
+    assert calls == []
+
+    resp = client.post("/admin/resources/host-control",
+                        data={"action": "restart", "totp_code": "000000"}, follow_redirects=True)
+    assert b"Too many incorrect attempts" in resp.data
+    assert calls == []
+
+
+def test_require_totp_lockout_also_blocks_the_login_page_and_vice_versa(client, monkeypatch):
+    """Deliberate shared-identity behavior (not a bug): the step-up gate and the
+    login page's TOTP step protect the same admin, so filling one lockout counter
+    locks both entry points. _login_state is process-global (not session-scoped),
+    so a second, separate client can fill it independently of the first."""
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    # Direction 1: wrong step-up attempts lock the login page too.
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/admin/resources/host-control", data={"action": "restart", "totp_code": "000000"})
+    assert app_module._login_locked() is True
+
+    other_client = app_module.app.test_client()
+    resp = other_client.post("/admin/login", data={"password": "testpass123"}, follow_redirects=True)
+    assert b"Too many failed attempts" in resp.data
+
+    # Direction 2: wrong login-page attempts (from a different client - the counter
+    # is global, not session-scoped) lock step-up too, even with a valid code.
+    app_module._register_login_success()
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        other_client.post("/admin/login", data={"password": "wrong"})
+    assert app_module._login_locked() is True
+    resp = client.post("/admin/resources/host-control",
+                        data={"action": "restart", "totp_code": pyotp.TOTP(secret).now()}, follow_redirects=True)
+    assert b"Too many incorrect attempts" in resp.data
+
+
+def test_require_totp_success_resets_the_lockout_counter(client, monkeypatch):
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    client.post("/admin/resources/host-control", data={"action": "restart", "totp_code": "000000"})
+    assert app_module._login_state["failures"] == 1
+
+    resp = client.post("/admin/resources/host-control",
+                        data={"action": "restart", "totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 302
+    assert app_module._login_state["failures"] == 0
+
+
 def test_admin_2fa_reset_flag_file(client, monkeypatch, tmp_path):
     flag_path = tmp_path / "RESET_2FA"
     monkeypatch.setattr(twofactor, "RESET_FLAG_PATH", str(flag_path))
