@@ -1,0 +1,7 @@
+# Optional: only needed if you're using the Discord bot feature (see CLAUDE.md
+# "Optional heavy dependencies" and "Discord bot"). Not part of requirements.txt
+# on purpose - the app degrades to "feature disabled" without it, so installs
+# that don't want the bot shouldn't have to pull it in.
+#
+#   pip install -r requirements-discord.txt
+discord.py==2.7.1

@@ -156,7 +156,12 @@ DB-backed Settings pages, not a code edit.
   (GPU stats) and `discord.py` (bot) both follow this: lazy-imported only inside the
   function that needs them, wrapped so a missing package degrades to "feature
   disabled, log why" rather than crashing the whole app on import. Neither is in
-  `requirements.txt`. If you add another optional integration, follow the same shape.
+  `requirements.txt` — `discord.py` is pinned separately in `requirements-discord.txt`
+  (added 2026-08-29, so the version is still reproducible for anyone who *does* want
+  the bot without making it part of the base install); `nvidia-ml-py` has no such file
+  yet since nothing else has needed a reproducible pin for it. If you add another
+  optional integration, follow the same shape — a sibling `requirements-<name>.txt`
+  if reproducibility matters, never a bare mention in a docstring.
 - **This app is meant to survive its own restart cleanly.** State that needs to
   persist across a process restart (maintenance-window progress, the Discord bot's
   tracked live-message id) lives in SQLite, never only in memory.

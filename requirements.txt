@@ -1,8 +1,8 @@
-Flask>=3.1
-Werkzeug>=3.0
-requests>=2.31
-waitress>=3.0
-python-dotenv>=1.0
-psutil>=5.9
-pyotp>=2.9
-qrcode>=7.4
+Flask==3.1.3
+Werkzeug==3.1.8
+requests==2.32.5
+waitress==3.0.2
+python-dotenv==1.2.2
+psutil==7.2.2
+pyotp==2.10.0
+qrcode==8.2

@@ -45,6 +45,7 @@ the [project website](https://adam4125-officiel.github.io/Status-Portal/) and th
 ```bash
 cd status-portal
 pip install -r requirements.txt
+pip install -r requirements-discord.txt   # optional, only for the Discord bot
 cp .env.example .env   # optional
 python app.py
 ```
