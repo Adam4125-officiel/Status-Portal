@@ -1798,10 +1798,18 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   same `_save_account_prefs()` (app.py) the visitor's own POST uses, same
   `user_notify.adopt_seerr_contact()` the auto-fill/manual-import paths use — scoped to
   the path's `user_id` instead of `current_user()`. This is the deliberate alternative
-  to maintaining two UIs for the same preferences. The report thread is the one thing
-  hidden in admin-viewing mode (`/admin/reports` already covers that); everything else
-  user-facing (theme, contact, both notification tables, the Seerr account block)
-  stays. `admin_users.html`'s username links there now; the inline per-row
+  to maintaining two UIs for the same preferences. **The auto-fill-on-first-visit half
+  of that sharing was missing until 2026-08-29** — the GET handler only ever called
+  `adopt_seerr_contact()` via the manual "Use these details here" button, not on page
+  load the way `user_account()` (the visitor's own route) does, so an admin always paid
+  one extra click per user despite the docstring already claiming the two were unified.
+  Fixed by copying `user_account()`'s exact "both fields still blank" guard block into
+  `admin_user_account()`'s `GET` path — same idempotency guarantee, same flash message
+  shape, just naming the target user instead of "your." If you touch one of these two
+  auto-fill blocks, check the other didn't just drift again. The report thread is the
+  one thing hidden in admin-viewing mode (`/admin/reports` already covers that);
+  everything else user-facing (theme, contact, both notification tables, the Seerr
+  account block) stays. `admin_users.html`'s username links there now; the inline per-row
   email/Discord-ID edit form is gone.
 - **Seerr keeps email and Discord ID in two different places, and this is the trap.**
   Email is on the base `User` record (so it comes back with `/api/v1/user`); Discord IDs

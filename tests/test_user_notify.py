@@ -923,6 +923,39 @@ def test_the_admin_account_view_saves_the_targets_prefs_not_the_admins(admin, is
     assert db.get_user_preferences("u2")["notify_email"] == ""
 
 
+def test_the_admin_view_auto_fills_from_a_linked_seerr_account(admin, isolated_db, monkeypatch):
+    """Same guarantee test_opening_the_account_page_auto_fills_from_a_linked_seerr_
+    account pins for a visitor's own page - an admin browsing a user's account must
+    not need an extra manual "Use these details here" click either, since this route
+    already claimed to reuse that same auto-fill logic but never actually called it."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "adam@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = admin.get("/admin/users/u1/account")
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "adam@example.invalid"
+    assert prefs["notify_discord_id"] == "999"
+    assert b"Filled in adam" in resp.data
+
+
+def test_the_admin_view_auto_fill_never_overwrites_an_existing_choice(admin, isolated_db, monkeypatch):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    db.set_user_preferences("u1", notify_email="mine@example.invalid")
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam",
+                                 "email": "seerr@example.invalid", "discord_id": "999",
+                                 "jellyfin_user_id": "u1"}])
+    resp = admin.get("/admin/users/u1/account")
+    assert db.get_user_preferences("u1")["notify_email"] == "mine@example.invalid"
+    assert b"Filled in adam" not in resp.data
+
+
 def test_the_admin_can_import_seerr_details_for_a_user(admin, isolated_db, monkeypatch):
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
     db.set_setting("user_notifications_enabled", "1")

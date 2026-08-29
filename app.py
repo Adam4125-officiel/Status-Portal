@@ -3703,7 +3703,7 @@ def admin_user_account(user_id):
     alternative" to a separate admin-only settings grid: one template, one set of
     fields, so the two audiences can't drift apart. Reuses _save_account_prefs() (the
     visitor's own POST handler's logic) and user_notify.adopt_seerr_contact() (the
-    auto-fill/manual-import logic) rather than re-implementing either.
+    auto-fill/manual-import logic, on GET below) rather than re-implementing either.
 
     The report thread is deliberately not shown here - /admin/reports is already the
     admin's UI for that, and reusing this page for it would be exactly the second UI
@@ -3720,6 +3720,18 @@ def admin_user_account(user_id):
 
     prefs = db.get_user_preferences(user_id)
     seerr_account = user_notify.find_seerr_account(user_id) if user_notify.is_enabled() else None
+    # Same auto-fill user_account() does for a visitor's own first visit - this route
+    # used to only reach adopt_seerr_contact() via the manual "Use these details here"
+    # button, which meant an admin browsing many users always had one extra click per
+    # user even though the visitor-facing page already did this automatically. Same
+    # "both fields still blank" guard, so it still only ever fires once per user and
+    # never overwrites a choice (theirs or a previous auto-fill) already on file.
+    if seerr_account and not prefs["notify_email"] and not prefs["notify_discord_id"] \
+            and (seerr_account["email"] or seerr_account["discord_id"]):
+        user_notify.adopt_seerr_contact(user_id, seerr_account)
+        prefs = db.get_user_preferences(user_id)
+        flash(f"Filled in {target['name']}'s contact details from Seerr — edit or clear them below.",
+              "success")
     return render_template("account.html",
                             admin_viewing=True,
                             target_user=target,
