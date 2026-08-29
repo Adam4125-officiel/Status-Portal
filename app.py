@@ -4114,9 +4114,13 @@ def _history_retention_days():
 def _prune_status_history_task():
     """Body of the `prune_status_history` scheduled task.
 
-    status_history is the only unbounded table in this app, and every query against it
-    runs on a public page load - so this is what keeps the covering index doing an
-    index scan over a bounded range instead of an ever-growing one.
+    status_history is the one table where staying unbounded would be user-visible
+    immediately, not just eventually: every query against it runs on a public page
+    load, so this is what keeps the covering index doing an index scan over a bounded
+    range instead of an ever-growing one. (notification_queue is also pruned on a
+    schedule - db.prune_notification_queue() - but it's read from an admin-only
+    background task, not a public page, so its growth was never the same class of
+    problem.)
 
     This used to be a "have 24 hours passed?" check inside the health-check loop,
     tracked in a module-level float. Being a real task instead means the schedule
@@ -4138,9 +4142,8 @@ scheduler.register(
     "prune_status_history",
     "Prune old check results",
     "Deletes individual health-check results older than the retention window set "
-    "under Settings. This is the only table in the portal that grows without limit, "
-    "and every public page load reads it, so keeping it trimmed is what stops the "
-    "page getting slower every week.",
+    "under Settings. Every public page load reads this table, so keeping it trimmed "
+    "is what stops the page getting slower every week.",
     _prune_status_history_task,
     default_schedule_kind="daily",
     default_daily_at="03:30",
