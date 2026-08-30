@@ -370,11 +370,33 @@ def _start_admin_session():
 DB_RESTORE_MAX_BYTES = 64 * 1024 * 1024
 
 
+# Opens the request-scoped pooled DB connection (see db.py's get_db()/
+# begin_request_scope()) before anything else in this request touches the database -
+# registered first, ahead of the ordering-sensitive pair below, so every db.py call
+# for the rest of the request benefits, including from _enforce_session_timeout and
+# _enforce_user_session's own settings reads. Harmless either way since get_db()
+# always has a working fallback; this is purely about not leaving a handful of
+# early calls opening their own connection when they didn't have to.
+@app.before_request
+def _open_scoped_db():
+    db.begin_request_scope()
+
+
+@app.teardown_appcontext
+def _close_scoped_db(exception=None):
+    """Guaranteed to run once per request by Flask, even if a before_request hook or
+    the view itself raised - closing the real connection here (not relying on
+    anything inside the request to do it) is what makes db.begin_request_scope()
+    safe to open unconditionally above."""
+    db.end_request_scope()
+
+
 # Registration order matters: Flask runs before_request hooks in the order they were
 # defined, and _check_csrf below reads request.form - which parses the body, and would
 # therefore hit the *old* limit and 413 a perfectly good upload before the view that
-# raises the limit ever runs. This has to be first. (Same class of ordering constraint
-# as _enforce_session_timeout needing to precede _check_csrf; see CLAUDE.md.)
+# raises the limit ever runs. This has to be first among the ordering-sensitive group.
+# (Same class of ordering constraint as _enforce_session_timeout needing to precede
+# _check_csrf; see CLAUDE.md.)
 @app.before_request
 def _allow_large_upload_for_restore():
     if request.method == "POST" and request.path == "/admin/about/restore-db":
