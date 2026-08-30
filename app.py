@@ -3,6 +3,7 @@ app.py — Personal server status portal.
 Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
+import gzip
 import io
 import logging
 import os
@@ -102,6 +103,44 @@ def set_security_headers(response):
         "frame-ancestors 'none'"
     )
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
+    return response
+
+
+# text/html and the JSON API are the two payload types the audit measured: a
+# representative public page compresses from ~24KB to ~2.8KB, /api/status from ~14KB
+# to ~1KB. Worth doing because the public page reloads itself every
+# PUBLIC_REFRESH_SECONDS (60s by default) for every visitor - a recurring cost, not a
+# one-off page load.
+_COMPRESSIBLE_MIMETYPES = {"text/html", "application/json", "application/rss+xml"}
+# Below this, gzip's own overhead (headers, checksum) can net worse than sending the
+# original bytes - not worth the CPU cycles either way at this size.
+_COMPRESS_MIN_BYTES = 500
+
+
+@app.after_request
+def _compress_response(response):
+    """Gzip-compresses eligible response bodies. No static-file serving route is
+    touched at all - direct_passthrough excludes send_file()'s conditional/
+    range-request mode, which this must not interfere with, and neither
+    static/uploads nor the DB backup download are in _COMPRESSIBLE_MIMETYPES to
+    begin with.
+
+    A client that doesn't advertise gzip support gets the exact same uncompressed
+    body as before this existed - nothing here changes what's rendered, only
+    whether the bytes on the wire are compressed."""
+    if (response.direct_passthrough
+            or response.mimetype not in _COMPRESSIBLE_MIMETYPES
+            or "gzip" not in request.headers.get("Accept-Encoding", "")
+            or "Content-Encoding" in response.headers
+            or response.content_length is None
+            or response.content_length < _COMPRESS_MIN_BYTES):
+        return response
+    response.set_data(gzip.compress(response.get_data(), compresslevel=6))
+    response.headers["Content-Encoding"] = "gzip"
+    # So a cache sitting in front of this app (a reverse proxy, a CDN - see
+    # config.BEHIND_PROXY) never serves a gzip response to a client that didn't ask
+    # for one, or vice versa.
+    response.headers["Vary"] = "Accept-Encoding"
     return response
 
 
