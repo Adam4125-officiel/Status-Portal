@@ -366,8 +366,10 @@ def _start_admin_session():
 # the 2 MB app-wide cap that exists for the logo upload. Flask 3.1 lets that cap be
 # raised for one request instead of for the whole app, which is the difference between
 # "the restore endpoint accepts a database" and "every form on the site, including the
-# public report form, now accepts 64 MB".
-DB_RESTORE_MAX_BYTES = 64 * 1024 * 1024
+# public report form, now accepts 128 MB". This is a cap on the *upload itself*
+# (typically a zip, so compressed) - see MAX_EXTRACTED_DB_BYTES below for the
+# separate, larger cap on the database's own uncompressed size once extracted.
+DB_RESTORE_MAX_BYTES = 128 * 1024 * 1024
 
 
 # Opens the request-scoped pooled DB connection (see db.py's get_db()/
@@ -3006,9 +3008,20 @@ def admin_update():
 DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
 KEEP_DB_SAFETY_BACKUPS = 5
 
-# An extracted database is capped separately from the upload itself, so a small zip that
-# expands to an enormous file (a zip bomb) is refused before it is written out.
-MAX_EXTRACTED_DB_BYTES = DB_RESTORE_MAX_BYTES
+# An extracted database is capped separately from the upload itself, so a small zip
+# that expands to an enormous file (a zip bomb) is refused before it is written out.
+#
+# Genuinely independent from DB_RESTORE_MAX_BYTES, not just named differently - a
+# real SQLite database routinely compresses well (repeated status/timestamp text in
+# status_history especially), which is the entire point of accepting a zip instead
+# of requiring a bare .db upload: it lets a database larger than the raw upload cap
+# through. Reusing DB_RESTORE_MAX_BYTES here (as this used to do) defeated that -
+# a real backup that zipped down to well under the upload cap could still have its
+# *uncompressed* size rejected by this check, at whatever compression ratio the
+# database happened to hit. Confirmed in the wild: a 140MB database zipping to 30MB
+# (a real, legitimate backup, nowhere near the 64MB upload cap) was refused here
+# because 140MB > the old 64MB extraction cap.
+MAX_EXTRACTED_DB_BYTES = 512 * 1024 * 1024
 
 
 def _write_uploaded_database(upload, dest_path):

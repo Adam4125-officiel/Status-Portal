@@ -350,8 +350,8 @@ def test_restore_proceeds_with_a_valid_2fa_code(admin, tmp_path, no_restart):
 # ---------------------------------------------------------------------------
 def test_the_big_upload_limit_applies_only_to_the_restore_route(client):
     """Raising MAX_CONTENT_LENGTH app-wide would hand every form on the site - the
-    public report form included - a 64 MB body allowance. Flask 3.1 lets the limit be
-    raised for one request instead."""
+    public report form included - the same large body allowance. Flask 3.1 lets the
+    limit be raised for one request instead."""
     with app_module.app.test_request_context("/admin/about/restore-db", method="POST"):
         app_module._allow_large_upload_for_restore()
         from flask import request
