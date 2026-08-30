@@ -1422,6 +1422,21 @@ def feed():
     return Response(xml_bytes, mimetype="application/rss+xml")
 
 
+def _notify_async(title, message):
+    """Fires notifications.notify() on its own one-shot daemon thread instead of
+    inline - same shape as _send_announcement_discord()/_restart_process()'s delayed
+    action, applied here because notify() itself can block on up to three sequential
+    outbound calls (Discord webhook, ntfy, SMTP - each with its own multi-second
+    timeout) and several of its callers are request handlers, including /report,
+    which is reachable by anyone with no login at all.
+
+    notify() is already fire-and-forget from every caller's point of view - nothing
+    reads a return value or shows delivery status in the response - so moving the
+    call off the request thread changes nothing about what happens, only how long
+    the request waits for it to."""
+    threading.Thread(target=notifications.notify, args=(title, message), daemon=True).start()
+
+
 @app.route("/report", methods=["GET", "POST"])
 def report_problem():
     """Public "report a problem" form - deliberately separate from the admin-authored
@@ -1474,7 +1489,7 @@ def report_problem():
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
-        notifications.notify("Problem reported", f"{prefix}{message[:200]}{who}")
+        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}")
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
@@ -2331,7 +2346,7 @@ def admin_incident_new():
         db.create_incident(request.form, service_ids)
         names = [db.get_service(sid)["name"] for sid in service_ids if db.get_service(sid)]
         prefix = f"{', '.join(names)}: " if names else ""
-        notifications.notify("Incident opened", f"{prefix}{request.form.get('title', '')}")
+        _notify_async("Incident opened", f"{prefix}{request.form.get('title', '')}")
         flash("Incident recorded.", "success")
         return redirect(url_for("admin_incidents"))
     return render_template("admin_incident_form.html", incident=None, services=services, active="incidents")
@@ -2380,7 +2395,7 @@ def admin_incident_add_update(iid):
             "description": incident["description"],
             "status": status,
         })
-        notifications.notify(f"Incident update — {status}", f"{incident['title']}: {message}")
+        _notify_async(f"Incident update — {status}", f"{incident['title']}: {message}")
         flash("Update posted.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -3967,12 +3982,17 @@ def admin_task_run(name):
 # Background health check
 # ---------------------------------------------------------------------------
 def _process_maintenance_and_notify():
+    """Also called directly from admin_maintenance_new()/admin_maintenance_edit() (a
+    request handler), not just from the health-check loop below - db.process_
+    maintenance_windows() above already applied the actual status flip by the time
+    this loop runs, so backgrounding only the notify() call doesn't delay that; see
+    those routes' own comments for why the flip itself has to stay synchronous."""
     for event in db.process_maintenance_windows():
         service_name = event["service"]["name"]
         window_title = event["window"]["title"]
         started = event["event"] == "maintenance_started"
         title = "Maintenance started" if started else "Maintenance ended"
-        notifications.notify(title, f"{service_name}: {window_title}")
+        _notify_async(title, f"{service_name}: {window_title}")
         # And the visitors who asked to hear about service events. Queued from this
         # background thread exactly as it would be from a request handler - the queue
         # is what keeps delivery off whichever thread noticed the event.
