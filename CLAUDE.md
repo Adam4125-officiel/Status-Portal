@@ -2281,6 +2281,18 @@ something else on an existing branch — put it on a branch of its own (or, if i
 directly unblocking testing of a PR already open, on that PR's own branch) rather
 than reaching for `main`.
 
+**One exception: `CLAUDE.md` and other markdown docs Claude itself maintains for its
+own context** (`docs/HISTORY.md`, `ROADMAP.md`) — these ride along on whichever
+branch already happens to be open for the related work, rather than needing a
+dedicated branch of their own purely for a doc-only edit. They still don't go
+straight to `main` out of nowhere - if no branch is currently open, treat a doc
+update the same as any other change and give it one. This does *not* extend to
+release finalization: the `VERSION` bump to a stable number is not one of these
+files, and still lands as a direct commit on `main` as the last step of "Promoting a
+feature branch to stable" below, exactly as it always has - confirmed explicitly by
+the user rather than assumed, precisely because the phrasing above could have been
+read either way.
+
 **Trigger**: the user says the session/work is done *and* that things are working —
 e.g. "this session ends here", "that's it for today, everything works", "we're done,
 thanks". Not every "looks good" or "great, that works" mid-session — those are just
