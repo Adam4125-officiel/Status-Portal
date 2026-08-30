@@ -112,6 +112,15 @@ PORT = int(os.environ.get("PORTAL_PORT", "5000"))
 # Backend health-check frequency (server-side polling of each service's check_url).
 CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_CHECK_INTERVAL_SECONDS", "120"))
 
+# How many services run_health_checks() checks concurrently, instead of one at a
+# time. A service with retry_count/retry_interval_seconds set can block its own slot
+# for retry_count * retry_interval_seconds seconds (see app._check_service_status),
+# and a plain unresponsive check_url still costs up to the 5s request timeout each -
+# fully sequential, a handful of unreachable services can push one health-check
+# cycle well past CHECK_INTERVAL_SECONDS. Static deployment config, so an env var -
+# same reasoning as WAITRESS_THREADS below.
+HEALTH_CHECK_WORKERS = int(os.environ.get("PORTAL_HEALTH_CHECK_WORKERS", "6"))
+
 # Public page auto-refresh frequency (browser-side full reload). Independent of the above.
 PUBLIC_REFRESH_SECONDS = int(os.environ.get("PORTAL_PUBLIC_REFRESH_SECONDS", "60"))
 

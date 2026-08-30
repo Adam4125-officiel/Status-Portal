@@ -5,18 +5,101 @@ No ORM, just plain SQL to stay readable and easy to modify.
 import logging
 import sqlite3
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 
 _logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "portal.db")
 
+# See get_db()/begin_request_scope()/end_request_scope() below. Thread-local rather
+# than a Flask g-object on purpose: this module deliberately imports no Flask
+# anywhere (update.py's CLI, notifications.py and monitoring.py all rely on the same
+# separation so they work without a running app), so the scoping mechanism has to be
+# expressible in plain stdlib terms, with app.py the only thing that knows it's
+# tied to a Flask request.
+_scoped = threading.local()
+
+
+class _PooledConnection:
+    """A thin proxy around a real sqlite3.Connection whose close() is a no-op - so
+    every one of this module's own "conn = get_db(); ...; conn.close()" call sites
+    works completely unmodified whether get_db() handed back a brand-new connection
+    or the one connection shared by every db.py call in the current request. The
+    real connection is only ever closed for real by end_request_scope(), once, when
+    the request ends.
+
+    __getattr__ delegates everything else (execute, executemany, cursor, commit,
+    row_factory, ...) straight to the wrapped connection. __enter__/__exit__ are
+    defined explicitly rather than left to __getattr__: Python looks those up on the
+    type for a `with` statement, not through instance attribute fallback, and two
+    call sites in this file use `with conn:` for its commit-on-success/
+    rollback-on-exception behavior."""
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def close(self):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._conn.__exit__(exc_type, exc_val, exc_tb)
+
 
 def get_db():
+    """Opens a connection to the database - or, inside a request scope (see
+    begin_request_scope() below), returns the one connection already open for the
+    calling thread instead of opening another.
+
+    This exists because opening a fresh SQLite connection to this schema costs
+    ~380us (SQLite re-parses the whole schema into the new connection's cache
+    before it can prepare anything) versus ~3us to reuse one already open - and a
+    single public page load makes over a hundred separate db.py calls, each
+    previously its own connection. Background threads (the health-check loop, the
+    scheduler, the Discord bot) never call begin_request_scope(), so they keep
+    opening a fresh connection per call exactly as before this existed - only an
+    actual Flask request benefits."""
+    cached = getattr(_scoped, "conn", None)
+    if cached is not None:
+        return cached
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def begin_request_scope():
+    """Opens one connection and caches it, thread-local, for every get_db() call
+    this thread makes until end_request_scope() is called - called from app.py's
+    very first before_request hook, before anything else that might touch the
+    database, so the whole request benefits."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    _scoped.raw = conn
+    _scoped.conn = _PooledConnection(conn)
+
+
+def end_request_scope():
+    """Closes the real connection begin_request_scope() opened and clears the
+    thread-local cache, so the next get_db() call - a background thread, or a later
+    unrelated request whose turn it is on this same worker thread - opens (or
+    scopes) its own connection again rather than reusing a stale one. Called from
+    app.py's teardown_appcontext, which Flask guarantees runs once per request even
+    if a before_request hook or the view itself raised."""
+    raw = getattr(_scoped, "raw", None)
+    if raw is not None:
+        raw.close()
+    _scoped.raw = None
+    _scoped.conn = None
 
 
 def backup_to_file(dest_path):
@@ -102,7 +185,19 @@ def restore_from_file(src_path):
     then delete both sidecars.
 
     os.replace() is atomic on both platforms, so a crash mid-restore leaves either the
-    old database or the new one - never half of either."""
+    old database or the new one - never half of either.
+
+    end_request_scope() first, unconditionally: if this is running inside the
+    request-scoped pooled connection (see get_db()/begin_request_scope()), that
+    connection has been open against DB_PATH since the very start of this same
+    request - and on Windows, os.replace() below can fail with "[WinError 5]
+    Access is denied" if *anything* still holds the destination file open without
+    delete-sharing, including a connection this same thread opened. POSIX doesn't
+    have this failure mode (a rename succeeds regardless of who has the file open),
+    which is why this was never seen testing on Linux. A safe no-op when there is
+    no pooled connection to release (e.g. called from the update.py CLI, or from a
+    background thread), since end_request_scope() already tolerates that."""
+    end_request_scope()
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -863,9 +958,35 @@ def _get_incident_services(incident_id):
     return [dict(r) for r in rows]
 
 
+def _get_incident_services_for_incidents(incident_ids):
+    """{incident_id: [{"id", "name"}, ...]} for every id in incident_ids, in the same
+    per-incident order _get_incident_services() returns - one grouped query instead
+    of one per incident. Written for _attach_incident_services() below, called by
+    every list_incidents() caller (the public page, /api/status, /api/incidents/more)
+    on every hit."""
+    incident_ids = list(incident_ids)
+    result = {iid: [] for iid in incident_ids}
+    if not incident_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(f"""
+        SELECT isv.incident_id AS incident_id, s.id AS id, s.name AS name
+        FROM incident_services isv
+        JOIN services s ON s.id = isv.service_id
+        WHERE isv.incident_id IN ({placeholders})
+        ORDER BY isv.incident_id, s.sort_order, s.id
+    """, incident_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["incident_id"]].append({"id": r["id"], "name": r["name"]})
+    return result
+
+
 def _attach_incident_services(incidents):
+    grouped = _get_incident_services_for_incidents([i["id"] for i in incidents])
     for i in incidents:
-        i["services"] = _get_incident_services(i["id"])
+        i["services"] = grouped[i["id"]]
         i["service_names"] = ", ".join(s["name"] for s in i["services"])
     return incidents
 
@@ -1033,6 +1154,27 @@ def list_incident_updates(incident_id):
     return [dict(r) for r in rows]
 
 
+def list_incident_updates_for_incidents(incident_ids):
+    """{incident_id: [updates...]} for every id in incident_ids, in the same
+    per-incident order (created_at DESC, id DESC) list_incident_updates() returns -
+    one grouped query instead of one per incident. Written for app._enrich_incidents(),
+    called by every list_incidents() caller on every hit."""
+    incident_ids = list(incident_ids)
+    result = {iid: [] for iid in incident_ids}
+    if not incident_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(f"""
+        SELECT * FROM incident_updates WHERE incident_id IN ({placeholders})
+        ORDER BY incident_id, created_at DESC, id DESC
+    """, incident_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["incident_id"]].append(dict(r))
+    return result
+
+
 def create_incident_update(incident_id, message, status):
     conn = get_db()
     conn.execute("""
@@ -1051,6 +1193,28 @@ def list_service_links(service_id):
     """, (service_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def list_service_links_for_services(service_ids):
+    """{service_id: [links...]} for every id in service_ids, in the same per-service
+    order list_service_links() returns - one grouped query instead of one per
+    service. Written for app._enrich_services(), which used to call
+    list_service_links() once per service on every public page load (measured: 19
+    of the ~114 SQLite connections a single '/' render made, for 17 services)."""
+    service_ids = list(service_ids)
+    result = {sid: [] for sid in service_ids}
+    if not service_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(service_ids))
+    rows = conn.execute(f"""
+        SELECT * FROM service_links WHERE service_id IN ({placeholders})
+        ORDER BY service_id, sort_order, id
+    """, service_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["service_id"]].append(dict(r))
+    return result
 
 
 def replace_service_links(service_id, links):

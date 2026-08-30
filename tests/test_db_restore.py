@@ -161,6 +161,34 @@ def test_restore_consumes_the_staged_file(tmp_path, isolated_db):
     assert not donor.exists()
 
 
+def test_restore_releases_the_calling_threads_pooled_connection(tmp_path, isolated_db):
+    """Real-world regression: request-scoped connection pooling (see get_db()/
+    begin_request_scope()) means the admin restore route's own pooled connection has
+    been open against DB_PATH since the very start of that request. On Windows,
+    os.replace() (used below to install the new database) can fail with "[WinError 5]
+    Access is denied" if anything - including a connection this same thread opened -
+    still holds the destination file open without delete-sharing. POSIX doesn't have
+    this failure mode, so nothing here would have caught it without asserting the
+    pool is actually released, not just that the restore "worked" on this platform."""
+    donor = tmp_path / "new.db"
+    donor.write_bytes(_valid_backup_bytes(tmp_path, marker="pool-released-marker"))
+
+    db.begin_request_scope()
+    try:
+        pooled = db.get_db()
+        assert db.get_db() is pooled  # confirms pooling is actually active here
+
+        db.restore_from_file(str(donor))
+
+        # The pool must have been released *before* os.replace() ran inside
+        # restore_from_file() - proven here by the fact that get_db() now hands
+        # back something other than the old (closed) pooled connection.
+        assert db.get_db() is not pooled
+        assert db.get_setting("site_name") == "pool-released-marker"
+    finally:
+        db.end_request_scope()
+
+
 # ---------------------------------------------------------------------------
 # The route: refusals leave the live database alone
 # ---------------------------------------------------------------------------
@@ -350,8 +378,8 @@ def test_restore_proceeds_with_a_valid_2fa_code(admin, tmp_path, no_restart):
 # ---------------------------------------------------------------------------
 def test_the_big_upload_limit_applies_only_to_the_restore_route(client):
     """Raising MAX_CONTENT_LENGTH app-wide would hand every form on the site - the
-    public report form included - a 64 MB body allowance. Flask 3.1 lets the limit be
-    raised for one request instead."""
+    public report form included - the same large body allowance. Flask 3.1 lets the
+    limit be raised for one request instead."""
     with app_module.app.test_request_context("/admin/about/restore-db", method="POST"):
         app_module._allow_large_upload_for_restore()
         from flask import request

@@ -6,6 +6,7 @@ import integrations as integrations_module
 import monitoring as monitoring_module
 import scheduler as scheduler_module
 import updater as updater_module
+import user_notify as user_notify_module
 
 
 def _reset_module_state():
@@ -38,6 +39,7 @@ def _reset_module_state():
     monitoring_module.clear_caches()
     scheduler_module.clear_caches()
     updater_module.clear_update_cache()
+    user_notify_module.clear_caches()
 
 
 @pytest.fixture

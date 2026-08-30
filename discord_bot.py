@@ -329,11 +329,12 @@ def build_status_data(include):
 
     if include.get("services") and services:
         lines = []
+        links_by_service = db.list_service_links_for_services([s["id"] for s in services])
         for s in services:
             line = (f"{STATUS_ICON.get(s['status'], '⚪')} **{s['name']}** — "
                     f"{STATUS_LABEL.get(s['status'], s['status'])}")
             all_links = ([("Open", s["url"])] if s.get("url") else []) + \
-                [(l["label"], l["url"]) for l in db.list_service_links(s["id"])]
+                [(l["label"], l["url"]) for l in links_by_service[s["id"]]]
             if all_links:
                 line += " (" + ", ".join(f"[{label}]({url})" for label, url in all_links) + ")"
             lines.append(line)
@@ -396,6 +397,7 @@ def build_snapshot_data():
     never tracked/edited afterward."""
     down = [s["name"] for s in db.list_services() if s["status"] == "down"]
     open_incidents = [i for i in db.list_incidents(limit=20) if i["status"] != "resolved"]
+    updates_by_incident = db.list_incident_updates_for_incidents([i["id"] for i in open_incidents])
     incidents = [
         {
             "title": i["title"],
@@ -403,7 +405,7 @@ def build_snapshot_data():
             "status": i["status"],
             "service_names": i.get("service_names") or "",
             "started_at": i["started_at"],
-            "updates": db.list_incident_updates(i["id"]),
+            "updates": updates_by_incident[i["id"]],
         }
         for i in open_incidents
     ]

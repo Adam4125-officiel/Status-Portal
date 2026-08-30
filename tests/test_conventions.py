@@ -410,6 +410,7 @@ def test_every_module_level_cache_is_reset_between_tests():
         "integrations.py": _read("integrations.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "scheduler.py": _read("scheduler.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "updater.py": _read("updater.py").split("def clear_update_cache")[-1].split("\ndef ")[0],
+        "user_notify.py": _read("user_notify.py").split("def clear_caches")[-1].split("\ndef ")[0],
     }
     missing = []
     for name, src in _python_modules():

@@ -3,6 +3,7 @@ app.py — Personal server status portal.
 Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
+import gzip
 import io
 import logging
 import os
@@ -15,6 +16,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
@@ -102,6 +104,44 @@ def set_security_headers(response):
         "frame-ancestors 'none'"
     )
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
+    return response
+
+
+# text/html and the JSON API are the two payload types the audit measured: a
+# representative public page compresses from ~24KB to ~2.8KB, /api/status from ~14KB
+# to ~1KB. Worth doing because the public page reloads itself every
+# PUBLIC_REFRESH_SECONDS (60s by default) for every visitor - a recurring cost, not a
+# one-off page load.
+_COMPRESSIBLE_MIMETYPES = {"text/html", "application/json", "application/rss+xml"}
+# Below this, gzip's own overhead (headers, checksum) can net worse than sending the
+# original bytes - not worth the CPU cycles either way at this size.
+_COMPRESS_MIN_BYTES = 500
+
+
+@app.after_request
+def _compress_response(response):
+    """Gzip-compresses eligible response bodies. No static-file serving route is
+    touched at all - direct_passthrough excludes send_file()'s conditional/
+    range-request mode, which this must not interfere with, and neither
+    static/uploads nor the DB backup download are in _COMPRESSIBLE_MIMETYPES to
+    begin with.
+
+    A client that doesn't advertise gzip support gets the exact same uncompressed
+    body as before this existed - nothing here changes what's rendered, only
+    whether the bytes on the wire are compressed."""
+    if (response.direct_passthrough
+            or response.mimetype not in _COMPRESSIBLE_MIMETYPES
+            or "gzip" not in request.headers.get("Accept-Encoding", "")
+            or "Content-Encoding" in response.headers
+            or response.content_length is None
+            or response.content_length < _COMPRESS_MIN_BYTES):
+        return response
+    response.set_data(gzip.compress(response.get_data(), compresslevel=6))
+    response.headers["Content-Encoding"] = "gzip"
+    # So a cache sitting in front of this app (a reverse proxy, a CDN - see
+    # config.BEHIND_PROXY) never serves a gzip response to a client that didn't ask
+    # for one, or vice versa.
+    response.headers["Vary"] = "Accept-Encoding"
     return response
 
 
@@ -326,15 +366,39 @@ def _start_admin_session():
 # the 2 MB app-wide cap that exists for the logo upload. Flask 3.1 lets that cap be
 # raised for one request instead of for the whole app, which is the difference between
 # "the restore endpoint accepts a database" and "every form on the site, including the
-# public report form, now accepts 64 MB".
-DB_RESTORE_MAX_BYTES = 64 * 1024 * 1024
+# public report form, now accepts 128 MB". This is a cap on the *upload itself*
+# (typically a zip, so compressed) - see MAX_EXTRACTED_DB_BYTES below for the
+# separate, larger cap on the database's own uncompressed size once extracted.
+DB_RESTORE_MAX_BYTES = 128 * 1024 * 1024
+
+
+# Opens the request-scoped pooled DB connection (see db.py's get_db()/
+# begin_request_scope()) before anything else in this request touches the database -
+# registered first, ahead of the ordering-sensitive pair below, so every db.py call
+# for the rest of the request benefits, including from _enforce_session_timeout and
+# _enforce_user_session's own settings reads. Harmless either way since get_db()
+# always has a working fallback; this is purely about not leaving a handful of
+# early calls opening their own connection when they didn't have to.
+@app.before_request
+def _open_scoped_db():
+    db.begin_request_scope()
+
+
+@app.teardown_appcontext
+def _close_scoped_db(exception=None):
+    """Guaranteed to run once per request by Flask, even if a before_request hook or
+    the view itself raised - closing the real connection here (not relying on
+    anything inside the request to do it) is what makes db.begin_request_scope()
+    safe to open unconditionally above."""
+    db.end_request_scope()
 
 
 # Registration order matters: Flask runs before_request hooks in the order they were
 # defined, and _check_csrf below reads request.form - which parses the body, and would
 # therefore hit the *old* limit and 413 a perfectly good upload before the view that
-# raises the limit ever runs. This has to be first. (Same class of ordering constraint
-# as _enforce_session_timeout needing to precede _check_csrf; see CLAUDE.md.)
+# raises the limit ever runs. This has to be first among the ordering-sensitive group.
+# (Same class of ordering constraint as _enforce_session_timeout needing to precede
+# _check_csrf; see CLAUDE.md.)
 @app.before_request
 def _allow_large_upload_for_restore():
     if request.method == "POST" and request.path == "/admin/about/restore-db":
@@ -741,8 +805,9 @@ def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
     uptimes = _cached_uptime_percentages()
     service_names = {s["id"]: s["name"] for s in services}
+    links_by_service = db.list_service_links_for_services([s["id"] for s in services])
     for s in services:
-        s["links"] = db.list_service_links(s["id"])
+        s["links"] = links_by_service[s["id"]]
         s["uptime"] = uptimes.get(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
@@ -755,8 +820,9 @@ def _enrich_services(services):
 
 
 def _enrich_incidents(incidents):
+    updates_by_incident = db.list_incident_updates_for_incidents([i["id"] for i in incidents])
     for i in incidents:
-        i["updates"] = db.list_incident_updates(i["id"])
+        i["updates"] = updates_by_incident[i["id"]]
     return incidents
 
 
@@ -776,8 +842,15 @@ _PUBLIC_MEDIA_KEYS = ["show_public_calendar", "show_public_requests",
 
 
 def _public_media_visibility():
-    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
-            for key in _PUBLIC_MEDIA_KEYS}
+    """Memoised on Flask's `g`, same pattern as _request_snapshot() below - every
+    public page calls this (and _public_resource_visibility()) from more than one of
+    its availability predicate/context builder/summary builder, and each one used to
+    re-read the same handful of settings rows from scratch (measured: 8 of the ~114
+    SQLite connections a single '/' render made, all re-fetching the same 4 rows)."""
+    if not hasattr(g, "_public_media_visibility"):
+        g._public_media_visibility = {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+                                       for key in _PUBLIC_MEDIA_KEYS}
+    return g._public_media_visibility
 
 
 def _media_requires_login():
@@ -798,7 +871,13 @@ def _media_visible_to(user):
 
 
 def _public_resource_visibility():
-    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
+    """Memoised on Flask's `g` - see _public_media_visibility()'s docstring just
+    above for why (same pattern, same reason: measured at 56 of the ~114 SQLite
+    connections a single '/' render made, all re-fetching the same 8 rows)."""
+    if not hasattr(g, "_public_resource_visibility"):
+        g._public_resource_visibility = {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+                                          for key in _PUBLIC_RESOURCE_KEYS}
+    return g._public_resource_visibility
 
 
 def _public_history_days():
@@ -1391,11 +1470,13 @@ def feed():
     base_url = request.url_root.rstrip("/")
 
     entries = []
-    for i in db.list_incidents(limit=20):
+    incidents = db.list_incidents(limit=20)
+    updates_by_incident = db.list_incident_updates_for_incidents([i["id"] for i in incidents])
+    for i in incidents:
         title = f"{i['service_names']}: " if i["service_names"] else ""
         title += f"[{i['status']}] {i['title']}"
         description = i["description"] or ""
-        updates = db.list_incident_updates(i["id"])
+        updates = updates_by_incident[i["id"]]
         if updates:
             description += "\n\n" + "\n".join(f"({u['status']}) {u['message']}" for u in updates)
         entries.append({"title": title, "description": description,
@@ -1420,6 +1501,21 @@ def feed():
 
     xml_bytes = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
     return Response(xml_bytes, mimetype="application/rss+xml")
+
+
+def _notify_async(title, message):
+    """Fires notifications.notify() on its own one-shot daemon thread instead of
+    inline - same shape as _send_announcement_discord()/_restart_process()'s delayed
+    action, applied here because notify() itself can block on up to three sequential
+    outbound calls (Discord webhook, ntfy, SMTP - each with its own multi-second
+    timeout) and several of its callers are request handlers, including /report,
+    which is reachable by anyone with no login at all.
+
+    notify() is already fire-and-forget from every caller's point of view - nothing
+    reads a return value or shows delivery status in the response - so moving the
+    call off the request thread changes nothing about what happens, only how long
+    the request waits for it to."""
+    threading.Thread(target=notifications.notify, args=(title, message), daemon=True).start()
 
 
 @app.route("/report", methods=["GET", "POST"])
@@ -1474,7 +1570,7 @@ def report_problem():
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
-        notifications.notify("Problem reported", f"{prefix}{message[:200]}{who}")
+        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}")
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
@@ -1828,6 +1924,7 @@ def user_account_push_seerr_contact():
         flash(f"Couldn't update Seerr: {e}", "error")
         return redirect(url_for("user_account"))
     db.set_user_preferences(user["id"], seerr_user_id=account["id"])
+    user_notify._invalidate_seerr_account_cache(user["id"])
     flash("Your Seerr account has been updated with these details.", "success")
     return redirect(url_for("user_account"))
 
@@ -1859,12 +1956,17 @@ def _register_search():
 @app.route("/search")
 @user_login_required
 def search():
-    """The one request handler in this app that makes a live outbound call.
+    """The one request handler in this app that makes a live outbound call with no
+    cache in front of it at all, by necessity rather than convenience.
 
-    Everything else reads a cache filled by a background task, because a request must
-    never wait on another server. A search query isn't known until someone types it, so
-    there is nothing to pre-fetch - see media_search.py for the safety machinery that
-    makes this carve-out acceptable rather than a quiet exception to the rule."""
+    A search query isn't known until someone types it, so there's nothing to
+    pre-fetch into a cache the way almost every other read here works - see
+    media_search.py for the safety machinery that makes this carve-out acceptable.
+    (A handful of other routes also make live outbound calls - a sanctioned
+    one-shot admin action like "Check now" or a host/VM control, or a lookup this
+    app deliberately keeps a short cache in front of, like the /account page's
+    Seerr contact lookup - but none of those are an *uncached* live call the way
+    every search keystroke here is.)"""
     user = current_user()
     query = request.args.get("q", "").strip()[:100]
     outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
@@ -2191,8 +2293,8 @@ def admin_announcements():
 
 
 def _announcement_channel_context():
-    return dict(discord_channel_configured=bool(db.get_setting("discordbot_announcement_channel_id", "")),
-                email_notify_enabled=user_notify.is_enabled())
+    return {"discord_channel_configured": bool(db.get_setting("discordbot_announcement_channel_id", "")),
+            "email_notify_enabled": user_notify.is_enabled()}
 
 
 def _send_announcement_discord(send_id, channel_id, text):
@@ -2325,7 +2427,7 @@ def admin_incident_new():
         db.create_incident(request.form, service_ids)
         names = [db.get_service(sid)["name"] for sid in service_ids if db.get_service(sid)]
         prefix = f"{', '.join(names)}: " if names else ""
-        notifications.notify("Incident opened", f"{prefix}{request.form.get('title', '')}")
+        _notify_async("Incident opened", f"{prefix}{request.form.get('title', '')}")
         flash("Incident recorded.", "success")
         return redirect(url_for("admin_incidents"))
     return render_template("admin_incident_form.html", incident=None, services=services, active="incidents")
@@ -2374,7 +2476,7 @@ def admin_incident_add_update(iid):
             "description": incident["description"],
             "status": status,
         })
-        notifications.notify(f"Incident update — {status}", f"{incident['title']}: {message}")
+        _notify_async(f"Incident update — {status}", f"{incident['title']}: {message}")
         flash("Update posted.", "success")
     return redirect(url_for("admin_incident_edit", iid=iid))
 
@@ -2594,6 +2696,10 @@ def _cache_inventory():
         {"name": "Jellyfin activity",
          "entries": len(integrations.get_cached_jellyfin_activity()["running_tasks"]),
          "detail": "running tasks", "updated_at": None},
+        {"name": "Seerr account lookups",
+         "entries": len(user_notify._seerr_account_cache),
+         "detail": f"users (recomputed every {user_notify.SEERR_ACCOUNT_CACHE_TTL_SECONDS}s)",
+         "updated_at": None},
     ] + monitoring.cache_summary()
     # Reachability per integration, straight out of the cache above.
     connections = [
@@ -2618,6 +2724,7 @@ def _clear_all_caches():
     integrations.clear_caches()
     monitoring.clear_caches()
     updater.clear_update_cache()
+    user_notify.clear_caches()
     _bump_asset_cache_salt()
 
 
@@ -2901,9 +3008,20 @@ def admin_update():
 DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
 KEEP_DB_SAFETY_BACKUPS = 5
 
-# An extracted database is capped separately from the upload itself, so a small zip that
-# expands to an enormous file (a zip bomb) is refused before it is written out.
-MAX_EXTRACTED_DB_BYTES = DB_RESTORE_MAX_BYTES
+# An extracted database is capped separately from the upload itself, so a small zip
+# that expands to an enormous file (a zip bomb) is refused before it is written out.
+#
+# Genuinely independent from DB_RESTORE_MAX_BYTES, not just named differently - a
+# real SQLite database routinely compresses well (repeated status/timestamp text in
+# status_history especially), which is the entire point of accepting a zip instead
+# of requiring a bare .db upload: it lets a database larger than the raw upload cap
+# through. Reusing DB_RESTORE_MAX_BYTES here (as this used to do) defeated that -
+# a real backup that zipped down to well under the upload cap could still have its
+# *uncompressed* size rejected by this check, at whatever compression ratio the
+# database happened to hit. Confirmed in the wild: a 140MB database zipping to 30MB
+# (a real, legitimate backup, nowhere near the 64MB upload cap) was refused here
+# because 140MB > the old 64MB extraction cap.
+MAX_EXTRACTED_DB_BYTES = 512 * 1024 * 1024
 
 
 def _write_uploaded_database(upload, dest_path):
@@ -3956,12 +4074,17 @@ def admin_task_run(name):
 # Background health check
 # ---------------------------------------------------------------------------
 def _process_maintenance_and_notify():
+    """Also called directly from admin_maintenance_new()/admin_maintenance_edit() (a
+    request handler), not just from the health-check loop below - db.process_
+    maintenance_windows() above already applied the actual status flip by the time
+    this loop runs, so backgrounding only the notify() call doesn't delay that; see
+    those routes' own comments for why the flip itself has to stay synchronous."""
     for event in db.process_maintenance_windows():
         service_name = event["service"]["name"]
         window_title = event["window"]["title"]
         started = event["event"] == "maintenance_started"
         title = "Maintenance started" if started else "Maintenance ended"
-        notifications.notify(title, f"{service_name}: {window_title}")
+        _notify_async(title, f"{service_name}: {window_title}")
         # And the visitors who asked to hear about service events. Queued from this
         # background thread exactly as it would be from a request handler - the queue
         # is what keeps delivery off whichever thread noticed the event.
@@ -4182,6 +4305,33 @@ def _check_low_disk_space(snapshot):
         db.set_low_disk_alert_state(path, is_low)
 
 
+def _check_and_record_service(s, status_by_id):
+    """One service's full check-and-record - the per-service body of the loop below,
+    pulled out so it can be submitted to a thread pool. Caught and logged here rather
+    than left to the loop's own try/except: a bounded pool means other services'
+    checks are already running concurrently regardless, so one service raising must
+    not cost the rest of this cycle's results the way it would in a plain
+    sequential loop with a single try/except wrapped around the whole thing."""
+    try:
+        if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
+            return
+        previous_status = s["status"]
+        status, elapsed_ms = _check_service_status(s)
+        status = _merge_api_health(status, s.get("api_health_mode", "off"),
+                                    _linked_integration_reachable(s["id"]))
+        dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
+        status = _merge_dependency_health(status, dependency_statuses)
+        db.update_service_status_from_check(s["id"], status, elapsed_ms)
+        db.record_status_history(s["id"], status, elapsed_ms)
+        # Status/response time are recorded above regardless - only the
+        # auto-incident escalation is held back during the grace window, so a
+        # service that's still booting doesn't get an incident opened on it.
+        if s["auto_incident"] and not _within_grace_period(s):
+            _handle_incident_lifecycle(s, previous_status, status)
+    except Exception:
+        _logger.exception("health check failed for service '%s'", s.get("name", "?"))
+
+
 def run_health_checks():
     while True:
         try:
@@ -4197,22 +4347,21 @@ def run_health_checks():
             # Caps dependency staleness at one check interval, same as everything
             # else here already tolerates.
             status_by_id = {row["id"]: row["status"] for row in services}
-            for s in services:
-                if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
-                    continue
-                previous_status = s["status"]
-                status, elapsed_ms = _check_service_status(s)
-                status = _merge_api_health(status, s.get("api_health_mode", "off"),
-                                            _linked_integration_reachable(s["id"]))
-                dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
-                status = _merge_dependency_health(status, dependency_statuses)
-                db.update_service_status_from_check(s["id"], status, elapsed_ms)
-                db.record_status_history(s["id"], status, elapsed_ms)
-                # Status/response time are recorded above regardless - only the
-                # auto-incident escalation is held back during the grace window, so a
-                # service that's still booting doesn't get an incident opened on it.
-                if s["auto_incident"] and not _within_grace_period(s):
-                    _handle_incident_lifecycle(s, previous_status, status)
+            # Bounded to config.HEALTH_CHECK_WORKERS rather than one thread per
+            # service - a service with retry_count set can hold its own slot for
+            # retry_count * retry_interval_seconds seconds, and fully sequential
+            # checking meant a handful of unreachable services could push a single
+            # cycle well past CHECK_INTERVAL_SECONDS. Each service's dependency
+            # lookup still reads the same pre-loop status_by_id snapshot regardless
+            # of which worker thread runs it or in what order, which is what keeps
+            # this safe to parallelize without dependency results depending on
+            # thread scheduling.
+            with ThreadPoolExecutor(max_workers=config.HEALTH_CHECK_WORKERS) as pool:
+                # list() to actually wait for every submitted check before moving on
+                # to the integration/disk checks below, which is what preserves this
+                # loop's existing "everything for this cycle finishes before the
+                # next one starts" shape.
+                list(pool.map(lambda s: _check_and_record_service(s, status_by_id), services))
             _refresh_integration_cache()
             _check_low_disk_space(monitoring.get_resource_snapshot())
             # Pruning old history and checking GitHub for releases used to be tacked

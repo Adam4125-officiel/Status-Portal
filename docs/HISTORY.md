@@ -758,6 +758,84 @@ corrupt-but-openable database (the corruption test mangles bytes and SQLite reje
 at open time rather than at `integrity_check`), and Windows, where `os.replace` over a
 file another process holds open behaves differently than it does here.
 
+### The extraction cap that couldn't benefit from zip compression (fixed 2026-08-30)
+
+The gap flagged above ("not tested against: a database large enough to approach the
+64 MB cap") turned out to hide a real bug, found live-testing a restore on the user's
+actual database: a 140 MB `portal.db`, zipped by the existing "Download a backup"
+button down to 30 MB - comfortably under the 64 MB upload cap - was refused at
+restore with `"The database inside that zip is too large (140 MB)"`.
+
+The cause: `MAX_EXTRACTED_DB_BYTES` (the cap on the database's own size once
+extracted from the zip - the actual zip-bomb guard, checked against bytes genuinely
+read during extraction, never the zip's declared size) had been set to the exact same
+value as `DB_RESTORE_MAX_BYTES` (the cap on the raw upload). That's backwards from
+what accepting a zip is *for*: the whole point of zipping the backup at all is to let
+a database larger than the upload cap through via compression, and a real SQLite
+database compresses well - `status_history` especially, being mostly repeated status
+strings and near-identical timestamps. Reusing the same number for both caps meant
+compression could never actually buy anything; a database whose *uncompressed* size
+exceeded 64 MB was refused regardless of how small the upload itself was.
+
+This was pre-existing since the restore feature shipped in v1.8.0 - not introduced by
+whatever change was being tested when it was found - confirmed by checking the same
+line out on `main` before any other changes that session.
+
+Fixed by making the two genuinely independent: `DB_RESTORE_MAX_BYTES` (upload cap)
+raised to 128 MB for headroom, `MAX_EXTRACTED_DB_BYTES` (uncompressed-size cap) set
+independently to 512 MB. Verified with a synthetic zip mirroring the real case (a
+highly-compressible ~140 MB payload, compressing to well under 1 MB) now succeeding,
+and a 600 MB declared inner size still correctly refused - the zip-bomb guard
+mechanism itself was never the problem, only the cap value.
+
+### The restore that couldn't replace its own open file (fixed 2026-08-30)
+
+Reported from a real Windows install, immediately after the extraction-cap fix above
+let a restore actually reach the replace step for the first time:
+
+```
+Restore failed: [WinError 5] Access is denied:
+'...\instance\restore-88857qr6.db' -> '...\instance\portal.db'
+```
+
+Running as administrator, which ruled out a plain permissions problem and pointed at
+file locking instead. The cause was a second bug in the same v1.8.2 performance
+batch: `db.get_db()` had just been changed (a few commits earlier, same session) to
+return one pooled connection per request instead of a fresh connection per call (see
+CLAUDE.md's "Sessions, caching and DB performance" section for the full mechanism).
+That pooled connection is opened at the very start of the request by `app.py`'s first
+`before_request` hook and stays open for the request's entire duration - including
+through `admin_restore_db()`'s own call into `db.restore_from_file()`, which ends
+with `os.replace(staged, DB_PATH)`.
+
+On POSIX, a rename succeeds regardless of who has the destination file open - the old
+inode just stays valid for whoever already had it open. Windows has no equivalent
+guarantee: `os.replace()` (via `MoveFileExW`) can fail with `ERROR_ACCESS_DENIED` if
+*anything* still holds the destination open without `FILE_SHARE_DELETE`, and nothing
+about SQLite's default Windows VFS guarantees that flag is set. The pooled
+connection - opened by this same thread, for this same request, specifically because
+of the change that had just shipped - was exactly such a handle. This sandbox is
+Linux-only, so the full pytest suite and every manual restore test that session
+passed cleanly; the failure mode structurally cannot reproduce outside Windows.
+
+Fixed by having `db.restore_from_file()` call `db.end_request_scope()`
+unconditionally before doing anything else - releasing the calling thread's pooled
+connection (a safe no-op if there wasn't one, e.g. called from the `update.py` CLI)
+before the checkpoint-then-replace sequence runs. Verified two ways, since the actual
+Windows failure can't be reproduced here: a direct test asserting `db.get_db()`
+returns a different (i.e. genuinely released, not the stale closed one) connection
+after `restore_from_file()` runs inside a request scope, and confirming that test
+fails without the fix and passes with it - proving it actually catches the class of
+bug being fixed, not just that the code executes.
+
+**Lesson worth remembering**: this shipped in the very same batch that introduced
+`get_db()`'s pooling in the first place, and the original review of that change did
+consider the database-restore route specifically (see its own commit message) - but
+only reasoned about *other requests'* stale connections, not about the *current*
+request's own pooled connection blocking its *own* replace. A change that holds a
+resource open for a request's full duration needs checking against everything that
+same request does before it ends, not just against what runs elsewhere.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

@@ -1114,10 +1114,18 @@ DB-backed Settings pages, not a code edit.
 - **`DB_RESTORE_MAX_BYTES` is applied per-request, not app-wide.** Flask 3.1 (hence
   `Flask>=3.1` in `requirements.txt`) allows `request.max_content_length` to be set for
   one request; raising `MAX_CONTENT_LENGTH` instead would hand every form on the site,
-  the public report form included, a 64 MB body allowance. The hook that sets it
-  **must be registered before `_check_csrf`**, because `_check_csrf` reads
+  the public report form included, the same large body allowance. The hook that sets
+  it **must be registered before `_check_csrf`**, because `_check_csrf` reads
   `request.form`, which parses the body and would 413 a perfectly good upload before
-  the view ever runs.
+  the view ever runs. **`MAX_EXTRACTED_DB_BYTES` (the cap on the database's own
+  uncompressed size once extracted, a separate constant) must never be set equal to
+  `DB_RESTORE_MAX_BYTES` again** - it was, for a while, and that silently defeated
+  the entire point of accepting a zip: a real SQLite database routinely compresses
+  well, so a database well over the *upload* cap can zip down to comfortably under
+  it, only to have its *uncompressed* size rejected at extraction regardless. Caught
+  live (`docs/HISTORY.md` → "the extraction cap that couldn't benefit from zip
+  compression") - the fix keeps the two independent, with the extraction cap
+  meaningfully larger than the upload cap.
 - **The staged upload's SQLite sidecars must be cleaned up too.** Validating it opens
   the file with SQLite, and opening a WAL-mode database — which every backup of this app
   is — creates `-wal`/`-shm` beside it, even read-only. `os.replace()` moves only the
@@ -1272,10 +1280,9 @@ DB-backed Settings pages, not a code edit.
   rather than committed straight to `main`, specifically because it was
   user-requested as untested/pre-release (touches core status-computation logic
   — `run_health_checks()`, `_handle_incident_lifecycle`'s invariant — not just
-  additive UI). Treat "push a branch + PR instead of main" as the default for a
-  batch like this (new status-computation logic, not yet run against a real
-  install) unless told otherwise, even outside the cloud-session no-tag-access
-  fallback already documented under Release process below.
+  additive UI). See "Never commit straight to `main`" under Release process below —
+  as of 2026-08-30 this isn't a judgment call scoped to risky batches, it's the
+  standing rule for every change.
 
 ## Sessions, caching and DB performance (added 2026-08-19, v1.6.1)
 
@@ -1335,6 +1342,30 @@ DB-backed Settings pages, not a code edit.
   hence `config.WAITRESS_THREADS` (default 12) as well. WAL is a persistent property
   of the file, set once in `init_db()`; it can't be enabled on a network filesystem
   (SMB/NFS), which is why the switch is wrapped and logged rather than assumed.
+- **`db.get_db()` returns one pooled connection per request, not a fresh connection
+  per call** (added in the v1.8.2 performance batch). `app.py`'s first
+  `before_request` hook calls `db.begin_request_scope()`, which opens a connection
+  and caches it thread-local; every `get_db()` call on that thread returns the same
+  connection (wrapped in `_PooledConnection`, whose `.close()` is a no-op) until
+  `teardown_appcontext` calls `db.end_request_scope()`. This exists because opening
+  a fresh connection to this schema costs ~380us (SQLite re-parsing the whole schema
+  per connection) versus ~3us to reuse one already open, and a single public page
+  load makes over a hundred `db.py` calls. Background threads (health-check loop,
+  scheduler, Discord bot) never call `begin_request_scope()`, so they keep opening a
+  fresh connection per call exactly as before this existed. `db.py` still imports no
+  Flask - the scoping is a bare `threading.local()`, wired to the request lifecycle
+  only from `app.py`.
+  **Anything that replaces `DB_PATH` on disk (`os.replace()`/`os.rename()`) must call
+  `db.end_request_scope()` first**, unconditionally, even if it looks like nothing in
+  the current request could still be holding the file open.
+  `db.restore_from_file()` does this. The reason is Windows-specific and was missed
+  when this shipped: a connection this same thread opened - the pooled one, alive for
+  the request's entire duration - can make `os.replace()` fail with `[WinError 5]
+  Access is denied` if it's still open without delete-sharing at the moment of the
+  replace. POSIX has no such failure mode (a rename succeeds regardless of open
+  handles), which is why this passed the full test suite and manual testing in this
+  Linux-only sandbox and only surfaced on the user's real Windows install
+  (`docs/HISTORY.md` → "the restore that couldn't replace its own open file").
 - **`monitoring.start_background_refresh()` is no longer a no-op off Windows.** It now
   also owns the CPU sample: `psutil.cpu_percent(interval=0.2)` *sleeps* 0.2s, and it
   was being called from `get_resource_snapshot()` inside request handlers. The thread
@@ -2238,6 +2269,29 @@ and releasing at checkpoints are separate things: commit at every completed fix,
 a release when a batch is done.
 
 ## Release process
+
+**Never commit straight to `main`, for anything — always a branch + PR.** Explicitly
+stated by the user 2026-08-30, superseding an earlier, narrower rule that only
+required a branch for untested/status-logic-touching batches (small direct fixes
+used to go straight to `main`). That distinction is gone: every change, regardless
+of size or risk, goes on its own branch with its own PR, merged the normal way
+(regular merge commit — see "Promoting a feature branch to stable" below, never
+squash/rebase). This includes a one-line fix found mid-session while testing
+something else on an existing branch — put it on a branch of its own (or, if it's
+directly unblocking testing of a PR already open, on that PR's own branch) rather
+than reaching for `main`.
+
+**One exception: `CLAUDE.md` and other markdown docs Claude itself maintains for its
+own context** (`docs/HISTORY.md`, `ROADMAP.md`) — these ride along on whichever
+branch already happens to be open for the related work, rather than needing a
+dedicated branch of their own purely for a doc-only edit. They still don't go
+straight to `main` out of nowhere - if no branch is currently open, treat a doc
+update the same as any other change and give it one. This does *not* extend to
+release finalization: the `VERSION` bump to a stable number is not one of these
+files, and still lands as a direct commit on `main` as the last step of "Promoting a
+feature branch to stable" below, exactly as it always has - confirmed explicitly by
+the user rather than assumed, precisely because the phrasing above could have been
+read either way.
 
 **Trigger**: the user says the session/work is done *and* that things are working —
 e.g. "this session ends here", "that's it for today, everything works", "we're done,
