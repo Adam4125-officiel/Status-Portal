@@ -778,8 +778,15 @@ _PUBLIC_MEDIA_KEYS = ["show_public_calendar", "show_public_requests",
 
 
 def _public_media_visibility():
-    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
-            for key in _PUBLIC_MEDIA_KEYS}
+    """Memoised on Flask's `g`, same pattern as _request_snapshot() below - every
+    public page calls this (and _public_resource_visibility()) from more than one of
+    its availability predicate/context builder/summary builder, and each one used to
+    re-read the same handful of settings rows from scratch (measured: 8 of the ~114
+    SQLite connections a single '/' render made, all re-fetching the same 4 rows)."""
+    if not hasattr(g, "_public_media_visibility"):
+        g._public_media_visibility = {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+                                       for key in _PUBLIC_MEDIA_KEYS}
+    return g._public_media_visibility
 
 
 def _media_requires_login():
@@ -800,7 +807,13 @@ def _media_visible_to(user):
 
 
 def _public_resource_visibility():
-    return {key[len("show_public_"):]: db.get_setting(key, "0") == "1" for key in _PUBLIC_RESOURCE_KEYS}
+    """Memoised on Flask's `g` - see _public_media_visibility()'s docstring just
+    above for why (same pattern, same reason: measured at 56 of the ~114 SQLite
+    connections a single '/' render made, all re-fetching the same 8 rows)."""
+    if not hasattr(g, "_public_resource_visibility"):
+        g._public_resource_visibility = {key[len("show_public_"):]: db.get_setting(key, "0") == "1"
+                                          for key in _PUBLIC_RESOURCE_KEYS}
+    return g._public_resource_visibility
 
 
 def _public_history_days():
