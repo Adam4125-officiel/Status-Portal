@@ -198,6 +198,20 @@ def _row(task):
     return row
 
 
+def _rows_for(tasks):
+    """{task_name: row} for every task in `tasks` - one db.list_task_rows() call
+    instead of one db.get_task_row() call per task, for the common case where every
+    task's row already exists (true after the very first tick this app has ever
+    run). A task whose row genuinely doesn't exist yet still goes through _row()
+    (get-then-create-then-get-again) exactly as before - this only removes the
+    redundant per-task read when there's nothing to create."""
+    rows = {r["name"]: r for r in db.list_task_rows()}
+    for task in tasks:
+        if task.name not in rows:
+            rows[task.name] = _row(task)
+    return rows
+
+
 def _parse_iso(value):
     if not value:
         return None
@@ -251,11 +265,16 @@ def next_run_at(task, row=None, now=None):
     return last + timedelta(minutes=max(1, int(row["interval_minutes"] or 1)))
 
 
-def task_view(task, now=None):
+def task_view(task, now=None, row=None):
     """Everything the admin page needs about one task, in one dict: the registry's
     static description plus the database row plus the derived next-run time. The
-    template does no computation of its own."""
-    row = _row(task)
+    template does no computation of its own.
+
+    `row` lets list_task_views() pass in an already-fetched row (see _rows_for())
+    instead of this doing its own db.get_task_row() per call - every other caller
+    omits it and gets the original single-task behavior via _row()."""
+    if row is None:
+        row = _row(task)
     return {
         "name": task.name,
         "label": task.label,
@@ -276,7 +295,9 @@ def task_view(task, now=None):
 
 
 def list_task_views(now=None):
-    return [task_view(task, now) for task in registered_tasks()]
+    tasks = registered_tasks()
+    rows = _rows_for(tasks)
+    return [task_view(task, now, row=rows[task.name]) for task in tasks]
 
 
 def save_schedule(name, enabled, schedule_kind, interval_minutes, daily_at):
@@ -361,9 +382,11 @@ def tick(now=None):
     threads or sleeps. Returns the names it started."""
     now = now or datetime.now(timezone.utc)
     started = []
-    for task in registered_tasks():
+    tasks = registered_tasks()
+    rows = _rows_for(tasks)
+    for task in tasks:
         try:
-            row = _row(task)
+            row = rows[task.name]
             if not row["enabled"] or is_running(task.name):
                 continue
             due = next_run_at(task, row, now)
