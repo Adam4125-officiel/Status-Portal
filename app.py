@@ -2191,8 +2191,8 @@ def admin_announcements():
 
 
 def _announcement_channel_context():
-    return dict(discord_channel_configured=bool(db.get_setting("discordbot_announcement_channel_id", "")),
-                email_notify_enabled=user_notify.is_enabled())
+    return {"discord_channel_configured": bool(db.get_setting("discordbot_announcement_channel_id", "")),
+            "email_notify_enabled": user_notify.is_enabled()}
 
 
 def _send_announcement_discord(send_id, channel_id, text):

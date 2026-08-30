@@ -170,9 +170,9 @@ def cmd_apply(args):
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
     if outcome["applied"]:
-        print(f"\nDone. Restart the portal now (e.g. `python serve_waitress.py`, or restart "
-              f"your service/scheduled task).")
-        print(f"If the new version doesn't start, undo it with: python update.py rollback")
+        print("\nDone. Restart the portal now (e.g. `python serve_waitress.py`, or restart "
+              "your service/scheduled task).")
+        print("If the new version doesn't start, undo it with: python update.py rollback")
     return 0
 
 

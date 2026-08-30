@@ -328,7 +328,7 @@ def run_task(name, trigger="schedule"):
         except TaskSkipped as e:
             message, status = str(e), "skipped"
             _logger.info("Scheduled task '%s' skipped: %s", name, message)
-        except Exception as e:  # noqa: BLE001 - a task must never take the loop down
+        except Exception as e:  # a task must never take the loop down
             message, status = str(e) or e.__class__.__name__, "failed"
             _logger.exception("Scheduled task '%s' failed", name)
         duration_ms = int((time.monotonic() - started) * 1000)

@@ -1,0 +1,9 @@
+# Minimal ruff config so `ruff check` output stays readable.
+#
+# This codebase's docstrings and comments are intentionally long-form prose (see
+# CLAUDE.md), so E501 (line-too-long) fires on the majority of files with no
+# reasonable line-length setting that wouldn't mean reformatting thousands of
+# existing, deliberately-written lines. Ignoring it here isn't a style guide - it's
+# what keeps a real ruff finding from being buried under ~1400 long-line hits.
+[lint]
+ignore = ["E501"]
