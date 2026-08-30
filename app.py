@@ -741,8 +741,9 @@ def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
     uptimes = _cached_uptime_percentages()
     service_names = {s["id"]: s["name"] for s in services}
+    links_by_service = db.list_service_links_for_services([s["id"] for s in services])
     for s in services:
-        s["links"] = db.list_service_links(s["id"])
+        s["links"] = links_by_service[s["id"]]
         s["uptime"] = uptimes.get(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
@@ -755,8 +756,9 @@ def _enrich_services(services):
 
 
 def _enrich_incidents(incidents):
+    updates_by_incident = db.list_incident_updates_for_incidents([i["id"] for i in incidents])
     for i in incidents:
-        i["updates"] = db.list_incident_updates(i["id"])
+        i["updates"] = updates_by_incident[i["id"]]
     return incidents
 
 
@@ -1391,11 +1393,13 @@ def feed():
     base_url = request.url_root.rstrip("/")
 
     entries = []
-    for i in db.list_incidents(limit=20):
+    incidents = db.list_incidents(limit=20)
+    updates_by_incident = db.list_incident_updates_for_incidents([i["id"] for i in incidents])
+    for i in incidents:
         title = f"{i['service_names']}: " if i["service_names"] else ""
         title += f"[{i['status']}] {i['title']}"
         description = i["description"] or ""
-        updates = db.list_incident_updates(i["id"])
+        updates = updates_by_incident[i["id"]]
         if updates:
             description += "\n\n" + "\n".join(f"({u['status']}) {u['message']}" for u in updates)
         entries.append({"title": title, "description": description,

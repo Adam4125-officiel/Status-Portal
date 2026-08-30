@@ -863,9 +863,35 @@ def _get_incident_services(incident_id):
     return [dict(r) for r in rows]
 
 
+def _get_incident_services_for_incidents(incident_ids):
+    """{incident_id: [{"id", "name"}, ...]} for every id in incident_ids, in the same
+    per-incident order _get_incident_services() returns - one grouped query instead
+    of one per incident. Written for _attach_incident_services() below, called by
+    every list_incidents() caller (the public page, /api/status, /api/incidents/more)
+    on every hit."""
+    incident_ids = list(incident_ids)
+    result = {iid: [] for iid in incident_ids}
+    if not incident_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(f"""
+        SELECT isv.incident_id AS incident_id, s.id AS id, s.name AS name
+        FROM incident_services isv
+        JOIN services s ON s.id = isv.service_id
+        WHERE isv.incident_id IN ({placeholders})
+        ORDER BY isv.incident_id, s.sort_order, s.id
+    """, incident_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["incident_id"]].append({"id": r["id"], "name": r["name"]})
+    return result
+
+
 def _attach_incident_services(incidents):
+    grouped = _get_incident_services_for_incidents([i["id"] for i in incidents])
     for i in incidents:
-        i["services"] = _get_incident_services(i["id"])
+        i["services"] = grouped[i["id"]]
         i["service_names"] = ", ".join(s["name"] for s in i["services"])
     return incidents
 
@@ -1033,6 +1059,27 @@ def list_incident_updates(incident_id):
     return [dict(r) for r in rows]
 
 
+def list_incident_updates_for_incidents(incident_ids):
+    """{incident_id: [updates...]} for every id in incident_ids, in the same
+    per-incident order (created_at DESC, id DESC) list_incident_updates() returns -
+    one grouped query instead of one per incident. Written for app._enrich_incidents(),
+    called by every list_incidents() caller on every hit."""
+    incident_ids = list(incident_ids)
+    result = {iid: [] for iid in incident_ids}
+    if not incident_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(f"""
+        SELECT * FROM incident_updates WHERE incident_id IN ({placeholders})
+        ORDER BY incident_id, created_at DESC, id DESC
+    """, incident_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["incident_id"]].append(dict(r))
+    return result
+
+
 def create_incident_update(incident_id, message, status):
     conn = get_db()
     conn.execute("""
@@ -1051,6 +1098,28 @@ def list_service_links(service_id):
     """, (service_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def list_service_links_for_services(service_ids):
+    """{service_id: [links...]} for every id in service_ids, in the same per-service
+    order list_service_links() returns - one grouped query instead of one per
+    service. Written for app._enrich_services(), which used to call
+    list_service_links() once per service on every public page load (measured: 19
+    of the ~114 SQLite connections a single '/' render made, for 17 services)."""
+    service_ids = list(service_ids)
+    result = {sid: [] for sid in service_ids}
+    if not service_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(service_ids))
+    rows = conn.execute(f"""
+        SELECT * FROM service_links WHERE service_id IN ({placeholders})
+        ORDER BY service_id, sort_order, id
+    """, service_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["service_id"]].append(dict(r))
+    return result
 
 
 def replace_service_links(service_id, links):
