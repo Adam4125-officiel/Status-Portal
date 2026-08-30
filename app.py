@@ -16,6 +16,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
@@ -4269,6 +4270,33 @@ def _check_low_disk_space(snapshot):
         db.set_low_disk_alert_state(path, is_low)
 
 
+def _check_and_record_service(s, status_by_id):
+    """One service's full check-and-record - the per-service body of the loop below,
+    pulled out so it can be submitted to a thread pool. Caught and logged here rather
+    than left to the loop's own try/except: a bounded pool means other services'
+    checks are already running concurrently regardless, so one service raising must
+    not cost the rest of this cycle's results the way it would in a plain
+    sequential loop with a single try/except wrapped around the whole thing."""
+    try:
+        if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
+            return
+        previous_status = s["status"]
+        status, elapsed_ms = _check_service_status(s)
+        status = _merge_api_health(status, s.get("api_health_mode", "off"),
+                                    _linked_integration_reachable(s["id"]))
+        dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
+        status = _merge_dependency_health(status, dependency_statuses)
+        db.update_service_status_from_check(s["id"], status, elapsed_ms)
+        db.record_status_history(s["id"], status, elapsed_ms)
+        # Status/response time are recorded above regardless - only the
+        # auto-incident escalation is held back during the grace window, so a
+        # service that's still booting doesn't get an incident opened on it.
+        if s["auto_incident"] and not _within_grace_period(s):
+            _handle_incident_lifecycle(s, previous_status, status)
+    except Exception:
+        _logger.exception("health check failed for service '%s'", s.get("name", "?"))
+
+
 def run_health_checks():
     while True:
         try:
@@ -4284,22 +4312,21 @@ def run_health_checks():
             # Caps dependency staleness at one check interval, same as everything
             # else here already tolerates.
             status_by_id = {row["id"]: row["status"] for row in services}
-            for s in services:
-                if not s["auto_check"] or s["manual_override"] or not s["check_url"]:
-                    continue
-                previous_status = s["status"]
-                status, elapsed_ms = _check_service_status(s)
-                status = _merge_api_health(status, s.get("api_health_mode", "off"),
-                                            _linked_integration_reachable(s["id"]))
-                dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
-                status = _merge_dependency_health(status, dependency_statuses)
-                db.update_service_status_from_check(s["id"], status, elapsed_ms)
-                db.record_status_history(s["id"], status, elapsed_ms)
-                # Status/response time are recorded above regardless - only the
-                # auto-incident escalation is held back during the grace window, so a
-                # service that's still booting doesn't get an incident opened on it.
-                if s["auto_incident"] and not _within_grace_period(s):
-                    _handle_incident_lifecycle(s, previous_status, status)
+            # Bounded to config.HEALTH_CHECK_WORKERS rather than one thread per
+            # service - a service with retry_count set can hold its own slot for
+            # retry_count * retry_interval_seconds seconds, and fully sequential
+            # checking meant a handful of unreachable services could push a single
+            # cycle well past CHECK_INTERVAL_SECONDS. Each service's dependency
+            # lookup still reads the same pre-loop status_by_id snapshot regardless
+            # of which worker thread runs it or in what order, which is what keeps
+            # this safe to parallelize without dependency results depending on
+            # thread scheduling.
+            with ThreadPoolExecutor(max_workers=config.HEALTH_CHECK_WORKERS) as pool:
+                # list() to actually wait for every submitted check before moving on
+                # to the integration/disk checks below, which is what preserves this
+                # loop's existing "everything for this cycle finishes before the
+                # next one starts" shape.
+                list(pool.map(lambda s: _check_and_record_service(s, status_by_id), services))
             _refresh_integration_cache()
             _check_low_disk_space(monitoring.get_resource_snapshot())
             # Pruning old history and checking GitHub for releases used to be tacked
