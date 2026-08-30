@@ -758,6 +758,36 @@ corrupt-but-openable database (the corruption test mangles bytes and SQLite reje
 at open time rather than at `integrity_check`), and Windows, where `os.replace` over a
 file another process holds open behaves differently than it does here.
 
+### The extraction cap that couldn't benefit from zip compression (fixed 2026-08-30)
+
+The gap flagged above ("not tested against: a database large enough to approach the
+64 MB cap") turned out to hide a real bug, found live-testing a restore on the user's
+actual database: a 140 MB `portal.db`, zipped by the existing "Download a backup"
+button down to 30 MB - comfortably under the 64 MB upload cap - was refused at
+restore with `"The database inside that zip is too large (140 MB)"`.
+
+The cause: `MAX_EXTRACTED_DB_BYTES` (the cap on the database's own size once
+extracted from the zip - the actual zip-bomb guard, checked against bytes genuinely
+read during extraction, never the zip's declared size) had been set to the exact same
+value as `DB_RESTORE_MAX_BYTES` (the cap on the raw upload). That's backwards from
+what accepting a zip is *for*: the whole point of zipping the backup at all is to let
+a database larger than the upload cap through via compression, and a real SQLite
+database compresses well - `status_history` especially, being mostly repeated status
+strings and near-identical timestamps. Reusing the same number for both caps meant
+compression could never actually buy anything; a database whose *uncompressed* size
+exceeded 64 MB was refused regardless of how small the upload itself was.
+
+This was pre-existing since the restore feature shipped in v1.8.0 - not introduced by
+whatever change was being tested when it was found - confirmed by checking the same
+line out on `main` before any other changes that session.
+
+Fixed by making the two genuinely independent: `DB_RESTORE_MAX_BYTES` (upload cap)
+raised to 128 MB for headroom, `MAX_EXTRACTED_DB_BYTES` (uncompressed-size cap) set
+independently to 512 MB. Verified with a synthetic zip mirroring the real case (a
+highly-compressible ~140 MB payload, compressing to well under 1 MB) now succeeding,
+and a 600 MB declared inner size still correctly refused - the zip-bomb guard
+mechanism itself was never the problem, only the cap value.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

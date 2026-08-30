@@ -1114,10 +1114,18 @@ DB-backed Settings pages, not a code edit.
 - **`DB_RESTORE_MAX_BYTES` is applied per-request, not app-wide.** Flask 3.1 (hence
   `Flask>=3.1` in `requirements.txt`) allows `request.max_content_length` to be set for
   one request; raising `MAX_CONTENT_LENGTH` instead would hand every form on the site,
-  the public report form included, a 64 MB body allowance. The hook that sets it
-  **must be registered before `_check_csrf`**, because `_check_csrf` reads
+  the public report form included, the same large body allowance. The hook that sets
+  it **must be registered before `_check_csrf`**, because `_check_csrf` reads
   `request.form`, which parses the body and would 413 a perfectly good upload before
-  the view ever runs.
+  the view ever runs. **`MAX_EXTRACTED_DB_BYTES` (the cap on the database's own
+  uncompressed size once extracted, a separate constant) must never be set equal to
+  `DB_RESTORE_MAX_BYTES` again** - it was, for a while, and that silently defeated
+  the entire point of accepting a zip: a real SQLite database routinely compresses
+  well, so a database well over the *upload* cap can zip down to comfortably under
+  it, only to have its *uncompressed* size rejected at extraction regardless. Caught
+  live (`docs/HISTORY.md` → "the extraction cap that couldn't benefit from zip
+  compression") - the fix keeps the two independent, with the extraction cap
+  meaningfully larger than the upload cap.
 - **The staged upload's SQLite sidecars must be cleaned up too.** Validating it opens
   the file with SQLite, and opening a WAL-mode database — which every backup of this app
   is — creates `-wal`/`-shm` beside it, even read-only. `os.replace()` moves only the
