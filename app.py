@@ -1859,12 +1859,17 @@ def _register_search():
 @app.route("/search")
 @user_login_required
 def search():
-    """The one request handler in this app that makes a live outbound call.
+    """The one request handler in this app that makes a live outbound call with no
+    cache in front of it at all, by necessity rather than convenience.
 
-    Everything else reads a cache filled by a background task, because a request must
-    never wait on another server. A search query isn't known until someone types it, so
-    there is nothing to pre-fetch - see media_search.py for the safety machinery that
-    makes this carve-out acceptable rather than a quiet exception to the rule."""
+    A search query isn't known until someone types it, so there's nothing to
+    pre-fetch into a cache the way almost every other read here works - see
+    media_search.py for the safety machinery that makes this carve-out acceptable.
+    (A handful of other routes also make live outbound calls - a sanctioned
+    one-shot admin action like "Check now" or a host/VM control, or a lookup this
+    app deliberately keeps a short cache in front of, like the /account page's
+    Seerr contact lookup - but none of those are an *uncached* live call the way
+    every search keystroke here is.)"""
     user = current_user()
     query = request.args.get("q", "").strip()[:100]
     outcome = {"results": [], "errors": {}, "available": media_search.is_available()}

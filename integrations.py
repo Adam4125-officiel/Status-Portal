@@ -997,9 +997,11 @@ def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=F
 
     if with_notification_settings:
         # One extra request per *linked* user. That's an N+1, and it's the accepted
-        # cost of the data living somewhere else: it runs hourly in a background task,
-        # only for users who actually map to a Jellyfin account, and a failure on one
-        # user leaves the rest (and their email) intact.
+        # cost of the data living somewhere else: only for users who actually map to
+        # a Jellyfin account, and a failure on one user leaves the rest (and their
+        # email) intact. Called from the hourly seerr_contact_sync task, and from
+        # user_notify.find_seerr_account() (the /account page's live lookup, cached
+        # briefly - see its own docstring for why this isn't purely hourly).
         for user in users:
             if not user["jellyfin_user_id"]:
                 continue
