@@ -12,6 +12,7 @@ kind of service it's showing:
 import logging
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode
 
@@ -763,7 +764,15 @@ def _resolved_seerr_media(base_url, api_key, media):
 # tmdb key -> {"title", "year", "poster_path"}. Overseerr's request payload is built
 # around ids and often carries no title at all, so each one has to be looked up - and
 # looked up once, not on every refresh, since a request's title never changes.
-_seerr_detail_cache = {}
+#
+# LRU-capped rather than a plain dict: the data is immutable so there's no
+# correctness reason to cap it, but nothing was bounding its size either, and every
+# distinct search-detail view and every distinct pending/historical Seerr request
+# adds an entry that never leaves. OrderedDict.move_to_end() on read + eviction from
+# the front on write is the whole mechanism - a capped entry falling out just means
+# the next lookup for it re-fetches, exactly like a cold cache today.
+_SEERR_DETAIL_CACHE_MAX = 2000
+_seerr_detail_cache = OrderedDict()
 
 
 def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
@@ -778,6 +787,7 @@ def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
         return None
     key = f"{media_type}:{tmdb_id}"
     if key in _seerr_detail_cache:
+        _seerr_detail_cache.move_to_end(key)
         return _seerr_detail_cache[key]
     try:
         r = requests.get(f"{base_url.rstrip('/')}/api/v1/{media_type}/{tmdb_id}",
@@ -810,6 +820,8 @@ def fetch_seerr_detail(base_url, api_key, media_type, tmdb_id):
     }
     if detail["title"]:
         _seerr_detail_cache[key] = detail
+        if len(_seerr_detail_cache) > _SEERR_DETAIL_CACHE_MAX:
+            _seerr_detail_cache.popitem(last=False)
     return detail
 
 
