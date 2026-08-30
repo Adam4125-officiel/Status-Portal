@@ -189,6 +189,7 @@ a.user-chip__name:hover { text-decoration: none; color: var(--brand); }
 html, body {
   margin: 0;
   padding: 0;
+  min-height: 100vh;
   background: var(--bg-void);
   color: var(--text-primary);
   font-family: var(--font-body);
