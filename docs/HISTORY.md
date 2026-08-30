@@ -788,6 +788,54 @@ highly-compressible ~140 MB payload, compressing to well under 1 MB) now succeed
 and a 600 MB declared inner size still correctly refused - the zip-bomb guard
 mechanism itself was never the problem, only the cap value.
 
+### The restore that couldn't replace its own open file (fixed 2026-08-30)
+
+Reported from a real Windows install, immediately after the extraction-cap fix above
+let a restore actually reach the replace step for the first time:
+
+```
+Restore failed: [WinError 5] Access is denied:
+'...\instance\restore-88857qr6.db' -> '...\instance\portal.db'
+```
+
+Running as administrator, which ruled out a plain permissions problem and pointed at
+file locking instead. The cause was a second bug in the same v1.8.2 performance
+batch: `db.get_db()` had just been changed (a few commits earlier, same session) to
+return one pooled connection per request instead of a fresh connection per call (see
+CLAUDE.md's "Sessions, caching and DB performance" section for the full mechanism).
+That pooled connection is opened at the very start of the request by `app.py`'s first
+`before_request` hook and stays open for the request's entire duration - including
+through `admin_restore_db()`'s own call into `db.restore_from_file()`, which ends
+with `os.replace(staged, DB_PATH)`.
+
+On POSIX, a rename succeeds regardless of who has the destination file open - the old
+inode just stays valid for whoever already had it open. Windows has no equivalent
+guarantee: `os.replace()` (via `MoveFileExW`) can fail with `ERROR_ACCESS_DENIED` if
+*anything* still holds the destination open without `FILE_SHARE_DELETE`, and nothing
+about SQLite's default Windows VFS guarantees that flag is set. The pooled
+connection - opened by this same thread, for this same request, specifically because
+of the change that had just shipped - was exactly such a handle. This sandbox is
+Linux-only, so the full pytest suite and every manual restore test that session
+passed cleanly; the failure mode structurally cannot reproduce outside Windows.
+
+Fixed by having `db.restore_from_file()` call `db.end_request_scope()`
+unconditionally before doing anything else - releasing the calling thread's pooled
+connection (a safe no-op if there wasn't one, e.g. called from the `update.py` CLI)
+before the checkpoint-then-replace sequence runs. Verified two ways, since the actual
+Windows failure can't be reproduced here: a direct test asserting `db.get_db()`
+returns a different (i.e. genuinely released, not the stale closed one) connection
+after `restore_from_file()` runs inside a request scope, and confirming that test
+fails without the fix and passes with it - proving it actually catches the class of
+bug being fixed, not just that the code executes.
+
+**Lesson worth remembering**: this shipped in the very same batch that introduced
+`get_db()`'s pooling in the first place, and the original review of that change did
+consider the database-restore route specifically (see its own commit message) - but
+only reasoned about *other requests'* stale connections, not about the *current*
+request's own pooled connection blocking its *own* replace. A change that holds a
+resource open for a request's full duration needs checking against everything that
+same request does before it ends, not just against what runs elsewhere.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

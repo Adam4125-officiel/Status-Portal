@@ -1342,6 +1342,30 @@ DB-backed Settings pages, not a code edit.
   hence `config.WAITRESS_THREADS` (default 12) as well. WAL is a persistent property
   of the file, set once in `init_db()`; it can't be enabled on a network filesystem
   (SMB/NFS), which is why the switch is wrapped and logged rather than assumed.
+- **`db.get_db()` returns one pooled connection per request, not a fresh connection
+  per call** (added in the v1.8.2 performance batch). `app.py`'s first
+  `before_request` hook calls `db.begin_request_scope()`, which opens a connection
+  and caches it thread-local; every `get_db()` call on that thread returns the same
+  connection (wrapped in `_PooledConnection`, whose `.close()` is a no-op) until
+  `teardown_appcontext` calls `db.end_request_scope()`. This exists because opening
+  a fresh connection to this schema costs ~380us (SQLite re-parsing the whole schema
+  per connection) versus ~3us to reuse one already open, and a single public page
+  load makes over a hundred `db.py` calls. Background threads (health-check loop,
+  scheduler, Discord bot) never call `begin_request_scope()`, so they keep opening a
+  fresh connection per call exactly as before this existed. `db.py` still imports no
+  Flask - the scoping is a bare `threading.local()`, wired to the request lifecycle
+  only from `app.py`.
+  **Anything that replaces `DB_PATH` on disk (`os.replace()`/`os.rename()`) must call
+  `db.end_request_scope()` first**, unconditionally, even if it looks like nothing in
+  the current request could still be holding the file open.
+  `db.restore_from_file()` does this. The reason is Windows-specific and was missed
+  when this shipped: a connection this same thread opened - the pooled one, alive for
+  the request's entire duration - can make `os.replace()` fail with `[WinError 5]
+  Access is denied` if it's still open without delete-sharing at the moment of the
+  replace. POSIX has no such failure mode (a rename succeeds regardless of open
+  handles), which is why this passed the full test suite and manual testing in this
+  Linux-only sandbox and only surfaced on the user's real Windows install
+  (`docs/HISTORY.md` → "the restore that couldn't replace its own open file").
 - **`monitoring.start_background_refresh()` is no longer a no-op off Windows.** It now
   also owns the CPU sample: `psutil.cpu_percent(interval=0.2)` *sleeps* 0.2s, and it
   was being called from `get_resource_snapshot()` inside request handlers. The thread

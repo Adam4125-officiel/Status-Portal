@@ -185,7 +185,19 @@ def restore_from_file(src_path):
     then delete both sidecars.
 
     os.replace() is atomic on both platforms, so a crash mid-restore leaves either the
-    old database or the new one - never half of either."""
+    old database or the new one - never half of either.
+
+    end_request_scope() first, unconditionally: if this is running inside the
+    request-scoped pooled connection (see get_db()/begin_request_scope()), that
+    connection has been open against DB_PATH since the very start of this same
+    request - and on Windows, os.replace() below can fail with "[WinError 5]
+    Access is denied" if *anything* still holds the destination file open without
+    delete-sharing, including a connection this same thread opened. POSIX doesn't
+    have this failure mode (a rename succeeds regardless of who has the file open),
+    which is why this was never seen testing on Linux. A safe no-op when there is
+    no pooled connection to release (e.g. called from the update.py CLI, or from a
+    background thread), since end_request_scope() already tolerates that."""
+    end_request_scope()
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
