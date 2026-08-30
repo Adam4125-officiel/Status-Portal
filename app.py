@@ -1828,6 +1828,7 @@ def user_account_push_seerr_contact():
         flash(f"Couldn't update Seerr: {e}", "error")
         return redirect(url_for("user_account"))
     db.set_user_preferences(user["id"], seerr_user_id=account["id"])
+    user_notify._invalidate_seerr_account_cache(user["id"])
     flash("Your Seerr account has been updated with these details.", "success")
     return redirect(url_for("user_account"))
 
@@ -2599,6 +2600,10 @@ def _cache_inventory():
         {"name": "Jellyfin activity",
          "entries": len(integrations.get_cached_jellyfin_activity()["running_tasks"]),
          "detail": "running tasks", "updated_at": None},
+        {"name": "Seerr account lookups",
+         "entries": len(user_notify._seerr_account_cache),
+         "detail": f"users (recomputed every {user_notify.SEERR_ACCOUNT_CACHE_TTL_SECONDS}s)",
+         "updated_at": None},
     ] + monitoring.cache_summary()
     # Reachability per integration, straight out of the cache above.
     connections = [
@@ -2623,6 +2628,7 @@ def _clear_all_caches():
     integrations.clear_caches()
     monitoring.clear_caches()
     updater.clear_update_cache()
+    user_notify.clear_caches()
     _bump_asset_cache_salt()
 
 

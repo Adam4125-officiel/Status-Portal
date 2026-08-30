@@ -24,6 +24,8 @@ call in this application that modifies another service, and it must never happen
 side effect of a sync or a background task.
 """
 import logging
+import threading
+import time
 
 import requests
 
@@ -36,6 +38,19 @@ import scheduler
 _logger = logging.getLogger(__name__)
 
 TASK_NAME = "user_notifications"
+
+# find_seerr_account() below is a live Seerr lookup on every /account and
+# /admin/users/<id>/account page load (not just the hourly seerr_contact_sync task -
+# see its own docstring). A short cache keeps the page's "Linked to X in Seerr"
+# display live-ish without paying the fetch_seerr_users(with_notification_settings=
+# True) N+1 on every single render - keyed per Jellyfin user id, unlike
+# app._uptime_cache's single shared value, since this answers a different question
+# per visitor. 60s mirrors app._uptime_cache's TTL for the same reasoning: real
+# staleness here is bounded by the hourly sync anyway, so a minute of additional
+# staleness on top of that is not a meaningfully different answer.
+SEERR_ACCOUNT_CACHE_TTL_SECONDS = 60
+_seerr_account_cache = {}
+_seerr_account_cache_lock = threading.Lock()
 
 # Which preference gates which event, per channel. A queued row whose user has since
 # switched the relevant preference off is dropped rather than sent - the preference is
@@ -77,6 +92,15 @@ def is_enabled():
     """Off unless the admin has switched per-user notifications on. Enabling it means
     the portal starts messaging visitors, which has to be deliberate."""
     return db.get_setting("user_notifications_enabled", "0") == "1"
+
+
+def clear_caches():
+    """Drops every cached find_seerr_account() lookup - purely derived data that
+    rebuilds itself on the next /account or /admin/users/<id>/account page load, same
+    shape as integrations.clear_caches()/monitoring.clear_caches(). Wired into the
+    admin System page's "Clear cached data" button (app._clear_all_caches())."""
+    with _seerr_account_cache_lock:
+        _seerr_account_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -129,17 +153,50 @@ def find_seerr_account(jellyfin_user_id):
     Only ever follows Seerr's own `jellyfinUserId`. If Seerr hasn't imported Jellyfin
     accounts there is no link to follow, and this returns None rather than guessing -
     see the module docstring. Network failures also return None: "we couldn't check"
-    and "there's no link" both correctly lead to asking the person directly."""
+    and "there's no link" both correctly lead to asking the person directly.
+
+    The actual Seerr round trip is cached per user for SEERR_ACCOUNT_CACHE_TTL_SECONDS
+    (see module-level comment) - this is called on every /account and
+    /admin/users/<id>/account page load, not just from the hourly sync task, so
+    without a cache every such page view pays a fetch_seerr_users(with_notification_
+    settings=True) N+1 in full. A cached None (no link found, or a transient failure)
+    is cached exactly like a cached hit - both answers "correctly lead to asking the
+    person directly" per the paragraph above, so there is no reason to treat them
+    differently here."""
+    if not jellyfin_user_id:
+        return None
+    now = time.monotonic()
+    with _seerr_account_cache_lock:
+        cached = _seerr_account_cache.get(jellyfin_user_id)
+        if cached and now - cached["fetched_at"] < SEERR_ACCOUNT_CACHE_TTL_SECONDS:
+            return cached["value"]
     integration = seerr_integration()
-    if integration is None or not jellyfin_user_id:
+    if integration is None:
         return None
     try:
         users = integrations.fetch_seerr_users(integration["base_url"], integration["api_key"],
                                                 with_notification_settings=True)
+        value = next((u for u in users if u["jellyfin_user_id"] == str(jellyfin_user_id)), None)
     except (requests.RequestException, ValueError) as e:
         _logger.info("Could not read Seerr users while looking for a link: %s", e)
-        return None
-    return next((u for u in users if u["jellyfin_user_id"] == str(jellyfin_user_id)), None)
+        value = None
+    # Deliberately computed outside the lock, same reasoning as
+    # app._cached_uptime_percentages(): an idempotent read, so two requests racing on
+    # a cold cache just do the same harmless work twice rather than queueing.
+    with _seerr_account_cache_lock:
+        _seerr_account_cache[jellyfin_user_id] = {"value": value, "fetched_at": now}
+    return value
+
+
+def _invalidate_seerr_account_cache(jellyfin_user_id):
+    """Drops one user's cached find_seerr_account() result immediately after this
+    portal successfully changes what Seerr holds for them (save_contact() and
+    user_account_push_seerr_contact() both call this right after a successful
+    push_seerr_contact()) - without this, the account page's "Linked to X in Seerr,
+    which has: ..." line would keep showing the pre-push values for up to
+    SEERR_ACCOUNT_CACHE_TTL_SECONDS after the very button press that changed them."""
+    with _seerr_account_cache_lock:
+        _seerr_account_cache.pop(jellyfin_user_id, None)
 
 
 def adopt_seerr_contact(user_id, account):
@@ -211,6 +268,7 @@ def save_contact(jellyfin_user_id, email=None, discord_id=None):
                              email=fields.get("notify_email"),
                              discord_id=fields.get("notify_discord_id"),
                              display_name=account["display_name"])
+    _invalidate_seerr_account_cache(jellyfin_user_id)
     return True, "Saved, and copied to your Seerr account."
 
 
