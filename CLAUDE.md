@@ -1280,10 +1280,9 @@ DB-backed Settings pages, not a code edit.
   rather than committed straight to `main`, specifically because it was
   user-requested as untested/pre-release (touches core status-computation logic
   — `run_health_checks()`, `_handle_incident_lifecycle`'s invariant — not just
-  additive UI). Treat "push a branch + PR instead of main" as the default for a
-  batch like this (new status-computation logic, not yet run against a real
-  install) unless told otherwise, even outside the cloud-session no-tag-access
-  fallback already documented under Release process below.
+  additive UI). See "Never commit straight to `main`" under Release process below —
+  as of 2026-08-30 this isn't a judgment call scoped to risky batches, it's the
+  standing rule for every change.
 
 ## Sessions, caching and DB performance (added 2026-08-19, v1.6.1)
 
@@ -2246,6 +2245,17 @@ and releasing at checkpoints are separate things: commit at every completed fix,
 a release when a batch is done.
 
 ## Release process
+
+**Never commit straight to `main`, for anything — always a branch + PR.** Explicitly
+stated by the user 2026-08-30, superseding an earlier, narrower rule that only
+required a branch for untested/status-logic-touching batches (small direct fixes
+used to go straight to `main`). That distinction is gone: every change, regardless
+of size or risk, goes on its own branch with its own PR, merged the normal way
+(regular merge commit — see "Promoting a feature branch to stable" below, never
+squash/rebase). This includes a one-line fix found mid-session while testing
+something else on an existing branch — put it on a branch of its own (or, if it's
+directly unblocking testing of a PR already open, on that PR's own branch) rather
+than reaching for `main`.
 
 **Trigger**: the user says the session/work is done *and* that things are working —
 e.g. "this session ends here", "that's it for today, everything works", "we're done,
