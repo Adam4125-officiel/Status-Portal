@@ -30,6 +30,7 @@
 
     <div class="admin-nav__group">System</div>
     <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
+    <a href="{{ url_for('admin_logs') }}" class="{{ 'active' if active == 'logs' }}">Logs</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
     <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
@@ -41,10 +42,17 @@
     </div>
   </nav>
   <main class="admin-main">
+    {# Pinned to the viewport rather than sitting in the flow: admin_scroll_restore.js
+       keeps you where you were when a form submits, so a message at the top of a long
+       page would be a confirmation nobody ever sees. #}
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% for category, msg in messages %}
-        <div class="flash {{ category }}">{{ msg }}</div>
-      {% endfor %}
+      {% if messages %}
+      <div class="flash-stack">
+        {% for category, msg in messages %}
+        <div class="flash {{ category }}" title="Click to dismiss">{{ msg }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
     {% endwith %}
     {% block admin_content %}{% endblock %}
   </main>
@@ -54,4 +62,8 @@
    fallback forever. One include here means the next admin page to add a timestamp
    can't repeat that. #}
 <script src="{{ asset_url('js/local_time.js') }}"></script>
+{# Both are panel-wide for the same reason local_time.js is: they fix behaviour every
+   admin page has, so wiring them per-template is how one page ends up missing it. #}
+<script src="{{ asset_url('js/admin_scroll_restore.js') }}"></script>
+<script src="{{ asset_url('js/admin_flash.js') }}"></script>
 {% endblock %}

@@ -14,7 +14,11 @@
     box.addEventListener('change', function () {
       // Disabled immediately so a double-click can't submit the same flip twice.
       box.disabled = true;
-      form.submit();
+      // requestSubmit(), not submit(): form.submit() bypasses the submit event
+      // entirely, so admin_scroll_restore.js would never hear about it and flipping
+      // a toggle far down a table would jump back to the top of the page.
+      if (form.requestSubmit) form.requestSubmit();
+      else form.submit();
     });
   });
 })();

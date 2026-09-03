@@ -1583,6 +1583,198 @@ def test_admin_host_control_requires_login(client):
     assert "/admin/login" in resp.headers["Location"]
 
 
+# ---------------------------------------------------------------------------
+# /admin/logs
+# ---------------------------------------------------------------------------
+def _seed_logs(tmp_path, monkeypatch, files=None):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    files = files or {"app.log": (
+        "2026-09-03 10:00:00,000 INFO [app] portal started\n"
+        "2026-09-03 10:00:01,000 ERROR [monitoring] disk read failed\n"
+        "Traceback (most recent call last):\n"
+        "RuntimeError: boom\n")}
+    for name, content in files.items():
+        (log_dir / name).write_text(content, encoding="utf-8")
+    monkeypatch.setattr(app_module.logging_setup, "LOG_DIR", str(log_dir))
+    monkeypatch.setattr(app_module.logging_setup, "LOG_FILE", str(log_dir / "app.log"))
+    return log_dir
+
+
+def test_admin_logs_requires_login(client):
+    resp = client.get("/admin/logs")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_logs_download_requires_login(client):
+    resp = client.get("/admin/logs/download")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_logs_page_shows_recent_entries(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs")
+
+    assert resp.status_code == 200
+    assert b"portal started" in resp.data
+    assert b"disk read failed" in resp.data
+    assert b"RuntimeError: boom" in resp.data  # the traceback stays with its error
+
+
+def test_admin_logs_level_filter_hides_lower_levels(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs?level=ERROR")
+
+    assert b"disk read failed" in resp.data
+    assert b"portal started" not in resp.data
+
+
+def test_admin_logs_ignores_a_junk_limit_or_level(client, tmp_path, monkeypatch):
+    """Both come straight from the query string, so both are validated against a
+    fixed set rather than trusted - an unbounded limit is a way to ask the server
+    for arbitrarily much work."""
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs?limit=999999&level=../etc/passwd")
+
+    assert resp.status_code == 200
+    # The page-size control shows what was actually applied, so this asserts the
+    # clamp itself rather than merely that the option exists in the dropdown.
+    assert b'value="200" selected' in resp.data
+    assert b'value="999999"' not in resp.data
+
+
+def test_admin_logs_page_renders_with_no_log_file_yet(client, tmp_path, monkeypatch):
+    """init_logging() only runs from the __main__ blocks, so under the test client -
+    and on a portal started some other way - there is genuinely no file."""
+    monkeypatch.setattr(app_module.logging_setup, "LOG_DIR", str(tmp_path / "nope"))
+    monkeypatch.setattr(app_module.logging_setup, "LOG_FILE", str(tmp_path / "nope" / "app.log"))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs")
+
+    assert resp.status_code == 200
+    assert b"No log file yet" in resp.data
+
+
+def test_admin_logs_tail_requires_login(client):
+    resp = client.get("/admin/logs/tail")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_logs_tail_returns_only_what_was_appended(client, tmp_path, monkeypatch):
+    """The whole point of the byte cursor: a poll on an idle portal transfers no
+    entries at all, and one after a new line transfers exactly that line."""
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    offset = app_module.logging_setup.log_size()
+
+    quiet = client.get(f"/admin/logs/tail?since={offset}")
+    assert quiet.status_code == 200
+    assert b"log-entry" not in quiet.data
+    assert f'data-log-offset="{offset}"'.encode() in quiet.data
+
+    with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
+        fh.write("2026-09-03 11:00:00,000 WARNING [app] something new\n")
+
+    resp = client.get(f"/admin/logs/tail?since={offset}")
+    assert b"something new" in resp.data
+    assert resp.data.count(b"log-entry") == 1  # not the entries that were already shown
+    assert b'data-log-reset="0"' in resp.data
+
+
+def test_admin_logs_tail_says_to_reset_when_the_file_rotated(client, tmp_path, monkeypatch):
+    """Midnight rotation leaves a shorter file, so the caller's cursor points past the
+    end of it - answering with a partial read would silently drop entries."""
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    (log_dir / "app.log").write_text(
+        "2026-09-04 00:00:01,000 INFO [app] fresh day\n", encoding="utf-8")
+
+    resp = client.get("/admin/logs/tail?since=999999")
+
+    assert b'data-log-reset="1"' in resp.data
+    assert b"fresh day" in resp.data
+
+
+def test_admin_logs_tail_applies_the_same_level_filter(client, tmp_path, monkeypatch):
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    offset = app_module.logging_setup.log_size()
+    with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
+        fh.write("2026-09-03 11:00:00,000 INFO [app] chatter\n"
+                  "2026-09-03 11:00:01,000 ERROR [app] real problem\n")
+
+    resp = client.get(f"/admin/logs/tail?since={offset}&level=ERROR")
+
+    assert b"real problem" in resp.data
+    assert b"chatter" not in resp.data
+
+
+def test_admin_logs_tail_ignores_a_junk_cursor(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    for cursor in ("", "abc", "-5", "../../etc/passwd"):
+        resp = client.get("/admin/logs/tail", query_string={"since": cursor})
+        assert resp.status_code == 200, cursor
+        assert b'data-log-reset="1"' in resp.data, cursor
+
+
+def test_admin_logs_page_carries_the_starting_offset(client, tmp_path, monkeypatch):
+    """Without it the first poll has no cursor, resets, and re-renders everything
+    that is already on screen."""
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs")
+
+    assert f'data-log-offset="{app_module.logging_setup.log_size()}"'.encode() in resp.data
+
+
+def test_admin_logs_download_streams_every_file_oldest_first(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch, {"app.log": "newest\n", "app.log.1": "older\n"})
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs/download")
+
+    assert resp.status_code == 200
+    assert resp.data == b"older\nnewest\n"
+    assert "attachment" in resp.headers["Content-Disposition"]
+    assert resp.headers["Content-Disposition"].endswith('.log"')
+
+
+def test_admin_logs_download_one_named_file(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch, {"app.log": "newest\n", "app.log.1": "older\n"})
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs/download?name=app.log.1")
+
+    assert resp.status_code == 200
+    assert resp.data == b"older\n"
+
+
+def test_admin_logs_download_refuses_anything_that_is_not_a_log_file(client, tmp_path, monkeypatch):
+    """The name is matched against a generated list, never joined onto a path - so
+    this can't be pointed at the database sitting one directory up."""
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    (log_dir.parent / "portal.db").write_text("secret", encoding="utf-8")
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    for name in ("../portal.db", "portal.db", "app.log.9", "/etc/passwd"):
+        resp = client.get("/admin/logs/download", query_string={"name": name})
+        assert resp.status_code == 404, name
+
+
 def test_admin_system_page_renders(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.get("/admin/system")

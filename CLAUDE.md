@@ -99,6 +99,8 @@ have bitten someone on exactly that change.
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
 | A new admin page, or moving one in the nav | *Admin panel navigation* → pick a group, keep the route, three labels must agree |
+| Anything reading or exposing the log files | *Reading the logs from the admin panel* → the name whitelist, and why every read is bounded |
+| A script that submits a form itself | *Keeping your place when a form submits* → `requestSubmit()`, never `submit()` |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
@@ -1093,6 +1095,86 @@ DB-backed Settings pages, not a code edit.
   wanted it needs its own check inside `report_problem()`. No global default setting
   was added either — purely per-service.
 
+## Reading the logs from the admin panel (`/admin/logs`, `logging_setup.py`)
+
+- **The readers live in `logging_setup.py`, not `app.py`.** That module already owns
+  where the log files are and how they're named (`LOG_BASENAME`, `MAX_BACKUPS`,
+  matching `RotatingFileHandler`'s own `app.log`, `app.log.1`, … convention), and
+  that is exactly what a reader needs to know. It also keeps them testable with no
+  Flask app in the picture.
+- **`log_files()` filters the directory through one strict pattern (`_LOG_NAME`), and
+  a download resolves by *membership in that list*.** The name a caller sends is never
+  joined onto a directory, which is what makes path traversal structurally impossible
+  here rather than something filtered out. Keep that shape if you add another log
+  file — widen the pattern, don't start trusting the input.
+- **Rotation is daily (`TimedRotatingFileHandler`, `when="midnight"`), keeping
+  `config.LOG_RETENTION_DAYS` (`PORTAL_LOG_RETENTION_DAYS`, default 7) files.** It was
+  size-based (2 MB × 3), which on a quiet portal is *months* of history — so the log
+  page opened on entries from weeks ago, which is what prompted the change. A day is a
+  unit a person reasons in, and it makes the retention setting mean something obvious.
+  **Rotating on every start is the tempting alternative and is worse**: this app
+  restarts itself (the updater, `/admin/system`, a systemd restart), so a
+  crash-restart loop would blow through every retained file and delete exactly the
+  history explaining the crash. `init_logging()` logs a "portal starting" banner
+  instead, so a run is findable inside a file that spans several of them.
+  The old `app.log.1`…`.3` files stay listed and downloadable on an upgraded install
+  — they stop being written, but hiding them would strand history someone may want.
+- **Every read is bounded, which is why this is allowed in a request handler at
+  all.** `read_tail()` seeks to the last `TAIL_MAX_BYTES` rather than reading a 2 MB
+  file, and the page's `limit` is validated against a fixed tuple (`LOG_PAGE_SIZES`)
+  so a query string can't ask the server for arbitrarily much work. Same class of
+  cheap local file work as `updater.list_backups()`. **Don't add a cache** — a log
+  page whose whole job is "what just happened" must not show a minute-old snapshot.
+- **The unit of display is an *entry*, not a line.** `parse_entries()` treats a line
+  matching the formatter's `timestamp LEVEL [name]` prefix as a new entry and
+  everything else as a continuation of the one above. Filtering line-by-line would
+  detach a traceback from the ERROR that produced it and then drop it — which is
+  precisely what someone opened the page to read.
+- **Terminal colour codes are stripped for display only, never from the file or a
+  download.** Some libraries colour their own console output without knowing a file
+  handler is also listening: werkzeug's development-server warning really does land
+  in `app.log` as `\x1b[31m\x1b[1mWARNING…`, which a browser renders as gibberish
+  mid-line. Found by reading the real file during a live smoke test, not by a test.
+- **"Download full log" concatenates every rotated file, oldest first**, streamed via
+  a generator — with the default rotation that's up to 8 MB, and a route has no
+  reason to hold it in memory. Per-file downloads exist too, for when only one is
+  wanted. Both pass `max_age=0`/`no-store` for the same reason the DB backup does:
+  `SEND_FILE_MAX_AGE_DEFAULT` is 30 days and these are point-in-time files, not
+  versioned assets.
+- **Not behind `_require_totp()`, deliberately** — nothing here writes and nothing
+  goes offline, which is the line that helper is scoped to. It is admin-only via
+  `login_required` like everything else under `/admin/`, which matters, because the
+  log quotes paths, user names and error text from every integration.
+- **The view is live, by polling `/admin/logs/tail` for an HTML fragment** — same
+  convention as `/api/incidents/more` (server-rendered fragment, not JSON), and the
+  *same partial* the full page renders, so a live-appended entry cannot look
+  different from one that was there on load. **Don't replace this with SSE or a
+  WebSocket**: either holds a request thread per open page for as long as it stays
+  open, and waitress runs a fixed pool (`config.WAITRESS_THREADS`) — a couple of
+  forgotten admin tabs would eat the pool that serves the actual portal. The poll
+  hands back a **byte offset** and gets only what was appended since, so the usual
+  tick reads nothing at all; `read_since()` reports `reset` when that cursor is no
+  good (midnight rotation, truncation, or a burst big enough that honouring it would
+  mean an unbounded read) and the client replaces instead of appending.
+- **Three scroll rules, and all three were asked for explicitly.** Follow the newest
+  entry; if the reader has scrolled up, keep streaming but **don't** yank them down;
+  when they scroll back to the end, re-sync — which falls out of re-checking
+  "am I at the bottom" on every tick rather than tracking a mode. **`.log-view` sets
+  `overflow-anchor: none` on purpose**: trimming entries off the top makes browsers
+  that implement scroll anchoring adjust `scrollTop` themselves, and Safari (which
+  doesn't implement it) would not — so the compensation is done in JS for everyone,
+  and leaving anchoring on applied it twice and slid the text down by the height of
+  whatever was trimmed. Found in a browser; no unit test would have seen it.
+- **The page needs JavaScript only for the live tail.** The filters are a plain `GET`
+  form with an Apply button rather than a `<select onchange>`, matching the
+  dependency-free admin-side convention, and the Live switch is hidden unless JS
+  reveals it — a switch that does nothing is worse than no switch. `.log-panel` opts out of `.form-panel`'s 560px cap on purpose: that cap
+  is right for a form and wrong for a log, where every extra pixel is one less
+  wrapped traceback line. The log box scrolls inside itself (`overflow: auto` +
+  `white-space: pre-wrap`) so a long line never pushes the page sideways — verified
+  across 320–1440px with the responsive audit described under *Admin panel
+  navigation*.
+
 ## Component restart controls (`app.py`, `discord_bot.py`)
 
 - **`/admin/system` is deliberately separate from `/admin/resources`** — Resources is
@@ -1599,6 +1681,33 @@ DB-backed Settings pages, not a code edit.
   tones. The markup keeps a real focusable checkbox for keyboards and screen readers,
   and a hidden field carrying the value to *become*, so the same form works with JS
   (submit on change) and without it (a fallback button the script hides).
+
+## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
+
+- **Every admin form submit remembers the page's scroll position and restores it
+  after the reload.** Admin forms POST and redirect back to the same page, and a
+  browser starts a fresh page at the top — so saving one field at the bottom of
+  Settings threw you back to the top every time. Reported 2026-09-03 as "anytime I
+  click a save button it brings me to the top of the page". One document-level
+  `submit` listener covers every form, including any added later.
+- **The restore is keyed on the path and expires in 10 seconds, and it is one-shot.**
+  A restore must only happen on the page you submitted from, and only for the load
+  that followed it — otherwise coming back to a page later, from somewhere else,
+  silently dumps you halfway down it. A `back_forward` navigation is skipped too:
+  the browser already restores scroll there, and fighting it is worse than doing
+  nothing.
+- **`form.submit()` bypasses the `submit` event entirely — use
+  `form.requestSubmit()`.** `admin_toggle.js` submits on change, and with
+  `.submit()` its flip would jump to the top of the page while every other form
+  stayed put. If you add another script that submits a form programmatically, this
+  is the trap.
+- **Admin flash messages are pinned to the viewport (`.flash-stack`), and that is a
+  consequence of the above, not decoration.** Once scroll is preserved, a message
+  rendered at the top of a long page is a confirmation nobody ever sees. Successes
+  auto-dismiss after 7s and anything can be clicked away; **errors deliberately stay**
+  — an error that vanishes while you are still working out what it meant is worse
+  than one you have to dismiss. Public pages keep the in-flow `.flash`: they are
+  short, and nothing there restores scroll.
 
 ## Notification channels (`/admin/notifications`, `notifications.py`)
 

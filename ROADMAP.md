@@ -355,6 +355,13 @@ this" rules are in `CLAUDE.md`; how its bugs actually presented is in
 - The Discord bot restart path, and a watchdog that brings the bot back on its own.
   The disconnect's underlying cause is still open — see "Known issues" above.
 
+**v1.8.4** (2026-09-03)
+- Reading the portal's own logs from `/admin/logs`, live, with a level filter and a
+  download — plus daily log rotation with a retention window, so the page shows
+  recent history rather than months of it.
+- Keeping your scroll position when any admin form is saved, which was a panel-wide
+  annoyance that had simply never been named.
+
 ## Overall take
 
 The list is short now, and what is on it is genuinely different in character rather

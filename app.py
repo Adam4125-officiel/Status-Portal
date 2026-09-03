@@ -21,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash, Response, abort, send_file, g
+from flask import (Flask, render_template, request, redirect, url_for, session, jsonify,
+                    flash, Response, abort, send_file, stream_with_context, g)
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
@@ -2657,6 +2658,124 @@ def _restart_process():
         _release_dev_server_socket()
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_do, daemon=True).start()
+
+
+# ---- Logs (logging_setup.py owns reading them; this is just the page) ----
+LOG_PAGE_SIZES = (100, 200, 500, 1000)
+LOG_LEVEL_CHOICES = (("", "Everything"), ("INFO", "Info and above"),
+                     ("WARNING", "Warnings and errors"), ("ERROR", "Errors only"))
+
+
+@app.route("/admin/logs")
+@login_required
+def admin_logs():
+    """The last N entries of the current log file, plus what's downloadable.
+
+    Reads the file on every load and deliberately does not cache: a log page whose
+    whole job is answering "what just happened" must not show a snapshot from a
+    minute ago. That's affordable because every read here is bounded - see
+    logging_setup's reader section for why this isn't the slow-I/O rule's business.
+
+    Nothing here writes, so it isn't behind _require_totp() - but it is behind
+    login_required, and the log can quote paths, user names and error text from
+    every integration, so it is admin-only like the rest of /admin."""
+    try:
+        limit = int(request.args.get("limit", 200))
+    except ValueError:
+        limit = 200
+    if limit not in LOG_PAGE_SIZES:
+        limit = 200
+    min_level = request.args.get("level", "")
+    if min_level not in [value for value, _ in LOG_LEVEL_CHOICES]:
+        min_level = ""
+
+    files = logging_setup.log_files()
+    # Read the offset *before* the entries: anything written between the two is then
+    # picked up by the first live poll, where taking it after would silently skip it.
+    offset = logging_setup.log_size()
+    entries = logging_setup.tail_entries(limit=limit, min_level=min_level or None)
+    return render_template(
+        "admin_logs.html", entries=entries, files=files, limit=limit, offset=offset,
+        min_level=min_level, page_sizes=LOG_PAGE_SIZES, level_choices=LOG_LEVEL_CHOICES,
+        total_bytes=sum(f["size_bytes"] for f in files),
+        log_dir=logging_setup.LOG_DIR, retention_days=config.LOG_RETENTION_DAYS,
+        active="logs")
+
+
+@app.route("/admin/logs/tail")
+@login_required
+def admin_logs_tail():
+    """Whatever has been written to the log since the caller's byte offset, as a
+    server-rendered HTML fragment - the same partial the full page renders, so a
+    live-appended entry can't look different from one that was there on load. Same
+    convention as /api/incidents/more; this app has one JSON API and no client-side
+    templating.
+
+    Polled rather than streamed. An SSE or WebSocket endpoint would hold a request
+    thread per open page for as long as it stays open, and waitress runs a fixed pool
+    of them (config.WAITRESS_THREADS) - a couple of forgotten admin tabs would eat
+    the pool that serves the actual portal. A poll that usually costs one getsize()
+    and reads nothing is the cheaper answer by a wide margin.
+
+    The response carries the new offset, and whether the caller should replace its
+    contents rather than append (the file rotated, was truncated, or so much arrived
+    that honouring the cursor would mean an unbounded read)."""
+    try:
+        since = int(request.args.get("since", ""))
+    except ValueError:
+        since = None
+    try:
+        limit = int(request.args.get("limit", 200))
+    except ValueError:
+        limit = 200
+    if limit not in LOG_PAGE_SIZES:
+        limit = 200
+    min_level = request.args.get("level", "")
+    if min_level not in [value for value, _ in LOG_LEVEL_CHOICES]:
+        min_level = ""
+
+    text, offset, reset = logging_setup.read_since(since)
+    entries = logging_setup.parse_entries(text)
+    if min_level:
+        threshold = logging_setup.LEVELS.index(min_level)
+        entries = [e for e in entries if e["level"] in logging_setup.LEVELS
+                    and logging_setup.LEVELS.index(e["level"]) >= threshold]
+    entries = entries[-limit:]
+    fragment = render_template("sections/_log_entries.html", entries=entries)
+    return Response(
+        f'<div data-log-fragment data-log-offset="{offset}" '
+        f'data-log-reset="{1 if reset else 0}">{fragment}</div>',
+        mimetype="text/html", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/admin/logs/download")
+@login_required
+def admin_logs_download():
+    """Downloads one log file, or (with no name) every one of them concatenated
+    oldest-first - which is what someone means by "the full log" once rotation has
+    split it into four.
+
+    GET rather than POST: it has no side effects. `name` is resolved through
+    logging_setup.log_file_path(), which only ever returns a path for a name in its
+    own generated list, so this cannot be pointed at another file. max_age=0 for the
+    same reason the database backup uses it - a point-in-time file is not a
+    versioned asset, and SEND_FILE_MAX_AGE_DEFAULT is 30 days."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    name = request.args.get("name")
+    if name:
+        path = logging_setup.log_file_path(name)
+        if not path:
+            abort(404)
+        return send_file(path, mimetype="text/plain", as_attachment=True,
+                          download_name=f"status-portal-{name}-{stamp}.log", max_age=0)
+    if not logging_setup.log_files():
+        abort(404)
+    return Response(
+        stream_with_context(logging_setup.iter_all_log_bytes()),
+        mimetype="text/plain",
+        headers={"Content-Disposition":
+                  f'attachment; filename="status-portal-{stamp}.log"',
+                  "Cache-Control": "no-store"})
 
 
 @app.route("/admin/system")

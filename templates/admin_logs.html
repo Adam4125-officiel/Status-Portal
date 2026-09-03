@@ -1,0 +1,106 @@
+{% extends "admin_base.html" %}
+{% block title %}Logs — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Logs</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  What this portal has written to <code>{{ log_dir }}</code> — every background thread's
+  errors, the health-check loop, the Discord bot, the updater. Times are the server's own
+  clock, not your timezone, because that is how they are written to the file.
+</p>
+
+{% if not files %}
+<div class="form-panel">
+  <div class="empty-state">
+    No log file yet. Logging starts when the portal is launched with
+    <code>python app.py</code> or <code>python serve_waitress.py</code> — if you are
+    seeing this on a running portal, it was started some other way and nothing is
+    being recorded.
+  </div>
+</div>
+{% else %}
+
+<div class="form-panel log-panel">
+  <form method="GET" action="{{ url_for('admin_logs') }}" class="log-filters">
+    <label>
+      Show
+      <select name="limit">
+        {% for size in page_sizes %}
+        <option value="{{ size }}" {{ 'selected' if size == limit }}>{{ size }} entries</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Level
+      <select name="level">
+        {% for value, label in level_choices %}
+        <option value="{{ value }}" {{ 'selected' if value == min_level }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn secondary">Apply</button>
+    <a class="btn secondary" href="{{ url_for('admin_logs_download') }}">Download full log</a>
+    {# Hidden without JavaScript: with nothing to poll, a "Live" switch that does
+       nothing is worse than no switch at all. #}
+    <label class="log-live" hidden>
+      <input type="checkbox" checked data-log-live>
+      <span>Live</span>
+    </label>
+  </form>
+
+  {% if entries %}
+  <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 6px;" class="log-status">
+    Showing the most recent <span data-log-count>{{ entries|length }}</span>
+    entr{{ 'y' if entries|length == 1 else 'ies' }}{% if min_level %} at {{ min_level }} or above{% endif %},
+    oldest first. <span class="log-live-note" hidden>New entries appear here as they are written.</span>
+  </p>
+  {# data-log-offset is where the live tail resumes from: the byte length of the file
+     at render time. The poller hands it back, gets whatever was appended since, and
+     is given a new one - so the usual poll reads nothing at all. #}
+  <div class="log-view" data-log-view
+        data-log-offset="{{ offset }}"
+        data-log-url="{{ url_for('admin_logs_tail') }}"
+        data-log-limit="{{ limit }}"
+        data-log-level="{{ min_level }}">
+    {% include 'sections/_log_entries.html' %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    Nothing in the log matches that filter{% if min_level %} — no entries at {{ min_level }} or above{% endif %}.
+  </div>
+  {% endif %}
+</div>
+
+<div class="form-panel log-panel" style="margin-top: 16px;">
+  <h2 style="font-size: 15px; margin: 0 0 4px;">Log files</h2>
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
+    The log rotates at midnight and {{ retention_days }} day{{ '' if retention_days == 1 else 's' }}
+    are kept, so nothing here is older than that — set <code>PORTAL_LOG_RETENTION_DAYS</code>
+    to keep more. "Download full log" stitches every file below together, oldest first.
+  </p>
+  <div class="admin-table">
+    <table>
+      <thead><tr><th>File</th><th style="text-align: right;">Size</th><th></th></tr></thead>
+      <tbody>
+        {% for file in files %}
+        <tr>
+          <td><code>{{ file.name }}</code> <span style="color: var(--text-faint);">— {{ file.label }}</span></td>
+          <td style="text-align: right; font-family: var(--font-mono); font-size: 12px; white-space: nowrap;">
+            {{ (file.size_bytes / 1024) | round(1) }} KB
+          </td>
+          <td style="text-align: right;">
+            <a href="{{ url_for('admin_logs_download', name=file.name) }}">Download</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 0;">
+    {{ (total_bytes / 1024) | round(1) }} KB in total.
+  </p>
+</div>
+{% endif %}
+<script src="{{ asset_url('js/admin_logs.js') }}"></script>
+{% endblock %}
