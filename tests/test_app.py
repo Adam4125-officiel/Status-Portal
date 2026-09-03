@@ -1664,6 +1664,83 @@ def test_admin_logs_page_renders_with_no_log_file_yet(client, tmp_path, monkeypa
     assert b"No log file yet" in resp.data
 
 
+def test_admin_logs_tail_requires_login(client):
+    resp = client.get("/admin/logs/tail")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+
+
+def test_admin_logs_tail_returns_only_what_was_appended(client, tmp_path, monkeypatch):
+    """The whole point of the byte cursor: a poll on an idle portal transfers no
+    entries at all, and one after a new line transfers exactly that line."""
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    offset = app_module.logging_setup.log_size()
+
+    quiet = client.get(f"/admin/logs/tail?since={offset}")
+    assert quiet.status_code == 200
+    assert b"log-entry" not in quiet.data
+    assert f'data-log-offset="{offset}"'.encode() in quiet.data
+
+    with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
+        fh.write("2026-09-03 11:00:00,000 WARNING [app] something new\n")
+
+    resp = client.get(f"/admin/logs/tail?since={offset}")
+    assert b"something new" in resp.data
+    assert resp.data.count(b"log-entry") == 1  # not the entries that were already shown
+    assert b'data-log-reset="0"' in resp.data
+
+
+def test_admin_logs_tail_says_to_reset_when_the_file_rotated(client, tmp_path, monkeypatch):
+    """Midnight rotation leaves a shorter file, so the caller's cursor points past the
+    end of it - answering with a partial read would silently drop entries."""
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    (log_dir / "app.log").write_text(
+        "2026-09-04 00:00:01,000 INFO [app] fresh day\n", encoding="utf-8")
+
+    resp = client.get("/admin/logs/tail?since=999999")
+
+    assert b'data-log-reset="1"' in resp.data
+    assert b"fresh day" in resp.data
+
+
+def test_admin_logs_tail_applies_the_same_level_filter(client, tmp_path, monkeypatch):
+    log_dir = _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    offset = app_module.logging_setup.log_size()
+    with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
+        fh.write("2026-09-03 11:00:00,000 INFO [app] chatter\n"
+                  "2026-09-03 11:00:01,000 ERROR [app] real problem\n")
+
+    resp = client.get(f"/admin/logs/tail?since={offset}&level=ERROR")
+
+    assert b"real problem" in resp.data
+    assert b"chatter" not in resp.data
+
+
+def test_admin_logs_tail_ignores_a_junk_cursor(client, tmp_path, monkeypatch):
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    for cursor in ("", "abc", "-5", "../../etc/passwd"):
+        resp = client.get("/admin/logs/tail", query_string={"since": cursor})
+        assert resp.status_code == 200, cursor
+        assert b'data-log-reset="1"' in resp.data, cursor
+
+
+def test_admin_logs_page_carries_the_starting_offset(client, tmp_path, monkeypatch):
+    """Without it the first poll has no cursor, resets, and re-renders everything
+    that is already on screen."""
+    _seed_logs(tmp_path, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+    resp = client.get("/admin/logs")
+
+    assert f'data-log-offset="{app_module.logging_setup.log_size()}"'.encode() in resp.data
+
+
 def test_admin_logs_download_streams_every_file_oldest_first(client, tmp_path, monkeypatch):
     _seed_logs(tmp_path, monkeypatch, {"app.log": "newest\n", "app.log.1": "older\n"})
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})

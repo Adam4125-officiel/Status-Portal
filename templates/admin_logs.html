@@ -41,18 +41,29 @@
     </label>
     <button type="submit" class="btn secondary">Apply</button>
     <a class="btn secondary" href="{{ url_for('admin_logs_download') }}">Download full log</a>
+    {# Hidden without JavaScript: with nothing to poll, a "Live" switch that does
+       nothing is worse than no switch at all. #}
+    <label class="log-live" hidden>
+      <input type="checkbox" checked data-log-live>
+      <span>Live</span>
+    </label>
   </form>
 
   {% if entries %}
-  <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 6px;">
-    Showing the most recent {{ entries|length }}
-    {{ 'entry' if entries|length == 1 else 'entries' }}{% if min_level %} at {{ min_level }} or above{% endif %},
-    oldest first.
+  <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 6px;" class="log-status">
+    Showing the most recent <span data-log-count>{{ entries|length }}</span>
+    entr{{ 'y' if entries|length == 1 else 'ies' }}{% if min_level %} at {{ min_level }} or above{% endif %},
+    oldest first. <span class="log-live-note" hidden>New entries appear here as they are written.</span>
   </p>
-  <div class="log-view">
-    {% for entry in entries %}
-    <pre class="log-entry{% if entry.level %} log-{{ entry.level|lower }}{% endif %}">{{ entry.text }}</pre>
-    {% endfor %}
+  {# data-log-offset is where the live tail resumes from: the byte length of the file
+     at render time. The poller hands it back, gets whatever was appended since, and
+     is given a new one - so the usual poll reads nothing at all. #}
+  <div class="log-view" data-log-view
+        data-log-offset="{{ offset }}"
+        data-log-url="{{ url_for('admin_logs_tail') }}"
+        data-log-limit="{{ limit }}"
+        data-log-level="{{ min_level }}">
+    {% include 'sections/_log_entries.html' %}
   </div>
   {% else %}
   <div class="empty-state">

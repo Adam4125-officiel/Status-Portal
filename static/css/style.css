@@ -1479,6 +1479,12 @@ footer.foot {
 .log-view {
   max-height: 60vh;
   overflow: auto;
+  /* The live tail trims entries off the top, and browsers that implement scroll
+     anchoring silently adjust scrollTop to compensate - while Safari, which doesn't
+     implement it, would not. admin_logs.js does that compensation itself so the
+     behaviour is the same everywhere; leaving anchoring on as well applied it twice
+     in Chrome and slid the text down by the height of whatever was trimmed. */
+  overflow-anchor: none;
   background: var(--bg-panel-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1498,5 +1504,15 @@ footer.foot {
   border-left: 3px solid transparent;
 }
 .log-entry + .log-entry { border-top: 1px solid var(--border); }
+.log-live {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-bottom: 7px;
+}
+.log-live-note { color: var(--text-faint); }
 .log-warning { border-left-color: var(--warn); color: var(--text); }
 .log-error, .log-critical { border-left-color: var(--crit); color: var(--text); }

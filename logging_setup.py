@@ -210,6 +210,43 @@ def read_tail(path, max_bytes=TAIL_MAX_BYTES):
     return blob.decode("utf-8", errors="replace")
 
 
+def log_size(path=None):
+    """Byte length of the current log, or 0 if there isn't one yet. This is the
+    "where have I read up to" cursor the live tail hands back and forth: a log file
+    is append-only, so a byte offset is the cheapest possible way to ask "anything new
+    since?" - the usual answer costs one getsize() and no reading at all."""
+    try:
+        return os.path.getsize(path or LOG_FILE)
+    except OSError:
+        return 0
+
+
+def read_since(offset, path=None, max_bytes=TAIL_MAX_BYTES):
+    """Everything appended since byte `offset`, as (text, new_offset, reset).
+
+    `reset` tells the caller its cursor was no good and the text is a fresh tail
+    rather than an increment - which happens when the file rotated at midnight (the
+    new one is shorter than the offset), was truncated, or when so much has been
+    written since the last poll that honouring the cursor would mean handing back an
+    unbounded read. In every one of those cases the honest answer is "start again",
+    not a silently partial one."""
+    path = path or LOG_FILE
+    size = log_size(path)
+    if offset is None or offset < 0 or offset > size or size - offset > max_bytes:
+        return read_tail(path, max_bytes), size, True
+    if size == offset:
+        return "", size, False  # the common case: nothing new, nothing read
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            blob = fh.read(size - offset)
+    except OSError:
+        return "", size, False
+    # The offset is always a previous end-of-file, so it sits on a line boundary and
+    # no partial-line trimming is needed here (unlike read_tail's blind seek).
+    return blob.decode("utf-8", errors="replace"), size, False
+
+
 def parse_entries(text):
     """Groups raw log text into entries: one dict per logged event, with any
     continuation lines (a traceback, most often) kept attached to the entry they

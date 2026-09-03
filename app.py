@@ -2690,13 +2690,62 @@ def admin_logs():
         min_level = ""
 
     files = logging_setup.log_files()
+    # Read the offset *before* the entries: anything written between the two is then
+    # picked up by the first live poll, where taking it after would silently skip it.
+    offset = logging_setup.log_size()
     entries = logging_setup.tail_entries(limit=limit, min_level=min_level or None)
     return render_template(
-        "admin_logs.html", entries=entries, files=files, limit=limit,
+        "admin_logs.html", entries=entries, files=files, limit=limit, offset=offset,
         min_level=min_level, page_sizes=LOG_PAGE_SIZES, level_choices=LOG_LEVEL_CHOICES,
         total_bytes=sum(f["size_bytes"] for f in files),
         log_dir=logging_setup.LOG_DIR, retention_days=config.LOG_RETENTION_DAYS,
         active="logs")
+
+
+@app.route("/admin/logs/tail")
+@login_required
+def admin_logs_tail():
+    """Whatever has been written to the log since the caller's byte offset, as a
+    server-rendered HTML fragment - the same partial the full page renders, so a
+    live-appended entry can't look different from one that was there on load. Same
+    convention as /api/incidents/more; this app has one JSON API and no client-side
+    templating.
+
+    Polled rather than streamed. An SSE or WebSocket endpoint would hold a request
+    thread per open page for as long as it stays open, and waitress runs a fixed pool
+    of them (config.WAITRESS_THREADS) - a couple of forgotten admin tabs would eat
+    the pool that serves the actual portal. A poll that usually costs one getsize()
+    and reads nothing is the cheaper answer by a wide margin.
+
+    The response carries the new offset, and whether the caller should replace its
+    contents rather than append (the file rotated, was truncated, or so much arrived
+    that honouring the cursor would mean an unbounded read)."""
+    try:
+        since = int(request.args.get("since", ""))
+    except ValueError:
+        since = None
+    try:
+        limit = int(request.args.get("limit", 200))
+    except ValueError:
+        limit = 200
+    if limit not in LOG_PAGE_SIZES:
+        limit = 200
+    min_level = request.args.get("level", "")
+    if min_level not in [value for value, _ in LOG_LEVEL_CHOICES]:
+        min_level = ""
+
+    text, offset, reset = logging_setup.read_since(since)
+    entries = logging_setup.parse_entries(text)
+    if min_level:
+        threshold = logging_setup.LEVELS.index(min_level)
+        entries = [e for e in entries if e["level"] in logging_setup.LEVELS
+                    and logging_setup.LEVELS.index(e["level"]) >= threshold]
+    entries = entries[-limit:]
+    fragment = render_template("sections/_log_entries.html", entries=entries)
+    return Response(
+        f'<div data-log-fragment data-log-offset="{offset}" '
+        f'data-log-reset="{1 if reset else 0}">{fragment}</div>',
+        mimetype="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/admin/logs/download")

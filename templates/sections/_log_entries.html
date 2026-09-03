@@ -1,0 +1,7 @@
+{# The log entries themselves, rendered by both the full page and /admin/logs/tail so
+   a live-appended entry cannot look different from one that was there on load. Same
+   convention as sections/_incidents_fragment.html: a route returns server-rendered
+   HTML, not JSON - this app has one JSON API and no client-side templating. #}
+{% for entry in entries %}
+<pre class="log-entry{% if entry.level %} log-{{ entry.level|lower }}{% endif %}">{{ entry.text }}</pre>
+{% endfor %}

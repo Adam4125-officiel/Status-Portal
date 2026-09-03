@@ -1145,9 +1145,30 @@ DB-backed Settings pages, not a code edit.
   goes offline, which is the line that helper is scoped to. It is admin-only via
   `login_required` like everything else under `/admin/`, which matters, because the
   log quotes paths, user names and error text from every integration.
-- **The page has no JavaScript.** The filters are a plain `GET` form with an Apply
-  button rather than a `<select onchange>`, matching the dependency-free admin-side
-  convention. `.log-panel` opts out of `.form-panel`'s 560px cap on purpose: that cap
+- **The view is live, by polling `/admin/logs/tail` for an HTML fragment** — same
+  convention as `/api/incidents/more` (server-rendered fragment, not JSON), and the
+  *same partial* the full page renders, so a live-appended entry cannot look
+  different from one that was there on load. **Don't replace this with SSE or a
+  WebSocket**: either holds a request thread per open page for as long as it stays
+  open, and waitress runs a fixed pool (`config.WAITRESS_THREADS`) — a couple of
+  forgotten admin tabs would eat the pool that serves the actual portal. The poll
+  hands back a **byte offset** and gets only what was appended since, so the usual
+  tick reads nothing at all; `read_since()` reports `reset` when that cursor is no
+  good (midnight rotation, truncation, or a burst big enough that honouring it would
+  mean an unbounded read) and the client replaces instead of appending.
+- **Three scroll rules, and all three were asked for explicitly.** Follow the newest
+  entry; if the reader has scrolled up, keep streaming but **don't** yank them down;
+  when they scroll back to the end, re-sync — which falls out of re-checking
+  "am I at the bottom" on every tick rather than tracking a mode. **`.log-view` sets
+  `overflow-anchor: none` on purpose**: trimming entries off the top makes browsers
+  that implement scroll anchoring adjust `scrollTop` themselves, and Safari (which
+  doesn't implement it) would not — so the compensation is done in JS for everyone,
+  and leaving anchoring on applied it twice and slid the text down by the height of
+  whatever was trimmed. Found in a browser; no unit test would have seen it.
+- **The page needs JavaScript only for the live tail.** The filters are a plain `GET`
+  form with an Apply button rather than a `<select onchange>`, matching the
+  dependency-free admin-side convention, and the Live switch is hidden unless JS
+  reveals it — a switch that does nothing is worse than no switch. `.log-panel` opts out of `.form-panel`'s 560px cap on purpose: that cap
   is right for a form and wrong for a log, where every extra pixel is one less
   wrapped traceback line. The log box scrolls inside itself (`overflow: auto` +
   `white-space: pre-wrap`) so a long line never pushes the page sideways — verified
