@@ -384,6 +384,22 @@ detecting the dead thread and reporting "bot was not running; started it", and t
 restart button returning a clean success. The wedged-loop case itself is covered by a
 test that fails on the previous implementation, not by a live repro.
 
+### Verification record — the bot fixes, real Discord server, 2026-09-03
+
+The user ran v1.8.3-rc.1 against their own portal and their own Discord bot and
+reported it working end to end, specifically calling out the watchdog. That covers
+the parts this sandbox cannot: a real gateway connection, the watchdog acting on a
+real bot, and the restart path against a connection that genuinely exists.
+
+**What that does and does not settle.** It settles the restart path and the watchdog.
+It does *not* settle why the bot was dropping in the first place — the heartbeat
+starvation theory (see above) predicts exactly this outcome, but so would several
+other things, and "it stopped happening" is not a cause. The theory is deliberately
+kept written down rather than closed out, with the two log lines that would confirm
+it, because the cheapest moment to test it is the next time it recurs; there is a
+matching entry in `ROADMAP.md` → "Known issues to investigate" so it isn't only
+recorded in an archive nobody reads until something breaks.
+
 ---
 
 ## Self-update

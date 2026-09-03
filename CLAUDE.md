@@ -50,8 +50,11 @@ bugs in `docs/HISTORY.md` passed their unit tests.
 
 **Two companion files:**
 
-- `ROADMAP.md` — open feature ideas. This file is about *how the existing code works
-  and how to work on it*, not what's left to build.
+- `ROADMAP.md` — open feature ideas, plus symptoms whose cause is still unknown.
+  It carries only what is *left*: a shipped idea's write-up is deleted from it (an
+  index line at the bottom is all that stays) precisely because this file and
+  `docs/HISTORY.md` are the better record once code exists. This file is about *how
+  the existing code works and how to work on it*, not what's left to build.
 - `docs/HISTORY.md` — the narrative archive: how past bugs actually presented, what
   the broken versions did, and what has been verified against real hardware / a real
   Discord server / real instances, and when. Rules live here in `CLAUDE.md`; the
@@ -760,7 +763,10 @@ DB-backed Settings pages, not a code edit.
   stuck in a reconnect loop never looked overdue to `watchdog()`.
 - **What is and isn't verified against a real Discord server**: `/snapshot` (and
   therefore slash-command registration and the command handler) is confirmed working
-  live. Still unconfirmed for real: the guild whitelist's actual `guild.leave()` call,
+  live, as are the v1.8.3 restart fix and the watchdog (user-confirmed end to end,
+  2026-09-03) — but **not** the heartbeat-starvation theory for *why* the bot was
+  dropping, which stays an open suspicion with the log lines that would confirm it
+  recorded in `ROADMAP.md` → "Known issues to investigate". Still unconfirmed for real: the guild whitelist's actual `guild.leave()` call,
   the server/channel management page's gateway-cache snapshot, and the
   restart-survives-message-editing behavior for the tracked `/status` message — all
   unit-tested with mocked Discord objects only. Don't assume "the bot" is confirmed

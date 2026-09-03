@@ -21,7 +21,8 @@ the full feature list and integrations at a glance.
   one-click requesting of anything not already in the library
 - Public **"Report a problem"** form, feeding an admin Reports page
 - Optional Discord/ntfy/**email** notifications, plus an optional Discord bot
-  (self-editing status message, `/snapshot` command)
+  (self-editing status message, `/snapshot` command, and a watchdog that reconnects
+  it by itself if the connection drops)
 - Optional **two-factor authentication** (TOTP) for the admin login
 - Host restart/shutdown and per-VM controls (Windows/Hyper-V), plus app/bot restart,
   from the admin panel

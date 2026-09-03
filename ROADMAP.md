@@ -1,93 +1,18 @@
-# Candidate features
+# Roadmap
 
-**Eight of the items below were built in v1.8.0 (2026-08-21)** and are marked
-**BUILT** where they appear. They're kept here rather than deleted so the reasoning
-that went into them stays findable; `CLAUDE.md` documents how each one actually works,
-and `docs/HISTORY.md` records what was and wasn't verified.
+What is still open, and why — with a rough priority and effort (**S**mall /
+**M**edium / **L**arge) on each, plus the reasoning behind them, so someone new to
+the repo can see *why* an idea landed where it did rather than just where.
 
-Still open: the external connectivity check, the stuck-download alert, admin-on-a-
-separate-port, the Jellyfin visibility model, the Linux-native monitoring backend,
-the Discord bot's search/request commands, Windows packaging and auto-start, and
-one open bug investigation (the Discord bot stopping and not restarting).
+**This file is only about what is left.** Ideas that have been built are listed in
+one line each under "Already shipped" at the bottom; their design write-ups were
+removed once the code existed, because a roadmap that keeps them reads as a much
+longer list of open work than there is. What replaced each write-up is better
+anyway: `CLAUDE.md` documents how the built thing actually works and what must not
+be broken, and `docs/HISTORY.md` records how its bugs presented and what has been
+verified against real hardware.
 
-Ideas discussed with Adam, written up so they can slot straight into
-`ROADMAP.md`. Each one lists a rough priority and implementation effort
-(**S**mall / **M**edium / **L**arge) alongside the reasoning, not just the
-label — the point is that someone new to the repo can see *why*, not just
-where it landed.
-
-## Solid features
-
-Contained but touch the schema or add a genuinely new concept.
-
-### Restore from backup — **BUILT (v1.8.0)**
-The counterpart to the "download a backup" button (built — see CLAUDE.md).
-Let an admin upload a previously-downloaded backup zip and have the portal
-restore `instance/portal.db` from it. Meaningfully riskier than the export
-button: this is a "replace the entire live database from an upload"
-primitive, so it needs real safety machinery, not just a file swap —
-validate the uploaded file is actually a well-formed SQLite database before
-touching anything, take a fresh safety snapshot of the *current* database
-first (reusing `db.backup_to_file()`) so a bad upload doesn't leave the
-admin with nothing to fall back on, atomically replace the file, then
-restart the process (`os.execv`, same pattern as `app._restart_process()`)
-so no stale connection keeps writing to the old file handle. Should go
-through `app._require_totp()` step-up re-authentication like the other
-destructive admin actions (host restart/shutdown, app restart, self-update)
-— a stolen session cookie alone must not be enough to replace the whole
-database.
-
-**Priority:** Medium · **Effort:** S-M — the individual pieces (upload
-handling, SQLite validation, atomic file replace, process restart) all
-already exist elsewhere in this codebase to reuse, but assembling them
-safely is the real work. Treat it with the same care as the self-updater,
-not as a quick add — it's the riskiest idea in this document, not the
-easiest.
-
-**Where it should live**: see "Updater quality-of-life" below — the argument
-there is that someone reaching for a restore is usually recovering from
-something, and will look on the About page next to rollback rather than in
-Settings. Same feature, one implementation.
-
-### Updater quality-of-life: release notes in the app, and restore from a backup zip — **BUILT (v1.8.0)**
-Two related improvements to `/admin/about`, which today tells you *that* an
-update exists but nothing about what's in it, and can roll code back but not
-data.
-
-**Show the changelog.** The GitHub releases API already returns each
-release's `body` (the changelog written at release time) in the same
-response `updater.py` parses for the version and download URL — so surfacing
-"what's in the update you're being offered" costs one extra field, not one
-extra request. Worth showing **both**: the notes for the version you're
-running and the notes for the version on offer, so "should I take this?" is
-answerable without leaving the page. If several releases have accumulated,
-showing the notes for each version *between* the two is the more useful
-version of this, and needs the releases list rather than just the latest —
-which `updater.py` already fetches. The body is Markdown and arrives from
-the network, so it must be rendered through something escaping-safe rather
-than dropped into the page as HTML — the existing `richtext` filter is the
-obvious starting point, and deliberately supports far less than Markdown.
-
-**Restore the database from a backup zip.** The counterpart to the existing
-"download a backup" button, offered where the other recovery machinery
-already lives instead of buried in Settings. **This is the same feature as
-"Restore from backup" above** — see that entry for the safety machinery it
-needs (validate the upload really is a SQLite database before touching
-anything, snapshot the *current* database first, atomic replace, restart the
-process, step-up 2FA). Treat this entry as "and put it on the About page
-next to rollback, where someone recovering from a bad update will actually
-look for it", not as a second, simpler implementation.
-
-Worth keeping the two kinds of backup distinct in the UI while doing it,
-because conflating them would be a genuinely bad mistake: `updater.py`'s
-backups are of **application code**, for rolling back a bad update, and
-contain no data; the Settings backup button produces a **database** zip and
-contains nothing else. Neither can restore the other.
-
-**Priority:** Medium-High for the changelog (small, and it improves every
-future update decision) · Medium for the restore half · **Effort:** S for
-the changelog; S-M for the restore, all of which is in the risk of
-assembling it rather than the amount of code.
+## Features
 
 ### External internet connectivity check
 Pings a fixed external target (1.1.1.1 by default, ideally configurable) on
@@ -101,167 +26,12 @@ call not chasing five separate incidents that are actually one.
 loop, plus a new status concept that isn't tied to any one service and needs
 its own banner/UI treatment on the public page.
 
-### Version-checker for the *Arr apps themselves — **BUILT (v1.8.0)**
-Radarr, Sonarr and Prowlarr each expose their own current version and can be
-checked against their latest GitHub release — the same way this app already
-checks its own version for self-updates. This would surface "Radarr has an
-update available" in the admin panel, read-only, no auto-update of those
-apps involved, just visibility, so nobody's manually checking three separate
-web UIs to know if anything's behind.
-
-**Priority:** Medium · **Effort:** M — the version-comparison logic in
-`updater.py` is already there to reuse, but each app has its own
-releases API/format to query and parse.
-
-### Per-user notifications: Discord DM and email — **BUILT (v1.8.0)**
-The portal already notifies *the admin* (Discord webhook, ntfy). This is the
-other direction: telling **the person who asked** when something they care
-about happens — their problem report got a reply or was turned into an
-incident, a request they made moved on, or maintenance is starting on a
-service they use.
-
-Two delivery channels, and the interesting part is **where the addresses come
-from**. Seerr already holds an email address and a Discord user ID for each of
-its users, entered once by them. Reading those rather than asking again is the
-difference between "set up notifications" being a chore and being invisible.
-So:
-
-1. If the signed-in Jellyfin user matches a Seerr user with contact details
-   already filled in, use those.
-2. If not, ask on the account page (which already has a contact field to grow
-   into) — and offer to **push it back to Seerr**, so the user enters it once
-   for both systems rather than maintaining two copies that drift.
-
-Worth deciding before building:
-
-- **Matching a Jellyfin user to a Seerr user.** Seerr can import Jellyfin
-  accounts, in which case there's a real link to follow; if it hasn't, matching
-  on email or username is guesswork and should probably just fall back to
-  asking. Getting this wrong means sending someone else's notifications to the
-  wrong person, so it should fail closed.
-- **Writing back to Seerr is the first time this portal would modify another
-  service.** Everything today is read-only except Jellyfin authentication.
-  That's a real line to cross deliberately, with the user's explicit consent in
-  the UI, not a silent sync.
-- **Per-event opt-in, per user.** Nobody wants a DM for every maintenance
-  window on every service. The natural granularity is "things about my own
-  reports" (almost always wanted) versus "anything about services I use"
-  (usually not), so default the first on and the second off.
-- **Sending is outbound I/O and belongs in a scheduled task or the existing
-  background thread**, never inline in the request that triggered it — the same
-  rule every other outbound call in this app follows.
-
-Email needs the SMTP configuration block described in "Email notifications"
-below; the Discord DM path needs `discord_bot.py` to DM a user, which is a
-different code path from its current guild/channel posting (the same one the
-Seerr approval alert further down needs, so build it once).
-
-**Priority:** Medium-High · **Effort:** L — two delivery channels, a matching
-problem with a real failure mode, a write-back to another service, and a
-per-user preferences surface. Best split: Discord DM first (the bot is already
-there), email second (needs the SMTP config below), Seerr contact reuse last,
-since it's the only part that can be wrong in a way that matters.
-
-### Email notifications — **BUILT (v1.8.0)**
-A third notification channel alongside the existing Discord webhook and
-ntfy, for incident/maintenance events. Needs an SMTP configuration block in
-`.env` (host, port, credentials, from-address) and a plain-text/HTML
-template — meaningfully more setup surface than the URL-only Discord/ntfy
-options. Worth it for anyone using neither of those, but it's a new
-dependency and a new way for things to be misconfigured.
-
-**Priority:** Medium · **Effort:** M — new config surface, a new dependency,
-and a template; the "when to send" logic itself doesn't change.
-
-## Bigger undertakings
-
-New integrations or genuinely stateful logic — worth doing, but each is a
-project of its own rather than an afternoon.
-
-### Radarr + Prowlarr + qBittorrent integration — **BUILT (v1.8.0)**
-Three new read-only integrations feeding a new section: what's coming up
-(Radarr's release calendar), what's been requested and its current state,
-and what's actively downloading right now with progress. Note that
-qBittorrent authenticates with a username/password login rather than an API
-key, so its integration looks more like Byparr/Tdarr's setup than
-Radarr/Sonarr's. Most valuable once Jellyfin-backed user permissions exist
-(below) — at that point "requested items" and "active downloads" could be
-scoped per Jellyfin account instead of shown flat to everyone — but there's
-no hard dependency between them; this can be built and shown flat first.
-
-**Priority:** Medium-High · **Effort:** L — three integrations with two
-different auth shapes, new parsing per app, and new UI sections on top of
-the existing `integrations.py` pattern.
-
-### Unified search across Jellyfin and Seerr (signed-in users only) — **BUILT (v1.8.0)**
-One search box on the public page that queries **Jellyfin** and **Seerr**
-at the same time and merges the results, so a visitor asks "do we have X?"
-once instead of checking two places. Each result then offers the action that
-actually applies to it: already in the library → a direct link straight to
-that item in Jellyfin; not in the library → request it through Seerr without
-leaving the portal.
-
-**Sequenced after the calendar/downloads integration above**, not before —
-that work brings the Seerr and *Arr API surface into this codebase, and
-building search first would mean writing half of it twice.
-
-**Signed-in users only** (the Jellyfin auth built in v1.7.0 is exactly what
-makes this possible). Three reasons that restriction isn't arbitrary: the
-result set reveals your whole library to anyone who can load the page;
-requesting is a write action against Seerr and needs to be attributable to a
-person; and a search box wired to two external APIs is a free
-denial-of-service amplifier if it's open to the internet. Rate-limit it
-per session on top.
-
-Two things to decide before building:
-
-- **Whose Seerr account requests it.** Simplest is one shared Seerr API key,
-  with the portal recording which Jellyfin user asked — but then Seerr's own
-  approval queue can't tell them apart. Seerr can also import Jellyfin users,
-  in which case requesting *as* the matching Seerr user is possible and much
-  better. Worth checking which is true of the actual setup before choosing.
-- **Search has to stay off the request path's slow-I/O rule.** Unlike every
-  other outbound call in this app, a search genuinely cannot be answered from
-  a background-refreshed cache — the query is unknown until someone types it.
-  This would be the first *legitimate* live outbound call from a request
-  handler, so it needs its own short timeout and a clear "search is
-  unavailable right now" degradation, rather than quietly breaking the rule.
-
-**Priority:** Medium · **Effort:** L — two APIs, a merge/dedupe step (the
-same title from both sources must not appear twice), a write action, a new
-UI, and the auth/rate-limiting story above.
-
-### Prowlarr per-indexer health — **BUILT (v1.8.0)**
-Prowlarr's own API already reports each configured indexer's individual
-state (healthy / down / rate-limited), not just whether Prowlarr itself is
-reachable. Surfacing that per-indexer list matters because "Prowlarr is up"
-hides the failure mode that actually happens in practice — one or two
-indexers going stale or getting rate-limited while Prowlarr itself runs
-fine.
-
-**Priority:** Medium · **Effort:** M-L — depends on, or extends, the
-Prowlarr integration above; needs its own endpoint parsing and a small
-per-indexer list in the UI.
-
-### Seerr pending-approval count + Discord DM to admins — **BUILT (v1.8.0)**
-Polls Seerr for requests awaiting approval and surfaces a count, plus has
-the Discord bot DM admins directly (not post to a channel) when a new one
-comes in. Two things worth deciding before building: whether the count is
-admin-only or shown publicly (leaning admin-only — it's operational
-information, not a status signal), and how the DM target list is configured
-(likely reusing the existing comma-separated Discord user ID pattern from
-the `/status`/`/snapshot` authorization).
-
-**Priority:** Medium · **Effort:** M — Seerr API polling is straightforward,
-but DMing specific users is a different code path from the bot's current
-guild/channel posting in `discord_bot.py`.
-
 ### Stuck-download alert
 Flags a download (a qBittorrent torrent, or a *Arr download-client task)
 that hasn't made progress in longer than an admin-configured window —
 usually the sign of a dead indexer or a stalled torrent nobody's noticed.
-Sent as a Discord DM to admins, the same delivery path as the Seerr approval
-alert above.
+Sent as a Discord DM to admins, reusing the delivery path the Seerr approval
+alert already uses.
 
 **Priority:** Medium · **Effort:** M-L — unlike the other integrations,
 which just check current state, this needs to track progress *across*
@@ -337,13 +107,9 @@ exists and are the two people would use daily · **Effort:** M for the two read
 commands; M-L including `/request`, almost all of it in extracting the submit path
 out of `app.py` cleanly rather than in the Discord surface itself.
 
----
+## Architecture
 
-## Architectural ideas (carried over from the repo's own ROADMAP.md)
-
-These were already scoped in more detail before this document existed —
-kept here, with priority/effort added, so nothing gets lost when the old
-`ROADMAP.md` content is replaced.
+Each of these changes the shape of the app rather than adding to it.
 
 ### Serve the admin panel on a separate port/subdomain from the public page
 Right now `/admin/*` and the public page are the same Flask app on the same
@@ -377,7 +143,7 @@ behaviour unless that's handled deliberately.
 already decided; it's mostly wiring a second listener and one
 `before_request` gate.
 
-### Jellyfin-backed user permissions — auth layer DONE (v1.7.0), visibility model still open
+### Per-content visibility for signed-in Jellyfin users
 The **authentication half is built** (2026-08-21): visitors sign in with
 their Jellyfin username and password, backed by a scheduled task that caches
 Jellyfin's user list locally so an outage never signs anybody out. See
@@ -402,8 +168,8 @@ instructions shown only to people who actually have an account.
 
 **Priority:** Medium · **Effort:** M for a three-way visibility flag on the
 existing content types; L if per-user rules are genuinely wanted. It is also
-what the Radarr/Prowlarr/qBittorrent integration above would build on to
-scope "requested items" and "active downloads" per account.
+what the media section (requests, active downloads) would build on to scope
+what it shows per account instead of showing everyone everything.
 
 ### Linux-native `monitoring.py` backend/fork
 Almost everything in this app is already OS-agnostic — services, incidents,
@@ -424,13 +190,11 @@ direct port, since Hyper-V doesn't exist on Linux.
 Windows/Hyper-V; mainly relevant if this app is ever run on a Linux host
 instead.
 
----
-
 ## Packaging and deployment (Windows)
 
-Everything here is about the gap between "the code is correct" and "a person has
-it running on their machine and it comes back after a reboot". Nothing in this
-section changes what the app does; all of it changes who can run it.
+Everything here is about the gap between "the code is correct" and "a person has it
+running on their machine and it comes back after a reboot". Nothing in this section
+changes what the app does; all of it changes who can run it.
 
 ### A Windows installer (`.exe`)
 One download that puts a working portal on a machine: Python and the
@@ -499,8 +263,8 @@ setup effort:
 3. **A Startup-folder shortcut.** Only runs once somebody logs in interactively,
    and dies with that session. Mentioned to be ruled out.
 
-Two things worth knowing before doing this, both of which are easy to discover
-the hard way:
+Three things worth knowing before doing this, all of them easy to discover the
+hard way instead:
 
 - **`_restart_process()` was built in a way that survives supervision.** It uses
   `os.execv`, which replaces the process image *in place, keeping the same PID* —
@@ -528,78 +292,88 @@ the hard way:
 power cut and not) · **Effort:** S with a wrapper (`WinSW`/`NSSM` plus an
 installer step and a documentation page) · S for the scheduled-task fallback.
 
----
-
 ## Known issues to investigate
 
-Reported symptoms whose cause is not yet established. Written down so the next
-session starts from what was already ruled out rather than from scratch.
+Symptoms whose cause is not established. Written down so the next session starts
+from what was already ruled out rather than from scratch.
 
-### The Discord bot stops and never comes back until the whole app is restarted
-**Symptom (reported 2026-09-03):** the bot goes offline on its own after running
-for a while. The admin panel shows it as not connected. **Restarting the bot from
-`/admin/system` does not fix it** — only restarting the entire process does,
-either from the app-restart button or by hand.
+### The Discord bot disconnecting on its own — half explained
 
-That second half is the useful clue, because it splits the problem in two, and
-they are almost certainly independent:
+**Half of this was fixed and verified in v1.8.3** (2026-09-03): restarting the bot
+from `/admin/system` used to do nothing, because a wedged event loop left the old
+connection recorded as still running and `start()` refuses to run while one is. That
+part is closed — see `docs/HISTORY.md` → "The restart button that did nothing".
 
-**Why the restart button doesn't help** has a concrete candidate visible in the
-code. `stop()` schedules `client.close()` onto the bot's own event loop and waits
-on `.result(timeout=10)`; if that loop is wedged the wait raises, is caught and
-logged, `thread.join(timeout)` then returns with the thread still alive — and
-`_runtime["client"]` is never cleared, because only `_run()`'s `finally` block
-does that and `_run()` never finishes. `restart()` immediately calls `start()`,
-which begins with `if _runtime["client"] is not None: return`. The result is a
-button that appears to work, reconnects nothing, and stays that way until the
-process image is replaced. Instrument this before fixing it: log whether the
-close future timed out and whether the thread actually joined, and surface
-`thread.is_alive()` / whether `_runtime` is still populated on `/admin/system`,
-so the next occurrence answers the question instead of prompting another guess.
+**The other half is still a suspicion, deliberately written down rather than
+declared solved.** Why the bot dropped in the first place was never proven. The
+leading theory is heartbeat starvation: everything the refresh tick read
+(`build_status_data()`'s dozen SQLite queries, plus
+`monitoring.get_resource_snapshot()`'s blocking psutil CPU sample and its
+`disk_usage()` walk of every mountpoint) ran on the same event loop that answers
+Discord's heartbeat. Enough missed heartbeats and Discord drops the session. All of
+that now runs off the loop, which is correct regardless — but "the symptom stopped"
+is not the same as "that was the cause", and a v1.8.3 that runs for weeks without
+dropping is evidence, not proof.
 
-**Why it disconnects in the first place** is the open question. discord.py
-reconnects on its own, so a permanent drop usually means the event loop stopped
-being able to answer the gateway. The first thing to check is
-`instance/logs/app.log` for discord.py's own warnings — "heartbeat blocked" or
-"Shard ID None has stopped responding to the gateway" name the cause directly,
-and logging is configured globally so they will already be there if it happened.
-The leading suspect is blocking work inside a coroutine: the refresh loop and the
-command callbacks do synchronous database and cache reads on the event loop
-thread. Under a slow disk or a locked database that is exactly how a heartbeat
-gets missed.
+**What would settle it**, if it ever happens again: `instance/logs/app.log` will
+contain discord.py's own `heartbeat blocked` or `Shard ID None has stopped
+responding to the gateway` if the loop was starved. Neither line present means the
+cause is something else entirely, and the log either side of that timestamp is the
+thing to read. The watchdog task (`/admin/tasks` → "Discord bot watchdog") also
+records each time it had to step in, which is a second, coarser signal that
+something is still dropping.
 
-**Anything added here must not become a workaround that hides the cause.** A
-watchdog (notice `_state["connected"]` has been false for N minutes, call
-`restart()`) is a reasonable safety net *after* the restart path is trusted to
-actually work — before that, it's a loop that calls a no-op.
+**Priority:** Low while it stays fixed in practice; High again the moment it
+recurs · **Effort:** unknown until there are logs — which is exactly why this
+entry exists rather than a guess at a fix.
 
-**Not reproducible in this sandbox**: there is no real Discord gateway here, so
-anything in this area is reasoned from the code and from logs the user can
-supply, not from a live repro.
+## Already shipped
 
-**Priority:** High — a monitoring bot that silently stops is worse than one that
-was never set up · **Effort:** S for the restart path (a bounded, readable fix
-plus the diagnostics to confirm it) · unknown for the disconnect itself until
-there are logs.
+Kept as an index, not a write-up. Each one's design decisions and its "don't break
+this" rules are in `CLAUDE.md`; how its bugs actually presented is in
+`docs/HISTORY.md`.
 
----
+**v1.7.0** (2026-08-21)
+- Jellyfin-backed visitor sign-in, and the account page that came with it. The
+  *permissions* half is still open — see "Per-content visibility" above.
+- The scheduled-task framework (`scheduler.py`), which is why nothing since has
+  needed another background thread.
+
+**v1.8.0** (2026-08-21)
+- Restore the database from a backup zip, on the About page next to rollback.
+- Release notes shown in-app, for the running version and everything newer.
+- Version checks for the *Arr apps, Jellyfin and Seerr against their own releases.
+- Per-user notifications by Discord DM and email, with contact details reused from
+  Seerr rather than asked for twice.
+- Email as a third notification channel.
+- Radarr/Sonarr calendar, Seerr requests, qBittorrent downloads and Prowlarr's
+  per-indexer health, as one media section.
+- Unified search across Jellyfin and Seerr for signed-in visitors, with requesting.
+- Seerr pending-approval count, and a Discord DM to admins when one arrives.
+
+**v1.8.3** (2026-09-03)
+- The Discord bot restart path, and a watchdog that brings the bot back on its own.
+  The disconnect's underlying cause is still open — see "Known issues" above.
 
 ## Overall take
 
-Most of this document is now built (v1.8.0 took eight of these items). What
-remains is genuinely different in character rather than more of the same. **Restore from backup** is the
-one item worth flagging out of proportion to its Medium priority: it's the
-riskiest thing in this document precisely because its counterpart (export)
-was so easy — don't let that make restore feel like a quick add too. Of the
-three architectural carry-overs, **Jellyfin auth's authentication half is now
-built** (v1.7.0) and only its visibility model is still an open design
-question; **admin-on-a-separate-port** has an implementation shape already
-fully decided; and the **Linux fork** remains a genuinely open question worth
-treating as such rather than scheduling like a normal feature.
+The list is short now, and what is on it is genuinely different in character rather
+than more of the same.
 
-Two things v1.7.0 added that later work should build on rather than
-reinvent: the **scheduled-task framework** (`scheduler.py`) means anything
-recurring — the *Arr version checker and the stuck-download alert above, a
-cleanup job, a cache warmer — is a `register()` call rather than another
-background thread; and the **visitor session** means anything that wants to
-know who is looking at the page already has an answer.
+**Windows packaging is the item most out of proportion to its priority label.**
+Everything else here makes the portal do more; an installer and a service change who
+can run it at all, and the auto-start half is the difference between the portal being
+up after a power cut and not.
+
+**Admin-on-a-separate-port** is the only architectural item whose implementation
+shape is already fully settled, which makes it the cheapest of the three to pick up.
+**The Linux fork** remains a genuinely open question, worth treating as one rather
+than scheduling like a normal feature. **Per-content visibility** needs a design
+conversation about granularity before any code — very likely a three-way
+public/signed-in/admin flag, which is vastly cheaper than per-user rules and probably
+enough.
+
+Two things to build on rather than reinvent: the **scheduled-task framework** means
+anything recurring is a `register()` call, not another background thread; and the
+**visitor session** means anything that wants to know who is looking at the page
+already has an answer.
