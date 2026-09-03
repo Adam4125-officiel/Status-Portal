@@ -336,6 +336,70 @@ ever set `connected` back to `True` after the first disconnect-and-resume cycle 
 the admin panel insisted the bot was offline while it kept answering the slash command
 and editing its tracked `/status` message the entire time. Confirmed by the user.
 
+### The restart button that did nothing, and the loop that couldn't answer (fixed 2026-09-03)
+
+**Reported as one bug, and it was two.** The bot would go offline on its own after
+running for a while; restarting it from `/admin/system` did nothing at all, and only
+restarting the whole process brought it back.
+
+**The half with a definite cause.** `stop()` schedules `client.close()` onto the bot's
+own event loop and waits on the future, then joins the thread. Both of those have
+timeouts, and both were being allowed to expire quietly: the `.result(timeout=…)` raise
+was caught and logged, `thread.join(timeout)` simply returned with the thread still
+alive, and `_runtime` was left pointing at the connection that never went away —
+because the only place clearing it is `_run()`'s `finally`, and `_run()` had not
+finished. `start()`, called immediately afterwards by `restart()`, begins with
+`if _runtime["client"] is not None: return`. So the button ran, flashed "Discord bot
+restarted", and did nothing, for as long as the process lived. Every ingredient of that
+was visible in the code; nothing in the test suite covered a `stop()` whose thread
+refuses to end, because the fake runtime the existing tests used always stopped when
+asked.
+
+The fix is that `stop()` must leave `_runtime` in a state `start()` can act on, always
+— it now reports whether the connection genuinely ended, abandons a wedged one, and
+schedules `loop.stop()` onto it so the abandoned thread tears itself down the moment it
+unblocks. `_forget_runtime()` carries the identity check that makes abandonment safe: a
+late-finishing abandoned run must not clear the runtime of the connection that replaced
+it, or `stop()` would have nothing to command and `start()` would be free to open a
+second connection on the same token.
+
+**The half that is still a suspect, not a conclusion.** Why it dropped in the first
+place is unproven. The leading candidate is that `_refresh()` did all its reading
+synchronously inside a coroutine — a dozen SQLite queries, and (whenever any resource
+toggle is on) `monitoring.get_resource_snapshot()`, which falls back to a *blocking*
+0.2s psutil CPU sample when its cache is stale and walks every mountpoint with
+`psutil.disk_usage()`, a call that can stall for seconds on a sleeping or disconnected
+drive. That runs on the same event loop that answers Discord's heartbeat. All of it now
+goes through `asyncio.to_thread()`, which is right regardless of whether it was the
+cause. **What would confirm it** is `instance/logs/app.log` containing discord.py's own
+`heartbeat blocked` or `Shard ID None has stopped responding to the gateway` warnings —
+logging is configured globally, so if it happened, those lines are already there.
+
+**Not reproducible here**: this sandbox has no Discord gateway. What *was* exercised
+live, against a real running portal with a deliberately invalid token (so the bot
+thread dies on its own), is the whole failure-visibility path — the System page
+correctly reading "Its connection thread isn't running (offline for 24s) — nothing is
+currently retrying. Last error: Improper token has been passed.", the watchdog task
+detecting the dead thread and reporting "bot was not running; started it", and the
+restart button returning a clean success. The wedged-loop case itself is covered by a
+test that fails on the previous implementation, not by a live repro.
+
+### Verification record — the bot fixes, real Discord server, 2026-09-03
+
+The user ran v1.8.3-rc.1 against their own portal and their own Discord bot and
+reported it working end to end, specifically calling out the watchdog. That covers
+the parts this sandbox cannot: a real gateway connection, the watchdog acting on a
+real bot, and the restart path against a connection that genuinely exists.
+
+**What that does and does not settle.** It settles the restart path and the watchdog.
+It does *not* settle why the bot was dropping in the first place — the heartbeat
+starvation theory (see above) predicts exactly this outcome, but so would several
+other things, and "it stopped happening" is not a cause. The theory is deliberately
+kept written down rather than closed out, with the two log lines that would confirm
+it, because the cheapest moment to test it is the next time it recurs; there is a
+matching entry in `ROADMAP.md` → "Known issues to investigate" so it isn't only
+recorded in an archive nobody reads until something breaks.
+
 ---
 
 ## Self-update

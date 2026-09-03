@@ -3,9 +3,12 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 import db
 import config
 import discord_bot
+import scheduler
 
 
 def _make_interaction(user_id, channel_id=555):
@@ -90,6 +93,46 @@ def test_on_guild_remove_refreshes_guild_snapshot(isolated_db, monkeypatch):
     current_guilds.clear()  # discord.py has already updated the cache by the time this fires
     asyncio.run(bot.on_guild_remove(_make_guild(111, name="Home Lab")))
     assert discord_bot.get_status()["guilds"] == []
+
+
+def test_refresh_does_not_block_the_event_loop(isolated_db, monkeypatch):
+    """The bot's event loop is what answers Discord's heartbeat, so a synchronous
+    read made straight from a coroutine stalls it - and enough missed heartbeats is
+    how a gateway session gets dropped, which is the leading suspect for the bot
+    going quiet on its own. build_status_data() is not cheap (a dozen SQLite queries,
+    plus monitoring.get_resource_snapshot()'s blocking psutil calls when any resource
+    toggle is on), so it must run off the loop.
+
+    Asserted by checking that other coroutines actually got to run *while* the slow
+    read was in progress - not merely that they ran eventually, which is true even
+    when the loop is blocked solid."""
+    bot = _build_bot()
+    monkeypatch.setattr(type(bot), "guilds", property(lambda self: []), raising=False)
+    window = {}
+
+    def slow_payload():
+        window["start"] = time.monotonic()
+        time.sleep(0.3)
+        window["end"] = time.monotonic()
+        return {"presence": False, "command_enabled": False,
+                "status": {"overall": "operational", "sections": []}, "tracked": []}
+
+    monkeypatch.setattr(discord_bot, "_refresh_payload", slow_payload)
+    beats = []
+
+    async def heartbeat():
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            beats.append(time.monotonic())
+
+    async def main():
+        await asyncio.gather(bot._refresh(), heartbeat())
+
+    asyncio.run(main())
+
+    assert any(window["start"] < beat < window["end"] for beat in beats), \
+        "the event loop was blocked for the whole refresh read - Discord's heartbeat " \
+        "would have gone unanswered for that long too"
 
 
 def test_snapshot_command_rejects_unauthorized_channel(isolated_db):
@@ -368,6 +411,88 @@ def test_restart_stops_existing_connection_then_starts_a_new_one(monkeypatch):
     discord_bot.restart()
     assert closed == [True]  # the old connection was actually closed first
     assert start_calls == ["started"]
+
+
+def _start_wedged_bot_runtime():
+    """A bot thread whose event loop never answers - the state the reported bug
+    happens in. The loop is running but permanently blocked inside a synchronous
+    call, so close() can be scheduled onto it and will simply never run: exactly
+    what a blocked event loop looks like from stop()'s side.
+
+    Returns (client, release) - call release() to let the thread finish, so the
+    test doesn't leave a genuinely stuck thread behind."""
+    loop = asyncio.new_event_loop()
+    release = threading.Event()
+
+    class WedgedClient:
+        async def close(self):  # pragma: no cover - the loop never gets to run it
+            pass
+
+    client = WedgedClient()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        try:
+            release.wait(10)  # blocks the loop's thread, exactly like slow sync I/O
+        finally:
+            loop.close()
+            discord_bot._forget_runtime(client)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    discord_bot._runtime["client"] = client
+    discord_bot._runtime["loop"] = loop
+    discord_bot._runtime["thread"] = thread
+    thread.start()
+    return client, release
+
+
+def test_stop_abandons_a_wedged_connection_so_start_can_run_again(caplog):
+    """The bug behind "restarting the bot does nothing, only restarting the whole
+    app helps": stop() used to leave _runtime pointing at a connection whose thread
+    never ended, and start() refuses to run while _runtime holds a client - so every
+    later restart silently no-opped."""
+    client, release = _start_wedged_bot_runtime()
+    try:
+        with caplog.at_level("WARNING"):
+            clean = discord_bot.stop(timeout=0.2)
+        assert clean is False, "a wedged connection must be reported, not called a clean stop"
+        assert discord_bot._runtime["client"] is None, "start() would refuse to run again"
+        assert "abandoning it" in caplog.text
+    finally:
+        release.set()
+
+
+def test_forget_runtime_only_clears_the_run_it_describes():
+    """The identity check in _forget_runtime(). An abandoned thread finishing after
+    a replacement connection has been started must not blank out the new one's
+    runtime - that would leave stop() with nothing to command and start() free to
+    open a second concurrent connection."""
+    abandoned, replacement = object(), object()
+    discord_bot._runtime["client"] = replacement
+    discord_bot._runtime["loop"] = object()
+    discord_bot._runtime["thread"] = object()
+
+    discord_bot._forget_runtime(abandoned)  # the old run's finally, arriving late
+    assert discord_bot._runtime["client"] is replacement
+
+    discord_bot._forget_runtime(replacement)
+    assert discord_bot._runtime["client"] is None
+    assert discord_bot._runtime["loop"] is None
+    assert discord_bot._runtime["thread"] is None
+
+
+def test_restart_reports_whether_the_old_connection_stopped_cleanly(monkeypatch):
+    """The admin panel tells the two apart - "restarted" and "the old one was
+    wedged so I started another" are different things to be told."""
+    started = []
+    monkeypatch.setattr(discord_bot, "start", lambda: started.append("started"))
+
+    monkeypatch.setattr(discord_bot, "stop", lambda timeout=10: True)
+    assert discord_bot.restart() is True
+
+    monkeypatch.setattr(discord_bot, "stop", lambda timeout=10: False)
+    assert discord_bot.restart() is False
+    assert started == ["started", "started"], "a new connection starts either way"
 
 
 def _discord_error(cls, status=404, reason="Not Found"):
@@ -834,3 +959,104 @@ def test_on_resumed_marks_connected_again_after_a_disconnect(isolated_db):
     status = discord_bot.get_status()
     assert status["connected"] is True
     assert status["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# watchdog() - bringing the bot back when it has gone quiet on its own
+# ---------------------------------------------------------------------------
+def _clear_bot_runtime():
+    discord_bot._runtime["client"] = None
+    discord_bot._runtime["loop"] = None
+    discord_bot._runtime["thread"] = None
+    discord_bot._state["connected"] = False
+    discord_bot._state["disconnected_since"] = None
+
+
+def test_watchdog_skips_when_no_token_configured(monkeypatch):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "")
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_skips_while_connected(monkeypatch):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setitem(discord_bot._state, "connected", True)
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_starts_the_bot_when_no_thread_is_running(monkeypatch):
+    """The "thread died" case: nothing is retrying, so waiting out a grace period
+    would only delay the recovery."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    started = []
+    monkeypatch.setattr(discord_bot, "start", lambda: started.append("started") or True)
+
+    message = discord_bot.watchdog()
+
+    assert started == ["started"]
+    assert "started it" in message
+
+
+def test_watchdog_waits_out_the_grace_period_before_restarting(monkeypatch):
+    """discord.py reconnects on its own with backoff. Restarting on top of a retry
+    that was about to succeed would just delay it."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    monkeypatch.setitem(discord_bot._runtime, "thread", alive)
+    monkeypatch.setitem(discord_bot._state, "disconnected_since", time.time() - 10)
+    monkeypatch.setattr(discord_bot, "restart", lambda: pytest.fail("restarted too early"))
+
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_restarts_a_connection_that_has_been_down_too_long(monkeypatch, caplog):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    monkeypatch.setitem(discord_bot._runtime, "thread", alive)
+    monkeypatch.setitem(discord_bot._state, "disconnected_since",
+                        time.time() - discord_bot.WATCHDOG_GRACE_SECONDS - 1)
+    restarts = []
+    monkeypatch.setattr(discord_bot, "restart", lambda: restarts.append("restarted") or True)
+
+    with caplog.at_level("WARNING"):
+        message = discord_bot.watchdog()
+
+    assert restarts == ["restarted"]
+    assert "restarted the bot" in message
+    assert "offline for" in caplog.text
+
+
+def test_start_stamps_when_the_bot_went_offline(monkeypatch):
+    """A bot that never manages to connect at all must look just as overdue to the
+    watchdog as one that connected and then dropped."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    monkeypatch.setattr(discord_bot, "_try_import_discord", lambda: (None, None, None))
+    discord_bot.start()  # refused (no discord.py) - must not stamp anything
+    assert discord_bot._state["disconnected_since"] is None
+
+
+def test_get_status_distinguishes_a_retrying_bot_from_a_dead_one():
+    """"Not connected" covers two situations that need different responses, and the
+    admin page could not tell them apart before this."""
+    _clear_bot_runtime()
+    assert discord_bot.get_status()["running"] is False
+    assert discord_bot.get_status()["offline_for"] is None
+
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    discord_bot._runtime["thread"] = alive
+    discord_bot._state["disconnected_since"] = time.time() - 600
+    try:
+        status = discord_bot.get_status()
+        assert status["running"] is True
+        assert status["offline_for"] == "10 min"
+    finally:
+        _clear_bot_runtime()

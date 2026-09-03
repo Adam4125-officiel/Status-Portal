@@ -22,15 +22,28 @@ import asyncio
 import logging
 import re
 import threading
+import time
 
 import config
 import db
 import integrations
 import monitoring
+import scheduler
 
 _logger = logging.getLogger(__name__)
 
-_state = {"connected": False, "user": None, "last_error": None, "guilds": []}
+# "disconnected_since" is a wall-clock float (not an ISO string like everything
+# rendered through a .local-time span) because only the watchdog below reads it, to
+# measure a duration - get_status() converts it for display.
+_state = {"connected": False, "user": None, "last_error": None, "guilds": [],
+          "disconnected_since": None}
+
+# Serialises start()/stop()/restart(). Since the watchdog task can restart the bot
+# from its own thread at the same moment an admin clicks "Restart Discord bot", the
+# "is it already running" guard in start() is not enough on its own: two callers
+# could both pass it before either had assigned _runtime["client"], leaving two live
+# connections on one token. Re-entrant because restart() calls the other two.
+_lifecycle_lock = threading.RLock()
 
 # The running bot's client/event-loop/thread, if any - set by start(), cleared by
 # stop(). Unlike _state above (a read-only snapshot for the admin page), this is
@@ -71,8 +84,28 @@ REFRESH_RETRY_DELAY_SECONDS = 2
 
 def get_status():
     """Read-only snapshot for the admin page - never raises, reflects whatever the
-    bot thread has last reported via the module-level _state dict."""
-    return dict(_state)
+    bot thread has last reported via the module-level _state dict, plus two derived
+    fields the panel needs to tell "offline" apart from "gone".
+
+    `running` is deliberately about the *thread*, not the connection: "not connected
+    but the thread is alive" means discord.py is retrying on its own, while "not
+    connected and no thread" means there is nothing left to retry - two situations
+    that need different responses and used to look identical on the page."""
+    snapshot = dict(_state)
+    thread = _runtime["thread"]
+    snapshot["running"] = thread is not None and thread.is_alive()
+    since = snapshot.get("disconnected_since")
+    snapshot["offline_for"] = _humanize_seconds(time.time() - since) if since else None
+    return snapshot
+
+
+def _humanize_seconds(seconds):
+    seconds = int(max(seconds, 0))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
 
 def include_settings():
@@ -471,6 +504,62 @@ def build_embed(discord_module, data):
     return embed
 
 
+# ---------------------------------------------------------------------------
+# Keeping the gateway heartbeat free
+# ---------------------------------------------------------------------------
+# Everything below the client class runs inside discord.py's own event loop, and
+# that loop is what answers Discord's heartbeat. A synchronous call made directly
+# from a coroutine blocks it for the whole duration - and the reads these commands
+# need are not as cheap as they look: build_status_data() makes a dozen SQLite
+# queries (which can wait on the health-check thread's writes up to the busy
+# timeout) and, whenever any resource toggle is on, calls
+# monitoring.get_resource_snapshot(), which falls back to a *blocking* 0.2s psutil
+# CPU sample when its cache is stale and walks every mountpoint with
+# psutil.disk_usage() - a call that can stall for seconds on a sleeping or
+# disconnected drive.
+#
+# Miss enough heartbeats and Discord drops the session ("Shard ID None has stopped
+# responding to the gateway" in the log), which is the leading suspect for the bot
+# going quiet on its own. So every synchronous read is gathered in one plain
+# function and handed to asyncio.to_thread(), leaving the loop free to keep
+# answering. If you add another command, follow this pattern rather than calling
+# db/monitoring straight from the coroutine.
+
+
+async def _off_loop(fn, *args):
+    """Runs a synchronous function on a worker thread so the gateway heartbeat
+    keeps being answered while it works."""
+    return await asyncio.to_thread(fn, *args)
+
+
+def _status_payload():
+    return build_status_data(include_settings())
+
+
+def _snapshot_payload():
+    return build_snapshot_text(build_snapshot_data())
+
+
+def _command_gate():
+    """The three settings _check_command_authorized() needs, read together."""
+    return {
+        "enabled": db.get_setting("discordbot_channel_command_enabled", "0") == "1",
+        "channels": allowed_channel_ids(),
+        "users": allowed_user_ids(),
+    }
+
+
+def _refresh_payload():
+    """Everything one refresh tick reads, gathered in a single off-loop call."""
+    return {
+        "presence": db.get_setting("discordbot_update_presence", "0") == "1",
+        "command_enabled": db.get_setting("discordbot_channel_command_enabled", "0") == "1",
+        "status": build_status_data(include_settings()),
+        "tracked": [(int(row["channel_id"]), int(row["message_id"]))
+                    for row in db.list_discord_status_messages()],
+    }
+
+
 def _try_import_discord():
     try:
         import discord
@@ -498,18 +587,19 @@ def _make_client_class(discord, app_commands, tasks):
             duplicated per command. Sends the appropriate ephemeral reply itself and
             returns False if not authorized; returns True (sending nothing) if the
             command should proceed."""
-            if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
+            gate = await _off_loop(_command_gate)
+            if not gate["enabled"]:
                 await interaction.response.send_message(
                     "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
                 return False
-            allowed_channels = allowed_channel_ids()
+            allowed_channels = gate["channels"]
             if allowed_channels and str(interaction.channel_id) not in allowed_channels:
                 _logger.warning("rejected /%s in unauthorized channel %s", command_name,
                                 interaction.channel_id)
                 await interaction.response.send_message(
                     "This command isn't allowed in this channel.", ephemeral=True)
                 return False
-            allowed = allowed_user_ids()
+            allowed = gate["users"]
             if allowed and str(interaction.user.id) not in allowed:
                 _logger.warning("rejected /%s from unauthorized user %s (%s)",
                                 command_name, interaction.user, interaction.user.id)
@@ -530,17 +620,17 @@ def _make_client_class(discord, app_commands, tasks):
             async def status_command(interaction):
                 if not await self._check_command_authorized(interaction, command_name):
                     return
-                embed = build_embed(discord, build_status_data(include_settings()))
+                embed = build_embed(discord, await _off_loop(_status_payload))
                 await interaction.response.send_message(embed=embed)
                 sent = await interaction.original_response()
-                db.set_discord_status_message(interaction.channel_id, sent.id)
+                await _off_loop(db.set_discord_status_message, interaction.channel_id, sent.id)
 
             @self.tree.command(name="snapshot",
                                 description="Quick snapshot: down services and open incidents/maintenance")
             async def snapshot_command(interaction):
                 if not await self._check_command_authorized(interaction, "snapshot"):
                     return
-                await interaction.response.send_message(build_snapshot_text(build_snapshot_data()))
+                await interaction.response.send_message(await _off_loop(_snapshot_payload))
 
         async def setup_hook(self):
             # Command registration is only picked up on (re)connect - changing the
@@ -606,6 +696,7 @@ def _make_client_class(discord, app_commands, tasks):
             _state["connected"] = True
             _state["user"] = str(self.user)
             _state["last_error"] = None
+            _state["disconnected_since"] = None
             _logger.info("connected as %s", self.user)
             # Also re-checked on every (re)connect, not just on_guild_join - covers
             # a server the bot was already in before the whitelist was configured
@@ -618,6 +709,12 @@ def _make_client_class(discord, app_commands, tasks):
 
         async def on_disconnect(self):
             _state["connected"] = False
+            # Only the *first* drop of a run stamps this - discord.py fires this event
+            # for every retry while it reconnects, and resetting the clock on each one
+            # would mean a bot stuck in a reconnect loop never looked overdue to the
+            # watchdog below.
+            if _state["disconnected_since"] is None:
+                _state["disconnected_since"] = time.time()
 
         async def on_resumed(self):
             # discord.py fires on_disconnect() for any dropped gateway connection,
@@ -630,6 +727,7 @@ def _make_client_class(discord, app_commands, tasks):
             # bot that was demonstrably still responding and editing messages.
             _state["connected"] = True
             _state["last_error"] = None
+            _state["disconnected_since"] = None
             _logger.info("session resumed")
 
         async def _fetch_channel(self, channel_id):
@@ -661,7 +759,7 @@ def _make_client_class(discord, app_commands, tasks):
                     await msg.edit(embed=embed)
                     return
                 except (discord.NotFound, discord.Forbidden):
-                    db.delete_discord_status_message(channel_id)
+                    await _off_loop(db.delete_discord_status_message, channel_id)
                     return
                 except Exception as e:
                     last_error = e
@@ -672,17 +770,17 @@ def _make_client_class(discord, app_commands, tasks):
 
         async def _refresh(self):
             try:
-                self._snapshot_guilds()
-                data = build_status_data(include_settings())
-                if db.get_setting("discordbot_update_presence", "0") == "1":
+                self._snapshot_guilds()  # in-memory gateway cache only, nothing to wait on
+                payload = await _off_loop(_refresh_payload)
+                if payload["presence"]:
                     await self.change_presence(activity=discord.Activity(
                         type=discord.ActivityType.watching,
-                        name=PRESENCE_TEXT.get(data["overall"], data["overall"])))
-                if db.get_setting("discordbot_channel_command_enabled", "0") == "1":
-                    embed = build_embed(discord, data)
-                    for row in db.list_discord_status_messages():
-                        await self._edit_tracked_status_message(
-                            int(row["channel_id"]), int(row["message_id"]), embed)
+                        name=PRESENCE_TEXT.get(payload["status"]["overall"],
+                                                payload["status"]["overall"])))
+                if payload["command_enabled"]:
+                    embed = build_embed(discord, payload["status"])
+                    for channel_id, message_id in payload["tracked"]:
+                        await self._edit_tracked_status_message(channel_id, message_id, embed)
             except Exception:
                 _logger.exception("refresh loop error")
 
@@ -702,15 +800,20 @@ def start():
     the loop is captured in _runtime *before* the client starts connecting - that
     reference is what lets stop() below schedule client.close() onto this exact
     loop from a different thread."""
+    with _lifecycle_lock:
+        return _start_locked()
+
+
+def _start_locked():
     if _runtime["client"] is not None:
-        return
+        return False
     if not config.DISCORD_BOT_TOKEN:
-        return
+        return False
     discord, app_commands, tasks = _try_import_discord()
     if discord is None:
         _logger.warning("PORTAL_DISCORD_BOT_TOKEN is set but discord.py isn't installed - "
                         "run `pip install discord.py` to enable this optional feature.")
-        return
+        return False
 
     def _run():
         loop = asyncio.new_event_loop()
@@ -733,13 +836,15 @@ def start():
             _logger.exception("failed to start")
         finally:
             loop.close()
-            _runtime["client"] = None
-            _runtime["loop"] = None
-            _runtime["thread"] = None
+            _forget_runtime(client)
 
     thread = threading.Thread(target=_run, daemon=True, name="discord-bot")
     _runtime["thread"] = thread
+    # Not connected yet, and the watchdog measures from here - so a bot that never
+    # manages to connect at all is just as overdue as one that dropped later.
+    _state["disconnected_since"] = time.time()
     thread.start()
+    return True
 
 
 def stop(timeout=10):
@@ -750,12 +855,37 @@ def stop(timeout=10):
     bot's background thread to actually finish - so by the time this returns, the
     connection is genuinely closed, not just "asked nicely", and a following
     start() (see restart() below) can't race with the old one still shutting
-    down."""
+    down.
+
+    Returns True if the bot is genuinely stopped by the time this returns (or was
+    never running), False if its thread refused to end and had to be abandoned.
+
+    **This function must always leave _runtime in a state start() can act on**,
+    which is the fix for a real bug: if the bot's event loop is wedged, the
+    close() future times out, thread.join() returns with the thread still alive,
+    and _runtime kept pointing at that dead-but-not-gone connection forever -
+    because only _run()'s finally clears it, and _run() never finished. start()
+    begins with "if _runtime['client'] is not None: return", so every subsequent
+    restart silently did nothing and only a full process restart brought the bot
+    back. That is exactly the symptom that was reported
+    (docs/HISTORY.md -> "the Discord bot restart button that did nothing").
+
+    Abandoning a wedged connection is not free - if it later unblocks it would be
+    a second live connection on the same token - so loop.stop() is scheduled onto
+    it first, which is what makes that thread tear itself down the moment it can
+    breathe. A momentarily-duplicated connection that resolves itself beats a bot
+    that stays dead until someone restarts the whole portal."""
+    with _lifecycle_lock:
+        return _stop_locked(timeout)
+
+
+def _stop_locked(timeout):
     client = _runtime["client"]
     loop = _runtime["loop"]
     thread = _runtime["thread"]
     if client is None or loop is None:
-        return
+        _state["connected"] = False
+        return True
     try:
         asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=timeout)
     except Exception:
@@ -763,11 +893,118 @@ def stop(timeout=10):
     if thread is not None:
         thread.join(timeout)
     _state["connected"] = False
+    stuck = thread is not None and thread.is_alive()
+    # Unconditional, not just in the stuck case: a thread that died without running
+    # its own finally would leave _runtime just as un-startable.
+    _forget_runtime(client)
+    if stuck:
+        _logger.warning("the Discord bot's connection did not shut down within %ss - abandoning "
+                        "it so a fresh one can be started; the old thread will exit on its own "
+                        "once it unblocks", timeout)
+        _state["last_error"] = ("the previous connection did not shut down when asked and was "
+                                "abandoned - a fresh one was started in its place")
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            # Loop already closed, or closing - nothing left to ask it to do.
+            pass
+        return False
+    return True
+
+
+def _forget_runtime(client):
+    """Clears _runtime, but only if it still describes `client`'s run.
+
+    The identity check is load-bearing, not defensive tidiness. A run abandoned by
+    stop() above can finish long after a replacement connection has been started;
+    clearing unconditionally from its finally block would then blank out the *live*
+    bot's runtime, leaving stop() with nothing to command and start() free to open
+    a second concurrent connection."""
+    if _runtime["client"] is client:
+        _runtime["client"] = None
+        _runtime["loop"] = None
+        _runtime["thread"] = None
 
 
 def restart():
     """Stops the current connection (if any) and starts a fresh one - e.g. after
     changing the bot token or another startup-time setting without restarting the
-    whole app process."""
-    stop()
-    start()
+    whole app process.
+
+    Returns False if the old connection had to be abandoned rather than shut down
+    cleanly (see stop()); a new one is started either way. The caller reports that
+    distinction to the admin rather than swallowing it, because "restarted" and
+    "the old one is wedged and I started another" are different things to be told."""
+    with _lifecycle_lock:
+        clean = stop()
+        start()
+        return clean
+
+
+# ---------------------------------------------------------------------------
+# Watchdog
+# ---------------------------------------------------------------------------
+WATCHDOG_TASK_NAME = "discord_bot_watchdog"
+
+# How long the bot may be offline before this steps in. discord.py reconnects on
+# its own, with backoff, and usually succeeds - restarting on top of a retry that
+# was about to work would just delay it. This is for the case where that has
+# clearly stopped working.
+WATCHDOG_GRACE_SECONDS = 300
+
+
+def watchdog():
+    """Scheduled task: brings the bot back when it has gone quiet on its own.
+
+    Deliberately a last resort, not the primary mechanism. It only acts on a state
+    discord.py's own reconnection has already failed to fix, and it can restart at
+    most once per grace period - because start() stamps disconnected_since, so a
+    restart that doesn't connect starts a fresh grace period rather than a restart
+    loop every tick.
+
+    Note this is only useful *because* stop()/start() can now recover from a wedged
+    connection: before that fix, a watchdog would have been calling a no-op."""
+    if not config.DISCORD_BOT_TOKEN:
+        raise scheduler.TaskSkipped("no bot token configured")
+    if _state["connected"]:
+        raise scheduler.TaskSkipped("bot is connected")
+
+    thread = _runtime["thread"]
+    if thread is None or not thread.is_alive():
+        # Nothing is retrying - either it was never started in this process, or the
+        # thread died. _forget_runtime clears anything a dead thread left behind, so
+        # start() isn't blocked by a runtime describing a connection that is gone.
+        _forget_runtime(_runtime["client"])
+        if start():
+            _logger.warning("watchdog: the Discord bot was not running - started it")
+            return "bot was not running; started it"
+        raise scheduler.TaskSkipped("bot is not running and could not be started "
+                                    "(discord.py missing?)")
+
+    since = _state["disconnected_since"]
+    if since is None:
+        # Thread alive, not connected, and nothing recorded when that started -
+        # record it now so the grace period is measured from a known point.
+        _state["disconnected_since"] = time.time()
+        raise scheduler.TaskSkipped("bot is reconnecting")
+    offline_for = time.time() - since
+    if offline_for < WATCHDOG_GRACE_SECONDS:
+        raise scheduler.TaskSkipped(f"offline for {_humanize_seconds(offline_for)}; "
+                                    "discord.py is still retrying")
+    _logger.warning("watchdog: the Discord bot has been offline for %s - restarting it",
+                    _humanize_seconds(offline_for))
+    clean = restart()
+    return ("restarted the bot after %s offline" % _humanize_seconds(offline_for)
+            + ("" if clean else " (the old connection had to be abandoned)"))
+
+
+scheduler.register(
+    WATCHDOG_TASK_NAME,
+    "Discord bot watchdog",
+    "Restarts the Discord bot if its connection has been down for several minutes. "
+    "discord.py reconnects by itself, so this only steps in when that hasn't worked "
+    "- which is what used to leave the bot silently offline until the whole portal "
+    "was restarted.",
+    watchdog,
+    default_interval_minutes=5,
+)

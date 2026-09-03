@@ -50,8 +50,11 @@ bugs in `docs/HISTORY.md` passed their unit tests.
 
 **Two companion files:**
 
-- `ROADMAP.md` — open feature ideas. This file is about *how the existing code works
-  and how to work on it*, not what's left to build.
+- `ROADMAP.md` — open feature ideas, plus symptoms whose cause is still unknown.
+  It carries only what is *left*: a shipped idea's write-up is deleted from it (an
+  index line at the bottom is all that stays) precisely because this file and
+  `docs/HISTORY.md` are the better record once code exists. This file is about *how
+  the existing code works and how to work on it*, not what's left to build.
 - `docs/HISTORY.md` — the narrative archive: how past bugs actually presented, what
   the broken versions did, and what has been verified against real hardware / a real
   Discord server / real instances, and when. Rules live here in `CLAUDE.md`; the
@@ -712,6 +715,40 @@ DB-backed Settings pages, not a code edit.
   `except`**: that distinction *is* the fix for a real bug where any transient network
   blip permanently forgot a perfectly healthy message
   (`docs/HISTORY.md` → "a bare `except` that forgot live messages").
+- **`stop()` must always leave `_runtime` in a state `start()` can act on.** `start()`
+  begins with `if _runtime["client"] is not None: return`, and only `_run()`'s
+  `finally` clears that — so a `close()` that times out on a wedged event loop used
+  to leave the bot un-restartable until the whole process was replaced, which is
+  exactly the "restarting the bot does nothing" report
+  (`docs/HISTORY.md` → "The restart button that did nothing"). `stop()` returns
+  whether the connection genuinely ended; a wedged one is abandoned (with
+  `loop.stop()` scheduled onto it so it tears itself down when it unblocks) rather
+  than left pinned. **`_forget_runtime()`'s identity check is what makes that safe**
+  — an abandoned run finishing late must not clear the runtime of the connection
+  that replaced it. Don't reintroduce an unconditional `_runtime[...] = None`.
+- **Never do synchronous work inside one of the bot's coroutines — hand it to
+  `asyncio.to_thread()` via `_off_loop()`.** That loop is what answers Discord's
+  heartbeat, and the reads here are not cheap: `build_status_data()` makes a dozen
+  SQLite queries and, with any resource toggle on, calls
+  `monitoring.get_resource_snapshot()`, which can block on a psutil CPU sample and
+  on `disk_usage()` for a sleeping drive. Enough missed heartbeats is a dropped
+  session. Every command and the refresh tick gather their reads into one plain
+  function (`_refresh_payload()`, `_command_gate()`, …) and run it off the loop; a
+  new command follows that shape.
+- **`watchdog()` is a last resort and must stay one.** discord.py reconnects on its
+  own; the task only acts after `WATCHDOG_GRACE_SECONDS` offline, or when the
+  connection thread is gone entirely. It cannot loop, because `start()` stamps
+  `_state["disconnected_since"]`, so a restart that doesn't connect begins a fresh
+  grace period rather than firing every tick. It is only useful *because* `stop()`
+  can now recover — a watchdog over the old code would have been calling a no-op.
+- **`start()`/`stop()`/`restart()` are serialised by `_lifecycle_lock` (re-entrant).**
+  The watchdog can restart the bot from its own thread at the same moment an admin
+  clicks the button, and `start()`'s already-running guard alone doesn't stop two
+  callers both passing it before either assigned `_runtime["client"]` — which would
+  be two live connections on one token.
+- **`get_status()` reports the *thread*, not just the connection.** "Not connected"
+  covers discord.py still retrying and nothing left running to retry; those need
+  different responses, and `/admin/system` renders them differently.
 - **`on_ready`, `on_resumed` and `on_disconnect` are all three load-bearing for
   `_state["connected"]`.** A resumed session fires only `on_resumed()`, never
   `on_ready()` again — without an `on_resumed()` handler the admin panel gets
@@ -720,10 +757,16 @@ DB-backed Settings pages, not a code edit.
   deliberately does *not* redo guild-whitelist enforcement or restart `refresh_loop`
   the way `on_ready()` does, since a resume means the session context didn't change.
   If you add another lifecycle-dependent piece of `_state`, remember it's these three
-  events that matter, not just the first two.
+  events that matter, not just the first two. `on_disconnect` stamps
+  `disconnected_since` only on the *first* drop of a run — it fires on every retry
+  while discord.py reconnects, and resetting the clock each time would mean a bot
+  stuck in a reconnect loop never looked overdue to `watchdog()`.
 - **What is and isn't verified against a real Discord server**: `/snapshot` (and
   therefore slash-command registration and the command handler) is confirmed working
-  live. Still unconfirmed for real: the guild whitelist's actual `guild.leave()` call,
+  live, as are the v1.8.3 restart fix and the watchdog (user-confirmed end to end,
+  2026-09-03) — but **not** the heartbeat-starvation theory for *why* the bot was
+  dropping, which stays an open suspicion with the log lines that would confirm it
+  recorded in `ROADMAP.md` → "Known issues to investigate". Still unconfirmed for real: the guild whitelist's actual `guild.leave()` call,
   the server/channel management page's gateway-cache snapshot, and the
   restart-survives-message-editing behavior for the tracked `/status` message — all
   unit-tested with mocked Discord objects only. Don't assume "the bot" is confirmed

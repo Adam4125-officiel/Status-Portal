@@ -24,6 +24,20 @@
     Restarting only the bot's connection doesn't affect the public status page or
     anything else in the app.
   </p>
+  {% if discord_configured and not discord_status.connected %}
+  {# "Not connected" covers two very different situations - discord.py still retrying,
+     and nothing left running to retry - and which one it is decides whether restarting
+     here is the right move. #}
+  <p style="font-size: 13px; color: var(--text-dim); margin-top: -6px;">
+    {% if discord_status.running %}
+      Its connection thread is running, so discord.py is retrying on its own{% if discord_status.offline_for %} (offline for {{ discord_status.offline_for }}){% endif %}.
+      The watchdog task restarts it automatically if that doesn't recover.
+    {% else %}
+      Its connection thread isn't running{% if discord_status.offline_for %} (offline for {{ discord_status.offline_for }}){% endif %} — nothing is currently retrying.
+    {% endif %}
+    {% if discord_status.last_error %}<br>Last error: <code>{{ discord_status.last_error }}</code>{% endif %}
+  </p>
+  {% endif %}
   <button type="button" class="btn secondary system-control-trigger" data-component="discord-bot" data-label="Restart the Discord bot"
           {{ 'disabled' if not discord_configured }}>Restart Discord bot</button>
 </div>
