@@ -6,7 +6,9 @@ that went into them stays findable; `CLAUDE.md` documents how each one actually 
 and `docs/HISTORY.md` records what was and wasn't verified.
 
 Still open: the external connectivity check, the stuck-download alert, admin-on-a-
-separate-port, the Jellyfin visibility model, and the Linux-native monitoring backend.
+separate-port, the Jellyfin visibility model, the Linux-native monitoring backend,
+the Discord bot's search/request commands, Windows packaging and auto-start, and
+one open bug investigation (the Discord bot stopping and not restarting).
 
 Ideas discussed with Adam, written up so they can slot straight into
 `ROADMAP.md`. Each one lists a rough priority and implementation effort
@@ -266,6 +268,75 @@ which just check current state, this needs to track progress *across*
 checks over time to detect "not moving" — a more stateful shape than the
 existing health-check model.
 
+### Discord bot: search, request status, and requesting content
+Today the bot answers one question — is anything down (`/status`, `/snapshot`).
+These extend it to the questions people actually ask in a Discord server: *do we
+have X?*, *what happened to the thing I asked for?*, and *can you add X?* — the
+same three the unified search page answers, reached from where the conversation
+already is.
+
+Three commands, in ascending order of risk:
+
+- **`/requests`** — what the caller has requested and where each one is
+  (pending / approved / downloading / available), read straight from the Seerr
+  data `integrations.fetch_seerr_requests()` already returns.
+- **`/search <title>`** — the unified Jellyfin + Seerr search, replying with the
+  same merged/deduped results the web page shows, and the same per-result answer:
+  in the library, already requested, or requestable.
+- **`/request <title>`** — a write against Seerr, attributed to a real person.
+
+**Identity is the whole design problem, and the answer already exists in the
+database.** Every one of these is per-person, but the bot has a Discord user id
+and nothing else. The link to follow is the one the portal already keeps: the
+`seerr_contact_sync` task caches Seerr's per-user contact details (including
+`discordIds`, read from Seerr's per-user notification-settings sub-resource) in
+`seerr_contacts`, and **only for accounts Seerr itself has linked to a Jellyfin
+user**. So a Discord id already resolves to a Jellyfin user id through data
+that's refreshed hourly, with no new integration and no sign-in step — which is
+exactly the "bypass the login by comparing the Discord id against Seerr" shape
+this was asked for, except it isn't a bypass: it's the same fail-closed link
+per-user notifications already rely on.
+
+Rules that follow from that, none of them optional:
+
+- **Never match on username or email**, in either direction. An unmatched Discord
+  id gets an ephemeral "I don't know who you are — add your Discord id in Seerr,
+  or on your account page in the portal" and nothing else. Same fail-closed rule
+  as `user_notify`; getting it wrong here means showing one person another
+  person's request history.
+- **The reply must be ephemeral** for anything per-person. `/requests` in a shared
+  channel otherwise publishes what everybody asked for to everybody.
+- **Reuse `media_search.py`, don't reimplement it.** The merge/dedupe (title *and*
+  year), the "search is unavailable" state distinct from "nothing found", and
+  `SEARCH_TIMEOUT_SECONDS` are all the point of that module. The request path is
+  the awkward part: the actual submit logic currently lives inside `app.py`'s
+  `search_request()` route, and `discord_bot.py` cannot import `app.py` (circular —
+  `app.py` imports the bot). Extracting it into `media_search.py` first, the way
+  `integrations.evaluate_high_load()` was extracted so both callers could share it,
+  is the real work of this item.
+- **The admin-only request fields must not exist here at all.** Root folder,
+  quality profile and tags are shown on the web configure page only to a browser
+  that is also signed in as the portal admin, because root folders are real server
+  filesystem paths. A Discord command has no such concept — it requests with
+  Seerr's defaults, full stop.
+- **A TV request needs seasons.** Either a Discord select menu, or default to all
+  seasons (what the web path did before it had a picker) and say so in the reply.
+- **Call `StatusBot._check_command_authorized()`** from every new command — the
+  enabled toggle, channel whitelist and user allow-list gate, in that order. It
+  exists precisely so a third command doesn't re-inline the checks.
+- **Every outbound call must leave the event loop free.** These commands make
+  blocking `requests` calls, and doing that directly inside a coroutine stalls the
+  gateway heartbeat for the duration — see the bot-disconnect investigation below,
+  where that is a leading suspect. Wrap them in `asyncio.to_thread(...)`.
+- **Rate-limit per Discord user.** The web search is limited per session; a
+  slash command has no session, and the underlying calls are the same two external
+  APIs.
+
+**Priority:** Medium-High — `/requests` and `/search` are small on top of what
+exists and are the two people would use daily · **Effort:** M for the two read
+commands; M-L including `/request`, almost all of it in extracting the submit path
+out of `app.py` cleanly rather than in the Discord surface itself.
+
 ---
 
 ## Architectural ideas (carried over from the repo's own ROADMAP.md)
@@ -352,6 +423,164 @@ direct port, since Hyper-V doesn't exist on Linux.
 **Priority:** Low · **Effort:** M-L — no pressing need while running on
 Windows/Hyper-V; mainly relevant if this app is ever run on a Linux host
 instead.
+
+---
+
+## Packaging and deployment (Windows)
+
+Everything here is about the gap between "the code is correct" and "a person has
+it running on their machine and it comes back after a reboot". Nothing in this
+section changes what the app does; all of it changes who can run it.
+
+### A Windows installer (`.exe`)
+One download that puts a working portal on a machine: Python and the
+dependencies, the app itself, a first-run configuration step, and a shortcut —
+instead of the current install Python, clone/extract, make a venv, `pip install
+-r requirements.txt`, write a `.env`.
+
+**The one decision that determines everything else: freeze, or install.** These
+are not two flavours of the same thing.
+
+- **A frozen single `.exe` (PyInstaller/Nuitka) breaks the self-updater**, which
+  is not a small loss — it's the feature that keeps every install current.
+  `updater.py` replaces `.py` files on disk and then re-execs
+  `os.execv(sys.executable, ...)`; in a frozen build the `.py` files aren't what
+  runs, and `sys.executable` is the bundled exe. Taking this path means replacing
+  in-app updating with "download and run the new installer", and rewriting
+  `update.py`/`updater.py` around that. It also fights the optional-dependency
+  design: `discord.py` and `nvidia-ml-py` are lazy-imported precisely so they can
+  be absent, and a freezer either bundles them for everyone or misses them
+  entirely.
+- **An installer that lays down a real Python (Inno Setup or NSIS wrapping the
+  embeddable distribution, creating a venv and running `pip install`) keeps every
+  existing mechanism working unchanged** — self-update, rollback, the CLI
+  recovery tool, optional extras. This is the recommended shape, and it is also
+  the *less* clever one on purpose.
+
+Whichever is chosen, four things need deciding at install time, not discovered
+later:
+
+- **Where writable state lives.** `instance/` holds the database, `secret_key`
+  (mode 0600), logs, and backups; `static/uploads/` holds the logo. Installing
+  into `C:\Program Files` puts all of that somewhere a non-elevated process
+  cannot write, and the failure is ugly and late (`config.py` degrades to a
+  per-process secret key *silently*, which reads as "it logs me out at random").
+  Either install per-user, or install to `%ProgramData%`, or point `instance/` at
+  a writable path explicitly.
+- **The optional Discord extra is a checkbox.** `requirements-discord.txt`
+  already exists as a separate pinned file for exactly this — the installer runs
+  a second `pip install` against it, or doesn't.
+- **First-run configuration.** A short form writing `.env` (port, admin password,
+  and whichever `PORTAL_*` values the user needs) beats shipping `.env.example`
+  and hoping. Note `PORTAL_SECRET_KEY` no longer needs to be asked for — it is
+  generated and persisted to `instance/secret_key` on first start.
+- **A firewall rule for the chosen port**, and the port itself, since the default
+  5000 is a common collision.
+
+**Priority:** Medium-High if this is ever meant to be used by anyone other than
+its author; Low if not · **Effort:** M for the installer-with-real-Python route ·
+L for the frozen route, most of it in rebuilding the update story rather than in
+the packaging.
+
+### Start automatically on boot
+Three ways, and they are not equivalent — the differences matter more than the
+setup effort:
+
+1. **A Windows service (recommended).** The only option that runs with no user
+   logged in, starts before anyone signs in, and — the part that matters most
+   here — **restarts the process automatically when it dies**. `WinSW` or `NSSM`
+   wrapping `python serve_waitress.py` needs no code change at all; a native
+   `pywin32` service would mean a new entry point and a new dependency for no
+   real gain.
+2. **A Scheduled Task at startup** (`schtasks /create /sc onstart`). No extra
+   dependency, works today, survives reboot — but no restart-on-failure and no
+   real service lifecycle. A reasonable fallback when a service wrapper can't be
+   installed.
+3. **A Startup-folder shortcut.** Only runs once somebody logs in interactively,
+   and dies with that session. Mentioned to be ruled out.
+
+Two things worth knowing before doing this, both of which are easy to discover
+the hard way:
+
+- **`_restart_process()` was built in a way that survives supervision.** It uses
+  `os.execv`, which replaces the process image *in place, keeping the same PID* —
+  so a service wrapper watching that PID sees the restart as a continuation, not
+  as a crash-and-restart fight. A fork+exit design would have broken under every
+  option above. Don't change it.
+- **A service also unlocks something the updater currently documents as
+  impossible.** `CLAUDE.md` states plainly that a failed start *after* an update's
+  restart cannot be rolled back automatically, because that would need "a
+  supervisor outside the process (systemd + a health check, or a wrapper), which
+  this project deliberately doesn't ship because it would change how everyone
+  launches the portal". An installer that sets up a service is exactly that
+  change, made deliberately and once — at which point `write_pending_marker()`'s
+  record could actually drive an automatic recovery instead of only naming the
+  backup for a human. Worth treating as a follow-on item, not bundled in.
+- **Check the monitoring calls under the service account.** The Hyper-V, CPU/disk
+  temperature and per-disk I/O queries shell out to PowerShell/CIM. They currently
+  run in the user's own interactive session; under `LocalSystem` or a dedicated
+  service account they may fail on permissions (Hyper-V administration in
+  particular). They degrade to `None` rather than crashing, so the symptom would
+  be "the VM list is empty since I made it a service" — verify explicitly rather
+  than assuming.
+
+**Priority:** High (this is the difference between the portal being up after a
+power cut and not) · **Effort:** S with a wrapper (`WinSW`/`NSSM` plus an
+installer step and a documentation page) · S for the scheduled-task fallback.
+
+---
+
+## Known issues to investigate
+
+Reported symptoms whose cause is not yet established. Written down so the next
+session starts from what was already ruled out rather than from scratch.
+
+### The Discord bot stops and never comes back until the whole app is restarted
+**Symptom (reported 2026-09-03):** the bot goes offline on its own after running
+for a while. The admin panel shows it as not connected. **Restarting the bot from
+`/admin/system` does not fix it** — only restarting the entire process does,
+either from the app-restart button or by hand.
+
+That second half is the useful clue, because it splits the problem in two, and
+they are almost certainly independent:
+
+**Why the restart button doesn't help** has a concrete candidate visible in the
+code. `stop()` schedules `client.close()` onto the bot's own event loop and waits
+on `.result(timeout=10)`; if that loop is wedged the wait raises, is caught and
+logged, `thread.join(timeout)` then returns with the thread still alive — and
+`_runtime["client"]` is never cleared, because only `_run()`'s `finally` block
+does that and `_run()` never finishes. `restart()` immediately calls `start()`,
+which begins with `if _runtime["client"] is not None: return`. The result is a
+button that appears to work, reconnects nothing, and stays that way until the
+process image is replaced. Instrument this before fixing it: log whether the
+close future timed out and whether the thread actually joined, and surface
+`thread.is_alive()` / whether `_runtime` is still populated on `/admin/system`,
+so the next occurrence answers the question instead of prompting another guess.
+
+**Why it disconnects in the first place** is the open question. discord.py
+reconnects on its own, so a permanent drop usually means the event loop stopped
+being able to answer the gateway. The first thing to check is
+`instance/logs/app.log` for discord.py's own warnings — "heartbeat blocked" or
+"Shard ID None has stopped responding to the gateway" name the cause directly,
+and logging is configured globally so they will already be there if it happened.
+The leading suspect is blocking work inside a coroutine: the refresh loop and the
+command callbacks do synchronous database and cache reads on the event loop
+thread. Under a slow disk or a locked database that is exactly how a heartbeat
+gets missed.
+
+**Anything added here must not become a workaround that hides the cause.** A
+watchdog (notice `_state["connected"]` has been false for N minutes, call
+`restart()`) is a reasonable safety net *after* the restart path is trusted to
+actually work — before that, it's a loop that calls a no-op.
+
+**Not reproducible in this sandbox**: there is no real Discord gateway here, so
+anything in this area is reasoned from the code and from logs the user can
+supply, not from a live repro.
+
+**Priority:** High — a monitoring bot that silently stops is worse than one that
+was never set up · **Effort:** S for the restart path (a bounded, readable fix
+plus the diagnostics to confirm it) · unknown for the disconnect itself until
+there are logs.
 
 ---
 
