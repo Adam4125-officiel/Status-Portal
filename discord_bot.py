@@ -22,15 +22,28 @@ import asyncio
 import logging
 import re
 import threading
+import time
 
 import config
 import db
 import integrations
 import monitoring
+import scheduler
 
 _logger = logging.getLogger(__name__)
 
-_state = {"connected": False, "user": None, "last_error": None, "guilds": []}
+# "disconnected_since" is a wall-clock float (not an ISO string like everything
+# rendered through a .local-time span) because only the watchdog below reads it, to
+# measure a duration - get_status() converts it for display.
+_state = {"connected": False, "user": None, "last_error": None, "guilds": [],
+          "disconnected_since": None}
+
+# Serialises start()/stop()/restart(). Since the watchdog task can restart the bot
+# from its own thread at the same moment an admin clicks "Restart Discord bot", the
+# "is it already running" guard in start() is not enough on its own: two callers
+# could both pass it before either had assigned _runtime["client"], leaving two live
+# connections on one token. Re-entrant because restart() calls the other two.
+_lifecycle_lock = threading.RLock()
 
 # The running bot's client/event-loop/thread, if any - set by start(), cleared by
 # stop(). Unlike _state above (a read-only snapshot for the admin page), this is
@@ -71,8 +84,28 @@ REFRESH_RETRY_DELAY_SECONDS = 2
 
 def get_status():
     """Read-only snapshot for the admin page - never raises, reflects whatever the
-    bot thread has last reported via the module-level _state dict."""
-    return dict(_state)
+    bot thread has last reported via the module-level _state dict, plus two derived
+    fields the panel needs to tell "offline" apart from "gone".
+
+    `running` is deliberately about the *thread*, not the connection: "not connected
+    but the thread is alive" means discord.py is retrying on its own, while "not
+    connected and no thread" means there is nothing left to retry - two situations
+    that need different responses and used to look identical on the page."""
+    snapshot = dict(_state)
+    thread = _runtime["thread"]
+    snapshot["running"] = thread is not None and thread.is_alive()
+    since = snapshot.get("disconnected_since")
+    snapshot["offline_for"] = _humanize_seconds(time.time() - since) if since else None
+    return snapshot
+
+
+def _humanize_seconds(seconds):
+    seconds = int(max(seconds, 0))
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
 
 def include_settings():
@@ -663,6 +696,7 @@ def _make_client_class(discord, app_commands, tasks):
             _state["connected"] = True
             _state["user"] = str(self.user)
             _state["last_error"] = None
+            _state["disconnected_since"] = None
             _logger.info("connected as %s", self.user)
             # Also re-checked on every (re)connect, not just on_guild_join - covers
             # a server the bot was already in before the whitelist was configured
@@ -675,6 +709,12 @@ def _make_client_class(discord, app_commands, tasks):
 
         async def on_disconnect(self):
             _state["connected"] = False
+            # Only the *first* drop of a run stamps this - discord.py fires this event
+            # for every retry while it reconnects, and resetting the clock on each one
+            # would mean a bot stuck in a reconnect loop never looked overdue to the
+            # watchdog below.
+            if _state["disconnected_since"] is None:
+                _state["disconnected_since"] = time.time()
 
         async def on_resumed(self):
             # discord.py fires on_disconnect() for any dropped gateway connection,
@@ -687,6 +727,7 @@ def _make_client_class(discord, app_commands, tasks):
             # bot that was demonstrably still responding and editing messages.
             _state["connected"] = True
             _state["last_error"] = None
+            _state["disconnected_since"] = None
             _logger.info("session resumed")
 
         async def _fetch_channel(self, channel_id):
@@ -759,6 +800,11 @@ def start():
     the loop is captured in _runtime *before* the client starts connecting - that
     reference is what lets stop() below schedule client.close() onto this exact
     loop from a different thread."""
+    with _lifecycle_lock:
+        return _start_locked()
+
+
+def _start_locked():
     if _runtime["client"] is not None:
         return False
     if not config.DISCORD_BOT_TOKEN:
@@ -794,6 +840,9 @@ def start():
 
     thread = threading.Thread(target=_run, daemon=True, name="discord-bot")
     _runtime["thread"] = thread
+    # Not connected yet, and the watchdog measures from here - so a bot that never
+    # manages to connect at all is just as overdue as one that dropped later.
+    _state["disconnected_since"] = time.time()
     thread.start()
     return True
 
@@ -826,6 +875,11 @@ def stop(timeout=10):
     it first, which is what makes that thread tear itself down the moment it can
     breathe. A momentarily-duplicated connection that resolves itself beats a bot
     that stays dead until someone restarts the whole portal."""
+    with _lifecycle_lock:
+        return _stop_locked(timeout)
+
+
+def _stop_locked(timeout):
     client = _runtime["client"]
     loop = _runtime["loop"]
     thread = _runtime["thread"]
@@ -881,6 +935,76 @@ def restart():
     cleanly (see stop()); a new one is started either way. The caller reports that
     distinction to the admin rather than swallowing it, because "restarted" and
     "the old one is wedged and I started another" are different things to be told."""
-    clean = stop()
-    start()
-    return clean
+    with _lifecycle_lock:
+        clean = stop()
+        start()
+        return clean
+
+
+# ---------------------------------------------------------------------------
+# Watchdog
+# ---------------------------------------------------------------------------
+WATCHDOG_TASK_NAME = "discord_bot_watchdog"
+
+# How long the bot may be offline before this steps in. discord.py reconnects on
+# its own, with backoff, and usually succeeds - restarting on top of a retry that
+# was about to work would just delay it. This is for the case where that has
+# clearly stopped working.
+WATCHDOG_GRACE_SECONDS = 300
+
+
+def watchdog():
+    """Scheduled task: brings the bot back when it has gone quiet on its own.
+
+    Deliberately a last resort, not the primary mechanism. It only acts on a state
+    discord.py's own reconnection has already failed to fix, and it can restart at
+    most once per grace period - because start() stamps disconnected_since, so a
+    restart that doesn't connect starts a fresh grace period rather than a restart
+    loop every tick.
+
+    Note this is only useful *because* stop()/start() can now recover from a wedged
+    connection: before that fix, a watchdog would have been calling a no-op."""
+    if not config.DISCORD_BOT_TOKEN:
+        raise scheduler.TaskSkipped("no bot token configured")
+    if _state["connected"]:
+        raise scheduler.TaskSkipped("bot is connected")
+
+    thread = _runtime["thread"]
+    if thread is None or not thread.is_alive():
+        # Nothing is retrying - either it was never started in this process, or the
+        # thread died. _forget_runtime clears anything a dead thread left behind, so
+        # start() isn't blocked by a runtime describing a connection that is gone.
+        _forget_runtime(_runtime["client"])
+        if start():
+            _logger.warning("watchdog: the Discord bot was not running - started it")
+            return "bot was not running; started it"
+        raise scheduler.TaskSkipped("bot is not running and could not be started "
+                                    "(discord.py missing?)")
+
+    since = _state["disconnected_since"]
+    if since is None:
+        # Thread alive, not connected, and nothing recorded when that started -
+        # record it now so the grace period is measured from a known point.
+        _state["disconnected_since"] = time.time()
+        raise scheduler.TaskSkipped("bot is reconnecting")
+    offline_for = time.time() - since
+    if offline_for < WATCHDOG_GRACE_SECONDS:
+        raise scheduler.TaskSkipped(f"offline for {_humanize_seconds(offline_for)}; "
+                                    "discord.py is still retrying")
+    _logger.warning("watchdog: the Discord bot has been offline for %s - restarting it",
+                    _humanize_seconds(offline_for))
+    clean = restart()
+    return ("restarted the bot after %s offline" % _humanize_seconds(offline_for)
+            + ("" if clean else " (the old connection had to be abandoned)"))
+
+
+scheduler.register(
+    WATCHDOG_TASK_NAME,
+    "Discord bot watchdog",
+    "Restarts the Discord bot if its connection has been down for several minutes. "
+    "discord.py reconnects by itself, so this only steps in when that hasn't worked "
+    "- which is what used to leave the bot silently offline until the whole portal "
+    "was restarted.",
+    watchdog,
+    default_interval_minutes=5,
+)

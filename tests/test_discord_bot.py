@@ -3,9 +3,12 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 import db
 import config
 import discord_bot
+import scheduler
 
 
 def _make_interaction(user_id, channel_id=555):
@@ -956,3 +959,104 @@ def test_on_resumed_marks_connected_again_after_a_disconnect(isolated_db):
     status = discord_bot.get_status()
     assert status["connected"] is True
     assert status["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# watchdog() - bringing the bot back when it has gone quiet on its own
+# ---------------------------------------------------------------------------
+def _clear_bot_runtime():
+    discord_bot._runtime["client"] = None
+    discord_bot._runtime["loop"] = None
+    discord_bot._runtime["thread"] = None
+    discord_bot._state["connected"] = False
+    discord_bot._state["disconnected_since"] = None
+
+
+def test_watchdog_skips_when_no_token_configured(monkeypatch):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "")
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_skips_while_connected(monkeypatch):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    monkeypatch.setitem(discord_bot._state, "connected", True)
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_starts_the_bot_when_no_thread_is_running(monkeypatch):
+    """The "thread died" case: nothing is retrying, so waiting out a grace period
+    would only delay the recovery."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    started = []
+    monkeypatch.setattr(discord_bot, "start", lambda: started.append("started") or True)
+
+    message = discord_bot.watchdog()
+
+    assert started == ["started"]
+    assert "started it" in message
+
+
+def test_watchdog_waits_out_the_grace_period_before_restarting(monkeypatch):
+    """discord.py reconnects on its own with backoff. Restarting on top of a retry
+    that was about to succeed would just delay it."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    monkeypatch.setitem(discord_bot._runtime, "thread", alive)
+    monkeypatch.setitem(discord_bot._state, "disconnected_since", time.time() - 10)
+    monkeypatch.setattr(discord_bot, "restart", lambda: pytest.fail("restarted too early"))
+
+    with pytest.raises(scheduler.TaskSkipped):
+        discord_bot.watchdog()
+
+
+def test_watchdog_restarts_a_connection_that_has_been_down_too_long(monkeypatch, caplog):
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    monkeypatch.setitem(discord_bot._runtime, "thread", alive)
+    monkeypatch.setitem(discord_bot._state, "disconnected_since",
+                        time.time() - discord_bot.WATCHDOG_GRACE_SECONDS - 1)
+    restarts = []
+    monkeypatch.setattr(discord_bot, "restart", lambda: restarts.append("restarted") or True)
+
+    with caplog.at_level("WARNING"):
+        message = discord_bot.watchdog()
+
+    assert restarts == ["restarted"]
+    assert "restarted the bot" in message
+    assert "offline for" in caplog.text
+
+
+def test_start_stamps_when_the_bot_went_offline(monkeypatch):
+    """A bot that never manages to connect at all must look just as overdue to the
+    watchdog as one that connected and then dropped."""
+    monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "fake-token")
+    _clear_bot_runtime()
+    monkeypatch.setattr(discord_bot, "_try_import_discord", lambda: (None, None, None))
+    discord_bot.start()  # refused (no discord.py) - must not stamp anything
+    assert discord_bot._state["disconnected_since"] is None
+
+
+def test_get_status_distinguishes_a_retrying_bot_from_a_dead_one():
+    """"Not connected" covers two situations that need different responses, and the
+    admin page could not tell them apart before this."""
+    _clear_bot_runtime()
+    assert discord_bot.get_status()["running"] is False
+    assert discord_bot.get_status()["offline_for"] is None
+
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    discord_bot._runtime["thread"] = alive
+    discord_bot._state["disconnected_since"] = time.time() - 600
+    try:
+        status = discord_bot.get_status()
+        assert status["running"] is True
+        assert status["offline_for"] == "10 min"
+    finally:
+        _clear_bot_runtime()
