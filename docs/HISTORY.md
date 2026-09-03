@@ -900,6 +900,79 @@ request's own pooled connection blocking its *own* replace. A change that holds 
 resource open for a request's full duration needs checking against everything that
 same request does before it ends, not just against what runs elsewhere.
 
+## The log page, and keeping your place (v1.8.4, 2026-09-03)
+
+### The save button that always scrolled you to the top
+
+Reported while testing the new log page: "each time I click on apply it brings me to
+the top of the page — and that's a bug not only with that apply button but anytime I
+click on something like a save button".
+
+The second half is what mattered. This was never a log-page bug: **every** admin form
+POSTs and redirects back to the same page, and a browser starts a fresh page at the
+top, so saving one field at the bottom of Settings meant scrolling all the way back
+down. It had been true since the admin panel existed, and had simply never been named
+— a good illustration of why "the user tests things and finds what you missed" is in
+`CLAUDE.md` as a standing note rather than a compliment.
+
+Two things came out of the fix that are easy to get wrong later:
+
+- **`form.submit()` does not fire the `submit` event.** `admin_toggle.js` submitted
+  that way, so a document-level listener never heard about it and flipping a switch
+  far down a table would have kept jumping to the top while every other form behaved.
+  `form.requestSubmit()` is the version that fires the event.
+- **Restoring the scroll position hides the confirmation.** "Settings updated."
+  renders at the top of the document; keep the reader at the bottom and they see
+  nothing at all. The flash had to become a pinned message in the same change — the
+  two are one feature, not a fix plus a decoration.
+
+### The scroll compensation that ran twice
+
+The live log tail trims old entries off the top as new ones arrive. Doing that shifts
+everything below upward, so someone reading further up would watch the text slide out
+from under them — the JS therefore measures the height it removed and subtracts it
+from `scrollTop`.
+
+In Chrome that made it *worse*: the browser implements scroll anchoring and had
+already done exactly that adjustment, so the text slid **down** by the trimmed height
+on every single update. Relying on the browser instead wasn't an option either —
+Safari doesn't implement scroll anchoring at all, so the same code would have been
+correct in one browser and broken in the other. The fix is `overflow-anchor: none` on
+`.log-view` plus the explicit JS compensation: one mechanism, same behaviour
+everywhere.
+
+Only visible in a real browser, and only while scrolled up with entries arriving. The
+unit tests could not have seen it, and neither could a screenshot.
+
+### Two bad assertions, one real bug, in the same test run
+
+Worth recording because the failures looked alike. A live-tail browser check came back
+with four failures: two were the test's own fault — marker text reused from an earlier
+run so `count() == 1` matched twice, and an assertion that `scrollTop` must not change
+when trimming means it *should* — and one was the genuine scroll-anchoring bug above.
+The lesson is not "distrust the tests", it's that a failing check needs reading before
+it is either believed or dismissed; three of those four looked equally like real bugs
+at first glance.
+
+### Why the log rotates daily rather than per run
+
+The log page opened on entries from a month earlier, because rotation was size-based
+(2 MB x 3 files) and this portal is quiet enough that that spans months. Rotating on
+every start was the obvious alternative and is the wrong one here: this app restarts
+*itself* — the in-app updater re-execs, `/admin/system` has a button, systemd restarts
+on failure — so a crash-restart loop would blow through every retained file and delete
+precisely the history that explains the crash. Daily rotation with a retention count
+(`PORTAL_LOG_RETENTION_DAYS`, default 7) is time-anchored instead, and a
+"portal starting" banner keeps individual runs findable inside a day's file.
+
+### Verification record — v1.8.4, 2026-09-03
+
+The user tested the whole thing end to end on their own portal and confirmed it
+stable: the log page, the live tail's scroll behaviour, the download, and the
+panel-wide scroll-position fix. In this sandbox the same behaviours were driven in
+Chromium against a running portal at 320-1440px, appending to a real log file — but
+"stable" here rests on their run, not that one.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
