@@ -104,6 +104,7 @@ have bitten someone on exactly that change.
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
 | Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
+| The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
 Three things that are true no matter what you're touching:
 
@@ -2311,6 +2312,38 @@ This does not change the *release* cadence — mid-session pre-releases stay coa
 and releasing at checkpoints are separate things: commit at every completed fix, cut
 a release when a batch is done.
 
+## Ending a session — and only then
+
+**Wrap-up work happens when the user says the session is ending, and not before.**
+"This session ends here", "that's it for today", "good session" — an explicit
+end, not a "looks good" about one change. Until that point, stay on the work.
+
+When it fires, the wrap-up is all of this, in this order:
+
+1. **Update the markdown.** Rules learned into `CLAUDE.md`, stories and verification
+   records into `docs/HISTORY.md`, and `ROADMAP.md` trimmed so anything shipped stops
+   reading as outstanding work (one index line, not a write-up — see the file's own
+   header for the shape).
+2. **Release, if and only if the user said the work is stable.** They will say so.
+   Untested work stays at its `-rc.N` prerelease and the branch stays open; that is a
+   perfectly good place for a session to end.
+3. **Clean up.** Delete every merged and stale branch, remote *and* local — the branch
+   list is read as "what is still in flight", so anything left there is a lie about
+   the state of the project. Also check `instance/` for what the session's testing
+   left behind (stray `portal.db`, `-wal`/`-shm` sidecars, cookie jars).
+
+Two failure modes worth naming, because both have happened: doing the wrap-up
+mid-session on a "that works!" that only meant one fix was fine, and finishing a
+stable release but leaving the merged branch sitting there.
+
+**A related note on how sessions start.** The opening message often mixes "do this
+now" with "write this down for later" — a batch of roadmap ideas and a bug report can
+arrive in one paragraph. If which is which isn't explicit, ask before starting rather
+than picking; guessing wrong burns the first chunk of the session on the wrong half.
+And when the ask is "why does X break", the single most useful thing to ask for is
+`instance/logs/app.log` around the failure, not more description — nearly every path
+in this app logs a real error now.
+
 ## Release process
 
 **Never commit straight to `main`, for anything — always a branch + PR.** Explicitly
@@ -2325,12 +2358,12 @@ directly unblocking testing of a PR already open, on that PR's own branch) rathe
 than reaching for `main`.
 
 **One exception: `CLAUDE.md` and other markdown docs Claude itself maintains for its
-own context** (`docs/HISTORY.md`, `ROADMAP.md`) — these ride along on whichever
-branch already happens to be open for the related work, rather than needing a
-dedicated branch of their own purely for a doc-only edit. They still don't go
-straight to `main` out of nowhere - if no branch is currently open, treat a doc
-update the same as any other change and give it one. This does *not* extend to
-release finalization: the `VERSION` bump to a stable number is not one of these
+own context** (`docs/HISTORY.md`, `ROADMAP.md`). If a branch is already open for
+related work, the doc edit rides along on it. **If no branch is open, a doc-only
+edit goes straight to `main`** — a branch and a PR for four lines of prose nobody
+reviews is ceremony, not safety. (Corrected 2026-09-03: this file previously said
+the opposite, that a doc edit with no branch open needed one of its own. It
+doesn't.) This does *not* extend to release finalization: the `VERSION` bump to a stable number is not one of these
 files, and still lands as a direct commit on `main` as the last step of "Promoting a
 feature branch to stable" below, exactly as it always has - confirmed explicitly by
 the user rather than assumed, precisely because the phrasing above could have been
@@ -2359,11 +2392,8 @@ the whole batch). The stable-release trigger above still governs promoting a
 pre-release or cutting a fresh full release.
 
 **Promoting a feature branch to stable means merging its PR with a regular merge
-commit (`gh pr merge N --merge`), never squash or rebase — and then deleting the
-branch, remote and local, once the release is published** (stated 2026-09-03: a
-merged branch left behind reads as work still in flight, so the release isn't
-finished until it's gone; the branch deletion is the last step of all, after the
-release is out, not before). Every past PR on this repo merged this way (`git log main --merges` shows it), and it's not a style preference —
+commit (`gh pr merge N --merge`), never squash or rebase.** Every past PR on this
+repo merged this way (`git log main --merges` shows it), and it's not a style preference —
 squashing would collapse a branch's carefully separated per-fix commits into one,
 which defeats the entire point of the commit-cadence convention above (`git bisect`/
 `git revert` need the individual commits to still exist on `main`). Do this *before*
