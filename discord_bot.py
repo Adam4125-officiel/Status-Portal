@@ -471,6 +471,62 @@ def build_embed(discord_module, data):
     return embed
 
 
+# ---------------------------------------------------------------------------
+# Keeping the gateway heartbeat free
+# ---------------------------------------------------------------------------
+# Everything below the client class runs inside discord.py's own event loop, and
+# that loop is what answers Discord's heartbeat. A synchronous call made directly
+# from a coroutine blocks it for the whole duration - and the reads these commands
+# need are not as cheap as they look: build_status_data() makes a dozen SQLite
+# queries (which can wait on the health-check thread's writes up to the busy
+# timeout) and, whenever any resource toggle is on, calls
+# monitoring.get_resource_snapshot(), which falls back to a *blocking* 0.2s psutil
+# CPU sample when its cache is stale and walks every mountpoint with
+# psutil.disk_usage() - a call that can stall for seconds on a sleeping or
+# disconnected drive.
+#
+# Miss enough heartbeats and Discord drops the session ("Shard ID None has stopped
+# responding to the gateway" in the log), which is the leading suspect for the bot
+# going quiet on its own. So every synchronous read is gathered in one plain
+# function and handed to asyncio.to_thread(), leaving the loop free to keep
+# answering. If you add another command, follow this pattern rather than calling
+# db/monitoring straight from the coroutine.
+
+
+async def _off_loop(fn, *args):
+    """Runs a synchronous function on a worker thread so the gateway heartbeat
+    keeps being answered while it works."""
+    return await asyncio.to_thread(fn, *args)
+
+
+def _status_payload():
+    return build_status_data(include_settings())
+
+
+def _snapshot_payload():
+    return build_snapshot_text(build_snapshot_data())
+
+
+def _command_gate():
+    """The three settings _check_command_authorized() needs, read together."""
+    return {
+        "enabled": db.get_setting("discordbot_channel_command_enabled", "0") == "1",
+        "channels": allowed_channel_ids(),
+        "users": allowed_user_ids(),
+    }
+
+
+def _refresh_payload():
+    """Everything one refresh tick reads, gathered in a single off-loop call."""
+    return {
+        "presence": db.get_setting("discordbot_update_presence", "0") == "1",
+        "command_enabled": db.get_setting("discordbot_channel_command_enabled", "0") == "1",
+        "status": build_status_data(include_settings()),
+        "tracked": [(int(row["channel_id"]), int(row["message_id"]))
+                    for row in db.list_discord_status_messages()],
+    }
+
+
 def _try_import_discord():
     try:
         import discord
@@ -498,18 +554,19 @@ def _make_client_class(discord, app_commands, tasks):
             duplicated per command. Sends the appropriate ephemeral reply itself and
             returns False if not authorized; returns True (sending nothing) if the
             command should proceed."""
-            if db.get_setting("discordbot_channel_command_enabled", "0") != "1":
+            gate = await _off_loop(_command_gate)
+            if not gate["enabled"]:
                 await interaction.response.send_message(
                     "This command is currently disabled in /admin/discord-bot.", ephemeral=True)
                 return False
-            allowed_channels = allowed_channel_ids()
+            allowed_channels = gate["channels"]
             if allowed_channels and str(interaction.channel_id) not in allowed_channels:
                 _logger.warning("rejected /%s in unauthorized channel %s", command_name,
                                 interaction.channel_id)
                 await interaction.response.send_message(
                     "This command isn't allowed in this channel.", ephemeral=True)
                 return False
-            allowed = allowed_user_ids()
+            allowed = gate["users"]
             if allowed and str(interaction.user.id) not in allowed:
                 _logger.warning("rejected /%s from unauthorized user %s (%s)",
                                 command_name, interaction.user, interaction.user.id)
@@ -530,17 +587,17 @@ def _make_client_class(discord, app_commands, tasks):
             async def status_command(interaction):
                 if not await self._check_command_authorized(interaction, command_name):
                     return
-                embed = build_embed(discord, build_status_data(include_settings()))
+                embed = build_embed(discord, await _off_loop(_status_payload))
                 await interaction.response.send_message(embed=embed)
                 sent = await interaction.original_response()
-                db.set_discord_status_message(interaction.channel_id, sent.id)
+                await _off_loop(db.set_discord_status_message, interaction.channel_id, sent.id)
 
             @self.tree.command(name="snapshot",
                                 description="Quick snapshot: down services and open incidents/maintenance")
             async def snapshot_command(interaction):
                 if not await self._check_command_authorized(interaction, "snapshot"):
                     return
-                await interaction.response.send_message(build_snapshot_text(build_snapshot_data()))
+                await interaction.response.send_message(await _off_loop(_snapshot_payload))
 
         async def setup_hook(self):
             # Command registration is only picked up on (re)connect - changing the
@@ -661,7 +718,7 @@ def _make_client_class(discord, app_commands, tasks):
                     await msg.edit(embed=embed)
                     return
                 except (discord.NotFound, discord.Forbidden):
-                    db.delete_discord_status_message(channel_id)
+                    await _off_loop(db.delete_discord_status_message, channel_id)
                     return
                 except Exception as e:
                     last_error = e
@@ -672,17 +729,17 @@ def _make_client_class(discord, app_commands, tasks):
 
         async def _refresh(self):
             try:
-                self._snapshot_guilds()
-                data = build_status_data(include_settings())
-                if db.get_setting("discordbot_update_presence", "0") == "1":
+                self._snapshot_guilds()  # in-memory gateway cache only, nothing to wait on
+                payload = await _off_loop(_refresh_payload)
+                if payload["presence"]:
                     await self.change_presence(activity=discord.Activity(
                         type=discord.ActivityType.watching,
-                        name=PRESENCE_TEXT.get(data["overall"], data["overall"])))
-                if db.get_setting("discordbot_channel_command_enabled", "0") == "1":
-                    embed = build_embed(discord, data)
-                    for row in db.list_discord_status_messages():
-                        await self._edit_tracked_status_message(
-                            int(row["channel_id"]), int(row["message_id"]), embed)
+                        name=PRESENCE_TEXT.get(payload["status"]["overall"],
+                                                payload["status"]["overall"])))
+                if payload["command_enabled"]:
+                    embed = build_embed(discord, payload["status"])
+                    for channel_id, message_id in payload["tracked"]:
+                        await self._edit_tracked_status_message(channel_id, message_id, embed)
             except Exception:
                 _logger.exception("refresh loop error")
 

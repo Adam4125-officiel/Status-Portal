@@ -92,6 +92,46 @@ def test_on_guild_remove_refreshes_guild_snapshot(isolated_db, monkeypatch):
     assert discord_bot.get_status()["guilds"] == []
 
 
+def test_refresh_does_not_block_the_event_loop(isolated_db, monkeypatch):
+    """The bot's event loop is what answers Discord's heartbeat, so a synchronous
+    read made straight from a coroutine stalls it - and enough missed heartbeats is
+    how a gateway session gets dropped, which is the leading suspect for the bot
+    going quiet on its own. build_status_data() is not cheap (a dozen SQLite queries,
+    plus monitoring.get_resource_snapshot()'s blocking psutil calls when any resource
+    toggle is on), so it must run off the loop.
+
+    Asserted by checking that other coroutines actually got to run *while* the slow
+    read was in progress - not merely that they ran eventually, which is true even
+    when the loop is blocked solid."""
+    bot = _build_bot()
+    monkeypatch.setattr(type(bot), "guilds", property(lambda self: []), raising=False)
+    window = {}
+
+    def slow_payload():
+        window["start"] = time.monotonic()
+        time.sleep(0.3)
+        window["end"] = time.monotonic()
+        return {"presence": False, "command_enabled": False,
+                "status": {"overall": "operational", "sections": []}, "tracked": []}
+
+    monkeypatch.setattr(discord_bot, "_refresh_payload", slow_payload)
+    beats = []
+
+    async def heartbeat():
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            beats.append(time.monotonic())
+
+    async def main():
+        await asyncio.gather(bot._refresh(), heartbeat())
+
+    asyncio.run(main())
+
+    assert any(window["start"] < beat < window["end"] for beat in beats), \
+        "the event loop was blocked for the whole refresh read - Discord's heartbeat " \
+        "would have gone unanswered for that long too"
+
+
 def test_snapshot_command_rejects_unauthorized_channel(isolated_db):
     db.set_setting("discordbot_channel_command_enabled", "1")
     db.set_setting("discordbot_channel_whitelist", "999")
