@@ -703,14 +703,14 @@ def start():
     reference is what lets stop() below schedule client.close() onto this exact
     loop from a different thread."""
     if _runtime["client"] is not None:
-        return
+        return False
     if not config.DISCORD_BOT_TOKEN:
-        return
+        return False
     discord, app_commands, tasks = _try_import_discord()
     if discord is None:
         _logger.warning("PORTAL_DISCORD_BOT_TOKEN is set but discord.py isn't installed - "
                         "run `pip install discord.py` to enable this optional feature.")
-        return
+        return False
 
     def _run():
         loop = asyncio.new_event_loop()
@@ -733,13 +733,12 @@ def start():
             _logger.exception("failed to start")
         finally:
             loop.close()
-            _runtime["client"] = None
-            _runtime["loop"] = None
-            _runtime["thread"] = None
+            _forget_runtime(client)
 
     thread = threading.Thread(target=_run, daemon=True, name="discord-bot")
     _runtime["thread"] = thread
     thread.start()
+    return True
 
 
 def stop(timeout=10):
@@ -750,12 +749,32 @@ def stop(timeout=10):
     bot's background thread to actually finish - so by the time this returns, the
     connection is genuinely closed, not just "asked nicely", and a following
     start() (see restart() below) can't race with the old one still shutting
-    down."""
+    down.
+
+    Returns True if the bot is genuinely stopped by the time this returns (or was
+    never running), False if its thread refused to end and had to be abandoned.
+
+    **This function must always leave _runtime in a state start() can act on**,
+    which is the fix for a real bug: if the bot's event loop is wedged, the
+    close() future times out, thread.join() returns with the thread still alive,
+    and _runtime kept pointing at that dead-but-not-gone connection forever -
+    because only _run()'s finally clears it, and _run() never finished. start()
+    begins with "if _runtime['client'] is not None: return", so every subsequent
+    restart silently did nothing and only a full process restart brought the bot
+    back. That is exactly the symptom that was reported
+    (docs/HISTORY.md -> "the Discord bot restart button that did nothing").
+
+    Abandoning a wedged connection is not free - if it later unblocks it would be
+    a second live connection on the same token - so loop.stop() is scheduled onto
+    it first, which is what makes that thread tear itself down the moment it can
+    breathe. A momentarily-duplicated connection that resolves itself beats a bot
+    that stays dead until someone restarts the whole portal."""
     client = _runtime["client"]
     loop = _runtime["loop"]
     thread = _runtime["thread"]
     if client is None or loop is None:
-        return
+        _state["connected"] = False
+        return True
     try:
         asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=timeout)
     except Exception:
@@ -763,11 +782,48 @@ def stop(timeout=10):
     if thread is not None:
         thread.join(timeout)
     _state["connected"] = False
+    stuck = thread is not None and thread.is_alive()
+    # Unconditional, not just in the stuck case: a thread that died without running
+    # its own finally would leave _runtime just as un-startable.
+    _forget_runtime(client)
+    if stuck:
+        _logger.warning("the Discord bot's connection did not shut down within %ss - abandoning "
+                        "it so a fresh one can be started; the old thread will exit on its own "
+                        "once it unblocks", timeout)
+        _state["last_error"] = ("the previous connection did not shut down when asked and was "
+                                "abandoned - a fresh one was started in its place")
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            # Loop already closed, or closing - nothing left to ask it to do.
+            pass
+        return False
+    return True
+
+
+def _forget_runtime(client):
+    """Clears _runtime, but only if it still describes `client`'s run.
+
+    The identity check is load-bearing, not defensive tidiness. A run abandoned by
+    stop() above can finish long after a replacement connection has been started;
+    clearing unconditionally from its finally block would then blank out the *live*
+    bot's runtime, leaving stop() with nothing to command and start() free to open
+    a second concurrent connection."""
+    if _runtime["client"] is client:
+        _runtime["client"] = None
+        _runtime["loop"] = None
+        _runtime["thread"] = None
 
 
 def restart():
     """Stops the current connection (if any) and starts a fresh one - e.g. after
     changing the bot token or another startup-time setting without restarting the
-    whole app process."""
-    stop()
+    whole app process.
+
+    Returns False if the old connection had to be abandoned rather than shut down
+    cleanly (see stop()); a new one is started either way. The caller reports that
+    distinction to the admin rather than swallowing it, because "restarted" and
+    "the old one is wedged and I started another" are different things to be told."""
+    clean = stop()
     start()
+    return clean

@@ -370,6 +370,88 @@ def test_restart_stops_existing_connection_then_starts_a_new_one(monkeypatch):
     assert start_calls == ["started"]
 
 
+def _start_wedged_bot_runtime():
+    """A bot thread whose event loop never answers - the state the reported bug
+    happens in. The loop is running but permanently blocked inside a synchronous
+    call, so close() can be scheduled onto it and will simply never run: exactly
+    what a blocked event loop looks like from stop()'s side.
+
+    Returns (client, release) - call release() to let the thread finish, so the
+    test doesn't leave a genuinely stuck thread behind."""
+    loop = asyncio.new_event_loop()
+    release = threading.Event()
+
+    class WedgedClient:
+        async def close(self):  # pragma: no cover - the loop never gets to run it
+            pass
+
+    client = WedgedClient()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        try:
+            release.wait(10)  # blocks the loop's thread, exactly like slow sync I/O
+        finally:
+            loop.close()
+            discord_bot._forget_runtime(client)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    discord_bot._runtime["client"] = client
+    discord_bot._runtime["loop"] = loop
+    discord_bot._runtime["thread"] = thread
+    thread.start()
+    return client, release
+
+
+def test_stop_abandons_a_wedged_connection_so_start_can_run_again(caplog):
+    """The bug behind "restarting the bot does nothing, only restarting the whole
+    app helps": stop() used to leave _runtime pointing at a connection whose thread
+    never ended, and start() refuses to run while _runtime holds a client - so every
+    later restart silently no-opped."""
+    client, release = _start_wedged_bot_runtime()
+    try:
+        with caplog.at_level("WARNING"):
+            clean = discord_bot.stop(timeout=0.2)
+        assert clean is False, "a wedged connection must be reported, not called a clean stop"
+        assert discord_bot._runtime["client"] is None, "start() would refuse to run again"
+        assert "abandoning it" in caplog.text
+    finally:
+        release.set()
+
+
+def test_forget_runtime_only_clears_the_run_it_describes():
+    """The identity check in _forget_runtime(). An abandoned thread finishing after
+    a replacement connection has been started must not blank out the new one's
+    runtime - that would leave stop() with nothing to command and start() free to
+    open a second concurrent connection."""
+    abandoned, replacement = object(), object()
+    discord_bot._runtime["client"] = replacement
+    discord_bot._runtime["loop"] = object()
+    discord_bot._runtime["thread"] = object()
+
+    discord_bot._forget_runtime(abandoned)  # the old run's finally, arriving late
+    assert discord_bot._runtime["client"] is replacement
+
+    discord_bot._forget_runtime(replacement)
+    assert discord_bot._runtime["client"] is None
+    assert discord_bot._runtime["loop"] is None
+    assert discord_bot._runtime["thread"] is None
+
+
+def test_restart_reports_whether_the_old_connection_stopped_cleanly(monkeypatch):
+    """The admin panel tells the two apart - "restarted" and "the old one was
+    wedged so I started another" are different things to be told."""
+    started = []
+    monkeypatch.setattr(discord_bot, "start", lambda: started.append("started"))
+
+    monkeypatch.setattr(discord_bot, "stop", lambda timeout=10: True)
+    assert discord_bot.restart() is True
+
+    monkeypatch.setattr(discord_bot, "stop", lambda timeout=10: False)
+    assert discord_bot.restart() is False
+    assert started == ["started", "started"], "a new connection starts either way"
+
+
 def _discord_error(cls, status=404, reason="Not Found"):
     response = MagicMock(status=status, reason=reason)
     return cls(response, {"message": reason, "code": 0})

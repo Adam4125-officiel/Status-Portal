@@ -2818,8 +2818,15 @@ def admin_system_restart():
         if not config.DISCORD_BOT_TOKEN:
             flash("Discord bot isn't configured (PORTAL_DISCORD_BOT_TOKEN not set).", "error")
             return redirect(url_for("admin_system"))
-        discord_bot.restart()
-        flash("Discord bot restarted.", "success")
+        if discord_bot.restart():
+            flash("Discord bot restarted.", "success")
+        else:
+            # restart() reports False when the old connection had to be abandoned
+            # rather than closed - a fresh one is starting either way, but that is
+            # a symptom worth telling the admin about rather than papering over.
+            flash("The bot's previous connection wouldn't shut down, so it was abandoned and a "
+                  "fresh one started. If this keeps happening, check instance/logs/app.log.",
+                  "error")
     return redirect(url_for("admin_system"))
 
 
