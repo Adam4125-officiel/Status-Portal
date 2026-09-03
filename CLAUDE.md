@@ -99,6 +99,7 @@ have bitten someone on exactly that change.
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
 | A new admin page, or moving one in the nav | *Admin panel navigation* → pick a group, keep the route, three labels must agree |
+| Anything reading or exposing the log files | *Reading the logs from the admin panel* → the name whitelist, and why every read is bounded |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
@@ -1092,6 +1093,54 @@ DB-backed Settings pages, not a code edit.
   as "hide the button", not "block reporting"); if per-service access control is ever
   wanted it needs its own check inside `report_problem()`. No global default setting
   was added either — purely per-service.
+
+## Reading the logs from the admin panel (`/admin/logs`, `logging_setup.py`)
+
+- **The readers live in `logging_setup.py`, not `app.py`.** That module already owns
+  where the log files are and how they're named (`LOG_BASENAME`, `MAX_BACKUPS`,
+  matching `RotatingFileHandler`'s own `app.log`, `app.log.1`, … convention), and
+  that is exactly what a reader needs to know. It also keeps them testable with no
+  Flask app in the picture.
+- **`log_files()` generates the names it looks for; it never lists the directory.**
+  So a file that merely happens to sit in `instance/logs/` can't be listed, and
+  therefore can't be downloaded, just for being there. `log_file_path(name)` resolves
+  a download request by *membership in that generated list* — the name is never
+  joined onto a directory, which makes path traversal structurally impossible here
+  rather than something filtered out. Keep it that way if you add a second log file.
+- **Every read is bounded, which is why this is allowed in a request handler at
+  all.** `read_tail()` seeks to the last `TAIL_MAX_BYTES` rather than reading a 2 MB
+  file, and the page's `limit` is validated against a fixed tuple (`LOG_PAGE_SIZES`)
+  so a query string can't ask the server for arbitrarily much work. Same class of
+  cheap local file work as `updater.list_backups()`. **Don't add a cache** — a log
+  page whose whole job is "what just happened" must not show a minute-old snapshot.
+- **The unit of display is an *entry*, not a line.** `parse_entries()` treats a line
+  matching the formatter's `timestamp LEVEL [name]` prefix as a new entry and
+  everything else as a continuation of the one above. Filtering line-by-line would
+  detach a traceback from the ERROR that produced it and then drop it — which is
+  precisely what someone opened the page to read.
+- **Terminal colour codes are stripped for display only, never from the file or a
+  download.** Some libraries colour their own console output without knowing a file
+  handler is also listening: werkzeug's development-server warning really does land
+  in `app.log` as `\x1b[31m\x1b[1mWARNING…`, which a browser renders as gibberish
+  mid-line. Found by reading the real file during a live smoke test, not by a test.
+- **"Download full log" concatenates every rotated file, oldest first**, streamed via
+  a generator — with the default rotation that's up to 8 MB, and a route has no
+  reason to hold it in memory. Per-file downloads exist too, for when only one is
+  wanted. Both pass `max_age=0`/`no-store` for the same reason the DB backup does:
+  `SEND_FILE_MAX_AGE_DEFAULT` is 30 days and these are point-in-time files, not
+  versioned assets.
+- **Not behind `_require_totp()`, deliberately** — nothing here writes and nothing
+  goes offline, which is the line that helper is scoped to. It is admin-only via
+  `login_required` like everything else under `/admin/`, which matters, because the
+  log quotes paths, user names and error text from every integration.
+- **The page has no JavaScript.** The filters are a plain `GET` form with an Apply
+  button rather than a `<select onchange>`, matching the dependency-free admin-side
+  convention. `.log-panel` opts out of `.form-panel`'s 560px cap on purpose: that cap
+  is right for a form and wrong for a log, where every extra pixel is one less
+  wrapped traceback line. The log box scrolls inside itself (`overflow: auto` +
+  `white-space: pre-wrap`) so a long line never pushes the page sideways — verified
+  across 320–1440px with the responsive audit described under *Admin panel
+  navigation*.
 
 ## Component restart controls (`app.py`, `discord_bot.py`)
 

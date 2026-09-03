@@ -30,6 +30,7 @@
 
     <div class="admin-nav__group">System</div>
     <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
+    <a href="{{ url_for('admin_logs') }}" class="{{ 'active' if active == 'logs' }}">Logs</a>
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
     <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>

@@ -23,6 +23,8 @@ the full feature list and integrations at a glance.
 - Optional Discord/ntfy/**email** notifications, plus an optional Discord bot
   (self-editing status message, `/snapshot` command, and a watchdog that reconnects
   it by itself if the connection drops)
+- **Log viewer** in the admin panel — recent entries with a level filter, and the
+  full log downloadable as a `.log` file
 - Optional **two-factor authentication** (TOTP) for the admin login
 - Host restart/shutdown and per-VM controls (Windows/Hyper-V), plus app/bot restart,
   from the admin panel

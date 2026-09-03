@@ -1422,3 +1422,50 @@ footer.foot {
    previous query's - dimming them says "these are stale" without the jarring blank of
    clearing them first. */
 .search-results--loading { opacity: 0.55; transition: opacity 0.12s ease; }
+
+/* Log viewer (/admin/logs). The log is the one place in this app that renders text
+   nothing here wrote - tracebacks, error strings quoted from other services - so it
+   scrolls inside its own box and never lets a long line push the page sideways.
+
+   .form-panel's 560px cap is right for a form, where a long line length hurts
+   readability, and wrong here: every extra pixel is one less wrapped traceback
+   line, so these two panels opt out of it. */
+.log-panel { max-width: none; }
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.log-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.log-view {
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 0;
+}
+.log-entry {
+  margin: 0;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  /* pre-wrap, not pre: an entry with a traceback should wrap rather than force the
+     whole view into one very wide line - but its own newlines still matter. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-left: 3px solid transparent;
+}
+.log-entry + .log-entry { border-top: 1px solid var(--border); }
+.log-warning { border-left-color: var(--warn); color: var(--text); }
+.log-error, .log-critical { border-left-color: var(--crit); color: var(--text); }
