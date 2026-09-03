@@ -64,8 +64,9 @@
 <div class="form-panel log-panel" style="margin-top: 16px;">
   <h2 style="font-size: 15px; margin: 0 0 4px;">Log files</h2>
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">
-    <code>app.log</code> is the current one; the numbered files are older, rotated out
-    at 2 MB each. "Download full log" above stitches all of them together, oldest first.
+    The log rotates at midnight and {{ retention_days }} day{{ '' if retention_days == 1 else 's' }}
+    are kept, so nothing here is older than that — set <code>PORTAL_LOG_RETENTION_DAYS</code>
+    to keep more. "Download full log" stitches every file below together, oldest first.
   </p>
   <div class="admin-table">
     <table>
@@ -73,7 +74,7 @@
       <tbody>
         {% for file in files %}
         <tr>
-          <td><code>{{ file.name }}</code>{% if loop.first %} <span style="color: var(--text-faint);">— current</span>{% endif %}</td>
+          <td><code>{{ file.name }}</code> <span style="color: var(--text-faint);">— {{ file.label }}</span></td>
           <td style="text-align: right; font-family: var(--font-mono); font-size: 12px; white-space: nowrap;">
             {{ (file.size_bytes / 1024) | round(1) }} KB
           </td>
@@ -90,4 +91,5 @@
   </p>
 </div>
 {% endif %}
+<script src="{{ asset_url('js/admin_logs.js') }}"></script>
 {% endblock %}
