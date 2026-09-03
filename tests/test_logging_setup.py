@@ -118,19 +118,46 @@ def test_log_files_only_lists_our_own_files(tmp_path, monkeypatch):
     """Anything else in instance/logs/ must not be listed - and therefore must not be
     downloadable - merely for sitting there."""
     _write_logs(tmp_path, monkeypatch, {
-        "app.log": "current\n", "app.log.1": "older\n", "secrets.txt": "nope\n"})
+        "app.log": "current\n", "app.log.2026-09-02": "yesterday\n",
+        "app.log.1": "legacy\n", "secrets.txt": "nope\n", "portal.db": "nope\n"})
 
     names = [f["name"] for f in logging_setup.log_files()]
 
-    assert names == ["app.log", "app.log.1"]
+    assert names == ["app.log", "app.log.2026-09-02", "app.log.1"]
     assert logging_setup.log_file_path("secrets.txt") is None
+    assert logging_setup.log_file_path("portal.db") is None
     assert logging_setup.log_file_path("../portal.db") is None
-    assert logging_setup.log_file_path("app.log.1").endswith("app.log.1")
+    assert logging_setup.log_file_path("app.log.2026-09-02").endswith("app.log.2026-09-02")
+
+
+def test_log_files_are_ordered_newest_first(tmp_path, monkeypatch):
+    """Which is what makes iter_all_log_bytes()'s reversed() give oldest-first, and
+    what makes the page's file table read top-down from most to least recent."""
+    _write_logs(tmp_path, monkeypatch, {
+        "app.log": "", "app.log.2026-08-30": "", "app.log.2026-09-01": "",
+        "app.log.1": "", "app.log.3": ""})
+
+    names = [f["name"] for f in logging_setup.log_files()]
+
+    assert names == ["app.log", "app.log.2026-09-01", "app.log.2026-08-30",
+                      "app.log.1", "app.log.3"]
+
+
+def test_legacy_size_rotated_files_stay_readable(tmp_path, monkeypatch):
+    """An install upgrading from size-based rotation still has app.log.1..3 sitting
+    there. They stop being written, but hiding them would strand history someone may
+    still want."""
+    _write_logs(tmp_path, monkeypatch, {"app.log": "new\n", "app.log.2": "old\n"})
+
+    labels = {f["name"]: f["label"] for f in logging_setup.log_files()}
+
+    assert labels == {"app.log": "current", "app.log.2": "older"}
 
 
 def test_iter_all_log_bytes_concatenates_oldest_first(tmp_path, monkeypatch):
     _write_logs(tmp_path, monkeypatch, {
-        "app.log": "newest\n", "app.log.1": "middle\n", "app.log.2": "oldest\n"})
+        "app.log": "newest\n", "app.log.2026-09-02": "middle\n",
+        "app.log.2026-09-01": "oldest\n"})
 
     blob = b"".join(logging_setup.iter_all_log_bytes()).decode()
 
@@ -160,3 +187,45 @@ def test_parse_entries_strips_terminal_colour_codes():
 
     assert entries[0]["text"].endswith("WARNING: development server")
     assert "\x1b" not in entries[0]["text"]
+
+
+def test_init_logging_rotates_daily_and_keeps_the_configured_number_of_days(tmp_path, monkeypatch):
+    """Daily, not by size: 2 MB x 3 files is months of history on a quiet portal,
+    which is what made the log page open on entries from weeks ago."""
+    import logging.handlers
+    monkeypatch.setattr(logging_setup, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(logging_setup, "LOG_FILE", str(tmp_path / "logs" / "app.log"))
+    monkeypatch.setattr(logging_setup, "_configured", False)
+    monkeypatch.setattr(logging_setup.config, "LOG_RETENTION_DAYS", 5)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        logging_setup.init_logging()
+        handler = [h for h in root.handlers if h not in before
+                    and isinstance(h, logging.handlers.TimedRotatingFileHandler)][0]
+        assert handler.when == "MIDNIGHT"
+        assert handler.backupCount == 5
+    finally:
+        for h in list(root.handlers):
+            if h not in before:
+                root.removeHandler(h)
+        monkeypatch.setattr(logging_setup, "_configured", False)
+
+
+def test_init_logging_marks_where_a_run_starts(tmp_path, monkeypatch, caplog):
+    """A file spans several restarts now that rotation is daily, so which entries
+    belong to the run being debugged has to be visible rather than inferred."""
+    monkeypatch.setattr(logging_setup, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(logging_setup, "LOG_FILE", str(tmp_path / "logs" / "app.log"))
+    monkeypatch.setattr(logging_setup, "_configured", False)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        with caplog.at_level("INFO"):
+            logging_setup.init_logging()
+        assert "portal starting" in caplog.text
+    finally:
+        for h in list(root.handlers):
+            if h not in before:
+                root.removeHandler(h)
+        monkeypatch.setattr(logging_setup, "_configured", False)

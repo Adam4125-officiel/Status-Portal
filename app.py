@@ -2695,7 +2695,8 @@ def admin_logs():
         "admin_logs.html", entries=entries, files=files, limit=limit,
         min_level=min_level, page_sizes=LOG_PAGE_SIZES, level_choices=LOG_LEVEL_CHOICES,
         total_bytes=sum(f["size_bytes"] for f in files),
-        log_dir=logging_setup.LOG_DIR, active="logs")
+        log_dir=logging_setup.LOG_DIR, retention_days=config.LOG_RETENTION_DAYS,
+        active="logs")
 
 
 @app.route("/admin/logs/download")

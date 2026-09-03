@@ -112,6 +112,11 @@ PORT = int(os.environ.get("PORTAL_PORT", "5000"))
 # Backend health-check frequency (server-side polling of each service's check_url).
 CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_CHECK_INTERVAL_SECONDS", "120"))
 
+# How many days of rotated log files to keep. The log rotates at midnight, so this is
+# also "how far back /admin/logs can look". Deployment config rather than a DB
+# setting: it decides how much disk this portal is allowed to use.
+LOG_RETENTION_DAYS = int(os.environ.get("PORTAL_LOG_RETENTION_DAYS", "7"))
+
 # How many services run_health_checks() checks concurrently, instead of one at a
 # time. A service with retry_count/retry_interval_seconds set can block its own slot
 # for retry_count * retry_interval_seconds seconds (see app._check_service_status),

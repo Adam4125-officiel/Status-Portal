@@ -14,6 +14,7 @@ import time, so running the test suite (which imports these modules but never
 starts the background threads or the dev/production server) doesn't create
 log files as a side effect.
 """
+import datetime
 import logging
 import logging.handlers
 import os
@@ -21,14 +22,30 @@ import re
 import sys
 import threading
 
+import config
+
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "logs")
 LOG_FILE = os.path.join(LOG_DIR, "app.log")
 
-# RotatingFileHandler's own naming: app.log is current, app.log.1 is the most
-# recently rotated, and so on up to backupCount. Anything else in the directory is
-# not ours and is never read or offered for download.
+# Rotation is by *day*, not by size (changed 2026-09-03). Size-based rotation kept
+# 2 MB x 3 files, which on a quiet portal is months of history - so the log page's
+# first screen was full of entries from weeks ago, and "what happened this morning"
+# meant scrolling past all of it. A day is a unit a person actually reasons in
+# ("check yesterday's log"), and config.LOG_RETENTION_DAYS then means something
+# obvious rather than translating into an unknown span of time.
+#
+# Rotating on every start was the other candidate and is worse here: this app
+# restarts itself (the in-app updater, /admin/system, a systemd restart), so a
+# crash-restart loop would blow through every retained file and delete exactly the
+# history that explains the crash.
 LOG_BASENAME = "app.log"
-MAX_BACKUPS = 3
+
+# app.log is current; TimedRotatingFileHandler names the rest app.log.YYYY-MM-DD. The
+# trailing "\.\d+" alternative matches the files the old size-based handler left
+# behind on an existing install - they are still readable and downloadable, they just
+# stop being produced. Nothing outside this pattern is ever listed, read or offered
+# for download, whatever else happens to be sitting in instance/logs/.
+_LOG_NAME = re.compile(r"^" + re.escape(LOG_BASENAME) + r"(?:\.(\d{4}-\d{2}-\d{2})|\.(\d+))?$")
 
 # How much of the end of a file the tail reader will look at. A log line here is
 # well under 200 bytes, so this comfortably covers the largest page size offered
@@ -67,8 +84,8 @@ def init_logging():
     os.makedirs(LOG_DIR, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        LOG_FILE, when="midnight", backupCount=config.LOG_RETENTION_DAYS, encoding="utf-8")
     file_handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler(sys.stdout)
@@ -80,6 +97,13 @@ def init_logging():
     root.addHandler(console_handler)
 
     threading.excepthook = _log_thread_exception
+
+    # A visible marker for where one run of the portal begins. Rotation is by day, so
+    # a single file routinely spans several restarts; without this, working out which
+    # entries belong to the run you are debugging means inferring it from timestamps.
+    logging.getLogger(__name__).info(
+        "--- portal starting (version %s, keeping %s day(s) of logs) ---",
+        getattr(config, "VERSION_DISPLAY", "?"), config.LOG_RETENTION_DAYS)
 
 
 def _log_thread_exception(args):
@@ -111,21 +135,41 @@ def _log_thread_exception(args):
 # what is in the file right now.
 
 
-def log_files():
-    """Every log file we wrote, newest first, as {name, path, size_bytes}.
+def _log_sort_key(name):
+    """Newest first: the current file, then dated backups most-recent-first, then any
+    files the old size-based handler left behind (.1 is newer than .3)."""
+    match = _LOG_NAME.match(name)
+    dated, legacy = match.group(1), match.group(2)
+    if dated:
+        return (1, [-int(part) for part in dated.split("-")], 0)
+    if legacy:
+        return (2, [], int(legacy))
+    return (0, [], 0)
 
-    The names are generated from LOG_BASENAME/MAX_BACKUPS rather than read from the
-    directory listing, so a file that merely happens to sit in instance/logs/ can
-    never be listed - and therefore never be downloaded - just because it is there.
+
+def log_files():
+    """Every log file we wrote, newest first, as {name, path, size_bytes, label}.
+
+    The directory listing is filtered through _LOG_NAME, so a file that merely
+    happens to sit in instance/logs/ is never listed - and therefore never
+    downloadable - just because it is there. A download request's name is checked
+    against *this* list rather than being joined onto a path (see log_file_path), so
+    nothing a caller sends ever reaches the filesystem.
     """
-    names = [LOG_BASENAME] + [f"{LOG_BASENAME}.{i}" for i in range(1, MAX_BACKUPS + 1)]
+    try:
+        names = [n for n in os.listdir(LOG_DIR) if _LOG_NAME.match(n)]
+    except OSError:
+        return []
     files = []
-    for name in names:
+    for name in sorted(names, key=_log_sort_key):
         path = os.path.join(LOG_DIR, name)
         try:
-            files.append({"name": name, "path": path, "size_bytes": os.path.getsize(path)})
+            size = os.path.getsize(path)
         except OSError:
-            continue  # not rotated that far yet, or removed
+            continue  # rotated away between listing and reading
+        match = _LOG_NAME.match(name)
+        files.append({"name": name, "path": path, "size_bytes": size,
+                       "label": match.group(1) or ("older" if match.group(2) else "current")})
     return files
 
 

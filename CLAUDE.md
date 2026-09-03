@@ -100,6 +100,7 @@ have bitten someone on exactly that change.
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
 | A new admin page, or moving one in the nav | *Admin panel navigation* → pick a group, keep the route, three labels must agree |
 | Anything reading or exposing the log files | *Reading the logs from the admin panel* → the name whitelist, and why every read is bounded |
+| A script that submits a form itself | *Keeping your place when a form submits* → `requestSubmit()`, never `submit()` |
 | Anything touching visitor sign-in or `portal_user` | *Jellyfin-backed user accounts* — the whole section; the admin/visitor split is load-bearing |
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
@@ -1101,12 +1102,23 @@ DB-backed Settings pages, not a code edit.
   matching `RotatingFileHandler`'s own `app.log`, `app.log.1`, … convention), and
   that is exactly what a reader needs to know. It also keeps them testable with no
   Flask app in the picture.
-- **`log_files()` generates the names it looks for; it never lists the directory.**
-  So a file that merely happens to sit in `instance/logs/` can't be listed, and
-  therefore can't be downloaded, just for being there. `log_file_path(name)` resolves
-  a download request by *membership in that generated list* — the name is never
-  joined onto a directory, which makes path traversal structurally impossible here
-  rather than something filtered out. Keep it that way if you add a second log file.
+- **`log_files()` filters the directory through one strict pattern (`_LOG_NAME`), and
+  a download resolves by *membership in that list*.** The name a caller sends is never
+  joined onto a directory, which is what makes path traversal structurally impossible
+  here rather than something filtered out. Keep that shape if you add another log
+  file — widen the pattern, don't start trusting the input.
+- **Rotation is daily (`TimedRotatingFileHandler`, `when="midnight"`), keeping
+  `config.LOG_RETENTION_DAYS` (`PORTAL_LOG_RETENTION_DAYS`, default 7) files.** It was
+  size-based (2 MB × 3), which on a quiet portal is *months* of history — so the log
+  page opened on entries from weeks ago, which is what prompted the change. A day is a
+  unit a person reasons in, and it makes the retention setting mean something obvious.
+  **Rotating on every start is the tempting alternative and is worse**: this app
+  restarts itself (the updater, `/admin/system`, a systemd restart), so a
+  crash-restart loop would blow through every retained file and delete exactly the
+  history explaining the crash. `init_logging()` logs a "portal starting" banner
+  instead, so a run is findable inside a file that spans several of them.
+  The old `app.log.1`…`.3` files stay listed and downloadable on an upgraded install
+  — they stop being written, but hiding them would strand history someone may want.
 - **Every read is bounded, which is why this is allowed in a request handler at
   all.** `read_tail()` seeks to the last `TAIL_MAX_BYTES` rather than reading a 2 MB
   file, and the page's `limit` is validated against a fixed tuple (`LOG_PAGE_SIZES`)
@@ -1648,6 +1660,33 @@ DB-backed Settings pages, not a code edit.
   tones. The markup keeps a real focusable checkbox for keyboards and screen readers,
   and a hidden field carrying the value to *become*, so the same form works with JS
   (submit on change) and without it (a fallback button the script hides).
+
+## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
+
+- **Every admin form submit remembers the page's scroll position and restores it
+  after the reload.** Admin forms POST and redirect back to the same page, and a
+  browser starts a fresh page at the top — so saving one field at the bottom of
+  Settings threw you back to the top every time. Reported 2026-09-03 as "anytime I
+  click a save button it brings me to the top of the page". One document-level
+  `submit` listener covers every form, including any added later.
+- **The restore is keyed on the path and expires in 10 seconds, and it is one-shot.**
+  A restore must only happen on the page you submitted from, and only for the load
+  that followed it — otherwise coming back to a page later, from somewhere else,
+  silently dumps you halfway down it. A `back_forward` navigation is skipped too:
+  the browser already restores scroll there, and fighting it is worse than doing
+  nothing.
+- **`form.submit()` bypasses the `submit` event entirely — use
+  `form.requestSubmit()`.** `admin_toggle.js` submits on change, and with
+  `.submit()` its flip would jump to the top of the page while every other form
+  stayed put. If you add another script that submits a form programmatically, this
+  is the trap.
+- **Admin flash messages are pinned to the viewport (`.flash-stack`), and that is a
+  consequence of the above, not decoration.** Once scroll is preserved, a message
+  rendered at the top of a long page is a confirmation nobody ever sees. Successes
+  auto-dismiss after 7s and anything can be clicked away; **errors deliberately stay**
+  — an error that vanishes while you are still working out what it meant is worse
+  than one you have to dismiss. Public pages keep the in-flow `.flash`: they are
+  short, and nothing there restores scroll.
 
 ## Notification channels (`/admin/notifications`, `notifications.py`)
 
