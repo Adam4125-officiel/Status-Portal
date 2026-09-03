@@ -2359,8 +2359,11 @@ the whole batch). The stable-release trigger above still governs promoting a
 pre-release or cutting a fresh full release.
 
 **Promoting a feature branch to stable means merging its PR with a regular merge
-commit (`gh pr merge N --merge`), never squash or rebase.** Every past PR on this repo
-merged this way (`git log main --merges` shows it), and it's not a style preference —
+commit (`gh pr merge N --merge`), never squash or rebase — and then deleting the
+branch, remote and local, once the release is published** (stated 2026-09-03: a
+merged branch left behind reads as work still in flight, so the release isn't
+finished until it's gone; the branch deletion is the last step of all, after the
+release is out, not before). Every past PR on this repo merged this way (`git log main --merges` shows it), and it's not a style preference —
 squashing would collapse a branch's carefully separated per-fix commits into one,
 which defeats the entire point of the commit-cadence convention above (`git bisect`/
 `git revert` need the individual commits to still exist on `main`). Do this *before*
