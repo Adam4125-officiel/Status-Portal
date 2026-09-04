@@ -1,0 +1,39 @@
+{# Deliberately not sections/services.html. That card carries per-service detail meant
+   for someone holding a phone - report links, grace-period notes, uptime bars, API
+   sub-status - none of which is legible from across a room, and a "Report" link on a
+   display with no pointer is furniture. What's left is the question a wall display is
+   there to answer: which of these is up. #}
+{% set status_label = {'operational': 'Operational', 'slow': 'Slow', 'degraded': 'Degraded', 'maintenance': 'Maintenance', 'down': 'Down'} %}
+{% set status_css = {'operational': 'ok', 'slow': 'warn', 'degraded': 'warn', 'maintenance': 'maint', 'down': 'crit'} %}
+<div class="kiosk-overall {{ status_css[overall] }}">
+  <span class="led {{ status_css[overall] }}"></span>
+  {% if overall == 'operational' %}All services are operating normally
+  {% elif overall == 'slow' %}Some services are responding slowly
+  {% elif overall == 'degraded' %}Some services are degraded
+  {% elif overall == 'maintenance' %}Maintenance in progress
+  {% else %}One or more services are down{% endif %}
+</div>
+
+{% if services %}
+  {% for group in groups %}
+    {% if group.name %}<div class="kiosk-group-title">{{ group.name }}</div>{% endif %}
+    <div class="kiosk-tiles">
+      {% for s in group.services %}
+        <div class="kiosk-tile {{ status_css[s.status] }}">
+          <div class="kiosk-tile__name"><span class="kiosk-tile__icon">{{ s.icon }}</span>{{ s.name }}</div>
+          <div class="kiosk-tile__status">
+            <span class="led {{ status_css[s.status] }}"></span>{{ status_label[s.status] }}
+          </div>
+          <div class="kiosk-tile__meta">
+            {% if s.auto_check and s.last_checked %}
+              {{ s.response_ms ~ ' ms' if s.response_ms is not none else 'no response' }}
+            {% elif s.auto_check %}check pending
+            {% else %}&nbsp;{% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty-state">No services configured yet.</div>
+{% endif %}

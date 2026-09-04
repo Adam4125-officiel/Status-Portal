@@ -973,6 +973,72 @@ panel-wide scroll-position fix. In this sandbox the same behaviours were driven 
 Chromium against a running portal at 320-1440px, appending to a real log file — but
 "stable" here rests on their run, not that one.
 
+## Kiosk mode (v1.8.5, 2026-09-04)
+
+### Why it polls a fragment instead of reusing the page reload
+
+The public page has refreshed itself with `window.location.reload()` since the
+beginning, and the obvious way to build a rotating kiosk display was to leave that
+alone and rotate on top of it. It doesn't work. A reload restarts the page, so the
+rotation restarts with it — at the default 60s refresh and a 20s rotation, views three
+and four are reached exactly never, and every view that *is* reached arrives with a
+white flash, on a television, forever.
+
+So `/kiosk/views` returns the rotating views as a server-rendered HTML fragment and
+`kiosk.js` swaps it in without navigating, restoring the view that was on screen
+before the swap. That is the same shape `/api/incidents/more` and `/admin/logs/tail`
+already use, so it needed no new convention — only the discipline of having the page's
+own first render `include` the *same* partial, so a polled view cannot drift from one
+that was there at switch-on.
+
+Confirmed in Chromium against a live server: the data underneath the display changed
+(a service renamed directly in the database), the change appeared on screen, the
+rotation stayed exactly where it was, and `performance.getEntriesByType('navigation')`
+stayed at 1 — the page never reloaded.
+
+### A test that reported a bug it had caused itself
+
+The first version of that refresh check forced a later view on screen by toggling the
+`kiosk-view--on` class from JavaScript, then asserted the view survived a poll. It
+didn't: the display snapped back to Services, which looked exactly like the bug the
+whole design existed to avoid.
+
+It wasn't one. Toggling the class reaches the DOM but not `kiosk.js`'s own rotation
+index, so the module still believed it was on view 1 and restored view 1 — correctly.
+Rewritten to let the rotation advance on its own, the assertion passed. Worth recording
+next to the log-page entry above, which makes the same point from the other side: a
+failing check has to be read before it is either believed or dismissed.
+
+### Two gates per view, because one would have been a way around a setting
+
+`/kiosk` is public, and a wall display showing Hyper-V VM names is a different
+disclosure from a status page showing service names. Gating the VMs view on its kiosk
+checkbox alone would have meant an admin who had deliberately switched `show_public_vms`
+off could publish exactly that data by ticking a box on a different page — the same
+class of mistake the public sub-pages already guard against by putting the visibility
+rule in one shared builder. So `vms` and `resources` hand `KIOSK_VIEWS` the *same*
+predicates `/vms` and `/resources` use, and the settings form says out loud when a
+ticked view is being held back by one of them.
+
+### Verification record — v1.8.5-rc.1, 2026-09-04
+
+Driven in a real Chromium against a live portal on a scratch database: rotation through
+all five views and wrapping back round, the polling refresh keeping its place and
+bringing in changed data with zero navigations, the "reconnecting" banner raising after
+two failed polls and clearing on recovery, cursor hiding after idle, and no page
+overflow in either axis at 1920x1080 or 1024x768, in both themes. Plus the full pytest
+suite and `curl` against every new route.
+
+**The VMs view was rendered from injected fake VM data.** This sandbox is Linux with no
+Hyper-V, so `monitoring.get_cached_vm_snapshot()` returns an empty list and the view
+would otherwise skip itself. What that screenshot proves is the template and the
+two-level gating; it says nothing about VM detection, which remains Windows-only and
+unverifiable here.
+
+Nothing has been tested on an actual wall-mounted display. `100dvh`, the `clamp()` type
+scale and the browser's own idea of `prefers-color-scheme` on a TV browser are all
+reasoned about rather than observed.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

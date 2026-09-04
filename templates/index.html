@@ -50,6 +50,17 @@
   </section>
   {% endif %}
 
+  {# Main page only. The kiosk display mirrors this page's own status, so the way in
+     belongs beside it rather than in the shared nav, where it would follow a visitor
+     onto every sub-page. Hidden entirely when kiosk mode is off - the route 404s in
+     that state, and a link to a 404 is worse than no link. #}
+  {% if kiosk_enabled %}
+  <div class="kiosk-launch">
+    <a class="btn secondary" href="{{ url_for('kiosk') }}">📺 Kiosk mode</a>
+    <span class="kiosk-launch__hint">Full-screen rotating display, for a wall-mounted screen or a spare tablet.</span>
+  </div>
+  {% endif %}
+
 {% endblock %}
 {% block page_scripts %}
 {# Only the main page has the incidents/maintenance "load more" buttons. #}

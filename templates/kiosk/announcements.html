@@ -1,0 +1,14 @@
+{# The view builder returns None when there's nothing to announce, so this is only
+   ever rendered with at least one item - there is no empty state to write. #}
+{% for a in announcements %}
+  <div class="announcement {{ a.type }}">
+    <div class="announcement__head">
+      <div class="announcement__title">
+        {% if a.pinned %}<span class="pin-flag">📌</span>{% endif %}
+        {{ a.title }}
+      </div>
+      <div class="announcement__time"><span class="local-time" data-utc="{{ a.created_at }}">{{ a.created_at[:16].replace('T', ' ') }} UTC</span></div>
+    </div>
+    <div class="announcement__body">{{ a.message|richtext }}</div>
+  </div>
+{% endfor %}

@@ -1,0 +1,13 @@
+{# Reuses the public per-item partials rather than restating them: an incident that
+   reads one way on the status page and another on the wall display beside it is worse
+   than one rendered slightly large. The kiosk CSS scales them up. #}
+{% if incidents %}
+  {% for i in incidents %}{% include 'sections/_incident_item.html' %}{% endfor %}
+{% else %}
+  <div class="empty-state">No incidents recorded. All clear.</div>
+{% endif %}
+
+{% if maintenance_windows %}
+  <div class="kiosk-group-title">Scheduled maintenance</div>
+  {% for w in maintenance_windows %}{% include 'sections/_maintenance_item.html' %}{% endfor %}
+{% endif %}
