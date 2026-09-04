@@ -369,6 +369,16 @@ def test_every_public_section_has_a_template():
         f"PUBLIC_SECTIONS keys with no templates/sections/<key>.html: {missing}")
 
 
+def test_every_kiosk_view_has_a_template():
+    """Same hazard as PUBLIC_SECTIONS above, one screen further from anyone noticing:
+    _kiosk_rendered_views() renders 'kiosk/<key>.html' with no existence check, and the
+    thing that breaks is a display on a wall that nobody is standing in front of."""
+    missing = [key for key, _, _, _ in app_module.KIOSK_VIEWS
+               if not os.path.isfile(os.path.join(REPO, "templates", "kiosk", f"{key}.html"))]
+    assert not missing, (
+        f"KIOSK_VIEWS keys with no templates/kiosk/<key>.html: {missing}")
+
+
 def test_reorderable_sections_are_not_underscore_prefixed():
     """CLAUDE.md's partial-naming rule: templates/sections/_*.html is an AJAX fragment
     or a per-item partial, not a reorderable block. A reorderable key starting with an

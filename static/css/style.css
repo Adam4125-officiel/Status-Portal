@@ -1516,3 +1516,234 @@ footer.foot {
 .log-live-note { color: var(--text-faint); }
 .log-warning { border-left-color: var(--warn); color: var(--text); }
 .log-error, .log-critical { border-left-color: var(--crit); color: var(--text); }
+
+/* ---------------- Kiosk mode ----------------
+   A full-screen display for a TV or a spare tablet, left running. Two things drive
+   every choice below.
+
+   Read from across a room: type is sized with clamp() against the viewport rather
+   than in fixed pixels, so the same markup is legible on a 1080p television at four
+   metres and on a 10" tablet at arm's length without a second breakpoint set.
+
+   Never scroll: nobody is there to scroll it. The screen is exactly 100dvh with the
+   body's own scrolling switched off, and each view scrolls inside itself only as a
+   last resort when a very long list genuinely doesn't fit - which is also why the
+   rotation exists rather than one long page. */
+body.kiosk {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg-void);
+}
+.kiosk-screen {
+  /* dvh, not vh: mobile browsers report vh as the viewport *without* their retracting
+     toolbars, so a tablet left on this page would render a screen taller than the
+     space it actually has and clip the progress bar off the bottom. */
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.kiosk-screen--nocursor, .kiosk-screen--nocursor * { cursor: none; }
+
+.kiosk-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: clamp(10px, 1.6vh, 22px) clamp(16px, 2.4vw, 48px);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.kiosk-head__brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.kiosk-head__logo { height: clamp(24px, 3.4vh, 44px); width: auto; }
+.kiosk-head__name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(17px, 2.2vh, 30px);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kiosk-head__right { display: flex; align-items: center; gap: clamp(12px, 1.6vw, 28px); }
+.kiosk-clock {
+  font-family: var(--font-mono);
+  font-size: clamp(16px, 2.2vh, 30px);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.kiosk-dots { display: flex; align-items: center; gap: 8px; }
+.kiosk-dot {
+  width: clamp(7px, 0.9vh, 11px);
+  height: clamp(7px, 0.9vh, 11px);
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.3s ease;
+}
+.kiosk-dot--on { background: var(--brand); }
+
+.kiosk-stale {
+  flex: 0 0 auto;
+  padding: 7px clamp(16px, 2.4vw, 48px);
+  background: var(--warn-dim);
+  color: var(--warn);
+  font-size: clamp(12px, 1.5vh, 18px);
+  font-weight: 500;
+}
+
+.kiosk-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: clamp(14px, 2.4vh, 36px) clamp(16px, 2.4vw, 48px);
+  overflow: hidden;
+}
+.kiosk-views, .kiosk-view--on { height: 100%; }
+.kiosk-view { display: none; }
+.kiosk-view--on { display: flex; flex-direction: column; }
+/* The title and the body are centred *together* as one block when the view is short
+   - four service tiles stranded along the top edge of a television, with their own
+   heading stranded further above them, is what the two auto margins below avoid.
+
+   Auto margins rather than justify-content: center, because that centring mode makes
+   overflowing content unreachable past the top of a scroll box. An auto margin
+   collapses to zero the moment there is no free space left, so a view with more in it
+   than fits goes back to top-aligned and scrolls correctly. */
+.kiosk-view__title {
+  flex: 0 0 auto;
+  margin: auto 0 clamp(10px, 1.6vh, 22px);
+  font-family: var(--font-display);
+  font-size: clamp(19px, 2.8vh, 38px);
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.4px;
+}
+.kiosk-view__body {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin-bottom: auto;
+  overflow-y: auto;
+  /* kiosk.js sets scrollTop every animation frame to auto-scroll a view that doesn't
+     fit, so smooth scrolling here would have the browser easing towards a target that
+     has already moved - it must stay 'auto'. */
+  scroll-behavior: auto;
+  /* No scrollbar on a display nobody is sitting in front of: the auto-scroll is the
+     signal that there's more, and a permanent bar down the side of a TV isn't. The
+     view still scrolls by touch or wheel for anyone who walks up to it. */
+  scrollbar-width: none;
+}
+.kiosk-view__body::-webkit-scrollbar { display: none; }
+
+.kiosk-overall {
+  display: flex;
+  align-items: center;
+  font-size: clamp(17px, 2.6vh, 34px);
+  font-weight: 500;
+  margin-bottom: clamp(12px, 2vh, 26px);
+  color: var(--text-primary);
+}
+.kiosk-overall.ok { color: var(--ok); }
+.kiosk-overall.warn { color: var(--warn); }
+.kiosk-overall.crit { color: var(--crit); }
+.kiosk-overall.maint { color: var(--maint); }
+/* The LED's glow is an ::after at inset -6px around an 11px dot - fine beside 13px
+   body text, lost beside 34px kiosk type. Scaled here so the indicator keeps the same
+   visual weight relative to the words next to it. */
+.kiosk-overall .led,
+.kiosk-tile__status .led {
+  width: clamp(12px, 1.6vh, 22px);
+  height: clamp(12px, 1.6vh, 22px);
+  margin-right: clamp(9px, 1.1vh, 15px);
+}
+
+.kiosk-group-title {
+  font-family: var(--font-display);
+  font-size: clamp(14px, 1.9vh, 24px);
+  color: var(--text-dim);
+  margin: clamp(12px, 1.8vh, 24px) 0 clamp(7px, 1vh, 13px);
+}
+.kiosk-tiles {
+  display: grid;
+  /* auto-fill, not auto-fit: on a wide television auto-fit would stretch three
+     services across two metres of glass. A fixed comfortable tile width and a ragged
+     last row reads better than that. */
+  grid-template-columns: repeat(auto-fill, minmax(clamp(210px, 22vw, 340px), 1fr));
+  gap: clamp(9px, 1.4vh, 18px);
+}
+.kiosk-tile {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: clamp(3px, 0.45vw, 6px) solid var(--border);
+  border-radius: var(--radius);
+  padding: clamp(11px, 1.6vh, 22px) clamp(13px, 1.2vw, 24px);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(4px, 0.7vh, 9px);
+  min-width: 0;
+}
+/* The status colour on the tile's own edge, so a wall of green with one red stripe
+   is readable before any of the words are. */
+.kiosk-tile.ok { border-left-color: var(--ok); }
+.kiosk-tile.warn { border-left-color: var(--warn); }
+.kiosk-tile.crit { border-left-color: var(--crit); }
+.kiosk-tile.maint { border-left-color: var(--maint); }
+.kiosk-tile__name {
+  font-family: var(--font-display);
+  font-size: clamp(15px, 2vh, 26px);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.kiosk-tile__icon { margin-right: 8px; }
+.kiosk-tile__status {
+  display: flex;
+  align-items: center;
+  font-size: clamp(13px, 1.7vh, 22px);
+  color: var(--text-dim);
+}
+.kiosk-tile__meta {
+  font-family: var(--font-mono);
+  font-size: clamp(11px, 1.3vh, 16px);
+  color: var(--text-faint);
+}
+
+/* The incident, maintenance, announcement, VM and resource views reuse the public
+   partials rather than restating them - an incident must not read one way on the
+   status page and another on the display beside it. Only the type scale is kiosk's
+   own, since those partials are written for a phone in the hand. */
+.kiosk-view .incident__title,
+.kiosk-view .announcement__title { font-size: clamp(15px, 2vh, 26px); }
+.kiosk-view .incident__desc,
+.kiosk-view .announcement__body { font-size: clamp(13px, 1.6vh, 20px); }
+.kiosk-view .incident__time,
+.kiosk-view .announcement__time { font-size: clamp(11px, 1.3vh, 16px); }
+.kiosk-view .empty-state { font-size: clamp(14px, 1.8vh, 24px); padding: clamp(16px, 3vh, 40px); }
+.kiosk-view .admin-table td,
+.kiosk-view .admin-table th { font-size: clamp(13px, 1.7vh, 22px); }
+.kiosk-view .resource-card__value { font-size: clamp(19px, 2.8vh, 38px); }
+.kiosk-view .resource-card__label { font-size: clamp(12px, 1.5vh, 18px); }
+.kiosk-view .resource-card__sub { font-size: clamp(11px, 1.3vh, 16px); }
+
+.kiosk-progress {
+  flex: 0 0 auto;
+  height: 3px;
+  background: var(--border-soft);
+}
+.kiosk-progress__fill {
+  height: 100%;
+  width: 0;
+  background: var(--brand);
+  /* No transition: kiosk.js sets the width every animation frame, so easing towards a
+     target that has already moved would only add lag. */
+}
+
+/* The way in, on the public status page. */
+.kiosk-launch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 26px;
+}
+.kiosk-launch__hint { font-size: 12px; color: var(--text-faint); }

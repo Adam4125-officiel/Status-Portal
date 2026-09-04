@@ -41,12 +41,18 @@
    width depends on whether visitor controls are showing at all. Marking the body
    lets the CSS reserve the right amount instead of always assuming the widest
    case. #}
-<body{{ ' class="no-visitor-controls"'|safe if not (user_auth_enabled and not request.path.startswith('/admin')) }}>
+<body class="{{ 'no-visitor-controls ' if not (user_auth_enabled and not request.path.startswith('/admin')) }}{{ 'kiosk' if kiosk_mode }}">
   {# One fixed cluster rather than each control positioning itself: the sign-in
      control and the theme toggle would otherwise sit on top of each other, and a
      sign-in link that only appears in the topbar scrolls away exactly when someone
      goes looking for it. Visitor controls are public-page only - admin pages have
      their own nav, and offering "Sign in" on the sign-in page is noise. #}
+  {# Suppressed on the kiosk display: a theme toggle and a sign-in button are chrome
+     for someone holding a device, and nobody is going to press either on a wall-mounted
+     TV. A kiosk browser therefore follows the ordinary theme rules (this device's saved
+     choice, then the OS setting) with no control of its own - set it once from the main
+     page on that same browser if the display comes up in the wrong one. #}
+  {% if not kiosk_mode %}
   <div class="page-actions">
     {% if user_auth_enabled and not request.path.startswith('/admin') %}
       {% if portal_user %}
@@ -63,6 +69,7 @@
     <button id="theme-toggle" class="theme-toggle"
             title="Toggle light/dark theme" aria-label="Toggle light/dark theme">🌙</button>
   </div>
+  {% endif %}
   {% block body %}{% endblock %}
   <script>window.PORTAL_SIGNED_IN = {{ 'true' if portal_user else 'false' }};</script>
   <script src="{{ asset_url('js/theme.js') }}"></script>

@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-08-21.
+Rough chronological range: 2026-07-22 through 2026-09-04.
 
 ---
 
@@ -972,6 +972,126 @@ stable: the log page, the live tail's scroll behaviour, the download, and the
 panel-wide scroll-position fix. In this sandbox the same behaviours were driven in
 Chromium against a running portal at 320-1440px, appending to a real log file — but
 "stable" here rests on their run, not that one.
+
+## Kiosk mode (v1.8.5, 2026-09-04)
+
+### Why it polls a fragment instead of reusing the page reload
+
+The public page has refreshed itself with `window.location.reload()` since the
+beginning, and the obvious way to build a rotating kiosk display was to leave that
+alone and rotate on top of it. It doesn't work. A reload restarts the page, so the
+rotation restarts with it — at the default 60s refresh and a 20s rotation, views three
+and four are reached exactly never, and every view that *is* reached arrives with a
+white flash, on a television, forever.
+
+So `/kiosk/views` returns the rotating views as a server-rendered HTML fragment and
+`kiosk.js` swaps it in without navigating, restoring the view that was on screen
+before the swap. That is the same shape `/api/incidents/more` and `/admin/logs/tail`
+already use, so it needed no new convention — only the discipline of having the page's
+own first render `include` the *same* partial, so a polled view cannot drift from one
+that was there at switch-on.
+
+Confirmed in Chromium against a live server: the data underneath the display changed
+(a service renamed directly in the database), the change appeared on screen, the
+rotation stayed exactly where it was, and `performance.getEntriesByType('navigation')`
+stayed at 1 — the page never reloaded.
+
+### A test that reported a bug it had caused itself
+
+The first version of that refresh check forced a later view on screen by toggling the
+`kiosk-view--on` class from JavaScript, then asserted the view survived a poll. It
+didn't: the display snapped back to Services, which looked exactly like the bug the
+whole design existed to avoid.
+
+It wasn't one. Toggling the class reaches the DOM but not `kiosk.js`'s own rotation
+index, so the module still believed it was on view 1 and restored view 1 — correctly.
+Rewritten to let the rotation advance on its own, the assertion passed. Worth recording
+next to the log-page entry above, which makes the same point from the other side: a
+failing check has to be read before it is either believed or dismissed.
+
+### Two gates per view, because one would have been a way around a setting
+
+`/kiosk` is public, and a wall display showing Hyper-V VM names is a different
+disclosure from a status page showing service names. Gating the VMs view on its kiosk
+checkbox alone would have meant an admin who had deliberately switched `show_public_vms`
+off could publish exactly that data by ticking a box on a different page — the same
+class of mistake the public sub-pages already guard against by putting the visibility
+rule in one shared builder. So `vms` and `resources` hand `KIOSK_VIEWS` the *same*
+predicates `/vms` and `/resources` use, and the settings form says out loud when a
+ticked view is being held back by one of them.
+
+### The small screen that showed the top third of a list (fixed 2026-09-04)
+
+Reported against rc.1: "for small screens it should scroll down and up automatically
+during these 20s". Correct — a view too tall for the screen just sat there showing its
+first few rows, and on a 7" tablet that is most of them.
+
+Each view now travels to the bottom and back within its own rotation slot, on fractions
+that sum to 1 so it is back at the top when the rotation next reaches it. Two details
+worth keeping:
+
+- **It has no breakpoint and doesn't need one.** The trigger is whether
+  `scrollHeight - clientHeight` actually exceeds a threshold, so "small screen" is
+  measured rather than guessed — a television with six services never moves, the same
+  page on a tablet does, and a television with forty services scrolls too, which a
+  media query would have got wrong.
+- **A manual scroll hands control over for the rest of the slot.** The naive version of
+  that check switched the animation off on its own first frame, because assigning
+  `scrollTop` fires a `scroll` event exactly like a human does. It compares against the
+  position the animation last wrote instead.
+
+### The one-second rotation tick that made "20 seconds" mean 20-to-21
+
+Adding the auto-scroll meant tracking elapsed time as a timestamp rather than a seconds
+counter, since a scroll that moves once a second reads as a fault. That immediately
+exposed something the counter had been hiding: rotation was checked on a 1s
+`setInterval`, which can only notice that 20 seconds have passed at the first tick
+*after* they have. Every slot ran 20 to 21 seconds.
+
+Small, and nobody would have filed it — but it surfaced as a test failure that looked
+much worse than it was. A sampler sleeping for exactly the rotation interval drifted
+against the slightly-longer real slots and reported a view appearing twice in a row,
+which reads as a broken rotation. Rotation, the progress bar and the auto-scroll now
+share one `requestAnimationFrame` loop and one clock; measured slots are 5.98-6.04s
+against a 6s setting.
+
+That test needed two corrections of its own before it was measuring anything, and both
+are the same mistake in different clothes: sampling at a guessed cadence rather than
+watching for transitions, and then treating the very first interval — which starts at
+the test's first poll, not at the display's own slot start — as if it were a slot.
+Third entry in this file about a check that had to be read carefully before being
+believed or dismissed.
+
+### Verification record — v1.8.5, 2026-09-04
+
+Driven in a real Chromium against a live portal on a scratch database: rotation through
+all five views and wrapping back round with slots measured at 5.98-6.04s against a 6s
+setting, the auto-scroll travelling a 518px overflow and returning to the top inside one
+20s slot at 800x480 while a 1920x1080 view that fits stayed still, the polling refresh
+keeping both its place and its scroll position while bringing in changed data with zero
+navigations, the "reconnecting" banner raising after two failed polls and clearing on
+recovery, cursor hiding after idle, and no page overflow in either axis at 1920x1080,
+1024x768 or 800x480, in both themes. Plus the full pytest
+suite and `curl` against every new route.
+
+**The VMs view was rendered from injected fake VM data.** This sandbox is Linux with no
+Hyper-V, so `monitoring.get_cached_vm_snapshot()` returns an empty list and the view
+would otherwise skip itself. What that screenshot proves is the template and the
+two-level gating; it says nothing about VM detection, which remains Windows-only and
+unverifiable here.
+
+**The user then tested the whole feature end to end on their own portal and confirmed
+it stable**, which is what promoted it from `-rc.2` to the `v1.8.5` release. That run
+is the only evidence about real hardware in this entry: everything above it happened in
+a Linux sandbox against a stand-in.
+
+Two things remain reasoned about rather than observed even so. `prefers-reduced-motion`
+on a television browser was never exercised — the discrete-cut fallback is written from
+the spec, not from watching one do it. And the VMs view's *detection* half still has no
+evidence behind it; if VM rows ever fail to appear on a real Hyper-V host, that path has
+never actually run here.
+
+The header of this file says the range stops at 2026-08-21; it now runs to 2026-09-04.
 
 ## Release history notes
 

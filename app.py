@@ -1264,6 +1264,191 @@ def public_info():
     return _render_public_page("info")
 
 
+# ---------------------------------------------------------------------------
+# Kiosk mode
+# ---------------------------------------------------------------------------
+# A full-screen, chrome-free display for a wall-mounted TV or a tablet left running
+# in a corner - one view at a time, rotating on a timer, with the data underneath it
+# refreshed on the ordinary public-page cycle.
+#
+# Two things about the shape of this are deliberate:
+#
+# 1. It reuses PUBLIC_PAGES' (predicate, context builder) split rather than inventing
+#    its own visibility rules. A kiosk view is gated by *both* the admin's kiosk
+#    checkbox and the existing show_public_* setting for the same data - otherwise
+#    ticking "Virtual machines" here would publish VM names on a wall display that the
+#    admin had deliberately switched off for /vms, and kiosk would have become a way
+#    around a public-visibility setting. Nothing on /kiosk is visible to a visitor who
+#    could not already see it on the public pages.
+# 2. It refreshes by polling for a server-rendered HTML fragment rather than by
+#    reloading the page the way main.js does. A full reload on a TV means a visible
+#    flash every refresh *and* throws the rotation back to the first view mid-cycle,
+#    which on a 60s refresh and a 20s rotation means views 2 and 3 are never reached.
+#    The fragment endpoint is the same convention /api/incidents/more and
+#    /admin/logs/tail already use: server-rendered HTML, not JSON.
+KIOSK_DEFAULT_ROTATION_SECONDS = 20
+# Floor and ceiling on the rotation timer. Below the floor a view is gone before it can
+# be read from across a room; above the ceiling the display has effectively stopped
+# rotating, which is better expressed by ticking one view.
+KIOSK_MIN_ROTATION_SECONDS = 5
+KIOSK_MAX_ROTATION_SECONDS = 300
+# How many incidents one kiosk view shows. There is no "load more" on a wall display,
+# so this is the whole list rather than a first page.
+KIOSK_INCIDENT_LIMIT = 6
+_KIOSK_DEFAULT_VIEWS = ["services", "incidents"]
+
+
+def _kiosk_services_context():
+    """Always has something to say - "no services configured yet" is itself the answer
+    a status display exists to give, which is also what makes this the safe fallback
+    when every other view is switched off or empty."""
+    services = _attach_integration_status(_enrich_services(db.list_services()))
+    return {"services": services, "groups": _group_services(services),
+            "overall": compute_overall_status(services)}
+
+
+def _kiosk_incidents_context():
+    return {"incidents": _enrich_incidents(
+                db.list_incidents(limit=KIOSK_INCIDENT_LIMIT, max_age_days=_public_history_days())),
+            "maintenance_windows": db.list_public_maintenance_windows()}
+
+
+def _kiosk_announcements_context():
+    announcements = db.list_announcements(limit=5)
+    return {"announcements": announcements} if announcements else None
+
+
+def _kiosk_vms_context():
+    """None when there are no VMs, unlike /vms' own builder, which renders an empty
+    table. A page a visitor navigated to can afford to say "nothing here"; a view that
+    rotates onto a wall for 20 seconds cannot."""
+    context = _vms_context()
+    return context if context and context["vms"] else None
+
+
+# key -> (label, availability predicate, context builder). Same contract as
+# PUBLIC_PAGES: the predicate reads settings only and answers "may this be shown at
+# all", the builder answers "is there anything to show right now" by returning None.
+KIOSK_VIEWS = [
+    ("services", "Services", lambda: True, _kiosk_services_context),
+    ("incidents", "Incidents & maintenance", lambda: True, _kiosk_incidents_context),
+    ("announcements", "Announcements", lambda: True, _kiosk_announcements_context),
+    ("vms", "Virtual machines", _vms_available, _kiosk_vms_context),
+    ("resources", "Server resources", _resources_available, _resources_context),
+]
+KIOSK_VIEW_LABELS = {key: label for key, label, _, _ in KIOSK_VIEWS}
+
+
+def kiosk_enabled():
+    """Public helper: the master switch, read by both kiosk routes and by index() to
+    decide whether to offer the link at all."""
+    return db.get_setting("kiosk_enabled", "0") == "1"
+
+
+def _kiosk_rotation_seconds():
+    raw = db.get_setting("kiosk_rotation_seconds", "")
+    seconds = int(raw) if raw.isdigit() else KIOSK_DEFAULT_ROTATION_SECONDS
+    return max(KIOSK_MIN_ROTATION_SECONDS, min(KIOSK_MAX_ROTATION_SECONDS, seconds))
+
+
+def _kiosk_selected_views():
+    """Which views the admin ticked.
+
+    Deliberately *not* _public_section_order()'s behaviour of appending valid keys
+    missing from the stored value. That list is an ordering of blocks that all show
+    anyway, so a new one appearing at the bottom is right; this one is an inclusion
+    list, and silently adding a view nobody ticked would put data on a wall display
+    the admin never asked to publish. A never-saved setting (None, not "") falls back
+    to the defaults; an explicitly emptied one stays empty and takes the fallback in
+    _kiosk_rendered_views()."""
+    raw = db.get_setting("kiosk_views", None)
+    if raw is None:
+        return list(_KIOSK_DEFAULT_VIEWS)
+    valid = set(KIOSK_VIEW_LABELS)
+    return [key.strip() for key in raw.split(",") if key.strip() in valid]
+
+
+def _kiosk_rendered_views():
+    """The views to actually put on screen, each already rendered to HTML.
+
+    Rendered here rather than by including 'kiosk/<key>.html' from a loop because each
+    view has its own context, and Jinja's include shares the caller's. Merging all five
+    contexts into one namespace would work today only because their keys happen not to
+    collide, which is not a property worth depending on.
+
+    Order is KIOSK_VIEWS' own, not the stored setting's - the checkboxes say which
+    views, not in what sequence, and a second reorder UI for five items would be cost
+    without benefit.
+
+    Falls back to Services when nothing qualifies: every view excluded, or every ticked
+    view currently empty, must still show the thing the display exists for rather than
+    a blank screen on somebody's wall."""
+    selected = set(_kiosk_selected_views())
+    views = []
+    for key, label, available, build_context in KIOSK_VIEWS:
+        if key not in selected or not available():
+            continue
+        try:
+            context = build_context()
+        except Exception:
+            # One broken view must not take the whole display down - the same
+            # reasoning as _public_page_links()' summary guard.
+            _logger.exception("Could not build kiosk view '%s'", key)
+            continue
+        if context:
+            views.append({"key": key, "label": label,
+                          "html": render_template(f"kiosk/{key}.html", **context)})
+    if not views:
+        views.append({"key": "services", "label": KIOSK_VIEW_LABELS["services"],
+                      "html": render_template("kiosk/services.html", **_kiosk_services_context())})
+    return views
+
+
+def _kiosk_view_choices():
+    """The kiosk view checkboxes for the Settings page.
+
+    Each carries whether its underlying public-visibility setting currently allows it,
+    so the form can say that a ticked view still won't appear. Without that, an admin
+    who ticks "Virtual machines" while show_public_vms is off sees a setting that
+    silently does nothing - which reads as a bug rather than as the deliberate refusal
+    to let kiosk publish what the public pages don't."""
+    selected = set(_kiosk_selected_views())
+    return [{"key": key, "label": label, "selected": key in selected, "available": available()}
+            for key, label, available, _ in KIOSK_VIEWS]
+
+
+@app.route("/kiosk")
+def kiosk():
+    """The full-screen display itself. 404s while kiosk mode is off, rather than
+    rendering an empty or redirected page - the same answer a switched-off public
+    sub-page gives, and the same reasoning: an empty page confirms the feature is
+    there and merely hidden."""
+    if not kiosk_enabled():
+        abort(404)
+    return render_template("kiosk.html", kiosk_mode=True,
+                            views=_kiosk_rendered_views(),
+                            rotation_seconds=_kiosk_rotation_seconds(),
+                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
+                            site_name=db.get_setting("site_name", "Server"))
+
+
+@app.route("/kiosk/views")
+def kiosk_views_fragment():
+    """The rotating views, re-rendered, as a server-rendered HTML fragment - polled by
+    static/js/kiosk.js so the display's data stays current without a page reload
+    resetting the rotation. Same convention as /api/incidents/more and
+    /admin/logs/tail; this app has one JSON API (/api/status) and no client-side
+    templating.
+
+    Nothing here does live outbound I/O: the VM and Jellyfin data come from their
+    background-refreshed caches and the resource snapshot reads monitoring's CPU
+    cache, exactly as the equivalent public pages do."""
+    if not kiosk_enabled():
+        abort(404)
+    return render_template("kiosk/_views.html", views=_kiosk_rendered_views(),
+                            rotation_seconds=_kiosk_rotation_seconds())
+
+
 @app.route("/")
 def index():
     services = _attach_integration_status(_enrich_services(db.list_services()))
@@ -1292,6 +1477,10 @@ def index():
                             nav_links=_public_page_links(),
                             page_summaries=_public_page_links(include_summaries=True),
                             search_enabled=search_enabled, active_page="status",
+                            # Main page only, not the shared nav: the kiosk link belongs
+                            # next to the status it mirrors, and a wall display isn't
+                            # something you launch from halfway down a sub-page.
+                            kiosk_enabled=kiosk_enabled(),
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -3531,6 +3720,11 @@ def admin_settings():
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            kiosk_enabled=kiosk_enabled(),
+                            kiosk_rotation_seconds=_kiosk_rotation_seconds(),
+                            kiosk_min_rotation=KIOSK_MIN_ROTATION_SECONDS,
+                            kiosk_max_rotation=KIOSK_MAX_ROTATION_SECONDS,
+                            kiosk_view_choices=_kiosk_view_choices(),
                             show_media=_public_media_visibility(),
                             media_calendar_days=integrations.calendar_days(),
                             max_calendar_days=integrations.MAX_CALENDAR_DAYS,
@@ -3571,6 +3765,18 @@ def admin_settings_general():
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
+    db.set_setting("kiosk_enabled", "1" if request.form.get("kiosk_enabled") else "0")
+    rotation = request.form.get("kiosk_rotation_seconds", "").strip()
+    db.set_setting("kiosk_rotation_seconds",
+                    rotation if rotation.isdigit() else str(KIOSK_DEFAULT_ROTATION_SECONDS))
+    # getlist() reads identically from repeated checkboxes as it would from a
+    # <select multiple>, which is why the picker is a checkbox list. Whitelisted
+    # against the declared views so only a real view key is ever stored, and stored
+    # even when empty - "" is an admin who unticked everything (and gets the Services
+    # fallback), which _kiosk_selected_views() has to be able to tell apart from a
+    # setting that was never saved at all.
+    db.set_setting("kiosk_views", ",".join(
+        key for key in request.form.getlist("kiosk_views") if key in KIOSK_VIEW_LABELS))
     history_days = request.form.get("public_history_days", "").strip()
     db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
     lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()

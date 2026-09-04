@@ -76,6 +76,51 @@
     <input type="hidden" name="layout_order" id="layout_order_input" value="{{ section_order|join(',') }}">
   </div>
   <div class="field">
+    <label>Kiosk mode</label>
+    <div class="field-hint" style="margin-bottom: 8px;">
+      A full-screen display at <code>/kiosk</code> for a wall-mounted TV or a spare
+      tablet — no nav, no footer, one view at a time, rotating on a timer. The data
+      underneath refreshes on the normal public-page cycle ({{ refresh_seconds }}s),
+      without the page reloading and restarting the rotation.
+      While this is off the page returns 404 to everyone and the link disappears from
+      the public status page.
+    </div>
+    <div class="checkbox-list">
+      <label class="field-check"><input type="checkbox" name="kiosk_enabled" {{ 'checked' if kiosk_enabled }}> Enable kiosk mode</label>
+    </div>
+    <div class="field" style="margin-top: 10px;">
+      <label for="kiosk_rotation_seconds">Seconds per view</label>
+      <input type="number" id="kiosk_rotation_seconds" name="kiosk_rotation_seconds"
+             min="{{ kiosk_min_rotation }}" max="{{ kiosk_max_rotation }}"
+             value="{{ kiosk_rotation_seconds }}" style="max-width: 120px;">
+      <div class="field-hint">
+        How long each view stays on screen before the display rotates to the next one.
+        {{ kiosk_min_rotation }}–{{ kiosk_max_rotation }} seconds. Takes effect on the
+        running display's next refresh — no need to go and reload the screen.
+        On a screen too small to fit a view, this is also how long it takes to scroll
+        that view to the bottom and back, so give a long list a longer slot.
+      </div>
+    </div>
+    <div class="field" style="margin-top: 10px;">
+      <label>Views in the rotation</label>
+      <div class="checkbox-list">
+        {% for view in kiosk_view_choices %}
+        <label class="field-check">
+          <input type="checkbox" name="kiosk_views" value="{{ view.key }}" {{ 'checked' if view.selected }}>
+          {{ view.label }}{% if not view.available %} <span style="color: var(--warn);">— currently hidden by the “Public page: also show…” settings above</span>{% endif %}
+        </label>
+        {% endfor %}
+      </div>
+      <div class="field-hint">
+        Kiosk never shows anything the public pages wouldn't: “Virtual machines” and
+        “Server resources” also need their boxes ticked further up this page. A view
+        with nothing to show right now (no announcements, no VMs detected) is skipped
+        rather than rotated onto as a blank screen, and if that leaves nothing at all —
+        including if you untick every box — the display falls back to Services.
+      </div>
+    </div>
+  </div>
+  <div class="field">
     <label for="public_history_days">Auto-hide old incidents/maintenance after (days)</label>
     <input type="number" id="public_history_days" name="public_history_days" min="0" value="{{ public_history_days }}" placeholder="blank = show everything">
     <div class="field-hint">Hides a *resolved* incident from the initial public page once it's older than this — a still-open incident is never hidden regardless of age. Hidden items (and the maintenance history list, which is never shown by default at all) stay reachable via the "Load more" / "Show maintenance history" buttons. Leave blank to show full history with no cutoff, like before this setting existed.</div>

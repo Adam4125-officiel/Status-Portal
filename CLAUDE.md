@@ -95,6 +95,7 @@ have bitten someone on exactly that change.
 | Anything that ends in a restart | *Testing/verification habits* → mocks can't tell you the process came back; exercise it live once |
 | The database restore | *Restoring the database* → the order is the safety machinery |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
+| A kiosk view, or anything under `/kiosk` | *Kiosk mode* → the two-level gate, and why it polls instead of reloading |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
@@ -1004,6 +1005,127 @@ DB-backed Settings pages, not a code edit.
   up/down-button list, not drag-and-drop — deliberate, to stay dependency-free like
   every other admin-side JS file. Don't introduce a drag-and-drop library without
   discussing it first.
+
+## Kiosk mode (`/kiosk`, `templates/kiosk/`, `static/js/kiosk.js`)
+
+A full-screen display for a wall-mounted TV or a tablet left running: one view at a
+time, rotating on a timer, no nav and no footer. Off by default.
+
+- **A kiosk view is gated twice, and the second gate is the point.** `KIOSK_VIEWS`
+  reuses `PUBLIC_PAGES`' `(predicate, context builder)` split, and `vms`/`resources`
+  hand it `_vms_available`/`_resources_available` - the *same* predicates the public
+  sub-pages use. Ticking "Virtual machines" in the kiosk settings while
+  `show_public_vms` is off must not put VM names on a wall display; kiosk shows nothing
+  a visitor couldn't already see on the public pages. A new view that surfaces anything
+  currently behind a `show_public_*` setting must pass that setting's predicate too, not
+  just its own checkbox. There's a test for both existing cases in `tests/test_kiosk.py`.
+- **The predicate answers "may this be shown", the builder answers "is there anything
+  to show".** A builder returning `None` means the view is skipped for that render -
+  no announcements posted, no VMs detected. This is stricter than `/activity`, which
+  deliberately renders an "idle right now" empty state: a page a visitor navigated to
+  can afford to say "nothing here", a view that rotates onto a wall for twenty seconds
+  cannot.
+- **`/kiosk` and `/kiosk/views` both 404 while kiosk mode is off.** Not just the page:
+  an ungated fragment endpoint would keep serving the display's contents to anything
+  still polling it after the admin switched kiosk off. 404 rather than a redirect or an
+  empty page, same as a switched-off public sub-page.
+- **It refreshes by polling for a server-rendered HTML fragment, not by reloading.**
+  `main.js`'s `window.location.reload()` is right for the public page and wrong here:
+  it flashes the screen and throws the rotation back to the first view every cycle, so
+  at a 60s refresh and a 20s rotation the later views are never reached at all.
+  `/kiosk/views` is the same convention as `/api/incidents/more` and `/admin/logs/tail`
+  - server-rendered HTML, never JSON, and the fragment the page includes on first load
+  is the *same partial*, so a polled view can't look different from one that was there
+  when the display was switched on. `applyFragment()` restores the view that was on
+  screen before the swap and re-runs `window.applyLocalTimes()` over what arrived.
+  **Don't "simplify" this back into a reload.**
+- **No slow I/O, despite polling every refresh cycle.** The VM and Jellyfin data come
+  from their background-refreshed caches and the resource snapshot reads `monitoring`'s
+  CPU cache, exactly as the public sub-pages do. A new view that wants live outbound
+  data needs a background cache first, like everything else here.
+- **Each view is rendered to HTML in Python, then embedded with `|safe`** - Jinja's
+  `include` shares the caller's context, and each view has its own. Merging all five
+  contexts into one namespace happens to work today only because their keys don't
+  collide, which isn't a property to depend on.
+- **Rotation order is `KIOSK_VIEWS`' own, not the stored setting's.** The checkboxes
+  say *which* views, not in what sequence. `_kiosk_selected_views()` therefore
+  deliberately does **not** copy `_public_section_order()`'s "append any valid key
+  missing from the stored value" behaviour: that list orders blocks that all show
+  anyway, this one is an *inclusion* list, and silently adding a view nobody ticked
+  would publish something to a wall display the admin never asked for.
+- **`""` and unset are different values for `kiosk_views`.** `""` is an admin who
+  unticked everything (and gets the Services fallback); `None` is an install that has
+  never opened the page (and gets the defaults). `db.get_setting("kiosk_views", None)`
+  is what keeps them apart - don't collapse it to `get_setting(key, "")`.
+- **Services is the fallback and must stay always-available.** Every view excluded, or
+  every ticked view currently empty, still shows Services rather than a blank screen on
+  somebody's wall. That only works while `_kiosk_services_context()` can't return
+  `None` - "no services configured yet" is itself an answer.
+- **`kiosk_mode` suppresses `base.html`'s fixed `.page-actions` cluster.** That's the
+  theme toggle and the sign-in chip, neither of which anyone presses on a TV. The
+  consequence is that a kiosk browser has no theme control of its own and follows the
+  ordinary rules (this device's `localStorage`, then the OS) - set it once from the
+  main page on that same browser. `kiosk_mode` is undefined (and so falsy) everywhere
+  else, but it's read from `base.html`, which *every* page extends, so a change there
+  is a change to every page.
+- **The *page* must never scroll; a *view* auto-scrolls when it doesn't fit.**
+  `.kiosk-screen` is `100dvh` (not `vh`: a tablet's retracting toolbars make `vh`
+  taller than the space actually available, which clips the progress bar off the
+  bottom) with `body.kiosk` overflow hidden, and only `.kiosk-view__body` ever
+  scrolls. Type is sized with `clamp()` against the viewport so one rule set covers a
+  1080p television at four metres and a 10" tablet at arm's length.
+- **A view too tall for the screen travels to the bottom and back within its own
+  rotation slot**, on the fractions in `kiosk.js` (`SCROLL_HOLD_TOP`/`SCROLL_DOWN`/
+  `SCROLL_HOLD_BOTTOM`, which must stay under 1 between them - the journey back up is
+  the remainder, and is what puts the view back at the top before the rotation next
+  reaches it).
+  This is **self-gating and deliberately has no breakpoint**: it only fires when
+  `scrollHeight - clientHeight` actually exceeds `SCROLL_MIN_OVERFLOW_PX`, so a
+  television showing six services never moves while the same page on a 7" tablet does.
+  The overflow is re-measured every frame, because a refresh can swap the contents
+  underneath it and late-loading web fonts change the height of everything.
+  `prefers-reduced-motion` gets two discrete cuts instead of a continuous scroll -
+  **not** "no scrolling", which would leave the bottom of a long list permanently
+  unreachable on exactly the screen where it matters.
+- **A manual scroll hands control over for the rest of the slot** (`scrollTakenOver`,
+  cleared by the next `show()`). The check compares against the position the animation
+  last wrote (`__kioskScrollTop`), because assigning `scrollTop` fires `scroll` too and
+  a naive listener would switch the animation off on its own first frame.
+- **Rotation, the progress bar and the auto-scroll all run on one `requestAnimationFrame`
+  loop reading one clock** (`viewStartedAt`, a timestamp - not a seconds counter).
+  Rotation used to be checked on a 1s tick, which can only notice that 20 seconds have
+  passed at the first tick *after* they have: every slot ran 20-21s and "20 seconds per
+  view" quietly meant something else. Don't move any of the three back onto a timer -
+  they must not be able to disagree about how far through the slot the display is.
+  `.kiosk-progress__fill` therefore has **no CSS transition**, and
+  `.kiosk-view__body` must keep `scroll-behavior: auto`; either one would ease towards
+  a target that has already moved.
+- **A short view is centred by auto margins on `.kiosk-view__title` and
+  `.kiosk-view__body`, never `justify-content: center`** - that centring mode makes
+  overflowing content unreachable past the top of a scroll box, while an auto margin
+  collapses to zero as soon as the space runs out and the view goes back to
+  top-aligned and scrollable.
+- **A failed poll raises the "reconnecting" banner after two consecutive failures.**
+  A display left running for weeks that still *looks* live while showing week-old data
+  is the failure mode that matters here; one failed poll is a blip, and crying wolf on
+  every one of those trains whoever walks past to ignore it.
+- **The cursor is hidden by a 3-second idle timer, not a blanket `cursor: none`** - so
+  the display can still be used when somebody walks up to it.
+- **The link is on `/` only, not in the shared `.page-nav`.** The display mirrors that
+  page's own status; in the nav it would follow a visitor onto every sub-page. It's
+  hidden entirely when kiosk mode is off, because the route 404s in that state.
+- **What is and isn't verified**: rotation through all five views (slots measured at
+  5.98-6.04s against a 6s setting), the auto-scroll travelling the full height and
+  returning to the top within one slot at 800x480, the polling refresh keeping both its
+  place and its scroll position while bringing in changed data with zero page reloads,
+  the stale banner raising and clearing, cursor hiding, and no page overflow at
+  1920x1080, 1024x768 or 800x480 were all confirmed by driving a real Chromium against
+  a live server, and **the user confirmed the whole feature stable end to end on their
+  own portal (2026-09-04)**, which is what promoted it to the `v1.8.5` release. The
+  **VMs view was rendered from injected fake VM data** - this sandbox is Linux with no
+  Hyper-V, so what that proves is the template and the gating, not VM detection. The
+  `prefers-reduced-motion` fallback was never exercised on a television browser either.
+  See `docs/HISTORY.md`.
 
 ## Two-factor authentication (`twofactor.py`)
 

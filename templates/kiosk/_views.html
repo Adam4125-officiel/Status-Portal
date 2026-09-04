@@ -1,0 +1,15 @@
+{# The rotating views, and the whole of what /kiosk/views returns. The kiosk page
+   includes this same partial on first load, so a view that arrives from a poll can't
+   look different from one that was there when the display was switched on.
+
+   The rotation interval rides along on the wrapper rather than only being read from
+   the page at load: a display bolted to a wall is exactly the thing you don't want to
+   have to go and reload after changing a setting. #}
+<div class="kiosk-views" data-rotation-seconds="{{ rotation_seconds }}">
+  {% for view in views %}
+    <section class="kiosk-view{{ ' kiosk-view--on' if loop.first }}" data-view="{{ view.key }}">
+      <h1 class="kiosk-view__title">{{ view.label }}</h1>
+      <div class="kiosk-view__body">{{ view.html|safe }}</div>
+    </section>
+  {% endfor %}
+</div>

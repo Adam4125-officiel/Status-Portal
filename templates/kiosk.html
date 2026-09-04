@@ -1,0 +1,47 @@
+{# The full-screen display. Extends base.html rather than public_base.html on purpose:
+   the topbar, the page nav and the footer are exactly the chrome a wall display has no
+   use for, and kiosk_mode also suppresses base.html's fixed .page-actions cluster (a
+   theme toggle and a sign-in button nobody is going to press on a TV).
+
+   Every view is rendered into the DOM up front and CSS shows one at a time, so the
+   rotation costs nothing at the moment it happens - and a browser with JavaScript off
+   still shows the first view instead of a blank screen. #}
+{% extends "base.html" %}
+{% block title %}{{ site_name }} — Kiosk{% endblock %}
+{% block body %}
+<div class="kiosk-screen"
+     data-rotation-seconds="{{ rotation_seconds }}"
+     data-refresh-seconds="{{ refresh_seconds }}"
+     data-views-url="{{ url_for('kiosk_views_fragment') }}">
+
+  <header class="kiosk-head">
+    <div class="kiosk-head__brand">
+      {% if site_logo_filename %}
+        <img class="kiosk-head__logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
+      {% else %}
+        <span class="dot-server"></span>
+      {% endif %}
+      <span class="kiosk-head__name">{{ site_name }}</span>
+    </div>
+    <div class="kiosk-head__right">
+      {# Dots rather than a label: on a display seen from across a room, "3 of 5" needs
+         reading, while five dots with one lit is taken in at a glance. #}
+      <div class="kiosk-dots" id="kiosk-dots" aria-hidden="true"></div>
+      <div class="kiosk-clock" id="kiosk-clock"></div>
+    </div>
+  </header>
+
+  {# A display left running for weeks must never be able to look live while showing
+     stale data - that is the failure mode that matters here, not a missed refresh.
+     kiosk.js reveals this the moment a poll fails. #}
+  <div class="kiosk-stale" id="kiosk-stale" hidden>Reconnecting — data may be out of date</div>
+
+  <main class="kiosk-body" id="kiosk-views">
+    {% include "kiosk/_views.html" %}
+  </main>
+
+  <div class="kiosk-progress"><div class="kiosk-progress__fill" id="kiosk-progress"></div></div>
+</div>
+<script src="{{ asset_url('js/local_time.js') }}"></script>
+<script src="{{ asset_url('js/kiosk.js') }}"></script>
+{% endblock %}
