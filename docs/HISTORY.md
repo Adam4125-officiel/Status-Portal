@@ -1020,13 +1020,58 @@ rule in one shared builder. So `vms` and `resources` hand `KIOSK_VIEWS` the *sam
 predicates `/vms` and `/resources` use, and the settings form says out loud when a
 ticked view is being held back by one of them.
 
+### The small screen that showed the top third of a list (fixed 2026-09-04)
+
+Reported against rc.1: "for small screens it should scroll down and up automatically
+during these 20s". Correct — a view too tall for the screen just sat there showing its
+first few rows, and on a 7" tablet that is most of them.
+
+Each view now travels to the bottom and back within its own rotation slot, on fractions
+that sum to 1 so it is back at the top when the rotation next reaches it. Two details
+worth keeping:
+
+- **It has no breakpoint and doesn't need one.** The trigger is whether
+  `scrollHeight - clientHeight` actually exceeds a threshold, so "small screen" is
+  measured rather than guessed — a television with six services never moves, the same
+  page on a tablet does, and a television with forty services scrolls too, which a
+  media query would have got wrong.
+- **A manual scroll hands control over for the rest of the slot.** The naive version of
+  that check switched the animation off on its own first frame, because assigning
+  `scrollTop` fires a `scroll` event exactly like a human does. It compares against the
+  position the animation last wrote instead.
+
+### The one-second rotation tick that made "20 seconds" mean 20-to-21
+
+Adding the auto-scroll meant tracking elapsed time as a timestamp rather than a seconds
+counter, since a scroll that moves once a second reads as a fault. That immediately
+exposed something the counter had been hiding: rotation was checked on a 1s
+`setInterval`, which can only notice that 20 seconds have passed at the first tick
+*after* they have. Every slot ran 20 to 21 seconds.
+
+Small, and nobody would have filed it — but it surfaced as a test failure that looked
+much worse than it was. A sampler sleeping for exactly the rotation interval drifted
+against the slightly-longer real slots and reported a view appearing twice in a row,
+which reads as a broken rotation. Rotation, the progress bar and the auto-scroll now
+share one `requestAnimationFrame` loop and one clock; measured slots are 5.98-6.04s
+against a 6s setting.
+
+That test needed two corrections of its own before it was measuring anything, and both
+are the same mistake in different clothes: sampling at a guessed cadence rather than
+watching for transitions, and then treating the very first interval — which starts at
+the test's first poll, not at the display's own slot start — as if it were a slot.
+Third entry in this file about a check that had to be read carefully before being
+believed or dismissed.
+
 ### Verification record — v1.8.5-rc.1, 2026-09-04
 
 Driven in a real Chromium against a live portal on a scratch database: rotation through
-all five views and wrapping back round, the polling refresh keeping its place and
-bringing in changed data with zero navigations, the "reconnecting" banner raising after
-two failed polls and clearing on recovery, cursor hiding after idle, and no page
-overflow in either axis at 1920x1080 or 1024x768, in both themes. Plus the full pytest
+all five views and wrapping back round with slots measured at 5.98-6.04s against a 6s
+setting, the auto-scroll travelling a 518px overflow and returning to the top inside one
+20s slot at 800x480 while a 1920x1080 view that fits stayed still, the polling refresh
+keeping both its place and its scroll position while bringing in changed data with zero
+navigations, the "reconnecting" banner raising after two failed polls and clearing on
+recovery, cursor hiding after idle, and no page overflow in either axis at 1920x1080,
+1024x768 or 800x480, in both themes. Plus the full pytest
 suite and `curl` against every new route.
 
 **The VMs view was rendered from injected fake VM data.** This sandbox is Linux with no

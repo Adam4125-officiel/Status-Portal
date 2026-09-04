@@ -1624,7 +1624,16 @@ body.kiosk {
   min-height: 0;
   margin-bottom: auto;
   overflow-y: auto;
+  /* kiosk.js sets scrollTop every animation frame to auto-scroll a view that doesn't
+     fit, so smooth scrolling here would have the browser easing towards a target that
+     has already moved - it must stay 'auto'. */
+  scroll-behavior: auto;
+  /* No scrollbar on a display nobody is sitting in front of: the auto-scroll is the
+     signal that there's more, and a permanent bar down the side of a TV isn't. The
+     view still scrolls by touch or wheel for anyone who walks up to it. */
+  scrollbar-width: none;
 }
+.kiosk-view__body::-webkit-scrollbar { display: none; }
 
 .kiosk-overall {
   display: flex;
@@ -1725,7 +1734,8 @@ body.kiosk {
   height: 100%;
   width: 0;
   background: var(--brand);
-  transition: width 1s linear;
+  /* No transition: kiosk.js sets the width every animation frame, so easing towards a
+     target that has already moved would only add lag. */
 }
 
 /* The way in, on the public status page. */

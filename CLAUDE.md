@@ -1068,12 +1068,38 @@ time, rotating on a timer, no nav and no footer. Off by default.
   main page on that same browser. `kiosk_mode` is undefined (and so falsy) everywhere
   else, but it's read from `base.html`, which *every* page extends, so a change there
   is a change to every page.
-- **The page must never scroll** - nobody is there to scroll it. `.kiosk-screen` is
-  `100dvh` (not `vh`: a tablet's retracting toolbars make `vh` taller than the space
-  actually available, which clips the progress bar off the bottom) with `body.kiosk`
-  overflow hidden; a view scrolls inside its own body only when a genuinely long list
-  doesn't fit. Type is sized with `clamp()` against the viewport so one rule set covers
-  a 1080p television at four metres and a 10" tablet at arm's length.
+- **The *page* must never scroll; a *view* auto-scrolls when it doesn't fit.**
+  `.kiosk-screen` is `100dvh` (not `vh`: a tablet's retracting toolbars make `vh`
+  taller than the space actually available, which clips the progress bar off the
+  bottom) with `body.kiosk` overflow hidden, and only `.kiosk-view__body` ever
+  scrolls. Type is sized with `clamp()` against the viewport so one rule set covers a
+  1080p television at four metres and a 10" tablet at arm's length.
+- **A view too tall for the screen travels to the bottom and back within its own
+  rotation slot**, on the fractions in `kiosk.js` (`SCROLL_HOLD_TOP`/`SCROLL_DOWN`/
+  `SCROLL_HOLD_BOTTOM`, which must stay under 1 between them - the journey back up is
+  the remainder, and is what puts the view back at the top before the rotation next
+  reaches it).
+  This is **self-gating and deliberately has no breakpoint**: it only fires when
+  `scrollHeight - clientHeight` actually exceeds `SCROLL_MIN_OVERFLOW_PX`, so a
+  television showing six services never moves while the same page on a 7" tablet does.
+  The overflow is re-measured every frame, because a refresh can swap the contents
+  underneath it and late-loading web fonts change the height of everything.
+  `prefers-reduced-motion` gets two discrete cuts instead of a continuous scroll -
+  **not** "no scrolling", which would leave the bottom of a long list permanently
+  unreachable on exactly the screen where it matters.
+- **A manual scroll hands control over for the rest of the slot** (`scrollTakenOver`,
+  cleared by the next `show()`). The check compares against the position the animation
+  last wrote (`__kioskScrollTop`), because assigning `scrollTop` fires `scroll` too and
+  a naive listener would switch the animation off on its own first frame.
+- **Rotation, the progress bar and the auto-scroll all run on one `requestAnimationFrame`
+  loop reading one clock** (`viewStartedAt`, a timestamp - not a seconds counter).
+  Rotation used to be checked on a 1s tick, which can only notice that 20 seconds have
+  passed at the first tick *after* they have: every slot ran 20-21s and "20 seconds per
+  view" quietly meant something else. Don't move any of the three back onto a timer -
+  they must not be able to disagree about how far through the slot the display is.
+  `.kiosk-progress__fill` therefore has **no CSS transition**, and
+  `.kiosk-view__body` must keep `scroll-behavior: auto`; either one would ease towards
+  a target that has already moved.
 - **A short view is centred by auto margins on `.kiosk-view__title` and
   `.kiosk-view__body`, never `justify-content: center`** - that centring mode makes
   overflowing content unreachable past the top of a scroll box, while an auto margin
@@ -1088,10 +1114,13 @@ time, rotating on a timer, no nav and no footer. Off by default.
 - **The link is on `/` only, not in the shared `.page-nav`.** The display mirrors that
   page's own status; in the nav it would follow a visitor onto every sub-page. It's
   hidden entirely when kiosk mode is off, because the route 404s in that state.
-- **What is and isn't verified**: rotation through all five views, the polling refresh
-  keeping its place and bringing in changed data with zero page reloads, the stale
-  banner raising and clearing, cursor hiding, and no overflow at 1920x1080 or 1024x768
-  were all confirmed by driving a real Chromium against a live server. The **VMs view
+- **What is and isn't verified**: rotation through all five views (slots measured at
+  5.98-6.04s against a 6s setting), the auto-scroll travelling the full height and
+  returning to the top within one slot at 800x480, the polling refresh keeping both its
+  place and its scroll position while bringing in changed data with zero page reloads,
+  the stale banner raising and clearing, cursor hiding, and no page overflow at
+  1920x1080, 1024x768 or 800x480 were all confirmed by driving a real Chromium against
+  a live server. The **VMs view
   was rendered from injected fake VM data** - this sandbox is Linux with no Hyper-V, so
   what that proves is the template and the gating, not VM detection. See
   `docs/HISTORY.md`.
