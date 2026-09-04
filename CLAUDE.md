@@ -1120,10 +1120,12 @@ time, rotating on a timer, no nav and no footer. Off by default.
   place and its scroll position while bringing in changed data with zero page reloads,
   the stale banner raising and clearing, cursor hiding, and no page overflow at
   1920x1080, 1024x768 or 800x480 were all confirmed by driving a real Chromium against
-  a live server. The **VMs view
-  was rendered from injected fake VM data** - this sandbox is Linux with no Hyper-V, so
-  what that proves is the template and the gating, not VM detection. See
-  `docs/HISTORY.md`.
+  a live server, and **the user confirmed the whole feature stable end to end on their
+  own portal (2026-09-04)**, which is what promoted it to the `v1.8.5` release. The
+  **VMs view was rendered from injected fake VM data** - this sandbox is Linux with no
+  Hyper-V, so what that proves is the template and the gating, not VM detection. The
+  `prefers-reduced-motion` fallback was never exercised on a television browser either.
+  See `docs/HISTORY.md`.
 
 ## Two-factor authentication (`twofactor.py`)
 

@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-08-21.
+Rough chronological range: 2026-07-22 through 2026-09-04.
 
 ---
 
@@ -1062,7 +1062,7 @@ the test's first poll, not at the display's own slot start — as if it were a s
 Third entry in this file about a check that had to be read carefully before being
 believed or dismissed.
 
-### Verification record — v1.8.5-rc.1, 2026-09-04
+### Verification record — v1.8.5, 2026-09-04
 
 Driven in a real Chromium against a live portal on a scratch database: rotation through
 all five views and wrapping back round with slots measured at 5.98-6.04s against a 6s
@@ -1080,9 +1080,18 @@ would otherwise skip itself. What that screenshot proves is the template and the
 two-level gating; it says nothing about VM detection, which remains Windows-only and
 unverifiable here.
 
-Nothing has been tested on an actual wall-mounted display. `100dvh`, the `clamp()` type
-scale and the browser's own idea of `prefers-color-scheme` on a TV browser are all
-reasoned about rather than observed.
+**The user then tested the whole feature end to end on their own portal and confirmed
+it stable**, which is what promoted it from `-rc.2` to the `v1.8.5` release. That run
+is the only evidence about real hardware in this entry: everything above it happened in
+a Linux sandbox against a stand-in.
+
+Two things remain reasoned about rather than observed even so. `prefers-reduced-motion`
+on a television browser was never exercised — the discrete-cut fallback is written from
+the spec, not from watching one do it. And the VMs view's *detection* half still has no
+evidence behind it; if VM rows ever fail to appear on a real Hyper-V host, that path has
+never actually run here.
+
+The header of this file says the range stops at 2026-08-21; it now runs to 2026-09-04.
 
 ## Release history notes
 

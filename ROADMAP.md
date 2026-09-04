@@ -362,6 +362,13 @@ this" rules are in `CLAUDE.md`; how its bugs actually presented is in
 - Keeping your scroll position when any admin form is saved, which was a panel-wide
   annoyance that had simply never been named.
 
+**v1.8.5** (2026-09-04)
+- Kiosk mode: a full-screen rotating display at `/kiosk` for a wall-mounted screen or
+  a spare tablet, off by default, with each view gated by the same `show_public_*`
+  settings the public pages use.
+- A view too tall for the screen scrolls itself to the bottom and back within its own
+  rotation slot, on a measured overflow rather than a screen-width breakpoint.
+
 ## Overall take
 
 The list is short now, and what is on it is genuinely different in character rather
