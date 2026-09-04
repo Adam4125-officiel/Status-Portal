@@ -347,7 +347,16 @@ code, .mono { font-family: var(--font-mono); }
   max-width: 260px;
 }
 .frame-body { position: relative; line-height: 0; }
-.frame-body img { width: 100%; }
+/* height: auto is load-bearing, not redundant. The hero <img> tags carry
+   width/height attributes (1440x900, 390x844) so the browser can reserve the
+   right box before the image loads - but those attributes map to the CSS
+   width/height properties via the presentational-hints stylesheet, and only
+   the width one is overridden here. Without height: auto the desktop capture
+   renders at the frame's ~958px width while keeping its attribute height of
+   900px: a 33% vertical stretch that made the in-image text visibly fat. The
+   gallery below already sets height: auto, which is why this only ever showed
+   on the first screenshot. */
+.frame-body img { width: 100%; height: auto; }
 .shot-dark { display: none; }
 :root[data-theme="dark"] .shot-light { display: none; }
 :root[data-theme="dark"] .shot-dark { display: block; }
