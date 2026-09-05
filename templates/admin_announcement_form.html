@@ -1,8 +1,8 @@
 {% extends "admin_base.html" %}
-{% block title %}{{ 'Edit' if announcement else 'New' }} announcement — Admin{% endblock %}
+{% block title %}{{ 'Edit' if is_edit else 'New' }} announcement — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>{{ 'Edit announcement' if announcement else 'New announcement' }}</h1>
+  <h1>{{ 'Edit announcement' if is_edit else 'New announcement' }}</h1>
 </div>
 
 <form method="POST" class="form-panel">
@@ -32,6 +32,27 @@
     </label>
   </div>
 
+  <div class="field">
+    <label id="window_label">When it's shown (optional, UTC)</label>
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;"
+         role="group" aria-labelledby="window_label">
+      <label for="starts_at" style="font-size: 13px; color: var(--text-dim);">From</label>
+      <input type="datetime-local" id="starts_at" name="starts_at" style="flex: 1; min-width: 180px;"
+             value="{{ announcement.starts_at[:16] if announcement else '' }}">
+      <label for="ends_at" style="font-size: 13px; color: var(--text-dim);">Until</label>
+      <input type="datetime-local" id="ends_at" name="ends_at" style="flex: 1; min-width: 180px;"
+             value="{{ announcement.ends_at[:16] if announcement else '' }}">
+      <button type="button" id="window_clear" class="btn secondary"
+              style="padding: 9px 12px;">Clear</button>
+    </div>
+    <div class="field-hint">
+      Leave both blank to publish it now and keep showing it until you delete it — which
+      is what an announcement did before this existed. Fill in "Until" and it stops
+      showing itself once that passes; fill in "From" to write it now and have it appear
+      later. Times are UTC, not your browser's local time.
+    </div>
+  </div>
+
   <hr style="border: none; border-top: 1px solid var(--border); margin: 18px 0;">
   <div class="field">
     <label>Also send as a notification (optional)</label>
@@ -51,8 +72,9 @@
   </div>
 
   <div class="form-actions">
-    <button type="submit" class="btn">{{ 'Save' if announcement else 'Publish' }}</button>
+    <button type="submit" class="btn">{{ 'Save' if is_edit else 'Publish' }}</button>
     <a href="{{ url_for('admin_announcements') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
+<script src="{{ asset_url('js/admin_announcement_form.js') }}"></script>
 {% endblock %}

@@ -13,6 +13,7 @@ Three things worth keeping straight while reading these:
   post resolves - so the history page always reflects that a send happened, even while
   Discord is still in flight.
 """
+import app as app_module
 import db
 import discord_bot
 import user_notify
@@ -180,3 +181,195 @@ def test_send_route_ignores_an_unrecognised_channel(client):
     resp = client.post(f"/admin/announcements/{aid}/send",
                        data={"channels": "sms"}, follow_redirects=True)
     assert b"Choose at least one channel" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# The display window (added 1.8.7)
+# ---------------------------------------------------------------------------
+def test_an_announcement_with_no_window_behaves_exactly_as_before(isolated_db):
+    """The property the whole feature has to preserve. Both fields blank is what every
+    announcement written before this existed has, and what a new one gets unless the
+    admin fills something in."""
+    db.create_announcement({"title": "Always", "message": "m"})
+    assert [a["title"] for a in db.list_active_announcements()] == ["Always"]
+    assert db.announcement_window_state(db.list_announcements()[0]) == "showing"
+
+
+def test_a_scheduled_announcement_is_not_public_until_it_starts(isolated_db):
+    db.create_announcement({"title": "Later", "message": "m", "starts_at": "2099-01-01T00:00"})
+    assert db.list_active_announcements() == []
+    assert db.announcement_window_state(db.list_announcements()[0]) == "scheduled"
+
+
+def test_an_expired_announcement_stops_being_public(isolated_db):
+    db.create_announcement({"title": "Over", "message": "m", "ends_at": "2000-01-01T00:00"})
+    assert db.list_active_announcements() == []
+    assert db.announcement_window_state(db.list_announcements()[0]) == "expired"
+
+
+def test_the_admin_list_still_shows_every_announcement(client, isolated_db):
+    """It is the only page that can edit a scheduled or expired one, so filtering there
+    would strand them with no way back."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.create_announcement({"title": "Later", "message": "m", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "Over", "message": "m", "ends_at": "2000-01-01T00:00"})
+    db.create_announcement({"title": "Live", "message": "m"})
+
+    body = client.get("/admin/announcements").get_data(as_text=True)
+
+    assert "Later" in body and "Over" in body and "Live" in body
+
+
+def test_expiry_is_decided_at_read_time_with_no_background_job(isolated_db):
+    """No stored flag to flip, so nothing has to catch up after downtime and extending
+    an expired announcement brings it straight back - rather than the admin having to
+    remember to switch it on again."""
+    aid = db.create_announcement({"title": "Over", "message": "m", "ends_at": "2000-01-01T00:00"})
+    assert db.list_active_announcements() == []
+
+    db.update_announcement(aid, {"title": "Over", "message": "m", "ends_at": "2099-01-01T00:00"})
+    assert [a["title"] for a in db.list_active_announcements()] == ["Over"]
+
+
+def test_a_window_that_can_never_open_is_refused(client, isolated_db):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.post("/admin/announcements/new",
+                       data={"title": "Backwards", "message": "m",
+                             "starts_at": "2026-06-01T10:00", "ends_at": "2026-06-01T09:00"},
+                       follow_redirects=True)
+    assert "has to be after its start" in resp.get_data(as_text=True)
+    assert db.list_announcements() == []
+
+
+def test_a_rejected_new_announcement_still_reads_as_new_and_keeps_what_was_typed(
+        client, isolated_db):
+    """`announcement` carries the field values on a rejected submit, so nothing typed is
+    lost - which is why the page's identity has to come from something else."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.post("/admin/announcements/new",
+                       data={"title": "Kept text", "message": "m",
+                             "starts_at": "2026-06-01T10:00", "ends_at": "2026-06-01T09:00"},
+                       ).get_data(as_text=True)
+    assert "New announcement" in body and "Edit announcement" not in body
+    assert "Kept text" in body
+
+
+def test_sending_a_scheduled_announcement_is_refused(client, isolated_db, monkeypatch):
+    """A notification would point people at something they can't see yet."""
+    sent = []
+    monkeypatch.setattr(user_notify, "notify_service_subscribers",
+                        lambda *a, **k: sent.append(a) or 1)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("user_notifications_enabled", "1")
+    aid = db.create_announcement({"title": "Later", "message": "m", "starts_at": "2099-01-01T00:00"})
+
+    resp = client.post(f"/admin/announcements/{aid}/send", data={"channels": "email"},
+                       follow_redirects=True)
+
+    # "isn't" renders HTML-escaped, so match on the unambiguous half.
+    assert "showing yet" in resp.get_data(as_text=True)
+    assert sent == []
+    assert db.list_announcement_sends() == []
+
+
+def test_sending_an_expired_announcement_is_refused(client, isolated_db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(user_notify, "notify_service_subscribers",
+                        lambda *a, **k: sent.append(a) or 1)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("user_notifications_enabled", "1")
+    aid = db.create_announcement({"title": "Over", "message": "m", "ends_at": "2000-01-01T00:00"})
+
+    resp = client.post(f"/admin/announcements/{aid}/send", data={"channels": "email"},
+                       follow_redirects=True)
+
+    assert "has expired" in resp.get_data(as_text=True)
+    assert sent == []
+
+
+def test_a_currently_showing_announcement_still_sends(client, isolated_db, monkeypatch):
+    """The guard must not get in the way of the ordinary case."""
+    sent = []
+    monkeypatch.setattr(user_notify, "notify_service_subscribers",
+                        lambda *a, **k: sent.append(a) or 3)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.set_setting("user_notifications_enabled", "1")
+    aid = db.create_announcement({"title": "Now", "message": "m",
+                                   "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00"})
+
+    client.post(f"/admin/announcements/{aid}/send", data={"channels": "email"})
+
+    assert len(sent) == 1
+    assert len(db.list_announcement_sends()) == 1
+
+
+# Every public-facing surface has to filter, not just the status page. Each of these is
+# a separate call site, and a missed one is a leak: a scheduled announcement is
+# unpublished content, so it appearing in a feed or a bot embed is worse than an expired
+# one lingering.
+def test_the_public_page_only_shows_active_announcements(client, isolated_db):
+    db.create_announcement({"title": "ScheduledOne", "message": "m", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "ExpiredOne", "message": "m", "ends_at": "2000-01-01T00:00"})
+    db.create_announcement({"title": "LiveOne", "message": "m"})
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert "LiveOne" in body
+    assert "ScheduledOne" not in body and "ExpiredOne" not in body
+
+
+def test_the_json_api_only_shows_active_announcements(client, isolated_db):
+    db.create_announcement({"title": "ScheduledOne", "message": "m", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "LiveOne", "message": "m"})
+
+    titles = [a["title"] for a in client.get("/api/status").get_json()["announcements"]]
+
+    assert titles == ["LiveOne"]
+
+
+def test_the_rss_feed_only_shows_active_announcements(client, isolated_db):
+    db.create_announcement({"title": "ScheduledOne", "message": "m", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "LiveOne", "message": "m"})
+
+    body = client.get("/feed.xml").get_data(as_text=True)
+
+    assert "LiveOne" in body and "ScheduledOne" not in body
+
+
+def test_the_discord_embed_only_shows_active_announcements(isolated_db):
+    db.create_announcement({"title": "ScheduledOne", "message": "m", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "LiveOne", "message": "m"})
+
+    data = discord_bot.build_status_data({"services": False, "incidents": False,
+                                           "announcements": True, "maintenance": False,
+                                           "resources": {}})
+    rendered = repr(data)
+
+    assert "LiveOne" in rendered and "ScheduledOne" not in rendered
+
+
+def test_the_kiosk_only_shows_active_announcements(isolated_db):
+    """And with nothing active the view is skipped entirely rather than rendering an
+    empty panel onto somebody's wall - the kiosk rule for every view."""
+    db.create_announcement({"title": "ScheduledOne", "message": "m", "starts_at": "2099-01-01T00:00"})
+    assert app_module._kiosk_announcements_context() is None
+
+    db.create_announcement({"title": "LiveOne", "message": "m"})
+    context = app_module._kiosk_announcements_context()
+    assert [a["title"] for a in context["announcements"]] == ["LiveOne"]
+
+
+def test_window_timestamps_are_marked_as_utc_for_the_browser(client, isolated_db):
+    """A datetime-local value ("2099-01-01T00:00") carries no offset, and JS parses that
+    form as *local* time - so without an explicit Z, local_time.js shifts every window
+    time by the viewer's own offset. Invisible on a UTC machine, which is exactly where
+    this was nearly missed; confirmed in a real browser set to Europe/Paris, where
+    00:00 UTC must render as 01:00 GMT+1 rather than 00:00."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.create_announcement({"title": "Windowed", "message": "m",
+                             "starts_at": "2099-01-01T00:00", "ends_at": "2099-02-01T00:00"})
+
+    body = client.get("/admin/announcements").get_data(as_text=True)
+
+    assert 'data-utc="2099-01-01T00:00Z"' in body
+    assert 'data-utc="2099-01-01T00:00"' not in body

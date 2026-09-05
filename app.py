@@ -1314,7 +1314,7 @@ def _kiosk_incidents_context():
 
 
 def _kiosk_announcements_context():
-    announcements = db.list_announcements(limit=5)
+    announcements = db.list_active_announcements(limit=5)
     return {"announcements": announcements} if announcements else None
 
 
@@ -1453,7 +1453,7 @@ def kiosk_views_fragment():
 def index():
     services = _attach_integration_status(_enrich_services(db.list_services()))
     groups = _group_services(services)
-    announcements = db.list_announcements(limit=10)
+    announcements = db.list_active_announcements(limit=10)
     incidents = _enrich_incidents(db.list_incidents(limit=8, max_age_days=_public_history_days()))
     # Distinguishes "no incidents exist" from "incidents exist but are all older
     # than public_history_days" - the unfiltered existence check only runs when
@@ -1488,7 +1488,7 @@ def index():
 def api_status():
     services = _enrich_services(db.list_services())
     incidents = _enrich_incidents(db.list_incidents(limit=8, max_age_days=_public_history_days()))
-    announcements = db.list_announcements(limit=10)
+    announcements = db.list_active_announcements(limit=10)
     return jsonify({
         "site_name": db.get_setting("site_name", "Server"),
         "overall": compute_overall_status(services),
@@ -1671,7 +1671,9 @@ def feed():
             description += "\n\n" + "\n".join(f"({u['status']}) {u['message']}" for u in updates)
         entries.append({"title": title, "description": description,
                          "date": i["resolved_at"] or i["started_at"], "guid": f"incident-{i['id']}"})
-    for a in db.list_announcements(limit=20):
+    # Active only: an announcement scheduled for next week is unpublished content, and
+    # a feed is as public as the page is.
+    for a in db.list_active_announcements(limit=20):
         entries.append({"title": f"Announcement: {a['title']}", "description": a["message"],
                          "date": a["created_at"], "guid": f"announcement-{a['id']}"})
     entries.sort(key=lambda e: e["date"], reverse=True)
@@ -2476,10 +2478,52 @@ def admin_service_delete(service_id):
 @app.route("/admin/announcements")
 @login_required
 def admin_announcements():
+    # Every announcement, whatever its window - this is the only page that can edit a
+    # scheduled or expired one, so filtering here would strand them. Each row carries
+    # its own state so the list can say which is which.
     announcements = db.list_announcements()
+    for a in announcements:
+        a["window_state"] = db.announcement_window_state(a)
     return render_template("admin_announcements.html", announcements=announcements,
                             sends=db.list_announcement_sends(), active="announcements",
                             **_announcement_channel_context())
+
+
+def _announcement_window_error(form):
+    """The one validation an announcement window needs: an end before its start is a
+    window that can never be open, and silently accepting it would leave the admin
+    looking at an announcement that simply never appears. Returns a message, or None.
+
+    Everything else is legal on purpose - a start in the past means "already showing",
+    an end in the past means "expired, keep it for the record", and both blank means
+    exactly what an announcement meant before windows existed."""
+    starts_at = (form.get("starts_at") or "").strip()
+    ends_at = (form.get("ends_at") or "").strip()
+    if starts_at and ends_at and ends_at <= starts_at:
+        return "The end of the window has to be after its start."
+    return None
+
+
+def _announcement_send_block(aid):
+    """Why this announcement can't be sent as a notification right now, or None.
+
+    Sending "here is some news" for something nobody can see on the site is
+    incoherent in both directions: a scheduled one hasn't been published yet, and an
+    expired one is telling people to go and look at something that isn't there. The
+    admin's fix is obvious and stated - adjust the window, or clear it."""
+    announcement = db.get_announcement(aid)
+    if not announcement:
+        return None
+    state = db.announcement_window_state(announcement)
+    if state == "scheduled":
+        return ("This announcement isn't showing yet, so it wasn't sent — a notification "
+                "would point people at something they can't see. Adjust when it starts, "
+                "or clear the window, then send it.")
+    if state == "expired":
+        return ("This announcement has expired, so it wasn't sent — a notification would "
+                "point people at something that's no longer on the page. Extend or clear "
+                "the window, then send it.")
+    return None
 
 
 def _announcement_channel_context():
@@ -2534,18 +2578,27 @@ def _dispatch_announcement_send(aid, title, message, channels):
 @login_required
 def admin_announcement_new():
     if request.method == "POST":
+        window_error = _announcement_window_error(request.form)
+        if window_error:
+            flash(window_error, "error")
+            return render_template("admin_announcement_form.html", announcement=request.form,
+                                    is_edit=False, active="announcements",
+                                    **_announcement_channel_context())
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
         aid = db.create_announcement(data)
         channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
-        if channels:
+        blocked = _announcement_send_block(aid) if channels else None
+        if blocked:
+            flash("Announcement published. " + blocked, "error")
+        elif channels:
             notes = _dispatch_announcement_send(aid, data["title"], data["message"], channels)
             flash("Announcement published. " + " ".join(notes), "success")
         else:
             flash("Announcement published.", "success")
         return redirect(url_for("admin_announcements"))
-    return render_template("admin_announcement_form.html", announcement=None, active="announcements",
-                            **_announcement_channel_context())
+    return render_template("admin_announcement_form.html", announcement=None, is_edit=False,
+                            active="announcements", **_announcement_channel_context())
 
 
 @app.route("/admin/announcements/<int:aid>/edit", methods=["GET", "POST"])
@@ -2556,18 +2609,30 @@ def admin_announcement_edit(aid):
         flash("Announcement not found.", "error")
         return redirect(url_for("admin_announcements"))
     if request.method == "POST":
+        window_error = _announcement_window_error(request.form)
+        if window_error:
+            flash(window_error, "error")
+            return render_template("admin_announcement_form.html", announcement=request.form,
+                                    is_edit=True, active="announcements",
+                                    **_announcement_channel_context())
         data = dict(request.form)
         data["pinned"] = 1 if request.form.get("pinned") else 0
         db.update_announcement(aid, data)
         channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
-        if channels:
+        # Checked *after* the update, deliberately: the admin may be fixing the window
+        # and sending in the same submit, and the window they just saved is the one that
+        # should decide.
+        blocked = _announcement_send_block(aid) if channels else None
+        if blocked:
+            flash("Announcement updated. " + blocked, "error")
+        elif channels:
             notes = _dispatch_announcement_send(aid, data["title"], data["message"], channels)
             flash("Announcement updated. " + " ".join(notes), "success")
         else:
             flash("Announcement updated.", "success")
         return redirect(url_for("admin_announcements"))
-    return render_template("admin_announcement_form.html", announcement=announcement, active="announcements",
-                            **_announcement_channel_context())
+    return render_template("admin_announcement_form.html", announcement=announcement, is_edit=True,
+                            active="announcements", **_announcement_channel_context())
 
 
 @app.route("/admin/announcements/<int:aid>/delete", methods=["POST"])
@@ -2592,6 +2657,11 @@ def admin_announcement_send(aid):
     channels = [c for c in request.form.getlist("channels") if c in ("email", "discord")]
     if not channels:
         flash("Choose at least one channel to send on.", "error")
+        return redirect(url_for("admin_announcements"))
+
+    blocked = _announcement_send_block(aid)
+    if blocked:
+        flash(blocked, "error")
         return redirect(url_for("admin_announcements"))
 
     notes = _dispatch_announcement_send(aid, announcement["title"], announcement["message"], channels)

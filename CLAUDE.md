@@ -96,6 +96,8 @@ have bitten someone on exactly that change.
 | The database restore | *Restoring the database* → the order is the safety machinery |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | A kiosk view, or anything under `/kiosk` | *Kiosk mode* → the two-level gate, and why it polls instead of reloading |
+| An announcement, or its window | *Announcements and their display window* → read-time filtering, and all five public consumers |
+| Any admin template's markup | *Admin panel navigation* → an unbalanced `<div>` closes the `<form>`; the rendered-page test |
 | Anything that sends a notification | *Notification channels* → the two email systems; *Per-user notifications* → group per-event, not per-entity |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
@@ -952,6 +954,38 @@ DB-backed Settings pages, not a code edit.
   Three classes now: `local-time` (full), `local-time-short` (clock only),
   `local-date` (date only).
 
+## Announcements and their display window (`db.py`, `/admin/announcements`)
+
+- **An announcement's `starts_at`/`ends_at` are optional, and `''` means "no bound".**
+  Both blank is what every announcement written before the window existed has, and what
+  a new one gets unless the admin fills something in - so the default behaviour is still
+  "published on save, shown until deleted". There's a test pinning that; don't let a
+  form default or a JS prefill quietly opt new announcements into an expiry.
+- **Whether one is showing is decided at read time, never by a stored flag a job flips.**
+  `db.list_active_announcements()` filters in SQL. Three reasons, and they're the
+  argument against "tidying" this into a scheduled task: nothing can fall out of sync,
+  so a window that opened or closed while the portal was down needs no catching up;
+  extending an expired announcement brings it straight back, where a flag would need the
+  admin to switch it on again *and* would make "expired" indistinguishable from "an
+  admin turned this off"; and it costs no task for something derivable from two
+  timestamps.
+- **Every public-facing consumer must use `list_active_announcements()`; only
+  `/admin/announcements` uses `list_announcements()`.** That's the status page,
+  `/api/status`, `/feed.xml`, the Discord embed and the kiosk - five separate call
+  sites, each with its own test, because a missed one is a leak: a *scheduled*
+  announcement is unpublished content, which is worse than an expired one lingering.
+  The admin list deliberately shows everything, with a "Showing" column, since it's the
+  only page that can edit a scheduled or expired one.
+- **A notification is refused for an announcement that isn't currently showing**
+  (`_announcement_send_block()`, checked in all three send paths). It would point people
+  at something they can't see, in both directions.
+- **A `datetime-local` value has no timezone, so `data-utc` needs an explicit `Z`.**
+  Stored as `2099-01-01T00:00`, which JS parses as *local* time - so without the `Z`,
+  `local_time.js` shifts every window time by the viewer's own offset. Invisible in this
+  sandbox, whose browser and clock are both UTC (`docs/HISTORY.md` → "the window times
+  that were an hour out"). Any future timestamp that comes from a `datetime-local` field
+  has the same trap.
+
 ## Public page layout (`templates/sections/`, `templates/public/`)
 
 - **The public page is split in two kinds of thing.** `PUBLIC_SECTIONS` (announcements,
@@ -1807,6 +1841,20 @@ time, rotating on a timer, no nav and no footer. Off by default.
   any `.led` whose painted box (glow included) intersects a text rect, and
   `documentElement.scrollWidth > clientWidth`. Five separate causes, only visible one at
   a time.
+- **`/admin/settings` has a filter box (`admin_settings_filter.js`), and hiding there is
+  visual only.** A filtered-out field's inputs stay in the DOM and still submit - the
+  same property the combined wizard's collapsed `<details>` relies on - so saving while
+  a filter is active saves the whole form. **Never "improve" it by removing or disabling
+  hidden inputs**: that turns a filter into a way to silently reset every setting not on
+  screen. Its unit is a *top-level* `.field` inside a `.form-panel`, because some fields
+  nest others and hiding a nested one alone leaves a section looking broken.
+- **An unbalanced `<div>` can close a `<form>` early, and it hides well.** A stray
+  `</div>` on the settings page put every field below it outside the form in the DOM,
+  while the page still looked right and still saved correctly - an input's form owner is
+  fixed at parse time (`docs/HISTORY.md` → "the stray `</div>`"). `tests/test_app.py`
+  now counts divs on every rendered admin page. Note `html.parser` **cannot** catch this:
+  it tokenises rather than building an HTML5 tree, so it counts `<form>` depth by tags
+  alone and passes happily with the fault present.
 - **Toggling a boolean in an admin table uses `.switch`** (`static/css/style.css` +
   `static/js/admin_toggle.js`), not a badge plus a separate Block/Allow button — that
   made the reader work out the current state from two elements written in different
