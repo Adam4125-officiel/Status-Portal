@@ -72,7 +72,17 @@
       <label for="recipients">Recipients</label>
       <textarea id="recipients" name="recipients" rows="2"
                 placeholder="you@example.com, someone-else@example.com">{{ recipients }}</textarea>
-      <div class="field-hint">Leave blank to send no email alerts at all.</div>
+      <div class="field-hint">
+        Leave blank to send no email alerts at all.
+      </div>
+      <div class="field-hint">
+        <strong>These are admin alerts, and they ignore personal notification
+        settings.</strong> Everyone listed here gets every incident, maintenance and
+        low-disk alert, whatever any of them have chosen on their own account page —
+        the two are separate systems. So if your own address is here, unticking
+        "Maintenance on any service" under your account will not stop maintenance mail
+        reaching you; remove yourself from this list instead.
+      </div>
     </div>
     <div class="form-actions">
       <button type="submit" class="btn">Save recipients</button>

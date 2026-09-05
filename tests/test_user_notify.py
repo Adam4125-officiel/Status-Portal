@@ -329,6 +329,116 @@ def test_contact_lookup_reads_stored_preferences_only(enabled, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# The two email systems, and where they collide
+# ---------------------------------------------------------------------------
+def test_maintenance_email_is_skipped_when_already_on_the_admin_alert_list(
+        isolated_db, monkeypatch):
+    """An admin who is also a signed-in visitor got the same maintenance event twice:
+    once from notifications.notify()'s admin alert (which ignores personal preferences
+    entirely and cannot be switched off per-person) and once from their own per-user
+    copy. Reported 2026-09-05. The admin alert is the one that must win."""
+    sent = []
+    monkeypatch.setattr(user_notify.notifications, "send_email",
+                        lambda s_, b, recipients=None: sent.append(recipients) or True)
+    monkeypatch.setattr(user_notify.notifications, "email_recipients",
+                        lambda: ["Me@Example.com"])
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="me@example.com",
+                            notify_email_maintenance=True)
+
+    user_notify.notify_service_subscribers("maintenance", "Maintenance started", "Body")
+    ok, detail = user_notify.deliver(db.pending_notifications()[0])
+
+    assert ok and detail == "already covered by the admin alert email"
+    assert sent == []
+
+
+def test_only_maintenance_is_suppressed_that_way(isolated_db, monkeypatch):
+    """The admin alert channel doesn't send report replies, announcements or "your
+    request arrived" at all, so those must still reach an admin like anyone else."""
+    sent = []
+    monkeypatch.setattr(user_notify.notifications, "send_email",
+                        lambda s_, b, recipients=None: sent.append(recipients) or True)
+    monkeypatch.setattr(user_notify.notifications, "email_recipients",
+                        lambda: ["me@example.com"])
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="me@example.com", notify_email_reports=True)
+
+    user_notify.notify_user("u1", "report_reply", "Re: your report", "Body")
+    ok, detail = user_notify.deliver(db.pending_notifications()[0])
+
+    assert ok and sent == [["me@example.com"]]
+
+
+def test_a_discord_dm_is_never_suppressed_by_the_admin_alert_list(isolated_db, monkeypatch):
+    """The admin's Discord webhook posts to a channel; a per-user DM goes to a person.
+    Different destinations, so neither is a duplicate of the other."""
+    dms = []
+    monkeypatch.setattr(user_notify.discord_bot, "send_dm",
+                        lambda did, text: (dms.append(did), (True, "sent"))[1])
+    monkeypatch.setattr(user_notify.notifications, "email_recipients",
+                        lambda: ["me@example.com"])
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="me@example.com",
+                            notify_discord_id="123456789012345678",
+                            notify_email_maintenance=True, notify_discord_maintenance=True)
+
+    user_notify.notify_service_subscribers("maintenance", "Maintenance started", "Body")
+    ok, _ = user_notify.deliver(db.pending_notifications()[0])
+
+    assert ok and dms == ["123456789012345678"]
+
+
+def test_delivery_uses_contact_details_seerr_knows_about(isolated_db, monkeypatch):
+    """deliver() read the preferences row directly while every other caller here went
+    through contact_for(), so someone whose address Seerr knows but who had never typed
+    it into this portal had every automated notification dropped as "no contact
+    details" - even though the admin's own Send-test button reached them fine."""
+    sent = []
+    monkeypatch.setattr(user_notify.notifications, "send_email",
+                        lambda s_, b, recipients=None: sent.append(recipients) or True)
+    monkeypatch.setattr(user_notify.notifications, "email_recipients", lambda: [])
+    db.set_setting("user_notifications_enabled", "1")
+    db.replace_seerr_contacts([{"jellyfin_user_id": "u1", "seerr_user_id": "7",
+                                 "display_name": "U1", "email": "seerr@example.com",
+                                 "discord_id": ""}])
+    db.set_user_preferences("u1", notify_email_reports=True)
+
+    user_notify.notify_user("u1", "report_reply", "Subject", "Body")
+    ok, _ = user_notify.deliver(db.pending_notifications()[0])
+
+    assert ok and sent == [["seerr@example.com"]]
+
+
+def test_unconfigured_users_follow_the_admin_defaults_for_broadcasts(isolated_db):
+    """get_user_preferences() reports the admin's defaults for a user with no
+    preferences row - so their account page shows the box ticked. users_opted_into()
+    read only the table, so the notification was never queued and an admin default of
+    "on" silently reached nobody who had never opened their account page."""
+    db.set_setting("user_notifications_enabled", "1")
+    db.replace_jellyfin_users([{"id": "newbie", "name": "Newbie", "is_administrator": False,
+                                 "is_disabled": False}])
+
+    assert db.get_user_preferences("newbie")["notify_email_announcements"] is True
+    assert user_notify.notify_service_subscribers("announcement", "Heads up", "Body") == 1
+
+    # And a default of "off" still means off - maintenance ships that way.
+    assert db.get_user_preferences("newbie")["notify_email_maintenance"] is False
+    assert user_notify.notify_service_subscribers("maintenance", "Maintenance", "Body") == 0
+
+
+def test_an_admin_default_of_off_is_honoured_for_unconfigured_users(isolated_db):
+    """The other direction: an admin who switches the announcement default off must not
+    have it reach every user who has never saved anything."""
+    db.set_setting("user_notifications_enabled", "1")
+    db.replace_jellyfin_users([{"id": "newbie", "name": "Newbie", "is_administrator": False,
+                                 "is_disabled": False}])
+    db.set_setting(f"{db.NOTIFY_DEFAULT_SETTING_PREFIX}notify_email_announcements", "0")
+
+    assert user_notify.notify_service_subscribers("announcement", "Heads up", "Body") == 0
+
+
+# ---------------------------------------------------------------------------
 # send_direct() - one-off admin sends, always bypassing preferences
 # ---------------------------------------------------------------------------
 def test_send_direct_email_uses_the_stored_address(isolated_db, monkeypatch):

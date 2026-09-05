@@ -161,6 +161,12 @@
 
     <div class="field">
       <label>By email</label>
+      <div class="field-hint">
+        These control what this portal sends <em>you personally</em>. If your address is
+        also on the administrator's own alert list, those alerts arrive regardless of
+        what you choose here — they're a separate system, and only an administrator can
+        change who is on it.
+      </div>
       <div class="checkbox-list">
         <label class="field-check">
           <input type="checkbox" name="notify_email_reports" {{ 'checked' if prefs.notify_email_reports }}>
@@ -168,7 +174,7 @@
         </label>
         <label class="field-check">
           <input type="checkbox" name="notify_email_requests" {{ 'checked' if prefs.notify_email_requests }}>
-          When something I requested becomes available
+          When something I requested becomes available (Seerr may already email you about this itself)
         </label>
         <label class="field-check">
           <input type="checkbox" name="notify_email_maintenance" {{ 'checked' if prefs.notify_email_maintenance }}>
@@ -189,7 +195,7 @@
         </label>
         <label class="field-check">
           <input type="checkbox" name="notify_discord_requests" {{ 'checked' if prefs.notify_discord_requests }}>
-          When something I requested becomes available
+          When something I requested becomes available (Seerr may already notify you about this itself)
         </label>
         <label class="field-check">
           <input type="checkbox" name="notify_discord_maintenance" {{ 'checked' if prefs.notify_discord_maintenance }}>

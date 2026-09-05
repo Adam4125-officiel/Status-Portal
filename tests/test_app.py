@@ -1375,6 +1375,93 @@ def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     assert "Maintenance ended" in titles
 
 
+def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
+        isolated_db, monkeypatch):
+    """A window covering several services is one thing that happened. It used to send
+    one admin notification (Discord webhook + ntfy + email) and queue one per-user
+    notification per *service*, so ticking five services meant five near-identical
+    emails and five DMs in a row - reported 2026-09-05."""
+    admin_calls = []
+    subscriber_calls = []
+    monkeypatch.setattr(app_module, "_notify_async",
+                        lambda title, msg: admin_calls.append((title, msg)))
+    monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
+                        lambda event, subject, body, **kw:
+                            subscriber_calls.append((event, subject, body)))
+
+    ids = [db.create_service({"name": n, "url": "", "description": ""})
+           for n in ("Alpha", "Beta", "Gamma")]
+    db.create_maintenance_window({
+        "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    }, service_ids=ids)
+
+    app_module._process_maintenance_and_notify()
+
+    # Both transitions are due at once (the window is entirely in the past), so this
+    # is exactly two notifications - one per transition - not two per service.
+    assert len(admin_calls) == 2, admin_calls
+    assert len(subscriber_calls) == 2, subscriber_calls
+    assert [c[0] for c in admin_calls] == ["Maintenance started", "Maintenance ended"]
+
+    # And every covered service is named in the one message that gets sent.
+    for name in ("Alpha", "Beta", "Gamma"):
+        assert name in admin_calls[0][1]
+        assert name in subscriber_calls[0][1]
+        assert name in subscriber_calls[0][2]
+    assert "Alpha, Beta and Gamma are now under maintenance" in subscriber_calls[0][2]
+    assert "Maintenance on Alpha, Beta and Gamma has finished" in subscriber_calls[1][2]
+
+
+def test_single_service_maintenance_wording_is_unchanged(isolated_db, monkeypatch):
+    """The grouping above must not turn a one-service window's message into a plural."""
+    subscriber_calls = []
+    monkeypatch.setattr(app_module, "_notify_async", lambda title, msg: None)
+    monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
+                        lambda event, subject, body, **kw:
+                            subscriber_calls.append((event, subject, body)))
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Upgrade",
+        "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+
+    app_module._process_maintenance_and_notify()
+
+    name = db.get_service(sid)["name"]
+    assert subscriber_calls[0][1] == f"Maintenance started: {name}"
+    assert subscriber_calls[0][2] == f"{name} is now under maintenance (Upgrade)."
+    assert subscriber_calls[1][2] == f"Maintenance on {name} has finished (Upgrade)."
+
+
+def test_two_separate_windows_still_notify_separately(isolated_db, monkeypatch):
+    """Grouping is per window, not per run - two unrelated windows starting in the
+    same cycle are two different things and must stay two notifications."""
+    admin_calls = []
+    monkeypatch.setattr(app_module, "_notify_async",
+                        lambda title, msg: admin_calls.append((title, msg)))
+    monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
+                        lambda *a, **kw: None)
+    a = db.create_service({"name": "Alpha", "url": "", "description": ""})
+    b = db.create_service({"name": "Beta", "url": "", "description": ""})
+    for title, sid in (("Upgrade A", a), ("Upgrade B", b)):
+        db.create_maintenance_window({
+            "service_id": sid, "title": title,
+            "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
+        })
+
+    app_module._process_maintenance_and_notify()
+
+    assert len(admin_calls) == 2
+    assert {c[1] for c in admin_calls} == {"Alpha: Upgrade A", "Beta: Upgrade B"}
+
+
+def test_service_list_phrase_reads_as_prose():
+    assert app_module._service_list_phrase([]) == ""
+    assert app_module._service_list_phrase(["Alpha"]) == "Alpha"
+    assert app_module._service_list_phrase(["Alpha", "Beta"]) == "Alpha and Beta"
+    assert app_module._service_list_phrase(["A", "B", "C"]) == "A, B and C"
+
+
 def test_lowdisk_threshold_blank_means_disabled(isolated_db):
     assert app_module._lowdisk_threshold() is None
     db.set_setting("lowdisk_percent_threshold", "90")

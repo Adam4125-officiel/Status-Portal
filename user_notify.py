@@ -81,6 +81,37 @@ EVENT_CHANNEL_PREFERENCE = {
 SEERR_SOURCED_EVENTS = {"request_update", "seerr_event"}
 
 
+# Events the admin alert channel already emails about, to everyone on the admin
+# recipient list, ignoring personal preferences entirely (notifications.notify() ->
+# send_email(), see /admin/notifications). Someone whose address is on that list has
+# therefore already been told about this event, so the friendlier per-user copy is the
+# same news arriving twice in one inbox seconds apart - which is exactly what an admin
+# who is also a signed-in visitor sees today. Only the *email* channel collides: the
+# admin's Discord webhook posts to a channel while a per-user DM goes to a person, so
+# those two are genuinely different destinations and neither suppresses the other.
+#
+# Deliberately just maintenance. The admin channel's other alerts (incidents, low disk)
+# have no per-user equivalent, and the per-user events it doesn't send at all - a reply
+# to your own report, an announcement, something you requested arriving - must keep
+# reaching an admin like anybody else.
+ADMIN_ALERTED_EVENTS = {"maintenance"}
+
+
+def _already_on_admin_alert_list(email):
+    """True when this address gets the admin's own copy of the same alert anyway.
+
+    Wrapped and defaulting to False for the same reason email_recipients() itself is:
+    deliver() runs on a background task, and a failed settings read must not turn a
+    deliverable notification into an exception."""
+    if not email:
+        return False
+    try:
+        return email.strip().lower() in {r.strip().lower() for r in notifications.email_recipients()}
+    except Exception:                     # noqa: BLE001 - never block a send over this
+        _logger.exception("Could not read the admin alert recipient list")
+        return False
+
+
 def seerr_email_enabled():
     """Off by default - Seerr already sends its own email for these, so this portal's
     copy would otherwise double up on every install upgrading into this feature.
@@ -362,16 +393,28 @@ def deliver(row):
     two minutes."""
     channel_prefs = EVENT_CHANNEL_PREFERENCE.get(row["event"], {})
     prefs = db.get_user_preferences(row["user_id"])
-    email, discord_id = prefs["notify_email"], prefs["notify_discord_id"]
+    # Through contact_for(), not prefs directly: someone whose details Seerr knows but
+    # who has never typed them into this portal has a perfectly good address on file,
+    # and reading only the preferences row meant every automated notification to them
+    # was dropped as "no contact details" - while the admin's own Send-test button,
+    # which already went through contact_for(), reached them without trouble. Every
+    # other caller here resolves contact details this way; this one was the exception.
+    email, discord_id = contact_for(row["user_id"])
 
     email_pref = channel_prefs.get("email")
     discord_pref = channel_prefs.get("discord")
     send_email = bool(email) and email_pref is not None and prefs.get(email_pref)
     if row["event"] in SEERR_SOURCED_EVENTS and not seerr_email_enabled():
         send_email = False
+    suppressed_as_duplicate = (send_email and row["event"] in ADMIN_ALERTED_EVENTS
+                               and _already_on_admin_alert_list(email))
+    if suppressed_as_duplicate:
+        send_email = False
     send_discord = bool(discord_id) and discord_pref is not None and prefs.get(discord_pref)
 
     if not send_email and not send_discord:
+        if suppressed_as_duplicate:
+            return True, "already covered by the admin alert email"
         if not email and not discord_id:
             return True, "no contact details"
         return True, "recipient has this switched off"

@@ -96,6 +96,7 @@ have bitten someone on exactly that change.
 | The database restore | *Restoring the database* → the order is the safety machinery |
 | A public-page section | *Public page layout* → add the key to `PUBLIC_SECTIONS` |
 | A kiosk view, or anything under `/kiosk` | *Kiosk mode* → the two-level gate, and why it polls instead of reloading |
+| Anything that sends a notification | *Notification channels* → the two email systems; *Per-user notifications* → group per-event, not per-entity |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
 | A new recurring background job | *Scheduled tasks* → register it, don't write another loop |
@@ -1863,6 +1864,22 @@ time, rotating on a timer, no nav and no footer. Off by default.
   no app or request context to render a template in — and this module deliberately
   doesn't import Flask. Plain text is set *first* because in `multipart/alternative`
   the last part is the preferred one.
+- **There are two email systems here and they are not the same thing - say so wherever
+  either is edited.** `notifications.notify()` -> `send_email()` goes to the *admin
+  alert list* (`smtp_recipients`) and deliberately ignores every per-user preference:
+  an alert list a person could silence for themselves is not an alert list.
+  `user_notify.deliver()` is the per-user path the `/account` checkboxes gate. An admin
+  who puts their own address on the admin list - the obvious thing to do on a personal
+  portal - therefore gets maintenance mail no matter what their account page says, which
+  is exactly what got reported as a bug (`docs/HISTORY.md` -> "two email systems, no sign
+  saying so"). Both pages now explain it; keep that text if you rework either page.
+- **`user_notify.ADMIN_ALERTED_EVENTS` is why the same event doesn't arrive twice.**
+  When an address is already on the admin alert list, `deliver()` skips the per-user
+  *email* for an event the admin channel also sends - the admin copy wins, because it's
+  the one that cannot be turned off per-person. Keep it scoped: only `maintenance`
+  overlaps today, and a per-user Discord DM must **never** be suppressed this way (the
+  admin webhook posts to a channel, a DM goes to a person - different destinations, not
+  duplicates).
 - The channel status and "Send test" button **moved off `/admin/settings`** into this
   page. The test button still calls `notifications.notify()` with a canned payload —
   the real dispatch path, not a parallel one. It deliberately no longer refuses when
@@ -2191,6 +2208,29 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   prompt becomes something people learn to click past. An explicit `?next=` beats the
   prompt — somebody who followed a link and got bounced through sign-in should land
   where they were going.
+- **A notification about several things at once is one notification.**
+  `db.process_maintenance_windows()` reports one event *per service* because that's the
+  granularity the status flip works at - but `app._process_maintenance_and_notify()`
+  groups those back up by `(window id, transition)` before sending anything. Looping
+  straight over the events sent one message per service down every channel at once
+  (Discord webhook, ntfy, admin email *and* each opted-in visitor's email and DM), so
+  five ticked services meant five of everything (`docs/HISTORY.md` -> "One notification
+  per service instead of one per window"). If you add another fan-out event sourced from
+  a per-entity list, group it the same way - and remember `notifications.notify()` is
+  three channels behind one call, so a duplication bug there is never confined to one.
+- **`users_opted_into()` and `get_user_preferences()` must agree about a user with no
+  preferences row.** Such a user follows the admin's configured defaults - that is what
+  their own account page renders - so the broadcast query has to include them too.
+  It didn't, and since `notify_email_announcements` ships on, announcement emails
+  reached nobody who had never opened their account page while showing every one of them
+  a ticked box.
+- **Resolve a recipient's contact details through `user_notify.contact_for()`, never
+  straight off the preferences row.** `contact_for()` also knows what Seerr holds for
+  that person. `deliver()` was the one caller reading the row directly, so anyone whose
+  details came only from Seerr had every automated notification dropped as "no contact
+  details" while the admin's own "Send test email" button - which already used
+  `contact_for()` - reached them fine. A test that passes while nothing arrives is close
+  to undiagnosable from outside.
 - **The admin page never lists recipients.** The queue is addressed to a Jellyfin
   account; whose email or Discord ID that resolved to is that person's business.
 - **`send_direct(user_id, channel, subject, body)` (added 2026-08-28) is a deliberate

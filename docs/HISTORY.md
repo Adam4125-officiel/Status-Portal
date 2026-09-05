@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-09-04.
+Rough chronological range: 2026-07-22 through 2026-09-05.
 
 ---
 
@@ -1092,6 +1092,119 @@ evidence behind it; if VM rows ever fail to appear on a real Hyper-V host, that 
 never actually run here.
 
 The header of this file says the range stops at 2026-08-21; it now runs to 2026-09-04.
+
+## Notifications, and the day one event became twenty emails (v1.8.6, 2026-09-05)
+
+Reported by the user in one sentence: "when a scheduled maintenance starts, it will send
+one e-mail per concerned service, so if i check 5 services, it will send 5 e-mails in a
+row instead of one containing the 5 of them." They then asked whether Discord had the
+same problem, and later confirmed ntfy did too. All three did, from one cause.
+
+### One notification per service instead of one per window (fixed 2026-09-05)
+
+`db.process_maintenance_windows()` returns one event **per service**, which is right:
+that is the granularity the status flip and the per-service `pre_status` snapshot
+operate on. `app._process_maintenance_and_notify()` looped straight over those events
+and sent a full notification for each one.
+
+So a window covering five services produced five `notifications.notify()` calls - and
+`notify()` fans out to the Discord webhook, ntfy *and* email from the same call, which
+is why one root cause presented on all three channels at once. It also queued five
+per-user rows, each of which delivers both an email and a Discord DM, so an opted-in
+visitor got five of each as well. Five ticked services, twenty-odd messages.
+
+The fix groups the events back up by `(window id, transition)` before anything is sent.
+The multi-service *incident* notification had been joining its service names since
+multi-service support was added; maintenance simply never was.
+
+Measured live afterwards, against a real server with a webhook receiver and a real SMTP
+sink: a five-service window's start and end produced **four emails in total** (one admin
+alert and one per-user copy, per transition) where the old code would have produced
+twenty, plus exactly one Discord webhook post and one ntfy push per transition, each
+naming all five services.
+
+### "I didn't turn maintenance email on and got one anyway" - two email systems, no sign saying so
+
+Reported in the same session. It turned out not to be a gating bug at all, and the
+empirical check is worth recording because the conclusion was not the obvious one.
+
+Set up on a live server with a real SMTP sink: a user whose `/account` page said
+maintenance email was **off**, whose per-user queue was consequently **empty** - and who
+still received "Maintenance started". The reason is that this app has two entirely
+separate email paths and nothing anywhere said so:
+
+- `notifications.notify()` -> `send_email()` goes to the **admin alert list**
+  (`smtp_recipients`, Notifications -> Email). It sends every incident, maintenance and
+  low-disk alert to everyone on that list and **ignores per-user preferences entirely**,
+  by design - an alert list individual people could silence would not be an alert list.
+- `user_notify.deliver()` is the per-user path, and is what the account page's
+  checkboxes gate.
+
+The user had put their own address on the admin list, which is the obvious thing to do
+on a personal portal. Nothing in either page hinted that the checkbox did not govern it.
+Both pages now say it plainly. The behaviour itself was left alone.
+
+### The same event arriving twice (fixed 2026-09-05)
+
+Following on from that, the user asked: "just check if i turn on both of them it doesn't
+spam me twice (we never know)." It did. Verified live - one address, both paths on, two
+emails seconds apart:
+
+```
+to=me@example.com  Subject: Maintenance started
+to=me@example.com  Subject: Maintenance started: Jellyfin, Alpha
+```
+
+`deliver()` now skips the per-user **email** when that address is already on the admin
+alert list and the event is one the admin channel covers (`ADMIN_ALERTED_EVENTS`, which
+is deliberately just `maintenance`). The admin alert wins because it is the copy that
+cannot be switched off per-person. Scoped narrowly on purpose: the admin channel sends
+no report replies, announcements or "your request arrived", so those must still reach an
+admin like anybody else, and a Discord DM is never suppressed - the admin webhook posts
+to a *channel* while a DM goes to a *person*, so those two are different destinations
+rather than duplicates.
+
+### Two more bugs the audit turned up, both silent (fixed 2026-09-05)
+
+Neither was reported; both were found by auditing the whole path after the above, and
+both were confirmed empirically against a live database before being fixed.
+
+**Unconfigured users were shown a promise nobody kept.** `get_user_preferences()`
+reports the admin's configured defaults for a user with no `user_preferences` row - so
+that user's own account page renders the box **ticked**. `users_opted_into()`, which is
+what actually queues a broadcast, read only the `user_preferences` table, so such a user
+was never queued. `notify_email_announcements` ships **on** by default, so in practice
+announcement emails silently reached nobody who had never opened their account page.
+The two functions now agree.
+
+**The test button worked and real notifications didn't.** `deliver()` read
+`notify_email`/`notify_discord_id` straight off the preferences row, while
+`send_direct()` (the admin's per-user "Send test email" button) and
+`needs_contact_details()` both resolve through `contact_for()`, which also knows about
+the details Seerr holds. So someone whose address Seerr knew, but who had never typed it
+into this portal, had every automated notification dropped as "no contact details" while
+the admin's test message reached them without trouble. That combination is close to
+undiagnosable from outside: the test says it works, and nothing ever arrives.
+
+### What was and wasn't verified (2026-09-05)
+
+Verified live, driving a real Chromium against a running server with a real SMTP sink
+(`aiosmtpd`) and an HTTP receiver standing in for the Discord webhook and ntfy:
+
+- Five services ticked on one window through the actual admin form -> one Discord post,
+  one ntfy push, one admin email and one per-user email per transition, each naming all
+  five services.
+- The full preference matrix, by observing what the SMTP sink actually received: opted
+  out -> never queued; Discord-only -> queued but no email; on both lists -> the
+  duplicate suppressed; no preferences row -> follows the admin default.
+- The reported "email despite the box being off" scenario, reproduced exactly and then
+  explained.
+- Both changed pages rendered in Chromium with no console, page or request errors.
+
+Not verified: no real Discord gateway, so the per-user **DM** half of the fan-out is
+still mocked-only, as it has always been in this sandbox. No real Jellyfin either, so
+the signed-in visitor's own `/account` page was exercised through
+`/admin/users/<id>/account`, which renders the same template through the same save path.
 
 ## Release history notes
 
