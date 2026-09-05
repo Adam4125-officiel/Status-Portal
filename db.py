@@ -2465,8 +2465,24 @@ def users_opted_into(*fields):
     conn = get_db()
     where = " OR ".join(f"{f}=1" for f in fields)
     rows = conn.execute(f"SELECT user_id FROM user_preferences WHERE {where}").fetchall()
+    ids = [r["user_id"] for r in rows]
+
+    # A user with no user_preferences row at all follows the admin's defaults - that is
+    # exactly what get_user_preferences() reports for them, and therefore what their own
+    # account page renders. Reading only the table above contradicted that: the box
+    # showed as ticked and the notification was never queued, so an admin default of
+    # "on" (notify_email_announcements ships that way) silently reached nobody who had
+    # never opened their account page. Only asked when a default actually applies, so
+    # the common case still runs one query.
+    defaults = notification_defaults()
+    if any(defaults.get(f) for f in fields):
+        ids.extend(r["id"] for r in conn.execute("""
+            SELECT j.id FROM jellyfin_users j
+            LEFT JOIN user_preferences p ON p.user_id = j.id
+            WHERE p.user_id IS NULL
+        """).fetchall())
     conn.close()
-    return [r["user_id"] for r in rows]
+    return ids
 
 
 def user_id_for_seerr_user(seerr_user_id):
