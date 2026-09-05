@@ -1,5 +1,27 @@
 {% extends "base.html" %}
 {% block body %}
+{# Floating search, pinned to the viewport on every admin page - the same idea as the
+   public side's .page-actions cluster, and for the same reason: it has to be reachable
+   without scrolling back to wherever it happens to sit in the flow.
+
+   Hidden until admin_search.js reveals it. A search box that can't search is worse than
+   no box at all, the same rule the log page's Live switch follows. #}
+<div class="admin-search" id="admin_search" hidden>
+  <button type="button" class="admin-search__open" id="admin_search_open"
+          aria-expanded="false" aria-controls="admin_search_panel"
+          title="Search the admin panel (press / or Ctrl+K)">
+    <span aria-hidden="true">🔍</span>
+    <span class="admin-search__open-label">Search</span>
+  </button>
+  <div class="admin-search__panel" id="admin_search_panel" hidden>
+    <label class="sr-only" for="admin_search_input">Search the admin panel</label>
+    <input type="search" id="admin_search_input" autocomplete="off" spellcheck="false"
+           placeholder="Search settings, controls and pages…"
+           role="combobox" aria-expanded="true" aria-controls="admin_search_output">
+    <div class="admin-search__output" id="admin_search_output"></div>
+  </div>
+</div>
+
 <div class="admin-shell">
   <nav class="admin-nav">
     <div class="admin-nav__brand">⚙ Admin</div>
@@ -66,4 +88,5 @@
    admin page has, so wiring them per-template is how one page ends up missing it. #}
 <script src="{{ asset_url('js/admin_scroll_restore.js') }}"></script>
 <script src="{{ asset_url('js/admin_flash.js') }}"></script>
+<script src="{{ asset_url('js/admin_search.js') }}" data-search-url="{{ url_for('admin_search_results') }}"></script>
 {% endblock %}

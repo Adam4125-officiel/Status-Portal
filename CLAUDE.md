@@ -2694,12 +2694,22 @@ in this app logs a real error now.
 stated by the user 2026-08-30, superseding an earlier, narrower rule that only
 required a branch for untested/status-logic-touching batches (small direct fixes
 used to go straight to `main`). That distinction is gone: every change, regardless
-of size or risk, goes on its own branch with its own PR, merged the normal way
-(regular merge commit — see "Promoting a feature branch to stable" below, never
-squash/rebase). This includes a one-line fix found mid-session while testing
-something else on an existing branch — put it on a branch of its own (or, if it's
-directly unblocking testing of a PR already open, on that PR's own branch) rather
-than reaching for `main`.
+of size or risk, goes on a branch with a PR, merged the normal way (regular merge
+commit — see "Promoting a feature branch to stable" below, never squash/rebase).
+
+**One branch at a time, held open until the work is stable — not a branch and a PR
+per fix.** Corrected by the user 2026-09-05, after a session opened three PRs in a
+row and merged each as it passed its own tests. The session's work accumulates on a
+single branch (still **one commit per completed fix** — that convention is
+unchanged, see *Commit cadence*), the branch stays open while the user tests it end
+to end on their own portal, and only then is it merged and released stable. A
+mid-session pre-release (`-rc.N`) off that branch is the right way to hand something
+over for testing; merging to `main` is not.
+
+The exception is a genuine emergency fix the user has asked to go out immediately —
+the v1.8.6 notification batch was one, and the user named it as exceptional rather
+than the pattern. Don't generalise from it: if the user hasn't said "this is
+urgent, ship it", the branch stays open.
 
 **One exception: `CLAUDE.md` and other markdown docs Claude itself maintains for its
 own context** (`docs/HISTORY.md`, `ROADMAP.md`). If a branch is already open for
