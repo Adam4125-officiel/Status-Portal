@@ -3,6 +3,7 @@ db.py — The entire database layer (SQLite).
 No ORM, just plain SQL to stay readable and easy to modify.
 """
 import logging
+import re
 import sqlite3
 import os
 import threading
@@ -226,6 +227,48 @@ def _ensure_column(conn, table, column, ddl):
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _clean_non_email_contacts(conn):
+    """Blanks any stored "email" that isn't one, in both places one can be held.
+
+    This exists because Seerr reports a Jellyfin-imported user's *username* in its
+    `email` field when that account has no email of its own, and this portal mirrored
+    that verbatim - so a bare username reached the SMTP server and came back "553 not a
+    valid RFC 5321 address", once per notification, for as long as the row survived
+    (docs/HISTORY.md -> "the username that was posted as an email address").
+
+    Runs on every startup rather than once, and that is deliberate on both counts:
+    - It is what makes the fix *self-healing*. The paths that could create one of these
+      are all guarded now, so upgrading and restarting is the whole cleanup - nobody has
+      to go and find the bad rows by hand.
+    - It stays a no-op afterwards, because nothing can write a non-address any more.
+      That is the property that makes re-running it free rather than merely safe.
+
+    Blanking is the right repair, not a fallback to some other value: a username is not
+    a lossy version of an address, it is a different thing entirely, and an empty field
+    is what makes needs_contact_details() go back to asking the person for a real one.
+    `seerr_contacts` is only a cache (replaced wholesale by the hourly sync, which now
+    filters at the source) but is cleaned too, so the account page stops *displaying*
+    the bad value immediately instead of an hour later."""
+    cleaned = []
+    for user_id, email in conn.execute(
+            "SELECT user_id, notify_email FROM user_preferences WHERE notify_email != ''").fetchall():
+        if not looks_like_email(email):
+            conn.execute("UPDATE user_preferences SET notify_email='' WHERE user_id=?", (user_id,))
+            cleaned.append(email)
+    for jf_id, email in conn.execute(
+            "SELECT jellyfin_user_id, email FROM seerr_contacts WHERE email != ''").fetchall():
+        if not looks_like_email(email):
+            conn.execute("UPDATE seerr_contacts SET email='' WHERE jellyfin_user_id=?", (jf_id,))
+            cleaned.append(email)
+    if cleaned:
+        conn.commit()
+        _logger.warning(
+            "Cleared %d stored contact value(s) that were not email addresses (%s). These were "
+            "most likely Seerr reporting a Jellyfin username in its email field; affected users "
+            "will be asked for a real address next time they open their account page.",
+            len(cleaned), ", ".join(sorted({repr(e) for e in cleaned})))
 
 
 def init_db():
@@ -751,6 +794,8 @@ def init_db():
     """)
     conn.commit()
 
+    _clean_non_email_contacts(conn)
+
     # Seed defaults if empty
     if c.execute("SELECT COUNT(*) FROM info_page").fetchone()[0] == 0:
         c.execute("INSERT INTO info_page (id, content) VALUES (1, ?)",
@@ -773,6 +818,32 @@ def init_db():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+# "something@something, with no whitespace" - deliberately *permissive*, and the
+# permissiveness is the point rather than laziness.
+#
+# This check is used to blank stored values (see _clean_non_email_contacts), so being
+# too strict destroys data. An earlier draft required a dot in the domain, which would
+# have silently deleted `admin@nas` or `root@localhost` - perfectly deliverable on the
+# kind of home LAN this portal runs on, where a relay on the same machine is a normal
+# setup. Requiring a dot buys nothing here anyway: the values this exists to catch are
+# bare Jellyfin usernames ("zellowz_", "saint boboniolo"), which have no @ at all.
+#
+# It lives *here*, at the bottom of the import graph, because four layers need the one
+# answer and db.py is the only module all of them already import: this file (cleaning
+# stored values), integrations.py (refusing to cache a non-address), notifications.py
+# (refusing to hand one to SMTP) and user_notify.py (treating one as "no address").
+# Two copies of this would eventually disagree, and the disagreement would show up as
+# mail that silently doesn't arrive.
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
+
+
+def looks_like_email(value):
+    """Whether `value` could be delivered to at all. Blank is False - "nothing here"
+    and "something that isn't an address" are both "can't send", and every caller
+    treats them identically."""
+    return bool(value) and bool(EMAIL_RE.match(value.strip()))
 
 
 # ---------- Services ----------

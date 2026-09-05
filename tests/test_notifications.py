@@ -370,3 +370,40 @@ def test_the_admin_page_saves_recipients(client, isolated_db):
                  follow_redirects=True)
     assert db_module.get_setting(notifications.RECIPIENTS_SETTING) == \
         "one@example.invalid, two@example.invalid"
+
+
+
+# ---------------------------------------------------------------------------
+# A recipient that isn't an address must never reach the SMTP server
+# ---------------------------------------------------------------------------
+def test_send_email_refuses_a_recipient_that_is_not_an_address(monkeypatch, caplog):
+    """Seerr reports a Jellyfin-imported user's *username* in its email field when that
+    account has no email of its own, and this portal mirrored it verbatim - so a bare
+    "zellowz_" was handed to Gmail, which answered "553 not a valid RFC 5321 address"
+    once per notification, forever. Reported 2026-09-05.
+
+    Refusing here, rather than only at the sources, is what also covers the admin
+    recipient list - free text an admin can typo into."""
+    _configure_email(monkeypatch)
+    monkeypatch.setattr(notifications.smtplib, "SMTP", _FakeSMTP)
+
+    with caplog.at_level("WARNING"):
+        ok = notifications.send_email("Subject", "Body", recipients=["zellowz_"])
+
+    assert ok is False
+    assert _FakeSMTP.instances == []          # never even connected
+    assert "zellowz_" in caplog.text          # and the log names what it refused
+
+
+def test_send_email_still_sends_to_the_valid_half_of_a_mixed_list(monkeypatch, caplog):
+    """One bad address on the admin alert list must not silence the others."""
+    _configure_email(monkeypatch)
+    monkeypatch.setattr(notifications.smtplib, "SMTP", _FakeSMTP)
+
+    with caplog.at_level("WARNING"):
+        ok = notifications.send_email("Subject", "Body",
+                                       recipients=["saint boboniolo", "real@example.com"])
+
+    assert ok is True
+    assert _FakeSMTP.instances[0].sent[0]["To"] == "real@example.com"
+    assert "saint boboniolo" in caplog.text

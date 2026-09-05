@@ -157,6 +157,15 @@ def send_email(subject, message, recipients=None):
     Best-effort like every other channel here: returns True/False rather than raising,
     so a caller that wants to record delivery can, and one that doesn't can ignore it."""
     recipients = recipients if recipients is not None else email_recipients()
+    # Last line of defence, and the only one that covers the admin recipient list too -
+    # that is a free-text field, and a typo there used to reach the SMTP server and come
+    # back as a 553 with the address mangled past recognition. Refusing here means the
+    # log names the value we actually refused, which is the thing you need to fix it.
+    deliverable = [r for r in recipients if db.looks_like_email(r)]
+    rejected = [r for r in recipients if not db.looks_like_email(r)]
+    if rejected:
+        _logger.warning("Not an email address, so not sent to: %s", ", ".join(repr(r) for r in rejected))
+    recipients = deliverable
     if not (config.SMTP_HOST and config.SMTP_FROM and recipients):
         return False
     email = build_email(subject, message, recipients)

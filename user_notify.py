@@ -236,8 +236,13 @@ def adopt_seerr_contact(user_id, account):
     One write, shared by the manual "Use these details here" button and the automatic
     first-load fill-in on the account page - both are "take what Seerr already has",
     the only difference is whether a person clicked something to trigger it."""
+    # fetch_seerr_users() already drops a non-address, but this is the write that puts
+    # a value into *this portal's own* record of someone, so it re-checks rather than
+    # trusting its input - a stale cache row written before that filter existed would
+    # otherwise get promoted into user_preferences and outlive the fix.
+    email = account["email"] if db.looks_like_email(account["email"]) else ""
     db.set_user_preferences(user_id,
-                             notify_email=account["email"],
+                             notify_email=email,
                              notify_discord_id=account["discord_id"],
                              seerr_user_id=account["id"])
 
@@ -256,7 +261,13 @@ def contact_for(user_id):
     actually typed is the better one to use."""
     prefs = db.get_user_preferences(user_id)
     cached = db.get_seerr_contact(user_id) or {}
-    return (prefs["notify_email"] or cached.get("email", ""),
+    # Anything that isn't address-shaped counts as *not having* an email, at read time,
+    # so a value stored before this was guarded stops being used immediately rather than
+    # waiting for a restart or a re-sync. It also keeps every consumer consistent: the
+    # delivery task, send_direct() and needs_contact_details() (which will now correctly
+    # go back to asking the person) all get the same answer from this one function.
+    email = prefs["notify_email"] or cached.get("email", "")
+    return (email if db.looks_like_email(email) else "",
             prefs["notify_discord_id"] or cached.get("discord_id", ""))
 
 
@@ -274,7 +285,15 @@ def save_contact(jellyfin_user_id, email=None, discord_id=None):
     the worse outcome."""
     fields = {}
     if email is not None:
-        fields["notify_email"] = email.strip()
+        email = email.strip()
+        # Checked here, not only inside push_seerr_contact(), because that one runs
+        # exclusively for users who have a Seerr account linked - so an unlinked user
+        # could save anything at all and only find out when a notification silently
+        # failed. Blank stays legal: clearing the field is a real thing to want.
+        if email and not db.looks_like_email(email):
+            return False, (f"{email!r} doesn't look like a complete email address, "
+                            "so it wasn't saved.")
+        fields["notify_email"] = email
     if discord_id is not None:
         fields["notify_discord_id"] = discord_id.strip()
     if not fields:
