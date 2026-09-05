@@ -381,12 +381,15 @@ this" rules are in `CLAUDE.md`; how its bugs actually presented is in
 **v1.8.7** (2026-09-05)
 - Announcements take an optional display window - schedule one for later, or have it
   expire on its own. Blank means no bound, so existing announcements are unaffected.
-- A filter box on the Settings page, which is long enough that finding one setting
-  meant reading every label.
+  The public card shows the end date when there is one.
+- A floating search bubble on every admin page, covering the whole panel: it finds a
+  setting by its label, its explanatory text or its underlying name, and takes you to
+  the control rather than the page. Its index is derived from the templates, so it
+  can't drift out of date - see `CLAUDE.md` -> *Admin search*.
 - Fixes: a Jellyfin username being used as an email address (Seerr reports one in its
   `email` field when an imported account has none), an unreachable service logging a
-  traceback that read like a portal crash, and a stray `</div>` that closed the
-  settings form early.
+  traceback that read like a portal crash, a stray `</div>` that closed the settings
+  form early, and window times rendering in the wrong timezone.
 
 ## Overall take
 
