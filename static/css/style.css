@@ -391,8 +391,15 @@ body.no-visitor-controls .topbar { padding-right: 46px; }
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-faint);
-  white-space: nowrap;
+  /* A column, because an announcement with an end date has a second line under the
+     posted date. nowrap moves onto the lines themselves - it's there to stop a
+     timestamp breaking mid-date, not to keep the two on one row. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
+.announcement__time > * { white-space: nowrap; }
 .announcement__body {
   font-size: 13.5px;
   color: var(--text-dim);
@@ -1749,42 +1756,131 @@ body.kiosk {
 .kiosk-launch__hint { font-size: 12px; color: var(--text-faint); }
 
 /* ---------------------------------------------------------------------------
-   Settings filter (admin_settings_filter.js)
+   Floating admin search (admin_search.js)
 
-   The Settings page is one long page of ~35 separate settings across three
-   forms, and finding one meant scrolling and reading. This filters it in
-   place. Revealed by JS only - see the template for why.
+   Pinned to the viewport on every admin page, the same idea as the public side's
+   .page-actions cluster: a panel of ~20 pages and several hundred controls needs
+   one box that is always reachable, not one that scrolls away.
    --------------------------------------------------------------------------- */
-.settings-filter {
+.admin-search {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  /* Above the sticky admin nav and any flash stack, below nothing - it is the
+     top-most interactive thing on the page while it's open. */
+  z-index: 60;
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
+}
+
+.admin-search__open {
+  display: inline-flex;
   align-items: center;
-  margin-bottom: 14px;
-  /* Sticky, because the point of filtering a long page is that you then scroll
-     the results - and having to come back up to change the term defeats it.
-     Sits under .admin-main's own padding, hence the negative offset. */
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  padding: 10px 0;
-  /* Opaque, because it's sticky and panels scroll underneath it. Matches the page
-     ground rather than a panel's - it sits on .admin-main, not inside a panel. */
-  background: var(--bg-void);
-}
-
-.settings-filter input[type="search"] {
-  flex: 1;
-  min-width: 0;
-}
-
-.settings-filter__status {
-  margin: -6px 0 14px;
-  font-size: 13px;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel-raised);
   color: var(--text-dim);
+  font-family: var(--font-body);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  transition: color 0.15s, border-color 0.15s;
+}
+.admin-search__open:hover,
+.admin-search.is-open .admin-search__open {
+  color: var(--text-primary);
+  border-color: var(--brand-dim);
 }
 
-/* Visually hidden but still read aloud - the input has a placeholder, which is
-   not a label. */
+.admin-search__panel {
+  width: min(440px, calc(100vw - 32px));
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  padding: 10px;
+}
+
+.admin-search__panel input[type="search"] {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+}
+
+.admin-search__output {
+  /* The list scrolls inside itself rather than growing the panel past the screen -
+     a search on a phone must not need the page scrolled to see its own results. */
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+}
+
+.admin-search__results { list-style: none; margin: 0; padding: 0; }
+
+.admin-search__result {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.admin-search__result:hover,
+.admin-search__result.is-active {
+  background: var(--bg-panel-raised);
+}
+.admin-search__title {
+  /* A label from another page can be long and has nothing to break at, so let it
+     break anywhere rather than push the panel wider - same rule as .admin-table td. */
+  overflow-wrap: anywhere;
+}
+.admin-search__page {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-search__empty {
+  margin: 6px 4px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
+/* The control a search result led to, flashed briefly on arrival so it's obvious
+   which of a page full of fields was meant. Removed by the script afterwards. */
+.admin-jump-target {
+  animation: admin-jump-flash 2.4s ease-out;
+  border-radius: var(--radius-sm);
+}
+@keyframes admin-jump-flash {
+  0%, 55% { box-shadow: 0 0 0 3px var(--brand-dim); background: rgba(108, 140, 255, 0.09); }
+  100% { box-shadow: 0 0 0 3px transparent; background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Still marked, just not animated - the point is "this one", not the movement. */
+  .admin-jump-target { animation: none; box-shadow: 0 0 0 3px var(--brand-dim); }
+}
+
+/* The bubble sits over the page, so on a narrow screen it must not cover the h1.
+   Dropping the word leaves a round icon button, which is what the public side's
+   theme toggle already is at this width. */
+@media (max-width: 640px) {
+  .admin-search { top: 10px; right: 10px; }
+  .admin-search__open-label { display: none; }
+  .admin-search__open { padding: 9px 11px; }
+}
+
+/* Visually hidden but still read aloud - the search input has a placeholder, which
+   is not a label. */
 .sr-only {
   position: absolute;
   width: 1px;

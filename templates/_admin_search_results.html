@@ -1,0 +1,29 @@
+{# Results for the floating admin search. A server-rendered fragment returned directly
+   by admin_search_results(), matching this app's convention (see /api/incidents/more)
+   rather than JSON plus client-side templating.
+
+   Every value here comes from an admin template's own text, but it still goes through
+   Jinja's escaping like anything else - nothing is marked safe. #}
+{% if not query %}
+  <p class="admin-search__empty">
+    Search every page of the admin panel — settings, controls and pages.
+    Try “disk”, “kiosk”, “2fa”, “retry” or a setting name like <code>show_public_gpu</code>.
+  </p>
+{% elif not results %}
+  <p class="admin-search__empty">Nothing matches “{{ query }}”.</p>
+{% else %}
+  <ul class="admin-search__results" role="listbox">
+    {% for r in results %}
+    <li>
+      {# `jump` is the input's name, not an id - the arriving page finds the control by
+         [name=...] and scrolls to it. That avoids having to add an id to several
+         hundred fields across twenty templates just to be linkable. #}
+      <a href="{{ url_for(r.endpoint) }}{% if r.jump %}?jump={{ r.jump }}{% endif %}"
+         class="admin-search__result" role="option" tabindex="-1">
+        <span class="admin-search__title">{{ r.title }}</span>
+        <span class="admin-search__page">{{ r.page }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+{% endif %}

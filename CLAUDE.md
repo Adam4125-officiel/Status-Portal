@@ -98,6 +98,7 @@ have bitten someone on exactly that change.
 | A kiosk view, or anything under `/kiosk` | *Kiosk mode* → the two-level gate, and why it polls instead of reloading |
 | An announcement, or its window | *Announcements and their display window* → read-time filtering, and all five public consumers |
 | Any admin template's markup | *Admin panel navigation* → an unbalanced `<div>` closes the `<form>`; the rendered-page test |
+| The admin search, or a new admin page | *Admin search* → the index is derived, `PAGES` is the only hand-written part |
 | Anything that sends a notification | *Notification channels* → the two email systems; *Per-user notifications* → group per-event, not per-entity |
 | Calling something "done" | *Testing/verification habits* — pytest alone has missed real bugs repeatedly |
 | A rule you half-remember | `tests/test_conventions.py` — the checkable ones are enforced there, with the reasoning in each docstring |
@@ -979,6 +980,12 @@ DB-backed Settings pages, not a code edit.
 - **A notification is refused for an announcement that isn't currently showing**
   (`_announcement_send_block()`, checked in all three send paths). It would point people
   at something they can't see, in both directions.
+- **The public card shows the end date when there is one**, under the posted date
+  (`sections/announcements.html`, mirrored in `kiosk/announcements.html` - the two are
+  near-identical copies, so keep them in step). Only when `ends_at` is set: "until
+  (nothing)" is worse than no second line. `.announcement__time` is a flex column for
+  this, with `nowrap` moved onto the individual spans - it's there to stop a timestamp
+  breaking mid-date, not to keep both on one row.
 - **A `datetime-local` value has no timezone, so `data-utc` needs an explicit `Z`.**
   Stored as `2099-01-01T00:00`, which JS parses as *local* time - so without the `Z`,
   `local_time.js` shifts every window time by the viewer's own offset. Invisible in this
@@ -1841,13 +1848,9 @@ time, rotating on a timer, no nav and no footer. Off by default.
   any `.led` whose painted box (glow included) intersects a text rect, and
   `documentElement.scrollWidth > clientWidth`. Five separate causes, only visible one at
   a time.
-- **`/admin/settings` has a filter box (`admin_settings_filter.js`), and hiding there is
-  visual only.** A filtered-out field's inputs stay in the DOM and still submit - the
-  same property the combined wizard's collapsed `<details>` relies on - so saving while
-  a filter is active saves the whole form. **Never "improve" it by removing or disabling
-  hidden inputs**: that turns a filter into a way to silently reset every setting not on
-  screen. Its unit is a *top-level* `.field` inside a `.form-panel`, because some fields
-  nest others and hiding a nested one alone leaves a section looking broken.
+- **The admin search bubble lives in `admin_base.html`, not per template** - same
+  reasoning as `local_time.js` being loaded there: wiring it per page is how one page
+  ends up without it. See *Admin search* below for the rest.
 - **An unbalanced `<div>` can close a `<form>` early, and it hides well.** A stray
   `</div>` on the settings page put every field below it outside the form in the DOM,
   while the page still looked right and still saved correctly - an input's form owner is
@@ -1861,6 +1864,46 @@ time, rotating on a timer, no nav and no footer. Off by default.
   tones. The markup keeps a real focusable checkbox for keyboards and screen readers,
   and a hidden field carrying the value to *become*, so the same form works with JS
   (submit on change) and without it (a fallback button the script hides).
+
+## Admin search (`admin_search.py`, `/admin/search`, the floating bubble)
+
+- **The index is derived from the admin templates and must never become a
+  hand-written list.** That is the entire design. A hand-maintained index of several
+  hundred settings would be wrong within two sessions and wrong *invisibly* - a missing
+  entry looks exactly like a setting that doesn't exist, which is worse than no search
+  at all. `build_index()` reads the templates for every `<label>`, field hint and
+  `name=`, so adding a setting adds it to the search and renaming one renames it, with
+  one source of truth.
+- **Never build the index by rendering the pages and reading the DOM.** It's the obvious
+  shortcut and it's wrong: rendering `/admin/reports` marks messages as read and
+  `/admin/logs` reads files off disk, so a search box would acquire side effects.
+  Templates are inert. `admin_search.py` deliberately imports neither `app` nor `db`,
+  and there's a test asserting it.
+- **`PAGES` is the one hand-maintained part, and it's kept honest by two tests**: every
+  `templates/admin_*.html` must be registered there or listed in `NON_PAGE_TEMPLATES`,
+  and every endpoint must resolve through `url_for()`. The second caught a typo'd
+  endpoint the moment it was written - without it that surfaces as a `BuildError` in
+  front of the user, on a search.
+- **Only the page-level entry carries `aliases`** (its own template/endpoint words).
+  That's what makes "2fa" land on Two-factor auth rather than on the four step-up code
+  prompts scattered around the panel, whose visible labels *do* contain "2FA" while the
+  page's own label doesn't. Don't give every entry aliases - it would boost every
+  control on that page equally and lose the distinction.
+- **Results are a server-rendered HTML fragment** (`_admin_search_results.html`), same
+  convention as `/api/incidents/more`, `/admin/logs/tail` and `/search/live`. This app
+  has one JSON API (`/api/status`, for external consumers) and no client-side
+  templating; a search box is not the place to start.
+- **`?jump=` is an input's `name`, not an id**, and `admin_search.js` resolves it with
+  `[name=...]` falling back to `getElementById`. Keyed that way so several hundred
+  fields across twenty templates didn't each need an id added just to be linkable. On
+  arrival it opens any enclosing `<details>` before scrolling - otherwise the page
+  scrolls to something invisible and reads as broken.
+- **Matching is AND across terms, not OR** - "disk alert" narrows rather than widens -
+  and a query under two characters matches nothing, because every entry would match and
+  that is a list rather than an answer.
+- The index is cached on the templates' mtimes (like `asset_url()`), so an edited label
+  shows up without a restart while a search does no disk I/O. It's in
+  `admin_search.clear_caches()` and `tests/conftest.py` like every other module cache.
 
 ## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
 
@@ -2694,12 +2737,22 @@ in this app logs a real error now.
 stated by the user 2026-08-30, superseding an earlier, narrower rule that only
 required a branch for untested/status-logic-touching batches (small direct fixes
 used to go straight to `main`). That distinction is gone: every change, regardless
-of size or risk, goes on its own branch with its own PR, merged the normal way
-(regular merge commit — see "Promoting a feature branch to stable" below, never
-squash/rebase). This includes a one-line fix found mid-session while testing
-something else on an existing branch — put it on a branch of its own (or, if it's
-directly unblocking testing of a PR already open, on that PR's own branch) rather
-than reaching for `main`.
+of size or risk, goes on a branch with a PR, merged the normal way (regular merge
+commit — see "Promoting a feature branch to stable" below, never squash/rebase).
+
+**One branch at a time, held open until the work is stable — not a branch and a PR
+per fix.** Corrected by the user 2026-09-05, after a session opened three PRs in a
+row and merged each as it passed its own tests. The session's work accumulates on a
+single branch (still **one commit per completed fix** — that convention is
+unchanged, see *Commit cadence*), the branch stays open while the user tests it end
+to end on their own portal, and only then is it merged and released stable. A
+mid-session pre-release (`-rc.N`) off that branch is the right way to hand something
+over for testing; merging to `main` is not.
+
+The exception is a genuine emergency fix the user has asked to go out immediately —
+the v1.8.6 notification batch was one, and the user named it as exceptional rather
+than the pattern. Don't generalise from it: if the user hasn't said "this is
+urgent, ship it", the branch stays open.
 
 **One exception: `CLAUDE.md` and other markdown docs Claude itself maintains for its
 own context** (`docs/HISTORY.md`, `ROADMAP.md`). If a branch is already open for

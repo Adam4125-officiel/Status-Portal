@@ -28,6 +28,7 @@ from werkzeug.utils import secure_filename
 from markupsafe import Markup, escape
 import requests
 
+import admin_search
 import config
 import db
 import discord_bot
@@ -2475,6 +2476,22 @@ def admin_service_delete(service_id):
 
 
 # ---- Announcements ----
+@app.route("/admin/search")
+@login_required
+def admin_search_results():
+    """Returns a server-rendered HTML fragment, not JSON - the same convention as
+    /api/incidents/more, /admin/logs/tail and /search/live. This app has exactly one
+    JSON API (/api/status, for external consumers) and no client-side templating
+    anywhere, and a search box is not the place to introduce some.
+
+    Cheap enough to run per keystroke: it matches against an in-memory index built from
+    the templates once (see admin_search.build_index), so a query is string work over a
+    few hundred entries with no database or disk access at all."""
+    query = request.args.get("q", "")
+    return render_template("_admin_search_results.html",
+                            query=query.strip(), results=admin_search.search(query))
+
+
 @app.route("/admin/announcements")
 @login_required
 def admin_announcements():
@@ -3103,6 +3120,7 @@ def _clear_all_caches():
     monitoring.clear_caches()
     updater.clear_update_cache()
     user_notify.clear_caches()
+    admin_search.clear_caches()
     _bump_asset_cache_salt()
 
 

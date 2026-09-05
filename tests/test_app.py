@@ -4116,12 +4116,3 @@ def test_admin_pages_have_balanced_divs(client, isolated_db, path):
         f"<form> early, which moves every field after it out of the form in the DOM")
 
 
-def test_the_settings_filter_is_hidden_until_javascript_reveals_it(client, isolated_db):
-    """Same rule as the log page's Live switch: a filter box that filters nothing is
-    worse than no box at all, so it ships hidden and the script unhides it."""
-    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    body = client.get("/admin/settings").get_data(as_text=True)
-
-    assert 'id="settings_filter"' in body
-    assert 'hidden' in body.split('id="settings_filter"')[1][:40]
-    assert "admin_settings_filter.js" in body

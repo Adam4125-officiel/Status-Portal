@@ -33,23 +33,27 @@
   </div>
 
   <div class="field">
-    <label id="window_label">When it's shown (optional, UTC)</label>
-    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;"
-         role="group" aria-labelledby="window_label">
-      <label for="starts_at" style="font-size: 13px; color: var(--text-dim);">From</label>
-      <input type="datetime-local" id="starts_at" name="starts_at" style="flex: 1; min-width: 180px;"
+    <label for="starts_at">Starts showing at (UTC, optional)</label>
+    <div style="display: flex; gap: 8px;">
+      <input type="datetime-local" id="starts_at" name="starts_at" style="flex: 1;"
              value="{{ announcement.starts_at[:16] if announcement else '' }}">
-      <label for="ends_at" style="font-size: 13px; color: var(--text-dim);">Until</label>
-      <input type="datetime-local" id="ends_at" name="ends_at" style="flex: 1; min-width: 180px;"
+      <button type="button" id="starts_at_now" class="btn secondary" style="padding: 9px 12px;">Now</button>
+    </div>
+    <div class="field-hint">Blank means it starts showing as soon as you save. Set it to write something now and have it appear later.</div>
+  </div>
+  <div class="field">
+    <label for="ends_at">Stops showing at (UTC, optional)</label>
+    <div style="display: flex; gap: 8px;">
+      <input type="datetime-local" id="ends_at" name="ends_at" style="flex: 1;"
              value="{{ announcement.ends_at[:16] if announcement else '' }}">
-      <button type="button" id="window_clear" class="btn secondary"
-              style="padding: 9px 12px;">Clear</button>
+      <button type="button" id="ends_at_now" class="btn secondary" style="padding: 9px 12px;">+1 week</button>
     </div>
     <div class="field-hint">
-      Leave both blank to publish it now and keep showing it until you delete it — which
-      is what an announcement did before this existed. Fill in "Until" and it stops
-      showing itself once that passes; fill in "From" to write it now and have it appear
-      later. Times are UTC, not your browser's local time.
+      Blank means it keeps showing until you delete it, exactly as an announcement did
+      before this existed. Clicking into either box fills in a sensible time you can then
+      edit; <button type="button" id="window_clear" class="btn secondary"
+      style="padding: 2px 8px; font-size: 12px;">Clear both</button> puts them back to
+      blank. The server compares against UTC, not your browser's local time.
     </div>
   </div>
 
