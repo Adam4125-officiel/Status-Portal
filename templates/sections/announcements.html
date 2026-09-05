@@ -7,7 +7,19 @@
         {% if a.pinned %}<span class="pin-flag">📌</span>{% endif %}
         {{ a.title }}
       </div>
-      <div class="announcement__time"><span class="local-time" data-utc="{{ a.created_at }}">{{ a.created_at[:16].replace('T', ' ') }} UTC</span></div>
+      <div class="announcement__time">
+        <span class="local-time" data-utc="{{ a.created_at }}">{{ a.created_at[:16].replace('T', ' ') }} UTC</span>
+        {# Only when the admin actually set an end - most announcements have none, and
+           "until (nothing)" is worse than no second line. The explicit Z matters: the
+           value comes from a datetime-local field and so carries no offset, which JS
+           would otherwise read as local time (docs/HISTORY.md -> "the window times that
+           were an hour out"). created_at above needs none - it's a full now_iso(). #}
+        {% if a.ends_at %}
+        <span class="announcement__until">until
+          <span class="local-time" data-utc="{{ a.ends_at }}Z">{{ a.ends_at.replace('T', ' ') }} UTC</span>
+        </span>
+        {% endif %}
+      </div>
     </div>
     <div class="announcement__body">{{ a.message|richtext }}</div>
   </div>

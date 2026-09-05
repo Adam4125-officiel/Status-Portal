@@ -980,6 +980,12 @@ DB-backed Settings pages, not a code edit.
 - **A notification is refused for an announcement that isn't currently showing**
   (`_announcement_send_block()`, checked in all three send paths). It would point people
   at something they can't see, in both directions.
+- **The public card shows the end date when there is one**, under the posted date
+  (`sections/announcements.html`, mirrored in `kiosk/announcements.html` - the two are
+  near-identical copies, so keep them in step). Only when `ends_at` is set: "until
+  (nothing)" is worse than no second line. `.announcement__time` is a flex column for
+  this, with `nowrap` moved onto the individual spans - it's there to stop a timestamp
+  breaking mid-date, not to keep both on one row.
 - **A `datetime-local` value has no timezone, so `data-utc` needs an explicit `Z`.**
   Stored as `2099-01-01T00:00`, which JS parses as *local* time - so without the `Z`,
   `local_time.js` shifts every window time by the viewer's own offset. Invisible in this

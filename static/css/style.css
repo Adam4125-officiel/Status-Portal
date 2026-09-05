@@ -391,8 +391,15 @@ body.no-visitor-controls .topbar { padding-right: 46px; }
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-faint);
-  white-space: nowrap;
+  /* A column, because an announcement with an end date has a second line under the
+     posted date. nowrap moves onto the lines themselves - it's there to stop a
+     timestamp breaking mid-date, not to keep the two on one row. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
+.announcement__time > * { white-space: nowrap; }
 .announcement__body {
   font-size: 13.5px;
   color: var(--text-dim);

@@ -393,3 +393,19 @@ def test_the_window_fields_have_now_buttons_and_dont_prefill(client, isolated_db
     for field in ("starts_at", "ends_at"):
         tag = body.split(f'id="{field}"')[1].split(">")[0]
         assert 'value=""' in tag, f"{field} must not be pre-filled: {tag}"
+
+
+def test_the_public_page_shows_when_an_announcement_ends(client, isolated_db):
+    """Asked for after rc.2: the public card showed only the posted date, so a visitor
+    had no way to know a notice was temporary."""
+    db.create_announcement({"title": "Temporary", "message": "m", "ends_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "Permanent", "message": "m"})
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert "until" in body
+    # Marked as UTC for the browser, same trap as the admin list - a datetime-local
+    # value has no offset and JS would read it as local time.
+    assert 'data-utc="2099-01-01T00:00Z"' in body
+    # And an announcement with no end gets no second line rather than an empty one.
+    assert body.count("announcement__until") == 1

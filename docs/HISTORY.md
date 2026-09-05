@@ -1551,6 +1551,17 @@ The property that needed verifying in a real browser rather than reasoned about:
 ticking a checkbox, filtering it off screen, saving, and checking it held - because the
 alternative failure mode silently resets every setting not currently visible.
 
+### Showing the end date publicly (added 2026-09-05)
+
+The last change before the stable release, asked for after the rest was confirmed
+working: the public card showed only the posted date, so a visitor had no way to tell a
+notice was temporary. Now shows "until ..." underneath, and only when an end is actually
+set - "until (nothing)" is worse than no second line.
+
+Same `Z` suffix as the admin list, for the same reason, and confirmed the same way: the
+card was read in a browser set to Europe/Paris as well as UTC, where 00:00 UTC correctly
+renders as 01:00 GMT+1.
+
 ### What was and wasn't verified (2026-09-05)
 
 Driven in real Chromium against a live server: all four announcement window states
