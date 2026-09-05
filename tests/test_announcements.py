@@ -357,3 +357,19 @@ def test_the_kiosk_only_shows_active_announcements(isolated_db):
     db.create_announcement({"title": "LiveOne", "message": "m"})
     context = app_module._kiosk_announcements_context()
     assert [a["title"] for a in context["announcements"]] == ["LiveOne"]
+
+
+def test_window_timestamps_are_marked_as_utc_for_the_browser(client, isolated_db):
+    """A datetime-local value ("2099-01-01T00:00") carries no offset, and JS parses that
+    form as *local* time - so without an explicit Z, local_time.js shifts every window
+    time by the viewer's own offset. Invisible on a UTC machine, which is exactly where
+    this was nearly missed; confirmed in a real browser set to Europe/Paris, where
+    00:00 UTC must render as 01:00 GMT+1 rather than 00:00."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    db.create_announcement({"title": "Windowed", "message": "m",
+                             "starts_at": "2099-01-01T00:00", "ends_at": "2099-02-01T00:00"})
+
+    body = client.get("/admin/announcements").get_data(as_text=True)
+
+    assert 'data-utc="2099-01-01T00:00Z"' in body
+    assert 'data-utc="2099-01-01T00:00"' not in body

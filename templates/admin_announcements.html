@@ -22,13 +22,13 @@
              one just looks like a live one that isn't on the public page. #}
           {% if a.window_state == 'scheduled' %}
             <span class="led warn"></span> from
-            <span class="local-time" data-utc="{{ a.starts_at }}">{{ a.starts_at.replace('T', ' ') }} UTC</span>
+            <span class="local-time" data-utc="{{ a.starts_at }}Z">{{ a.starts_at.replace('T', ' ') }} UTC</span>
           {% elif a.window_state == 'expired' %}
             <span class="led"></span> ended
-            <span class="local-time" data-utc="{{ a.ends_at }}">{{ a.ends_at.replace('T', ' ') }} UTC</span>
+            <span class="local-time" data-utc="{{ a.ends_at }}Z">{{ a.ends_at.replace('T', ' ') }} UTC</span>
           {% elif a.ends_at %}
             <span class="led ok"></span> until
-            <span class="local-time" data-utc="{{ a.ends_at }}">{{ a.ends_at.replace('T', ' ') }} UTC</span>
+            <span class="local-time" data-utc="{{ a.ends_at }}Z">{{ a.ends_at.replace('T', ' ') }} UTC</span>
           {% else %}
             <span class="led ok"></span> yes
           {% endif %}
