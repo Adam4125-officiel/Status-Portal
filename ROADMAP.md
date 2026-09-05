@@ -378,6 +378,16 @@ this" rules are in `CLAUDE.md`; how its bugs actually presented is in
   pages that touch them, and no longer send the same maintenance event twice to an
   address on both.
 
+**v1.8.7** (2026-09-05)
+- Announcements take an optional display window - schedule one for later, or have it
+  expire on its own. Blank means no bound, so existing announcements are unaffected.
+- A filter box on the Settings page, which is long enough that finding one setting
+  meant reading every label.
+- Fixes: a Jellyfin username being used as an email address (Seerr reports one in its
+  `email` field when an imported account has none), an unreachable service logging a
+  traceback that read like a portal crash, and a stray `</div>` that closed the
+  settings form early.
+
 ## Overall take
 
 The list is short now, and what is on it is genuinely different in character rather

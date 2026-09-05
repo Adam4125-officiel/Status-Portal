@@ -1284,6 +1284,90 @@ with a test on it, because it is the half that would quietly rot.
 Verified by reproducing the exact reported call, with the same URL, and reading the
 resulting log line.
 
+## Expiring announcements, and two bugs found building them (v1.8.7, 2026-09-05)
+
+### The window times that were an hour out (caught before shipping)
+
+The admin list renders an announcement's window through the usual `.local-time` span,
+and in this sandbox it looked perfect. It was wrong.
+
+A `datetime-local` field submits `2099-01-01T00:00` - no offset - and that form is
+parsed by JavaScript as **local** time, not UTC. So `local_time.js` was shifting every
+window time by the viewer's own offset. Invisible here, because this sandbox's browser
+and clock are both UTC, which is the whole reason it nearly shipped: the check that
+found it was re-running the page in a Chromium context set to `Europe/Paris`, where
+00:00 UTC has to render as 01:00 GMT+1 and was rendering as 00:00.
+
+Fixed by appending an explicit `Z` to `data-utc`. Worth noting that the *maintenance*
+list sidesteps this by not converting at all - it prints raw UTC text - so it was never
+a model to copy, and any future timestamp sourced from a `datetime-local` field has the
+same trap.
+
+### The stray `</div>` (fixed 2026-09-05)
+
+Found while building the settings filter, not by looking for it. The filter groups
+fields by the `.form-panel` they sit in, and it kept finding seven of them out of
+twenty-seven. Searching "timeout" - a setting that plainly exists - matched nothing.
+
+`admin_settings.html` had one `</div>` too many, which closed the `<form>` element
+early: from "Public page layout" downwards, every field was parsed as a child of
+`<body>`.
+
+It had presumably been there a long while and was completely invisible, because an
+input's **form owner is fixed at parse time**. The fields still submitted, still saved,
+and the page still looked right; only something reasoning about DOM *structure* could
+see it.
+
+The test for it is instructive. The first attempt used `html.parser` to track `<form>`
+depth and check no input fell outside - and it **passed with the fault reintroduced**,
+because `html.parser` tokenises rather than implementing HTML5 tree construction, so a
+stray `</div>` doesn't affect its idea of form depth at all. What works is counting
+`<div>` against `</div>` on the *rendered* page (Jinja conditionals make a
+template-level count give false positives) across every admin page - all sixteen
+balance at zero, so it's a real invariant rather than a number that happened to fit.
+
+### The feature itself
+
+Asked for as "an expiring system such as incidents and maintenance for announcements".
+Two optional fields; blank means no bound, so an announcement with neither behaves
+exactly as one did before - pinned by a test, because that is the property the whole
+thing has to preserve on an existing install.
+
+The design choice worth keeping is that **expiry is evaluated at read time**, not by a
+scheduled job flipping a stored flag. Nothing can fall out of sync, a window that opened
+or closed during downtime needs no catching up, and extending an expired announcement
+brings it straight back rather than needing the admin to switch it on again - with a
+flag, "expired" would also be indistinguishable from "an admin turned this off".
+
+Sending a notification for an announcement that isn't currently showing is refused in
+all three send paths: it would point people at something they can't see, in both
+directions.
+
+### The settings filter
+
+`/admin/settings` is ~27 settings across three forms. The filter matches labels, hints,
+checkbox text *and* field names, so `show_public_gpu` copied out of a log line finds its
+setting without knowing what it's called in English.
+
+The property that needed verifying in a real browser rather than reasoned about:
+**hiding is visual only**, so saving while filtered saves the whole form. Confirmed by
+ticking a checkbox, filtering it off screen, saving, and checking it held - because the
+alternative failure mode silently resets every setting not currently visible.
+
+### What was and wasn't verified (2026-09-05)
+
+Driven in real Chromium against a live server: all four announcement window states
+through the actual admin form (none / scheduled / expired / open), the public page
+showing exactly the right two, the backwards-window refusal keeping what was typed and
+still reading as "New announcement", the Clear button, and the timezone rendering in
+both UTC and Europe/Paris. For the filter: every search term above, the empty state,
+Escape restoring the page, and the save-while-filtered case. No console, page or request
+errors on any of it.
+
+Not verified: the Discord embed and kiosk filtering are covered by tests only, since
+there is no real Discord gateway here and the kiosk view was not driven in a browser
+this time.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
