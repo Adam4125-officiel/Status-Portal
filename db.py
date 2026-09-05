@@ -295,6 +295,10 @@ def init_db():
         )
     """)
 
+    # starts_at/ends_at are an optional display window (see list_active_announcements).
+    # '' means "no bound", which is what every announcement written before the window
+    # existed has, and what a new one gets unless the admin fills the field in - so the
+    # default behaviour is exactly what it was: published on save, shown until deleted.
     c.execute("""
         CREATE TABLE IF NOT EXISTS announcements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,7 +306,9 @@ def init_db():
             message TEXT NOT NULL,
             type TEXT NOT NULL DEFAULT 'info',  -- info | warning | critical | success
             pinned INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            starts_at TEXT NOT NULL DEFAULT '',  -- '' = no start bound
+            ends_at TEXT NOT NULL DEFAULT ''     -- '' = never expires
         )
     """)
 
@@ -672,6 +678,11 @@ def init_db():
     # requests, unlike maintenance, since an announcement is something the admin chose
     # to say to everyone, not routine noise about one service.
     _ensure_column(conn, "user_preferences", "notify_email_announcements", "INTEGER NOT NULL DEFAULT 1")
+    # The announcement display window. Empty on every pre-existing row, which is the
+    # "no bound" sentinel, so an install upgrading into this shows exactly what it
+    # showed before - nothing silently expires on upgrade.
+    _ensure_column(conn, "announcements", "starts_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "announcements", "ends_at", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "username", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "integrations", "password", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "problem_reports", "reporter_user", "TEXT NOT NULL DEFAULT ''")
@@ -938,7 +949,30 @@ def delete_service(service_id):
 
 
 # ---------- Announcements ----------
+# An announcement can carry an optional display window (starts_at/ends_at, '' for
+# "no bound"). Whether it is currently showing is decided at *read* time, by
+# list_active_announcements() below, and never by a background job flipping a stored
+# flag. Three reasons that is the right shape here, and they're worth keeping:
+#
+#   - There is nothing to fall out of sync. A window that opened or closed while the
+#     portal was down needs no catching up, because nothing was ever recorded.
+#   - Extending an expired announcement brings it straight back. With a flag, the
+#     admin would have to remember to switch it on again, and "expired" would be
+#     indistinguishable from "an admin turned this off".
+#   - It costs no new scheduled task. The scheduler exists (see CLAUDE.md) but a job
+#     whose entire output is derivable from two timestamps is a job worth not having.
+#
+# The comparison is a plain string one against now_iso(). That works because both
+# sides are zero-padded ISO-8601 starting with the year, so lexicographic order is
+# chronological order - the same reason process_maintenance_windows() can do it. A
+# datetime-local field submits "2026-09-05T18:20" (no seconds, no offset), which
+# compares correctly against a fuller "2026-09-05T18:20:00.123456+00:00": they agree
+# character for character up to the minute, and the shorter string then sorts first,
+# which is what "that minute has started" should mean.
 def list_announcements(limit=None):
+    """Every announcement, whatever its window. This is the *admin's* view - the
+    announcements page has to show a scheduled or expired one so it can be edited.
+    Anything public-facing wants list_active_announcements() instead."""
     conn = get_db()
     q = "SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC"
     if limit:
@@ -948,6 +982,44 @@ def list_announcements(limit=None):
     return [dict(r) for r in rows]
 
 
+def list_active_announcements(limit=None, now=None):
+    """The announcements that should be visible right now - what every public-facing
+    caller wants (the status page, /api/status, the RSS feed, the Discord bot's embed
+    and the kiosk display).
+
+    An empty starts_at/ends_at means that end of the window is unbounded, so an
+    announcement with neither is always active. That is the state every row written
+    before this feature existed is in, and the state a new one gets unless the admin
+    says otherwise."""
+    now = now or now_iso()
+    conn = get_db()
+    q = """
+        SELECT * FROM announcements
+        WHERE (starts_at = '' OR starts_at <= ?)
+          AND (ends_at = '' OR ends_at > ?)
+        ORDER BY pinned DESC, created_at DESC
+    """
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    rows = conn.execute(q, (now, now)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def announcement_window_state(announcement, now=None):
+    """'scheduled' | 'showing' | 'expired' - for the admin list, which shows every
+    announcement and has to say which of those each one is. Derived from the same two
+    fields the query above filters on, so the label and the behaviour cannot disagree."""
+    now = now or now_iso()
+    starts_at = announcement.get("starts_at") or ""
+    ends_at = announcement.get("ends_at") or ""
+    if starts_at and starts_at > now:
+        return "scheduled"
+    if ends_at and ends_at <= now:
+        return "expired"
+    return "showing"
+
+
 def get_announcement(aid):
     conn = get_db()
     row = conn.execute("SELECT * FROM announcements WHERE id=?", (aid,)).fetchone()
@@ -955,13 +1027,22 @@ def get_announcement(aid):
     return dict(row) if row else None
 
 
+def _window_value(raw):
+    """A datetime-local field submits '' when left blank, which is the "no bound"
+    sentinel - so a missing key and an empty one must land on the same value. Stored
+    exactly as submitted ("2026-09-05T18:20"), like maintenance windows, because that
+    string compares correctly against now_iso() (see the block comment above)."""
+    return (raw or "").strip()
+
+
 def create_announcement(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO announcements (title, message, type, pinned, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO announcements (title, message, type, pinned, created_at, starts_at, ends_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (data["title"], data["message"], data.get("type", "info"),
-          int(data.get("pinned", 0)), now_iso()))
+          int(data.get("pinned", 0)), now_iso(),
+          _window_value(data.get("starts_at")), _window_value(data.get("ends_at"))))
     conn.commit()
     aid = cur.lastrowid
     conn.close()
@@ -971,9 +1052,11 @@ def create_announcement(data):
 def update_announcement(aid, data):
     conn = get_db()
     conn.execute("""
-        UPDATE announcements SET title=?, message=?, type=?, pinned=? WHERE id=?
+        UPDATE announcements SET title=?, message=?, type=?, pinned=?, starts_at=?, ends_at=?
+        WHERE id=?
     """, (data["title"], data["message"], data.get("type", "info"),
-          int(data.get("pinned", 0)), aid))
+          int(data.get("pinned", 0)),
+          _window_value(data.get("starts_at")), _window_value(data.get("ends_at")), aid))
     conn.commit()
     conn.close()
 

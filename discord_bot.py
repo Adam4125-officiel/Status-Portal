@@ -401,7 +401,7 @@ def build_status_data(include):
             sections.append(("Recent incidents", lines))
 
     if include.get("announcements"):
-        announcements = db.list_announcements(limit=3)
+        announcements = db.list_active_announcements(limit=3)
         if announcements:
             lines = [f"📣 **{a['title']}**: {a['message']}" for a in announcements]
             sections.append(("Announcements", lines))

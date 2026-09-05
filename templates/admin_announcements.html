@@ -9,13 +9,30 @@
 {% if announcements %}
 <div class="admin-table">
   <table>
-    <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Date</th><th>Send as notification</th><th></th></tr></thead>
+    <thead><tr><th>Title</th><th>Type</th><th>Pinned</th><th>Showing</th><th>Date</th><th>Send as notification</th><th></th></tr></thead>
     <tbody>
       {% for a in announcements %}
       <tr>
         <td>{{ a.title }}</td>
         <td>{{ a.type }}</td>
         <td>{{ 'yes' if a.pinned else 'no' }}</td>
+        <td>
+          {# This list is the one place every announcement appears whatever its window,
+             so it has to say which state each is in - otherwise a scheduled or expired
+             one just looks like a live one that isn't on the public page. #}
+          {% if a.window_state == 'scheduled' %}
+            <span class="led warn"></span> from
+            <span class="local-time" data-utc="{{ a.starts_at }}">{{ a.starts_at.replace('T', ' ') }} UTC</span>
+          {% elif a.window_state == 'expired' %}
+            <span class="led"></span> ended
+            <span class="local-time" data-utc="{{ a.ends_at }}">{{ a.ends_at.replace('T', ' ') }} UTC</span>
+          {% elif a.ends_at %}
+            <span class="led ok"></span> until
+            <span class="local-time" data-utc="{{ a.ends_at }}">{{ a.ends_at.replace('T', ' ') }} UTC</span>
+          {% else %}
+            <span class="led ok"></span> yes
+          {% endif %}
+        </td>
         <td>{{ a.created_at[:16].replace('T', ' ') }}</td>
         <td>
           <form action="{{ url_for('admin_announcement_send', aid=a.id) }}" method="POST"
