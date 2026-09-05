@@ -5,6 +5,17 @@
   <h1>Settings</h1>
 </div>
 
+{# Hidden until the script reveals it: a filter box that filters nothing is worse than
+   no box at all, the same reasoning as the log page's Live switch. Everything on this
+   page still works with JavaScript off, exactly as it did before. #}
+<div class="settings-filter" id="settings_filter" hidden>
+  <label class="sr-only" for="settings_filter_input">Filter settings</label>
+  <input type="search" id="settings_filter_input" autocomplete="off" spellcheck="false"
+         placeholder="Filter settings — try “disk”, “kiosk”, “timeout”…">
+  <button type="button" id="settings_filter_clear" class="btn secondary">Clear</button>
+</div>
+<p class="settings-filter__status" id="settings_filter_status" hidden role="status"></p>
+
 <form method="POST" action="{{ url_for('admin_settings_general') }}" class="form-panel" style="margin-bottom: 20px;">
   <div class="field">
     <label for="site_name">Server / site name</label>
@@ -56,7 +67,6 @@
       Only has an effect while Jellyfin sign-in is enabled — with no sign-in configured
       there's no such thing as a signed-in visitor, so enforcing it would hide the
       section from everybody rather than restricting it.
-    </div>
     </div>
   </div>
   <div class="field">
@@ -264,4 +274,5 @@
   configured, and to send a test.
 </p>
 <script src="{{ asset_url('js/admin_layout_order.js') }}"></script>
+<script src="{{ asset_url('js/admin_settings_filter.js') }}"></script>
 {% endblock %}

@@ -4073,3 +4073,55 @@ def test_the_thread_shows_both_sides_to_the_reporter(client, user_auth, monkeypa
     body = client.get("/account").data.decode()
     assert "Looking now." in body and "Thanks!" in body
     assert "The admin" in body and "You" in body
+
+
+# ---------------------------------------------------------------------------
+# The settings filter, and the malformed markup it uncovered
+# ---------------------------------------------------------------------------
+ADMIN_PAGES_FOR_MARKUP_CHECK = (
+    "/admin/settings", "/admin/services", "/admin/announcements", "/admin/notifications",
+    "/admin/tasks", "/admin/about", "/admin/system", "/admin/integrations",
+    "/admin/reports", "/admin/users", "/admin/discord-bot", "/admin/incidents",
+    "/admin/maintenance", "/admin/logs", "/admin/2fa", "/admin/info",
+)
+
+
+@pytest.mark.parametrize("path", ADMIN_PAGES_FOR_MARKUP_CHECK)
+def test_admin_pages_have_balanced_divs(client, isolated_db, path):
+    """A stray </div> in admin_settings.html closed its <form> element early, so from
+    "Public page layout" downwards every field was parsed as a child of <body>.
+
+    It hid well: an input's form owner is fixed at parse time, so the settings still
+    submitted and saved correctly, and the page looked right. It only surfaced when
+    something reasoned about the DOM *structure* - the settings filter groups fields by
+    the panel they sit in, and silently found seven of them.
+
+    Counted on the *rendered* page rather than the template, because Jinja conditionals
+    make a template-level count give false positives on markup that is perfectly fine.
+    Every admin page balances at zero today, so this is a real invariant rather than a
+    number that happened to fit.
+
+    Note this deliberately doesn't use html.parser: that tokenises rather than building
+    an HTML5 tree, so it counts <form> depth by tags alone and cannot see this bug at
+    all - the first attempt at this test passed happily with the fault reintroduced."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get(path)
+    assert resp.status_code == 200, f"{path} did not render"
+    body = resp.get_data(as_text=True)
+
+    opened = len(re.findall(r"<div\b", body))
+    closed = len(re.findall(r"</div\s*>", body))
+    assert opened == closed, (
+        f"{path} has {opened} <div> and {closed} </div> - an unbalanced div can close a "
+        f"<form> early, which moves every field after it out of the form in the DOM")
+
+
+def test_the_settings_filter_is_hidden_until_javascript_reveals_it(client, isolated_db):
+    """Same rule as the log page's Live switch: a filter box that filters nothing is
+    worse than no box at all, so it ships hidden and the script unhides it."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.get("/admin/settings").get_data(as_text=True)
+
+    assert 'id="settings_filter"' in body
+    assert 'hidden' in body.split('id="settings_filter"')[1][:40]
+    assert "admin_settings_filter.js" in body
