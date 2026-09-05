@@ -9,11 +9,13 @@ Every test registers its own throwaway tasks into the registry and removes them
 again, rather than exercising the real jellyfin_user_sync task - the framework has to
 be testable without any of its consumers.
 """
+import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import requests
 
 import db
 import scheduler
@@ -378,3 +380,72 @@ def test_the_three_real_background_loops_are_all_registered():
     import app  # noqa: F401 - importing is what registers them
     names = {loop["name"] for loop in scheduler.list_loop_views()}
     assert {"health_checks", "resource_polling", "discord_bot_refresh"} <= names
+
+
+# ---------------------------------------------------------------------------
+# A remote service being down is not a crash in this portal (reported 2026-09-05)
+# ---------------------------------------------------------------------------
+def test_task_unavailable_is_recorded_as_failed_but_logged_without_a_traceback(
+        isolated_db, caplog):
+    """Seerr answering 502 behind a tunnel produced a two-deep chained traceback in the
+    log, which reads exactly like the portal crashed - the user reported it as an error
+    they couldn't explain. The run is still a failure (the work didn't happen, and
+    /admin/tasks must say so); only the logging changes."""
+    scheduler.register("t_unavailable", "T", "d",
+                       lambda: (_ for _ in ()).throw(
+                           scheduler.TaskUnavailable("Could not read pending requests: 502")))
+
+    with caplog.at_level(logging.WARNING):
+        status, message = scheduler.run_task("t_unavailable")
+
+    assert status == "failed"
+    assert "502" in message
+    assert "Traceback" not in caplog.text
+    assert "Could not read pending requests: 502" in caplog.text
+
+
+def test_a_network_error_a_task_simply_lets_through_is_treated_the_same(isolated_db, caplog):
+    """The two sync tasks don't wrap their requests errors at all, so they'd otherwise
+    still print a traceback for an unreachable Jellyfin or Seerr."""
+    def boom():
+        raise requests.ConnectionError("Jellyfin is unreachable")
+    scheduler.register("t_network", "T", "d", boom)
+
+    with caplog.at_level(logging.WARNING):
+        status, _ = scheduler.run_task("t_network")
+
+    assert status == "failed"
+    assert "Traceback" not in caplog.text
+    assert "Jellyfin is unreachable" in caplog.text
+
+
+def test_a_wrapped_network_error_is_recognised_through_the_exception_chain(isolated_db, caplog):
+    """A task that catches a requests error and re-raises with a friendlier message -
+    which is what seerr_alerts and version_checks do - must not lose the concise
+    treatment just because the outermost exception is a RuntimeError."""
+    def boom():
+        try:
+            raise requests.HTTPError("502 Server Error: Bad Gateway")
+        except requests.HTTPError as e:
+            raise RuntimeError(f"Could not read pending requests: {e}")
+    scheduler.register("t_wrapped", "T", "d", boom)
+
+    with caplog.at_level(logging.WARNING):
+        status, _ = scheduler.run_task("t_wrapped")
+
+    assert status == "failed"
+    assert "Traceback" not in caplog.text
+
+
+def test_a_real_bug_in_a_task_still_gets_its_traceback(isolated_db, caplog):
+    """The other half, and the one that must not regress: a genuine fault in this code
+    is exactly where a traceback earns its place."""
+    def boom():
+        return {}["nope"]
+    scheduler.register("t_bug", "T", "d", boom)
+
+    with caplog.at_level(logging.ERROR):
+        status, _ = scheduler.run_task("t_bug")
+
+    assert status == "failed"
+    assert "Traceback" in caplog.text

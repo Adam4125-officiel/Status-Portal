@@ -18,9 +18,12 @@ either duplicate the loop, or you build this. So:
   signals "couldn't run, and that isn't an error" by raising `TaskSkipped`, and
   failure by raising anything else. No base class to subclass, no config object.
 - **Every run is isolated.** Each due task runs in its own short-lived thread, so a
-  slow or hung task delays nothing but itself, and every exception is caught,
-  logged with its traceback and recorded against that task - the scheduler thread
-  itself cannot die from a task, and one broken task cannot stop the others.
+  slow or hung task delays nothing but itself, and every exception is caught and
+  recorded against that task - the scheduler thread itself cannot die from a task,
+  and one broken task cannot stop the others. A failure caused by a remote service
+  being down is logged as a one-line warning rather than a traceback (see
+  `TaskUnavailable`); anything else still gets the full traceback, because that is
+  the case where the traceback is the point.
 - **A task never runs twice concurrently**, whatever the trigger. Each has its own
   lock; the scheduler skips a task whose lock is held, and the admin panel's "Run
   now" reports it as already running rather than starting a second copy.
@@ -39,6 +42,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 import config
 import db
 
@@ -50,6 +55,35 @@ class TaskSkipped(Exception):
     failure" - e.g. the feature it serves isn't configured yet. Recorded as
     'skipped' rather than 'failed' so an admin can tell "you haven't set this up"
     apart from "this is broken", which are very different things to see in a list."""
+
+
+class TaskUnavailable(Exception):
+    """Raised by a task body meaning "this failed because something outside this portal
+    was unavailable, and the reason is already in the message".
+
+    Recorded as **failed**, not skipped, because it is one: the work did not happen and
+    /admin/tasks must say so. What changes is only how it is logged. A traceback is a
+    description of a fault in *this* code, so printing a two-deep chained one because
+    Seerr answered 502 sends whoever reads the log hunting for a bug in the portal -
+    which is exactly what happened when this didn't exist (docs/HISTORY.md -> "a 502
+    that read like a crash"). There is nothing in the traceback that the message doesn't
+    already say."""
+
+
+def _caused_by_network_failure(exc):
+    """Whether `exc` happened because a remote service was unreachable or erroring.
+
+    Walks the exception chain, so a task that wraps a requests error in its own
+    RuntimeError to attach a better message still gets the concise treatment without
+    having to know this exists - which is what most of them do, and what the two sync
+    tasks get for free by simply letting the original propagate."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, requests.RequestException):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 class Task:
@@ -349,9 +383,17 @@ def run_task(name, trigger="schedule"):
         except TaskSkipped as e:
             message, status = str(e), "skipped"
             _logger.info("Scheduled task '%s' skipped: %s", name, message)
+        except TaskUnavailable as e:
+            message, status = str(e) or e.__class__.__name__, "failed"
+            _logger.warning("Scheduled task '%s' failed: %s", name, message)
         except Exception as e:  # a task must never take the loop down
             message, status = str(e) or e.__class__.__name__, "failed"
-            _logger.exception("Scheduled task '%s' failed", name)
+            if _caused_by_network_failure(e):
+                # Same reasoning as TaskUnavailable above, applied to every task that
+                # just lets a requests error propagate rather than dressing it up.
+                _logger.warning("Scheduled task '%s' failed: %s", name, message)
+            else:
+                _logger.exception("Scheduled task '%s' failed", name)
         duration_ms = int((time.monotonic() - started) * 1000)
         try:
             db.record_task_run(name, status, message[:500], duration_ms, trigger)

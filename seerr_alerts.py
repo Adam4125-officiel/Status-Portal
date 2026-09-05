@@ -271,7 +271,12 @@ def run_approval_check():
         # Raised, so the scheduler records a failed run with the reason intact. The
         # stored count is deliberately left alone: a failed poll means "unknown", and
         # overwriting a real count with 0 would quietly say "nothing to approve".
-        raise RuntimeError(f"Could not read pending requests: {e}")
+        #
+        # TaskUnavailable rather than a bare RuntimeError so the log gets one line
+        # saying what Seerr answered, instead of a chained traceback through this
+        # module that reads like the portal crashed. Seerr going 502 behind a tunnel
+        # for a minute is not a portal fault and shouldn't look like one.
+        raise scheduler.TaskUnavailable(f"Could not read pending requests: {e}")
 
     db.set_setting(COUNT_SETTING, str(total))
     db.set_setting(CHECKED_SETTING, db.now_iso())
