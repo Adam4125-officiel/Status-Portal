@@ -369,6 +369,15 @@ this" rules are in `CLAUDE.md`; how its bugs actually presented is in
 - A view too tall for the screen scrolls itself to the bottom and back within its own
   rotation slot, on a measured overflow rather than a screen-width breakpoint.
 
+**v1.8.6** (2026-09-05)
+- A maintenance window covering several services now sends one notification naming all
+  of them, down every channel, instead of one per service. Three further notification
+  bugs found by auditing the rest of that path went with it.
+- The two email systems (the admin alert list, which ignores personal settings by
+  design, and the per-user path the account checkboxes gate) are now explained on both
+  pages that touch them, and no longer send the same maintenance event twice to an
+  address on both.
+
 ## Overall take
 
 The list is short now, and what is on it is genuinely different in character rather
