@@ -1343,6 +1343,203 @@ Sending a notification for an announcement that isn't currently showing is refus
 all three send paths: it would point people at something they can't see, in both
 directions.
 
+### The settings filter, and what it became
+
+The first cut was an in-page filter box on `/admin/settings` alone. The user's response
+was that it should be a bubble floating on every admin page, searching the whole panel -
+which is the right shape, and the reason is that "which page is that setting on" is the
+actual question. It was replaced rather than kept alongside: two search UIs on one page
+is worse than either.
+
+The property that needed verifying in a browser rather than reasoned about, while the
+in-page filter existed: **hiding was visual only**, so saving while filtered saved the
+whole form. Confirmed by ticking a checkbox, filtering it off screen, saving, and
+checking it held - because the alternative failure mode silently resets every setting
+not currently visible.
+
+### The panel-wide search, and the index that can't drift
+
+The design decision worth keeping is that **the index is derived from the admin
+templates**, not hand-written. A hand-maintained list of several hundred settings would
+be wrong within two sessions and wrong *invisibly*: a missing entry looks exactly like a
+setting that doesn't exist. Deriving it means adding a setting adds it to the search.
+
+The tempting alternative - render each admin page and read the DOM - is worse than it
+looks. Rendering `/admin/reports` marks messages as read and `/admin/logs` reads files
+off disk, so an index built that way would give a search box side effects. Templates are
+inert.
+
+The one hand-maintained part is `PAGES`, one row per page. Two tests keep it honest, and
+the second earned its place immediately: `test_every_registered_endpoint_actually_
+resolves` failed on the first run with `Could not build url for endpoint
+'admin_clear_browser_cache'` - the real name is `admin_system_clear_browser_cache`.
+Without that test the typo surfaces as a `BuildError` in front of the user, on a search.
+
+One ranking problem worth recording because the fix is non-obvious: searching "2fa"
+originally returned the four step-up code prompts dotted around the panel and *not* the
+Two-factor auth page, because those prompts' labels literally say "2FA code" while the
+page's own label says "Two-factor auth". Fixed by giving only the page-level entry a set
+of aliases drawn from its template and endpoint names, scored just below a title match.
+Giving every entry aliases would have boosted every control on that page equally and
+lost the distinction.
+
+### What was and wasn't verified (2026-09-05)
+
+Verified live, driving a real Chromium against a running server with a real SMTP sink
+(`aiosmtpd`) and an HTTP receiver standing in for the Discord webhook and ntfy:
+
+- Five services ticked on one window through the actual admin form -> one Discord post,
+  one ntfy push, one admin email and one per-user email per transition, each naming all
+  five services.
+- The full preference matrix, by observing what the SMTP sink actually received: opted
+  out -> never queued; Discord-only -> queued but no email; on both lists -> the
+  duplicate suppressed; no preferences row -> follows the admin default.
+- The reported "email despite the box being off" scenario, reproduced exactly and then
+  explained.
+- Both changed pages rendered in Chromium with no console, page or request errors.
+
+Not verified: no real Discord gateway, so the per-user **DM** half of the fan-out is
+still mocked-only, as it has always been in this sandbox. No real Jellyfin either, so
+the signed-in visitor's own `/account` page was exercised through
+`/admin/users/<id>/account`, which renders the same template through the same save path.
+
+## Two ways a misbehaving external service looked like a portal bug (2026-09-05)
+
+Both reported from the user's own `instance/logs/app.log`, on the same evening, shortly
+after v1.8.6 went on. Neither was visible from the UI at all - the log was the only
+place either showed up, which is a decent argument for the log page existing.
+
+### The username that was posted as an email address (fixed 2026-09-05)
+
+```
+WARNING [notifications] Email to 1 recipient(s) failed: {'zellowz_': (553, b'5.1.3 The
+recipient address <zellowz_> is not a valid RFC 5321 address...')}
+WARNING [notifications] Email to 1 recipient(s) failed: {'saint boboniolo': (553, ...
+```
+
+Seerr fills a user's `email` field with their **username** when it imports a Jellyfin
+account that has no email of its own. `fetch_seerr_users()` copied that verbatim into
+`seerr_contacts`, `adopt_seerr_contact()` promoted it into `user_preferences` on the
+person's first account-page visit, and delivery then handed a bare username to Gmail.
+Once per notification, per affected user, indefinitely.
+
+Worth noting for the record that **v1.8.6 made this more visible**: before it,
+`deliver()` read the preferences row directly, so only a value that had been adopted or
+typed was used. Fixing that to go through `contact_for()` (correctly - it was dropping
+real notifications) also meant the Seerr-cached value became reachable. The underlying
+bad data predates it either way.
+
+Guarded at four layers, because each is reachable without the others: the source
+(`fetch_seerr_users()` no longer caches a non-address), `save_contact()` (which now
+validates for *every* user - the existing check lived in `push_seerr_contact()`, which
+only ever runs for users with a Seerr link), `contact_for()` (a stored non-address reads
+as no address, so nothing has to wait for a restart) and `send_email()` (which also
+covers the admin recipient list - free text nobody was validating).
+
+**The check is deliberately permissive**, and the near-miss is the interesting part. The
+first draft required a dot in the domain, matching `integrations._EMAIL_RE`. That draft
+would have *deleted* a working `admin@nas` or `root@localhost` during the startup
+cleanup - perfectly deliverable on the kind of home LAN this portal runs on, where a
+relay on the same machine is normal. Caught because three existing tests using dot-less
+addresses went red. The rule now only has to catch what it exists to catch: bare
+usernames, which have no `@` at all. `integrations._EMAIL_RE` stays strict and separate
+because it answers a different question ("will Seerr accept this") where a refusal costs
+nothing.
+
+Already-stored values self-heal: `_clean_non_email_contacts()` runs on every startup,
+blanks what isn't an address, logs what it cleared and by design becomes a no-op
+afterwards. Verified against a database seeded with the exact reported values - cleared
+on the next `init_db()`, a real address beside them untouched, second restart silent.
+
+### A 502 that read like a crash (fixed 2026-09-05)
+
+```
+ERROR [scheduler] Scheduled task 'seerr_approvals' failed
+Traceback (most recent call last):
+  ...
+requests.exceptions.HTTPError: 502 Server Error: Bad Gateway for url: https://...:5055/...
+During handling of the above exception, another exception occurred:
+  ...
+RuntimeError: Could not read pending requests: 502 Server Error: Bad Gateway
+```
+
+Seerr, behind a Tailscale tunnel, answered 502 for a moment. The task did exactly the
+right thing - refused to overwrite a real pending count with 0, and raised so the run
+was recorded as failed - but `run_task()` logged it with `.exception()`, so a transient
+hiccup at the other end produced a two-deep chained traceback. The user reported it as
+an error they couldn't explain, having noticed nothing wrong as a user. They were right:
+nothing was wrong, and the log said otherwise.
+
+`scheduler.TaskUnavailable` now covers this. The run is **still recorded as failed** -
+the work didn't happen and `/admin/tasks` must say so - and only the logging changes, to
+one warning line carrying the reason. `run_task()` additionally walks the exception
+chain for a `requests` error, so the tasks that simply let one propagate (the Jellyfin
+and Seerr contact syncs) get the same treatment without each needing to know this
+exists. **A genuine bug in a task still gets its full traceback**, which is the half
+with a test on it, because it is the half that would quietly rot.
+
+Verified by reproducing the exact reported call, with the same URL, and reading the
+resulting log line.
+
+## Expiring announcements, and two bugs found building them (v1.8.7, 2026-09-05)
+
+### The window times that were an hour out (caught before shipping)
+
+The admin list renders an announcement's window through the usual `.local-time` span,
+and in this sandbox it looked perfect. It was wrong.
+
+A `datetime-local` field submits `2099-01-01T00:00` - no offset - and that form is
+parsed by JavaScript as **local** time, not UTC. So `local_time.js` was shifting every
+window time by the viewer's own offset. Invisible here, because this sandbox's browser
+and clock are both UTC, which is the whole reason it nearly shipped: the check that
+found it was re-running the page in a Chromium context set to `Europe/Paris`, where
+00:00 UTC has to render as 01:00 GMT+1 and was rendering as 00:00.
+
+Fixed by appending an explicit `Z` to `data-utc`. Worth noting that the *maintenance*
+list sidesteps this by not converting at all - it prints raw UTC text - so it was never
+a model to copy, and any future timestamp sourced from a `datetime-local` field has the
+same trap.
+
+### The stray `</div>` (fixed 2026-09-05)
+
+Found while building the settings filter, not by looking for it. The filter groups
+fields by the `.form-panel` they sit in, and it kept finding seven of them out of
+twenty-seven. Searching "timeout" - a setting that plainly exists - matched nothing.
+
+`admin_settings.html` had one `</div>` too many, which closed the `<form>` element
+early: from "Public page layout" downwards, every field was parsed as a child of
+`<body>`.
+
+It had presumably been there a long while and was completely invisible, because an
+input's **form owner is fixed at parse time**. The fields still submitted, still saved,
+and the page still looked right; only something reasoning about DOM *structure* could
+see it.
+
+The test for it is instructive. The first attempt used `html.parser` to track `<form>`
+depth and check no input fell outside - and it **passed with the fault reintroduced**,
+because `html.parser` tokenises rather than implementing HTML5 tree construction, so a
+stray `</div>` doesn't affect its idea of form depth at all. What works is counting
+`<div>` against `</div>` on the *rendered* page (Jinja conditionals make a
+template-level count give false positives) across every admin page - all sixteen
+balance at zero, so it's a real invariant rather than a number that happened to fit.
+
+### The feature itself
+
+Asked for as "an expiring system such as incidents and maintenance for announcements".
+Two optional fields; blank means no bound, so an announcement with neither behaves
+exactly as one did before - pinned by a test, because that is the property the whole
+thing has to preserve on an existing install.
+
+The design choice worth keeping is that **expiry is evaluated at read time**, not by a
+scheduled job flipping a stored flag. Nothing can fall out of sync, a window that opened
+or closed during downtime needs no catching up, and extending an expired announcement
+brings it straight back rather than needing the admin to switch it on again - with a
+flag, "expired" would also be indistinguishable from "an admin turned this off".
+
+Sending a notification for an announcement that isn't currently showing is refused in
+all three send paths: it would point people at something they can't see, in both
+directions.
+
 ### The settings filter
 
 `/admin/settings` is ~27 settings across three forms. The filter matches labels, hints,
@@ -1363,6 +1560,13 @@ still reading as "New announcement", the Clear button, and the timezone renderin
 both UTC and Europe/Paris. For the filter: every search term above, the empty state,
 Escape restoring the page, and the save-while-filtered case. No console, page or request
 errors on any of it.
+
+For the panel-wide search, driven in real Chromium: the bubble present on pages far
+from Settings, "/" and Ctrl+K opening it, a search run from `/admin/logs` for a setting
+that lives on `/admin/settings`, arrow-key navigation, Enter navigating cross-page, and
+the arriving page scrolling to the right control, focusing it and flashing it. Also at
+380px wide, where the bubble collapses to an icon and the page has no horizontal
+overflow.
 
 Not verified: the Discord embed and kiosk filtering are covered by tests only, since
 there is no real Discord gateway here and the kiosk view was not driven in a browser
