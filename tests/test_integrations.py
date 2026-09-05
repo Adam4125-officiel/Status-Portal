@@ -211,3 +211,32 @@ def test_evaluate_high_load_merges_jellyfin_activity(isolated_db):
     result = integrations.evaluate_high_load(snapshot)
     assert result["active"] is True
     assert any("Trickplay" in r for r in result["reasons"])
+
+
+# ---------------------------------------------------------------------------
+# Seerr's `email` field is not always an email (reported 2026-09-05)
+# ---------------------------------------------------------------------------
+def test_a_seerr_username_is_not_cached_as_an_email(monkeypatch):
+    """Seerr fills `email` with the *username* when it imports a Jellyfin account that
+    has no email of its own. Mirroring that verbatim is what put "zellowz_" in front of
+    an SMTP server, which answered 553 once per notification, forever. Filtering at the
+    source is what stops the hourly sync putting it straight back."""
+    payload = {"results": [
+        {"id": 1, "username": "zellowz_", "email": "zellowz_", "jellyfinUserId": "jf1"},
+        {"id": 2, "username": "saint", "email": "saint boboniolo", "jellyfinUserId": "jf2"},
+        {"id": 3, "username": "adam", "email": "adam@example.com", "jellyfinUserId": "jf3"},
+    ]}
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value=payload)
+
+    with patch("requests.get", return_value=resp):
+        users = integrations.fetch_seerr_users("http://seerr.invalid", "key")
+
+    by_id = {u["id"]: u for u in users}
+    assert by_id["1"]["email"] == ""
+    assert by_id["2"]["email"] == ""
+    assert by_id["3"]["email"] == "adam@example.com"
+    # The rest of the record is untouched - the user still exists and is still linked.
+    assert by_id["1"]["display_name"] == "zellowz_"
+    assert by_id["1"]["jellyfin_user_id"] == "jf1"

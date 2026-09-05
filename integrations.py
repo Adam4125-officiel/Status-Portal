@@ -970,6 +970,15 @@ def fetch_seerr_issues(base_url, api_key, limit=50):
     return items
 
 
+def _seerr_email(raw):
+    """Seerr's `email` for a Jellyfin-imported user is only sometimes an email - when
+    the Jellyfin account has none, Seerr puts the username there instead. Anything that
+    isn't address-shaped is dropped rather than mirrored into this portal's contact
+    cache; see the call site for what that cost when it wasn't."""
+    value = (raw or "").strip()
+    return value if db.looks_like_email(value) else ""
+
+
 def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=False):
     """Every Seerr user, normalised - including `jellyfin_user_id`, which is the whole
     point of this call.
@@ -1001,7 +1010,14 @@ def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=F
         users.append({
             "id": str(entry.get("id")) if entry.get("id") is not None else "",
             "display_name": entry.get("displayName") or entry.get("username") or "",
-            "email": entry.get("email") or "",
+            # Only if it is actually an address. Seerr fills `email` with the *username*
+            # when it imports a Jellyfin account that has no email of its own, so this
+            # field routinely arrives holding something like "zellowz_" or "saint
+            # boboniolo". Caching that verbatim is what put a bare username in front of
+            # an SMTP server, which answered "553 not a valid RFC 5321 address" once per
+            # notification, per user, forever (docs/HISTORY.md -> "the username that was
+            # posted as an email address"). Not an address means we do not know one.
+            "email": _seerr_email(entry.get("email")),
             "discord_id": first_discord_id(embedded),
             "jellyfin_user_id": str(entry.get("jellyfinUserId") or entry.get("jellyfinId") or ""),
         })
@@ -1027,6 +1043,12 @@ def fetch_seerr_users(base_url, api_key, limit=200, with_notification_settings=F
     return users
 
 
+# Deliberately stricter than db.EMAIL_RE, and the two answer different questions:
+# db's is "could this be delivered to at all", used to decide whether to keep a value;
+# this one is "will Seerr accept this", used to refuse a write to somebody else's
+# service before it happens. Being strict here costs nothing (a refusal, which the
+# caller reports) while being strict *there* would blank a working `admin@nas` off a
+# home LAN. Keep them separate on purpose rather than collapsing them again.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Discord snowflake IDs are unsigned 64-bit integers, currently 17-19 digits as text
 # (growing over time) - not a format Seerr validates itself, so a stray non-numeric

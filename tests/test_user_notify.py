@@ -1319,3 +1319,54 @@ def test_the_sync_now_captures_discord_ids(enabled, seerr_stub):
     cached = db.get_seerr_contact("u1")
     assert cached["email"] == "adam@seerr.lan"
     assert cached["discord_id"] == "999"
+
+
+# ---------------------------------------------------------------------------
+# A username is not an email address (reported 2026-09-05)
+# ---------------------------------------------------------------------------
+def test_a_stored_non_address_reads_as_no_address(isolated_db):
+    """Guarded at read time as well as at the sources, so a value written before this
+    existed stops being used immediately rather than waiting for a restart. It also
+    keeps every consumer consistent - delivery, send_direct() and the "we have nowhere
+    to reach you" prompt all ask this one function."""
+    db.set_user_preferences("u1", notify_email="zellowz_", notify_discord_id="")
+    assert user_notify.contact_for("u1") == ("", "")
+
+    db.set_user_preferences("u1", notify_email="real@example.com")
+    assert user_notify.contact_for("u1") == ("real@example.com", "")
+
+
+def test_a_non_address_means_we_still_need_contact_details(isolated_db):
+    """The consequence that matters: the person gets asked for a real address, instead
+    of the portal believing it already has one."""
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="saint boboniolo")
+    assert user_notify.needs_contact_details("u1") is True
+
+
+def test_saving_a_non_address_is_refused(isolated_db):
+    """Checked for everyone, not only users with a Seerr link - push_seerr_contact()
+    validates too, but it only ever runs for linked users, so an unlinked one could
+    save anything and find out when a notification silently failed."""
+    ok, message = user_notify.save_contact("u1", email="zellowz_")
+    assert ok is False and "zellowz_" in message
+    assert db.get_user_preferences("u1")["notify_email"] == ""
+
+
+def test_clearing_the_email_field_is_still_allowed(isolated_db):
+    """Blank is not "invalid" - removing an address is a real thing to want."""
+    db.set_user_preferences("u1", notify_email="real@example.com")
+    ok, _ = user_notify.save_contact("u1", email="")
+    assert ok is True
+    assert db.get_user_preferences("u1")["notify_email"] == ""
+
+
+def test_a_non_address_is_never_adopted_from_seerr(isolated_db):
+    """fetch_seerr_users() drops it first, but this is the write that puts a value into
+    this portal's own record of someone - a stale cache row from before that filter
+    existed must not get promoted into user_preferences and outlive the fix."""
+    user_notify.adopt_seerr_contact("u1", {"id": "7", "email": "zellowz_",
+                                            "discord_id": "123456789012345678"})
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == ""
+    assert prefs["notify_discord_id"] == "123456789012345678"   # the good half survives

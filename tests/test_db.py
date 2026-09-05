@@ -1169,3 +1169,52 @@ def test_preferences_are_untouched_by_a_user_sync(isolated_db):
     prefs = db.get_user_preferences("u1")
     assert prefs["theme"] == "light"
     assert prefs["contact"] == "me@example.invalid"
+
+
+# ---------------------------------------------------------------------------
+# A username is not an email address (reported 2026-09-05)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("value,expected", [
+    ("zellowz_", False),              # a bare Jellyfin username, exactly as reported
+    ("saint boboniolo", False),       # ...and one with a space, which SMTP truncated
+    ("", False),
+    (None, False),
+    ("@nodomain", False),
+    ("nolocal@", False),
+    ("a b@example.com", False),
+    ("real@example.com", True),
+    # Permissive on purpose: this check decides whether a *stored* value gets blanked,
+    # and these are deliverable on the kind of LAN this portal runs on.
+    ("admin@nas", True),
+    ("root@localhost", True),
+])
+def test_looks_like_email(value, expected):
+    assert db.looks_like_email(value) is expected
+
+
+def test_a_stored_username_is_cleared_on_the_next_restart(isolated_db):
+    """The self-healing half of the fix. Seerr reports a Jellyfin-imported user's
+    username in its email field when the account has no email, so installs running
+    before this have real usernames sitting in contact fields, each producing an SMTP
+    553 on every notification. Restarting is the whole cleanup - nobody has to go and
+    find the bad rows by hand."""
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.execute("INSERT INTO user_preferences (user_id,theme,contact,updated_at,notify_email,"
+                 "notify_discord_id) VALUES ('u1','auto','','','zellowz_','')")
+    conn.execute("INSERT INTO user_preferences (user_id,theme,contact,updated_at,notify_email,"
+                 "notify_discord_id) VALUES ('u2','auto','','','real@example.com','')")
+    conn.execute("INSERT INTO seerr_contacts (jellyfin_user_id,seerr_user_id,display_name,"
+                 "email,discord_id,synced_at) VALUES ('u1','7','Zellowz','zellowz_','','')")
+    conn.commit()
+    conn.close()
+
+    db.init_db()                       # i.e. the portal starting up again
+
+    assert db.get_user_preferences("u1")["notify_email"] == ""
+    assert db.get_user_preferences("u2")["notify_email"] == "real@example.com"
+    assert db.get_seerr_contact("u1")["email"] == ""
+
+    # And a second restart changes nothing further - it must stay a no-op, not keep
+    # rewriting rows forever.
+    db.init_db()
+    assert db.get_user_preferences("u2")["notify_email"] == "real@example.com"

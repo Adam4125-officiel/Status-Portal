@@ -182,7 +182,7 @@ def test_a_failed_poll_leaves_the_previous_count_alone(seerr_configured, monkeyp
         raise integrations.requests.RequestException("down")
 
     monkeypatch.setattr(integrations, "fetch_seerr_pending", boom)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(scheduler.TaskUnavailable):
         seerr_alerts.run_approval_check()
     assert seerr_alerts.pending_count() == 3
 

@@ -1687,6 +1687,15 @@ time, rotating on a timer, no nav and no footer. Off by default.
   one every tick. "Run now" on a task that's already running reports `busy` and
   **records nothing** — the run in progress writes the real result, and stamping
   `last_run_at` for a run that never happened would corrupt the schedule.
+- **A remote service being down is a failed run, but not a traceback.** Raise
+  `scheduler.TaskUnavailable` (or just let a `requests` error propagate - `run_task()`
+  walks the exception chain and recognises one either way). The run is still recorded
+  as `failed`, because it is; only the logging changes, to one warning line carrying
+  the reason. A traceback describes a fault in *this* code, and printing a chained one
+  because Seerr answered 502 sends whoever reads the log hunting for a bug that isn't
+  there - which is exactly what got reported (`docs/HISTORY.md` → "a 502 that read like
+  a crash"). **A genuine bug in a task must still get its full traceback**; there's a
+  test pinning that half, and it's the one that matters if this is ever "simplified".
 - **A failed run still stamps `last_run_at`.** An interval schedule is measured from
   it, so leaving it alone on failure would make a permanently-failing task retry on
   every single scheduler tick instead of on its next scheduled run.
@@ -2208,6 +2217,22 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   prompt becomes something people learn to click past. An explicit `?next=` beats the
   prompt — somebody who followed a link and got bounced through sign-in should land
   where they were going.
+- **A username is not an email address, and Seerr will hand you one.** Seerr fills a
+  user's `email` field with their *username* when it imports a Jellyfin account that
+  has none of its own, so `fetch_seerr_users()` must keep dropping anything that isn't
+  address-shaped. Mirroring it verbatim put "zellowz_" in front of Gmail, which
+  answered "553 not a valid RFC 5321 address" once per notification, per user, forever
+  (`docs/HISTORY.md` → "the username that was posted as an email address"). Guarded at
+  four layers on purpose - the source, `save_contact()`, `contact_for()` and
+  `send_email()` - because each is reachable without the others.
+- **`db.looks_like_email()` is deliberately permissive, and must stay that way.**
+  It is what decides whether to *blank* a stored value (`_clean_non_email_contacts()`
+  runs on every startup), so a stricter rule destroys data - an earlier draft required
+  a dot in the domain and would have silently deleted a working `admin@nas` on a home
+  LAN. It only has to catch what it exists to catch: bare usernames, which have no `@`
+  at all. **`integrations._EMAIL_RE` is separate and stricter on purpose** - that one
+  answers "will Seerr accept this" before a write to somebody else's service, where a
+  refusal costs nothing. Don't collapse the two back together.
 - **A notification about several things at once is one notification.**
   `db.process_maintenance_windows()` reports one event *per service* because that's the
   granularity the status flip works at - but `app._process_maintenance_and_notify()`

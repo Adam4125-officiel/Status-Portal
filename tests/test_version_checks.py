@@ -160,7 +160,7 @@ def test_a_run_where_everything_failed_is_recorded_as_a_failure(isolated_db):
     green in the task list for a run that had answered no question at all."""
     db.create_integration({"name": "Dead", "kind": "arr", "base_url": "http://127.0.0.1:1",
                             "api_key": "k", "enabled": 1})
-    with pytest.raises(RuntimeError, match="Nothing could be checked"):
+    with pytest.raises(scheduler.TaskUnavailable, match="Nothing could be checked"):
         version_checks.run_check_task()
 
 
@@ -169,7 +169,7 @@ def test_a_fully_failed_run_still_records_why_per_app(isolated_db):
     explains what went wrong instead of just going blank."""
     db.create_integration({"name": "Dead", "kind": "arr", "base_url": "http://127.0.0.1:1",
                             "api_key": "k", "enabled": 1})
-    with pytest.raises(RuntimeError):
+    with pytest.raises(scheduler.TaskUnavailable):
         version_checks.run_check_task()
     assert version_checks.get_results()["results"][0]["error"]
 

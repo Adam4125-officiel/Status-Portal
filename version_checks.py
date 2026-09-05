@@ -259,7 +259,11 @@ def run_check_task():
         # all - and the most likely cause (GitHub's 60-requests-per-hour limit for
         # unauthenticated callers, shared across everything on this IP) is exactly the
         # sort of thing an admin should see rather than have smoothed over.
-        raise RuntimeError("Nothing could be checked - " + failed[0]["error"])
+        # TaskUnavailable, not RuntimeError: the cause is outside this portal (usually
+        # GitHub's rate limit, sometimes an app being unreachable) and the message
+        # already carries it, so a traceback would only make an external condition look
+        # like a crash in here.
+        raise scheduler.TaskUnavailable("Nothing could be checked - " + failed[0]["error"])
 
     parts = []
     if behind:
