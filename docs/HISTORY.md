@@ -1206,6 +1206,84 @@ still mocked-only, as it has always been in this sandbox. No real Jellyfin eithe
 the signed-in visitor's own `/account` page was exercised through
 `/admin/users/<id>/account`, which renders the same template through the same save path.
 
+## Two ways a misbehaving external service looked like a portal bug (2026-09-05)
+
+Both reported from the user's own `instance/logs/app.log`, on the same evening, shortly
+after v1.8.6 went on. Neither was visible from the UI at all - the log was the only
+place either showed up, which is a decent argument for the log page existing.
+
+### The username that was posted as an email address (fixed 2026-09-05)
+
+```
+WARNING [notifications] Email to 1 recipient(s) failed: {'zellowz_': (553, b'5.1.3 The
+recipient address <zellowz_> is not a valid RFC 5321 address...')}
+WARNING [notifications] Email to 1 recipient(s) failed: {'saint boboniolo': (553, ...
+```
+
+Seerr fills a user's `email` field with their **username** when it imports a Jellyfin
+account that has no email of its own. `fetch_seerr_users()` copied that verbatim into
+`seerr_contacts`, `adopt_seerr_contact()` promoted it into `user_preferences` on the
+person's first account-page visit, and delivery then handed a bare username to Gmail.
+Once per notification, per affected user, indefinitely.
+
+Worth noting for the record that **v1.8.6 made this more visible**: before it,
+`deliver()` read the preferences row directly, so only a value that had been adopted or
+typed was used. Fixing that to go through `contact_for()` (correctly - it was dropping
+real notifications) also meant the Seerr-cached value became reachable. The underlying
+bad data predates it either way.
+
+Guarded at four layers, because each is reachable without the others: the source
+(`fetch_seerr_users()` no longer caches a non-address), `save_contact()` (which now
+validates for *every* user - the existing check lived in `push_seerr_contact()`, which
+only ever runs for users with a Seerr link), `contact_for()` (a stored non-address reads
+as no address, so nothing has to wait for a restart) and `send_email()` (which also
+covers the admin recipient list - free text nobody was validating).
+
+**The check is deliberately permissive**, and the near-miss is the interesting part. The
+first draft required a dot in the domain, matching `integrations._EMAIL_RE`. That draft
+would have *deleted* a working `admin@nas` or `root@localhost` during the startup
+cleanup - perfectly deliverable on the kind of home LAN this portal runs on, where a
+relay on the same machine is normal. Caught because three existing tests using dot-less
+addresses went red. The rule now only has to catch what it exists to catch: bare
+usernames, which have no `@` at all. `integrations._EMAIL_RE` stays strict and separate
+because it answers a different question ("will Seerr accept this") where a refusal costs
+nothing.
+
+Already-stored values self-heal: `_clean_non_email_contacts()` runs on every startup,
+blanks what isn't an address, logs what it cleared and by design becomes a no-op
+afterwards. Verified against a database seeded with the exact reported values - cleared
+on the next `init_db()`, a real address beside them untouched, second restart silent.
+
+### A 502 that read like a crash (fixed 2026-09-05)
+
+```
+ERROR [scheduler] Scheduled task 'seerr_approvals' failed
+Traceback (most recent call last):
+  ...
+requests.exceptions.HTTPError: 502 Server Error: Bad Gateway for url: https://...:5055/...
+During handling of the above exception, another exception occurred:
+  ...
+RuntimeError: Could not read pending requests: 502 Server Error: Bad Gateway
+```
+
+Seerr, behind a Tailscale tunnel, answered 502 for a moment. The task did exactly the
+right thing - refused to overwrite a real pending count with 0, and raised so the run
+was recorded as failed - but `run_task()` logged it with `.exception()`, so a transient
+hiccup at the other end produced a two-deep chained traceback. The user reported it as
+an error they couldn't explain, having noticed nothing wrong as a user. They were right:
+nothing was wrong, and the log said otherwise.
+
+`scheduler.TaskUnavailable` now covers this. The run is **still recorded as failed** -
+the work didn't happen and `/admin/tasks` must say so - and only the logging changes, to
+one warning line carrying the reason. `run_task()` additionally walks the exception
+chain for a `requests` error, so the tasks that simply let one propagate (the Jellyfin
+and Seerr contact syncs) get the same treatment without each needing to know this
+exists. **A genuine bug in a task still gets its full traceback**, which is the half
+with a test on it, because it is the half that would quietly rot.
+
+Verified by reproducing the exact reported call, with the same URL, and reading the
+resulting log line.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
