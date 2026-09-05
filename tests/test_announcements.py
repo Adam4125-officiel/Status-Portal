@@ -373,3 +373,23 @@ def test_window_timestamps_are_marked_as_utc_for_the_browser(client, isolated_db
 
     assert 'data-utc="2099-01-01T00:00Z"' in body
     assert 'data-utc="2099-01-01T00:00"' not in body
+
+
+def test_the_window_fields_have_now_buttons_and_dont_prefill(client, isolated_db):
+    """Asked for after the first cut: "Now" buttons like the maintenance form has.
+
+    The one difference from that form is deliberate and load-bearing - the values are
+    *not* rendered pre-filled. A maintenance window must have both ends, so pre-filling
+    is pure convenience; an announcement's window is optional and blank is the common
+    case, so pre-filling on load would silently give every new announcement an expiry
+    nobody asked for. The script fills a field on first focus instead, which is the same
+    convenience at the moment the admin actually reaches for it."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    body = client.get("/admin/announcements/new").get_data(as_text=True)
+
+    assert 'id="starts_at_now"' in body and 'id="ends_at_now"' in body
+    assert "admin_announcement_form.js" in body
+    # Both inputs render empty on a new announcement.
+    for field in ("starts_at", "ends_at"):
+        tag = body.split(f'id="{field}"')[1].split(">")[0]
+        assert 'value=""' in tag, f"{field} must not be pre-filled: {tag}"
