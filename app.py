@@ -4405,27 +4405,53 @@ def admin_task_run(name):
 # ---------------------------------------------------------------------------
 # Background health check
 # ---------------------------------------------------------------------------
+def _service_list_phrase(names):
+    """"A", "A and B", "A, B and C" - for the sentence body of a maintenance
+    notification, which reads as prose rather than as the bare comma-separated
+    prefix an incident notification uses."""
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _process_maintenance_and_notify():
     """Also called directly from admin_maintenance_new()/admin_maintenance_edit() (a
     request handler), not just from the health-check loop below - db.process_
     maintenance_windows() above already applied the actual status flip by the time
     this loop runs, so backgrounding only the notify() call doesn't delay that; see
-    those routes' own comments for why the flip itself has to stay synchronous."""
+    those routes' own comments for why the flip itself has to stay synchronous.
+
+    db.process_maintenance_windows() reports one event *per service*, because that is
+    what the status flip operates on. Notifications are grouped back up to one per
+    window and per transition before anything is sent: a window covering five services
+    is one thing that happened, and announcing it five times over is how an admin's
+    inbox (and every opted-in visitor's) gets five identical-looking emails in a row."""
+    groups = {}
     for event in db.process_maintenance_windows():
-        service_name = event["service"]["name"]
-        window_title = event["window"]["title"]
-        started = event["event"] == "maintenance_started"
+        key = (event["window"]["id"], event["event"])
+        group = groups.setdefault(key, {"window": event["window"],
+                                         "started": event["event"] == "maintenance_started",
+                                         "names": []})
+        group["names"].append(event["service"]["name"])
+
+    for group in groups.values():
+        window_title = group["window"]["title"]
+        names = group["names"]
+        started = group["started"]
         title = "Maintenance started" if started else "Maintenance ended"
-        _notify_async(title, f"{service_name}: {window_title}")
+        listed = ", ".join(names)
+        phrase = _service_list_phrase(names)
+        verb = "is" if len(names) == 1 else "are"
+        _notify_async(title, f"{listed}: {window_title}")
         # And the visitors who asked to hear about service events. Queued from this
         # background thread exactly as it would be from a request handler - the queue
         # is what keeps delivery off whichever thread noticed the event.
         user_notify.notify_service_subscribers(
             "maintenance",
-            f"{title}: {service_name}",
-            (f"{service_name} is now under maintenance ({window_title})."
+            f"{title}: {listed}",
+            (f"{phrase} {verb} now under maintenance ({window_title})."
              if started else
-             f"Maintenance on {service_name} has finished ({window_title})."))
+             f"Maintenance on {phrase} has finished ({window_title})."))
 
 
 def _check_status_for_response(r, elapsed_ms, slow_threshold_ms):
