@@ -1583,6 +1583,123 @@ Not verified: the Discord embed and kiosk filtering are covered by tests only, s
 there is no real Discord gateway here and the kiosk view was not driven in a browser
 this time.
 
+## The requests that were never made (2026-09-06)
+
+### What was reported
+
+Adam's Seerr profile page threw a generic error for one specific user. Another agent
+found the cause in Seerr's own SQLite database: two `media_request` rows of type `tv`
+with **`mediaId` NULL** while their `season_request` children were still there - seasons
+selected, parent request attached to no media at all. Seerr's frontend crashed rendering
+that user's request list. Those two rows were deleted by hand in Seerr; what was left was
+to find whether this portal had caused them.
+
+The handoff pointed at the **"Send details to Seerr"** button on a user's account page.
+
+### That button was innocent, and ruling it out mattered
+
+`integrations.push_seerr_contact()` makes exactly four calls, a GET and a POST against
+`/api/v1/user/{id}/settings/main` and the same pair against
+`/api/v1/user/{id}/settings/notifications`. It never touches `/api/v1/request`, `/media`,
+or anything that could create a request row. It is structurally incapable of the
+reported symptom, and no amount of hardening it would have helped.
+
+Worth recording because the obvious next move - "harden the thing that was reported" -
+would have produced a plausible-looking commit against code that was already correct,
+and left the actual path untouched. The feature that *does* create requests is the
+search page's "Request this" button, which was not what was reported.
+
+### What was actually wrong, from Seerr's own source
+
+Read out of `seerr-team/seerr` (`server/entity/MediaRequest.ts`,
+`server/routes/request.ts`, `server/index.ts`) rather than guessed at:
+
+**1. The portal never sent `is4k`, which disabled Seerr's duplicate protection.** It is
+optional in Seerr's API. `MediaRequest.request()` dedupes against the *incoming* value
+in two places - `.where('request.is4k = :is4k', ...)` for the "already requested" check,
+and `request.is4k === requestBody.is4k` when working out which seasons an earlier request
+already covers - while the row it writes gets `false` from the column default. So the
+portal sent `undefined` and Seerr stored `false`, and **every request the portal made was
+invisible to the dedupe of the next one**. Asking for the same series twice produced two
+overlapping request rows with duplicate `season_request` children instead of a 409. Adam's
+two broken rows were both `tv`.
+
+**2. Seerr's "no seasons available" answer is HTTP 202, and 202 is a success code.**
+`NoSeasonsAvailableError` is mapped to `next({status: 202, ...})` and rendered by the
+express error middleware as `{"message": "No seasons available to request"}`. Nothing is
+created. `raise_for_status()` does not raise on 202, so the portal flashed *"Requested.
+You'll be notified when it arrives."* for a request that did not exist and never would -
+and `seerr_alerts.track_request_progress()` then had nothing to notify anyone about.
+
+**3. Unticking every season sent `seasons: []`.** `request_via_seerr()` tested
+`seasons is not None` rather than truthiness, so an empty selection was forwarded as a
+request asking for nothing - which is case 2's 202, reported as success.
+
+**4. The response was never looked at.** `request_via_seerr()` returned `r.json()` and
+`media_search.request()` discarded it. Nothing confirmed Seerr had attached a media object
+to the request it said it created.
+
+**5. `search_request()` filtered instead of validating.** Seasons were built with
+`[int(s) for s in ... if s.isdigit()]`, so a mangled submission became a *partial* one -
+a series quietly requested with some of its seasons and nothing anywhere saying so.
+
+### What can and cannot be claimed
+
+`media_request.mediaId` is nullable in Seerr's schema (its `@ManyToOne(() => Media, ...)`
+declares `onDelete: 'CASCADE'` but never `nullable: false`), so the orphan is representable
+server-side. **It has not been proven that a payload from this portal wrote the NULL** -
+that happens inside Seerr's persistence layer, which is not observable from here. What is
+proven is that this portal removed every guard that would have stopped repeated and
+malformed TV submissions, and reported Seerr's own failures as success. Say it that way
+rather than claiming the root cause was found and eliminated.
+
+The one thing the portal can now do about the orphan itself: a 201 describing a request
+with no media attached is logged at ERROR with the request id and reported as a failure,
+so the next one is findable the day it happens instead of weeks later when it breaks a
+profile page.
+
+### Three layers against a duplicate, because one is not enough
+
+- `static/js/search_request_submit.js` disables the submit button. The only layer that can
+  stop a double-click's second POST ever being sent - both are in flight before the server
+  has written anything either could be checked against.
+- `app._request_recently_submitted()`, a short per-session window keyed on
+  `media_type:tmdb_id:seasons`. Covers a refresh or a back-and-resubmit minutes later,
+  which the button cannot. A *different* season selection still goes through, and a failed
+  submission is forgotten immediately so a Seerr that was down for one press doesn't lock
+  a title out.
+- `is4k`, which restores Seerr's own 409 - the only layer that reaches another device.
+
+### Verified
+
+Against a live `python app.py` (a throwaway copy of the tree, so the developer's own
+`instance/portal.db` was never touched) with stand-in Jellyfin and Seerr servers built
+from their documented shapes, the Seerr stub recording every POST body it received:
+
+- A normal two-season request put `"is4k": false` on the wire, attributed to the linked
+  Seerr user, and flashed success. **The wire payload was asserted, not a mocked call.**
+- The identical submission again: refused, and Seerr received exactly one request. A
+  different season selection for the same series still went through.
+- Seerr answering 202 "No seasons available to request": reported as an error carrying
+  Seerr's own words, where it previously said "Requested."
+- Seerr answering 201 with `media: null`: reported as an error, and logged as
+  `Seerr created request 77 ... it is an orphaned request row and should be deleted in
+  Seerr`.
+- No seasons ticked: refused with "Pick at least one season to request", and **zero**
+  calls reached Seerr.
+- Real Chromium: three rapid clicks on Request produced one POST. Isolated separately
+  (cancelling navigation from a capture-phase listener so the page stayed put) the button
+  went `disabled` with the label "Requesting…" after the first click, a forced second
+  click produced no second submit event, and a simulated back/forward restore re-enabled
+  it. No console or page errors.
+- All six new tests were confirmed to fail with their fix reverted, one at a time.
+
+**Not verified**: no real Seerr instance exists in this sandbox, so the 202 body shape,
+the media-less 201, and the `is4k` dedupe behaviour come from reading `seerr-team/seerr`'s
+source and OpenAPI spec, not from observing a running server. The `is4k` claim is the one
+worth re-checking against the real thing - it is the fix most likely to change how Seerr
+answers a repeat request (it should now be a 409 rather than a second row).
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

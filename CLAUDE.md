@@ -110,6 +110,7 @@ have bitten someone on exactly that change.
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
 | Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
+| Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -2575,6 +2576,69 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   `session["logged_in"]`) - the configuration page not rendering them for a plain
   visitor is not itself an authorization boundary, and a forged POST must not be able
   to smuggle them in.
+
+## Requesting through Seerr (`integrations.request_via_seerr()`) — read before touching it
+
+Everything here exists because of one incident: two orphaned `media_request` rows in
+Adam's Seerr with `mediaId` NULL and their `season_request` children intact, which broke
+the profile page of the user they belonged to (`docs/HISTORY.md` → "the requests that
+were never made"). This is the only code in the portal that creates anything in Seerr,
+and the rules below are what stop it asking for something Seerr will half-do.
+
+- **`is4k` must always be sent, and this is the least obvious rule in the file.** It is
+  optional in Seerr's API and the portal used to omit it, which silently disabled
+  Seerr's *own* duplicate protection for every request the portal made. Seerr's
+  `MediaRequest.request()` dedupes by comparing the **incoming** value twice —
+  `.where('request.is4k = :is4k', ...)` for "already requested", and
+  `request.is4k === requestBody.is4k` when working out which seasons a previous request
+  already covers — while the row it writes takes `false` from the column default. So
+  `undefined` goes in and `false` is stored: every request the portal made was invisible
+  to the dedupe of the next one, and asking twice produced two overlapping request rows
+  instead of a 409. Verified against `seerr-team/seerr`'s own source, not deduced. If
+  4K requesting is ever added, it becomes a real value — never an omission again.
+- **A 2xx from `/api/v1/request` does not mean a request was created.** Seerr maps its
+  `NoSeasonsAvailableError` to **HTTP 202** with `{"message": "No seasons available to
+  request"}` and creates nothing, and `raise_for_status()` is blind to it — so the
+  portal told visitors "Requested. You'll be notified when it arrives" about requests
+  that did not exist. Only a **201 carrying an `id`** counts; anything else raises
+  `integrations.SeerrRequestNotCreated` with Seerr's own message. **Don't reduce this
+  back to `raise_for_status()`.**
+- **A created request is checked for attached media, and a media-less one is logged at
+  ERROR with its id.** `media_request.mediaId` is nullable in Seerr's schema (its
+  `@ManyToOne(() => Media, ...)` sets `onDelete: 'CASCADE'` but never
+  `nullable: false`), so a 201 can describe exactly the orphan that started this. The
+  portal cannot stop Seerr writing that row, but it can refuse to call it a success and
+  name the id, which is the difference between a quiet corruption and something
+  findable. That log line is the point of the check — keep it.
+- **`SeerrRequestNotCreated` is caught before the `RequestException`/`ValueError`
+  branch in `media_search.request()`, and must stay separate from it.** "Seerr answered
+  fine and made nothing" is a different thing from "Seerr is unreachable", and "try
+  again in a moment" is wrong advice for the first.
+- **Never send an empty season list.** `seasons: []` asks Seerr for nothing. The check
+  is truthiness, not `is not None` — that distinction was the bug. Refused with a
+  sentence in `media_search.request()` and again as a structural backstop in
+  `request_via_seerr()`.
+- **Numeric form fields are validated, never filtered.** `search_request()` used to
+  build seasons with `if s.isdigit()`, which turns a mangled submission into a
+  *partial* one — a series quietly requested with three of its five seasons and nothing
+  anywhere saying so. Refuse the submission instead; the same applies to `profile_id`
+  and `tags`.
+- **Three layers stop a duplicate, and each covers what the others can't.** Deleting
+  any one of them leaves a real gap: `static/js/search_request_submit.js` disables the
+  submit button (the only layer that can stop a double-click's second POST ever being
+  sent, since both are in flight before the server has written anything);
+  `app._request_recently_submitted()` keys a short per-session window on
+  `media_type:tmdb_id:seasons` (covers a refresh or a back-and-resubmit, and lets a
+  *different* season selection through on purpose); and `is4k` restores Seerr's own
+  409, which is the only one that reaches another device. A failed submission is
+  forgotten immediately (`_forget_submitted_request()`) — the guard exists to stop a
+  *successful* request happening twice, not to lock a title out because Seerr was down
+  for one press.
+- **The wire payload is worth asserting on directly.** These bugs all lived in what was
+  actually sent and what came back, which a mocked `request_via_seerr` cannot see —
+  `tests/test_search.py`'s `_capture_post`/`_SeerrResponse` exist for that, and the
+  live smoke test in `docs/HISTORY.md` drove the real form against a stand-in Seerr that
+  records every POST.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
