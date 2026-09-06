@@ -807,6 +807,58 @@ def test_selected_seasons_are_sent_as_a_list_of_ints(visitor, stub, monkeypatch)
     assert sent["seasons"] == [1, 2]
 
 
+def test_the_same_submission_twice_only_reaches_seerr_once(visitor, stub, monkeypatch):
+    """A refresh, a back-and-resubmit, or a double-click that outran the disabled
+    button. The second one must not become a second request row in Seerr."""
+    _configure(stub, jellyfin=False)
+    calls = []
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, **kw: calls.append(tid))
+    data = {"media_type": "tv", "tmdb_id": "1399", "seasons": ["1", "2"]}
+    visitor.post("/search/request", data=dict(data))
+    visitor.post("/search/request", data=dict(data))
+    assert len(calls) == 1
+
+    # A *different* selection of the same series is a genuinely different request and
+    # must still go through - the guard is against the same submission arriving twice,
+    # not against asking for more of something.
+    visitor.post("/search/request", data={"media_type": "tv", "tmdb_id": "1399",
+                                           "seasons": ["3"]})
+    assert len(calls) == 2
+
+
+def test_a_failed_submission_can_be_retried_immediately(visitor, stub, monkeypatch):
+    """The guard exists to stop a *successful* request happening twice. Locking a title
+    out for a minute because Seerr happened to be down for one press would be worse
+    than the problem it solves."""
+    _configure(stub, jellyfin=False)
+    calls = []
+
+    def down(url, key, mt, tid, uid=None, **kw):
+        calls.append(tid)
+        raise integrations.requests.RequestException("down")
+
+    monkeypatch.setattr(integrations, "request_via_seerr", down)
+    data = {"media_type": "movie", "tmdb_id": "1"}
+    visitor.post("/search/request", data=dict(data))
+    visitor.post("/search/request", data=dict(data))
+    assert len(calls) == 2
+
+
+def test_a_mangled_season_value_is_refused_rather_than_silently_dropped(
+        visitor, stub, monkeypatch):
+    """The route used to filter with `if s.isdigit()`, which turns a mangled submission
+    into a *partial* one - a series quietly requested with some of its seasons and
+    nothing anywhere saying so."""
+    _configure(stub, jellyfin=False)
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")))
+    resp = visitor.post("/search/request", data={"media_type": "tv", "tmdb_id": "1",
+                                                  "seasons": ["1", "two"]},
+                        follow_redirects=True)
+    assert b"didn&#39;t make sense" in resp.data or b"didn't make sense" in resp.data
+
+
 # ---------------------------------------------------------------------------
 # The HTTP 400: a space encoded as "+" rather than "%20"
 # ---------------------------------------------------------------------------

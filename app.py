@@ -4,6 +4,7 @@ Run with: python app.py
 Admin panel: /admin (password is set on first launch)
 """
 import gzip
+import hashlib
 import io
 import logging
 import os
@@ -2133,6 +2134,49 @@ def user_account_push_seerr_contact():
 # avoid the request, the server because the client can't be trusted to.
 MIN_LIVE_QUERY_LENGTH = 3
 
+# How long a just-submitted request is remembered, so a double-click, a refresh, or a
+# back-and-resubmit can't ask Seerr for the same thing twice. This is the middle of
+# three layers, and it exists because the other two can't cover this case: the
+# configuration page disables its own submit button (which stops the double-click
+# before a second POST is ever sent) and Seerr's own duplicate check answers 409 (which
+# stops it across devices and sessions) - but a browser resending a POST minutes later
+# reaches neither. Kept in the session rather than a module-level dict because the
+# meaningful unit is one person's browser, exactly like _search_rate_limited().
+REQUEST_REPEAT_WINDOW_SECONDS = 60
+# Bounded because the session is a cookie: this rides along on every response, so it
+# must not grow with how much somebody searches for.
+MAX_REMEMBERED_REQUESTS = 20
+
+
+def _request_recently_submitted(key):
+    """True when this exact item was already submitted a moment ago from this session.
+
+    Prunes as it reads rather than on a timer - the whole structure is at most
+    MAX_REMEMBERED_REQUESTS entries and is walked once per request submission."""
+    now = time.time()
+    recent = {k: t for k, t in (session.get("recent_requests") or {}).items()
+              if now - t < REQUEST_REPEAT_WINDOW_SECONDS}
+    already = key in recent
+    if not already:
+        recent[key] = now
+        # Oldest first, so what falls off the end is what is least likely to still be
+        # somebody's stuck submit button.
+        if len(recent) > MAX_REMEMBERED_REQUESTS:
+            recent = dict(sorted(recent.items(), key=lambda kv: kv[1])[-MAX_REMEMBERED_REQUESTS:])
+    session["recent_requests"] = recent
+    return already
+
+
+def _forget_submitted_request(key):
+    """Lets a genuinely failed submission be retried immediately.
+
+    Without this, a Seerr that was down for one press would lock that title out for the
+    whole window - the guard is there to stop a *successful* request being made twice,
+    not to punish a failed one."""
+    recent = dict(session.get("recent_requests") or {})
+    if recent.pop(key, None) is not None:
+        session["recent_requests"] = recent
+
 
 def _search_rate_limited():
     now = time.time()
@@ -2280,8 +2324,20 @@ def search_request():
         return redirect(url_for("search", q=request.form.get("q", "")))
     _register_search()
     media_type = request.form.get("media_type", "")
-    seasons = ([int(s) for s in request.form.getlist("seasons") if s.isdigit()]
-               if media_type == "tv" else None)
+    tmdb_id = request.form.get("tmdb_id", "")
+
+    # Every numeric field is validated rather than filtered. Dropping what doesn't parse
+    # is what the season list used to do, and it turns a mangled submission into a
+    # *partial* one - a series quietly requested with three of its five seasons, with
+    # nothing anywhere saying so. Refusing says what happened.
+    raw_seasons = request.form.getlist("seasons")
+    seasons = None
+    if media_type == "tv":
+        if not all(s.isdigit() for s in raw_seasons):
+            flash("That season selection didn't make sense - try again.", "error")
+            return redirect(url_for("search", q=request.form.get("q", "")))
+        seasons = [int(s) for s in raw_seasons]
+
     root_folder = request.form.get("root_folder") or None
     profile_id = request.form.get("profile_id") or None
     tags = request.form.getlist("tags") or None
@@ -2291,10 +2347,32 @@ def search_request():
     # what the form actually showed.
     if not session.get("logged_in"):
         root_folder = profile_id = tags = None
-    ok, message = media_search.request(media_type, request.form.get("tmdb_id", ""),
+    if (profile_id is not None and not str(profile_id).isdigit()) or \
+            (tags is not None and not all(str(t).isdigit() for t in tags)):
+        flash("That request configuration didn't make sense - try again.", "error")
+        return redirect(url_for("search", q=request.form.get("q", "")))
+
+    # Keyed on what is actually being asked for, so requesting two different seasons of
+    # the same series in quick succession is still two requests - it is the *same*
+    # submission arriving twice that must not become two rows in Seerr.
+    #
+    # Hashed because this lives in the session, and the session is a cookie: a series
+    # with thirty seasons would otherwise write a ~120-character key, and a forged POST
+    # could name a tmdb_id of any length at all. A fixed 16 characters keeps the whole
+    # structure comfortably inside the 4KB a cookie gets, whatever is submitted.
+    submission = hashlib.sha256(
+        f"{media_type}:{tmdb_id}:{','.join(sorted(raw_seasons))}".encode()).hexdigest()[:16]
+    if _request_recently_submitted(submission):
+        flash("That was already sent a moment ago - check Seerr before asking again.",
+              "error")
+        return redirect(url_for("search", q=request.form.get("q", "")))
+
+    ok, message = media_search.request(media_type, tmdb_id,
                                         user["id"], user.get("name", ""),
                                         seasons=seasons, root_folder=root_folder,
                                         profile_id=profile_id, tags=tags)
+    if not ok:
+        _forget_submitted_request(submission)
     flash(message, "success" if ok else "error")
     return redirect(url_for("search", q=request.form.get("q", "")))
 

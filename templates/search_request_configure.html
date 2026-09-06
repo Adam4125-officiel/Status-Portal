@@ -33,7 +33,7 @@
         submitted until you press "Request" below.
       </p>
 
-      <form method="POST" action="{{ url_for('search_request') }}" class="form-panel">
+      <form method="POST" action="{{ url_for('search_request') }}" class="form-panel" data-request-form>
         <input type="hidden" name="media_type" value="{{ media_type }}">
         <input type="hidden" name="tmdb_id" value="{{ tmdb_id }}">
         <input type="hidden" name="q" value="{{ query }}">
@@ -113,4 +113,5 @@
     </div>
   </div>
 </div>
+<script src="{{ asset_url('js/search_request_submit.js') }}"></script>
 {% endblock %}
