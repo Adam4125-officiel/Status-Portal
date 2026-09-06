@@ -520,6 +520,30 @@ def search_seerr(base_url, api_key, query, limit=12):
     return items
 
 
+class SeerrRequestNotCreated(Exception):
+    """Seerr answered without a 4xx/5xx, but no usable request came out of it.
+
+    Two genuinely different things end up here, and neither is an HTTP error, which is
+    exactly why they needed their own exception - `raise_for_status()` is blind to both:
+
+    * **A 2xx that isn't 201.** Seerr's `NoSeasonsAvailableError` is reported as
+      **HTTP 202** with `{"message": "No seasons available to request"}` and nothing
+      created (`server/routes/request.ts` maps it to 202; `server/index.ts`'s error
+      middleware is what renders the body). 202 sails straight through
+      `raise_for_status()`, so before this existed the portal told the visitor
+      "Requested. You'll be notified when it arrives." for a request that does not
+      exist and never will.
+    * **A 201 describing a request with no media attached.** `media_request.mediaId` is
+      nullable in Seerr's schema (its `@ManyToOne(() => Media, ...)` declares
+      `onDelete: 'CASCADE'` but never `nullable: false`), so an orphaned request row -
+      one whose season_request children exist while the parent points at no media at
+      all - is representable, and one crashed a real user's Seerr profile page in
+      September 2026. This portal cannot stop Seerr writing such a row, but it can
+      refuse to call it a success and log the id, which is the difference between a
+      quiet corruption and something findable.
+    """
+
+
 def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None,
                        seasons=None, root_folder=None, profile_id=None, tags=None):
     """Asks Seerr for something, on behalf of a specific Seerr user where one is known.
@@ -532,9 +556,30 @@ def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None
     seasons/root_folder/profile_id/tags are all optional and only included in the
     payload when actually provided, so a caller that doesn't pass them (or passes only
     `seasons`) gets exactly today's behaviour for the rest - Seerr's own configured
-    defaults for root folder/profile/tags."""
+    defaults for root folder/profile/tags.
+
+    **`is4k` is always sent, and that is load-bearing rather than tidiness.** It is
+    optional in Seerr's API and this portal used to omit it, which quietly disabled
+    Seerr's own duplicate protection for everything the portal asked for.
+    `MediaRequest.request()` dedupes by comparing against the *incoming* value twice -
+    `.where('request.is4k = :is4k', ...)` for the "already requested" check, and
+    `request.is4k === requestBody.is4k` when working out which seasons a previous
+    request already covers - while the row it writes gets `false` from the column
+    default. So an omitted `is4k` is `undefined` on the way in and `false` once stored:
+    every request the portal made was invisible to the dedupe of the next one, and
+    asking twice produced two overlapping request rows instead of a 409. Sending it
+    explicitly is what makes Seerr's server-side duplicate check work on our requests
+    at all.
+
+    Raises SeerrRequestNotCreated when Seerr answers without creating a usable request;
+    see that class for the two ways that happens."""
     base_url = base_url.rstrip("/")
-    payload = {"mediaType": media_type, "mediaId": int(tmdb_id)}
+    if media_type == "tv" and seasons is not None and not seasons:
+        # A backstop, not the user-facing check - media_search.request() refuses this
+        # with a sentence first. Sending it would be asking Seerr for nothing at all,
+        # which it answers with the 202 described above.
+        raise ValueError("A series request needs at least one season.")
+    payload = {"mediaType": media_type, "mediaId": int(tmdb_id), "is4k": False}
     if seerr_user_id:
         payload["userId"] = int(seerr_user_id)
     if media_type == "tv":
@@ -551,7 +596,29 @@ def request_via_seerr(base_url, api_key, media_type, tmdb_id, seerr_user_id=None
                        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
                        json=payload, timeout=config.SEARCH_TIMEOUT_SECONDS)
     r.raise_for_status()
-    return r.json() if r.content else {}
+    body = r.json() if r.content else {}
+    if not isinstance(body, dict):
+        body = {}
+
+    if r.status_code != 201 or not body.get("id"):
+        # Seerr's own words where it gave any - "No seasons available to request" says
+        # far more than a status code, and it is the whole reason this branch exists.
+        raise SeerrRequestNotCreated(
+            body.get("message") or f"Seerr answered {r.status_code} without creating a request.")
+
+    media = body.get("media")
+    if not isinstance(media, dict) or not media.get("id"):
+        # Logged with the request id specifically so it can be found and removed in
+        # Seerr: this is the orphaned row, caught at the moment it is created rather
+        # than weeks later when it breaks somebody's profile page.
+        _logger.error(
+            "Seerr created request %s for %s/%s with no media attached - it is an "
+            "orphaned request row and should be deleted in Seerr",
+            body.get("id"), media_type, tmdb_id)
+        raise SeerrRequestNotCreated(
+            "Seerr created the request but didn't attach it to anything - it needs "
+            "deleting in Seerr before it's requested again.")
+    return body
 
 
 def _seerr_servers(base_url, api_key, kind):

@@ -268,17 +268,45 @@ def test_a_nonsense_request_is_refused_before_reaching_seerr(isolated_db, stub, 
     assert ok is False
 
 
+class _SeerrResponse:
+    """Enough of a requests.Response for request_via_seerr()'s own checks.
+
+    A stand-in here has to carry a status code and a body, not just raise_for_status():
+    the whole point of what this exercises is that a 2xx on its own no longer counts as
+    "a request was created" - Seerr answers "no seasons available to request" with a
+    perfectly successful-looking HTTP 202."""
+
+    def __init__(self, status_code=201, payload=None):
+        self.status_code = status_code
+        self._payload = {"id": 1, "media": {"id": 10}} if payload is None else payload
+        self.content = json.dumps(self._payload).encode()
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise integrations.requests.HTTPError(response=self)
+
+    def json(self):
+        return self._payload
+
+
+def _capture_post(monkeypatch, sent, response=None):
+    """Records the JSON body request_via_seerr() sends, answering as Seerr would."""
+    answer = response if response is not None else _SeerrResponse()
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.update(json or {})
+        return answer
+
+    monkeypatch.setattr(integrations.requests, "post", post)
+
+
 def test_a_series_request_asks_for_every_season_by_default(isolated_db, stub, monkeypatch):
     """Seerr rejects a TV request with no season selection - "all" is the fallback a
     caller gets by not passing seasons explicitly (see test_specific_seasons_can_be_
     requested_instead below for the configuration page's own picker)."""
     _configure(stub, jellyfin=False)
     sent = {}
-    monkeypatch.setattr(integrations.requests, "post",
-                        lambda url, headers=None, json=None, timeout=None:
-                        sent.update(json or {}) or type("R", (), {
-                            "raise_for_status": lambda self: None, "content": b"",
-                        })())
+    _capture_post(monkeypatch, sent)
     integrations.request_via_seerr(stub, "k", "tv", 1399)
     assert sent["seasons"] == "all"
 
@@ -286,11 +314,7 @@ def test_a_series_request_asks_for_every_season_by_default(isolated_db, stub, mo
 def test_specific_seasons_can_be_requested_instead(isolated_db, stub, monkeypatch):
     _configure(stub, jellyfin=False)
     sent = {}
-    monkeypatch.setattr(integrations.requests, "post",
-                        lambda url, headers=None, json=None, timeout=None:
-                        sent.update(json or {}) or type("R", (), {
-                            "raise_for_status": lambda self: None, "content": b"",
-                        })())
+    _capture_post(monkeypatch, sent)
     integrations.request_via_seerr(stub, "k", "tv", 1399, seasons=[1, 2])
     assert sent["seasons"] == [1, 2]
 
@@ -300,11 +324,7 @@ def test_root_folder_profile_and_tags_are_only_sent_when_provided(isolated_db, s
     Seerr's own configured defaults for the rest."""
     _configure(stub, jellyfin=False)
     sent = {}
-    monkeypatch.setattr(integrations.requests, "post",
-                        lambda url, headers=None, json=None, timeout=None:
-                        sent.update(json or {}) or type("R", (), {
-                            "raise_for_status": lambda self: None, "content": b"",
-                        })())
+    _capture_post(monkeypatch, sent)
     integrations.request_via_seerr(stub, "k", "movie", 1)
     assert "rootFolder" not in sent and "profileId" not in sent and "tags" not in sent
 
@@ -313,6 +333,77 @@ def test_root_folder_profile_and_tags_are_only_sent_when_provided(isolated_db, s
     assert sent["rootFolder"] == "/movies"
     assert sent["profileId"] == 3
     assert sent["tags"] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Not asking Seerr for something it will half-do
+# ---------------------------------------------------------------------------
+# A real incident: two orphaned "tv" media_request rows in Seerr's database with
+# mediaId NULL and their season_request children still present, which broke the profile
+# page of the user they belonged to. Everything below is what this portal can control
+# about that - see CLAUDE.md under "Requesting through Seerr".
+def test_every_request_declares_is4k_so_seerrs_duplicate_check_can_work(
+        isolated_db, stub, monkeypatch):
+    """The one that actually caused duplicate requests, and the least obvious.
+
+    is4k is optional in Seerr's API and this portal used to omit it. Seerr dedupes by
+    comparing the *incoming* value - `.where('request.is4k = :is4k')` and
+    `request.is4k === requestBody.is4k` in MediaRequest.request() - while the row it
+    writes takes `false` from the column default. undefined in, false stored: every
+    request the portal made was invisible to the dedupe of the next one, so asking
+    twice produced two overlapping request rows instead of a 409."""
+    _configure(stub, jellyfin=False)
+    for media_type, tmdb_id in (("movie", 1), ("tv", 1399)):
+        sent = {}
+        _capture_post(monkeypatch, sent)
+        integrations.request_via_seerr(stub, "k", media_type, tmdb_id)
+        assert sent["is4k"] is False, f"{media_type} request omitted is4k"
+
+
+def test_a_202_no_seasons_available_is_not_reported_as_success(isolated_db, stub, monkeypatch):
+    """Seerr maps NoSeasonsAvailableError to HTTP 202, which raise_for_status() ignores.
+
+    Nothing is created, so telling the visitor "Requested. You'll be notified when it
+    arrives" is a promise about a request that does not exist."""
+    _configure(stub, jellyfin=False)
+    _capture_post(monkeypatch, {}, _SeerrResponse(
+        202, {"message": "No seasons available to request"}))
+    with pytest.raises(integrations.SeerrRequestNotCreated) as excinfo:
+        integrations.request_via_seerr(stub, "k", "tv", 1399, seasons=[1])
+    assert "No seasons available" in str(excinfo.value)
+
+    ok, message = media_search.request("tv", 1399, "u1", "adam", seasons=[1])
+    assert ok is False
+    assert "No seasons available" in message
+
+
+def test_a_request_created_with_no_media_attached_is_reported_and_logged(
+        isolated_db, stub, monkeypatch, caplog):
+    """The orphan itself, caught at the moment it is created.
+
+    media_request.mediaId is nullable in Seerr's schema, so a 201 can describe a request
+    attached to nothing. This portal can't stop Seerr writing that row, but calling it a
+    success is what let two of them sit there until they broke a profile page - so it
+    reports the failure and logs the id, which is what makes it findable."""
+    _configure(stub, jellyfin=False)
+    _capture_post(monkeypatch, {}, _SeerrResponse(201, {"id": 77, "media": None}))
+    with caplog.at_level("ERROR"), pytest.raises(integrations.SeerrRequestNotCreated):
+        integrations.request_via_seerr(stub, "k", "tv", 1399, seasons=[1])
+    assert "77" in caplog.text and "orphaned" in caplog.text
+
+
+def test_an_empty_season_selection_never_reaches_seerr(isolated_db, stub, monkeypatch):
+    """Unticking every box. request_via_seerr() used to send `seasons: []` because it
+    tested `is not None` rather than truthiness - a request asking for nothing."""
+    _configure(stub, jellyfin=False)
+    monkeypatch.setattr(integrations.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")))
+    with pytest.raises(ValueError):
+        integrations.request_via_seerr(stub, "k", "tv", 1399, seasons=[])
+
+    ok, message = media_search.request("tv", 1399, "u1", "adam", seasons=[])
+    assert ok is False
+    assert "at least one season" in message
 
 
 def test_radarr_servers_and_detail_are_read_from_seerrs_service_endpoints(stub):
