@@ -1797,6 +1797,42 @@ All eight endpoints the portal uses were checked against the official
 `jellyfin-openapi-stable.json`, which now reports `12.0.0`: all present, none
 deprecated.
 
+### Does it still work on older Jellyfin? (checked 2026-09-10)
+
+The obvious follow-up question, and the fix would have been worth very little without an
+answer: the user is not on 12.0 yet, so a change that only worked there would have
+broken their portal today to protect it from a server they had not installed.
+
+`AuthorizationContext.cs` was read at v10.0.0, v10.2.2, v10.3.7, v10.4.3, v10.5.5,
+v10.6.4, v10.7.7, v10.8.13, v10.9.11, v10.10.7, v10.11.11 and v12.0. Three eras:
+
+| Versions | `GetAuthorizationDictionary` reads |
+|---|---|
+| 10.0 - 10.10 | `X-Emby-Authorization` **first**, falling back to `Authorization` when empty |
+| 10.11 | `Authorization` first; `X-Emby-Authorization` only when legacy is enabled (still the default there) |
+| 12.0 | Same code, legacy off by default |
+
+`MediaBrowser` is an accepted scheme name in all of them, and `Token=` inside that
+header is read in all of them.
+
+**The first row is the one that matters, and it turns a tidiness decision into a
+correctness one.** On 10.0-10.10 the legacy header wins when present - so had
+`X-Emby-Authorization` been left in place "as a harmless fallback", those versions would
+have carried on parsing the legacy header and the new path would have been exercised
+nowhere except 12.0. Dropping it is what makes every supported version take the same
+code path.
+
+Verified by driving the portal's real functions against a stand-in for each era - all
+six read paths, the version check and the full sign-in flow, on all three - with a
+counter-check that the pre-fix `X-Emby-Token`-only request is *accepted* by eras A and B
+and **401s** on era C. Without that counter-check the stand-ins could have been passing
+everything.
+
+Endpoint availability for the older range comes from Jellyfin's own controller source at
+10.8.13 and 10.10.7 (all eight routes present); no historical OpenAPI documents are
+published, only `stable` and `unstable`. That is why `README.md` claims **10.8 - 12.0**
+rather than 10.0: authorization is verified further back than the endpoints are.
+
 **What this does not prove**: anything about a real Jellyfin 12.0 install. The stand-in
 validates the header format and that every call site reaches it. The database rewrite,
 the required post-upgrade library scan, and 12.0's `GetItems` behaviour change are all

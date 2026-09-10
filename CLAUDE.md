@@ -2692,12 +2692,25 @@ mechanisms it stopped reading, so all seven of them would have returned 401 agai
   return a different set than it did on 10.11. `search_jellyfin()` already passes both
   `Recursive=true` and `IncludeItemTypes`, so it is unaffected; a *new* `/Items` caller
   is the thing to check.
-- **Verified against a stand-in that enforces 12.0's rules, not a real server.** This
-  sandbox has no Jellyfin, so `tests/` plus a live driver reproduce
-  `AuthorizationContext.cs`'s exact token-resolution order with legacy authorization
-  off — including proving the *old* header is rejected by it. That validates the header
-  format and the call sites; it cannot validate anything about a real 12.0 install's
-  behaviour beyond authorization. See `docs/HISTORY.md`.
+- **One build covers Jellyfin 10.8 → 12.0, and there are three auth eras behind
+  that.** Don't add version detection; the single header form is accepted by all of
+  them, for a reason worth knowing:
+  - **10.0 – 10.10** read `X-Emby-Authorization` *first* and fall back to
+    `Authorization` only when it is empty. This is why dropping `X-Emby-Authorization`
+    was necessary rather than merely tidy — had it been left in place alongside, these
+    versions would have kept parsing the legacy header and the migration would have
+    been untested on exactly the servers most people run.
+  - **10.11** reads `Authorization` first, legacy still enabled.
+  - **12.0** is the same code with legacy authorization off by default.
+- **Verified against stand-ins, not a real server.** This sandbox has no Jellyfin, so a
+  driver reproduces `AuthorizationContext.cs` for each of the three eras and runs every
+  call the portal makes against all of them — plus a counter-check proving the old
+  `X-Emby-Token` request is accepted by the first two and 401s on the third, so the
+  stand-ins genuinely discriminate rather than passing everything. Endpoint
+  availability comes from Jellyfin's controller source at 10.8.13/10.10.7 and the
+  published OpenAPI document for 12.0. That validates the authorization mechanism and
+  the endpoint surface; it says nothing about a live install's behaviour.
+  **The supported range is stated in `README.md` — update it there if it changes.**
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

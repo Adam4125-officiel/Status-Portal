@@ -59,6 +59,54 @@ Open `http://localhost:5000` for the public page, `http://localhost:5000/admin` 
 the admin password on first launch. For continuous/production use, run
 `python serve_waitress.py` instead of `app.py`. Docker is also supported.
 
+## Jellyfin compatibility
+
+**Jellyfin 10.8 through 12.0 (inclusive).** The same build works across all of them —
+there is nothing to configure and no version to tell the portal about.
+
+This matters because **Jellyfin 12.0 disables "legacy authorization" by default**, and
+ships a migration that disables it on existing installs too, so simply upgrading your
+server is enough to trigger it. Portal versions **before v1.8.8 authenticate with the
+`X-Emby-Token` header, which 12.0 ignores** — on those, every Jellyfin feature (visitor
+sign-in, the user sync, unified search, the health check, the transcode/high-load
+signal and the version check) fails with a 401 the moment you upgrade Jellyfin.
+**Update the portal to v1.8.8 or later before upgrading Jellyfin to 12.0.**
+
+| Jellyfin | Status |
+| --- | --- |
+| 12.0 | Supported. All endpoints used by the portal checked against the official 12.0 OpenAPI document — all present, none deprecated |
+| 10.11.x | Supported |
+| 10.10.x | Supported |
+| 10.8.x – 10.9.x | Supported |
+| Older than 10.8 | Untested. The authorization method the portal uses is accepted as far back as 10.0.0, but the endpoints have not been checked against those releases |
+
+<details>
+<summary>How this was verified</summary>
+
+The portal sends its token in the `Authorization` header with the `MediaBrowser`
+scheme, which is the only mechanism accepted by every version in that range. Jellyfin's
+own `AuthorizationContext.cs` was read at v10.0.0, v10.2.2, v10.3.7, v10.4.3, v10.5.5,
+v10.6.4, v10.7.7, v10.8.13, v10.9.11, v10.10.7, v10.11.11 and v12.0 — there are three
+distinct eras of behaviour, and every call the portal makes was then driven against a
+stand-in server reproducing each one:
+
+- **10.0 – 10.10** read `X-Emby-Authorization` first and fall back to `Authorization`
+  when it is absent. The portal no longer sends the former, so the fallback applies.
+- **10.11** reads `Authorization` first, with the legacy headers still enabled.
+- **12.0** is the same code with legacy authorization off by default.
+
+Endpoint availability was confirmed from Jellyfin's controller source at 10.8.13 and
+10.10.7, and from the published OpenAPI document for 12.0.
+
+No real Jellyfin server exists in the project's development environment, so this
+verifies the authorization mechanism and the endpoint surface, not the behaviour of a
+live install.
+</details>
+
+**If you do upgrade to Jellyfin 12.0**, follow Jellyfin's own release notes: take a full
+backup first (rolling back is not possible without one), remove non-built-in plugins
+before migrating, and run a full library scan afterwards.
+
 ## Documentation
 
 Full documentation — installation (native Python + Docker), the configuration
