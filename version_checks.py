@@ -32,6 +32,7 @@ import requests
 
 import db
 import integrations
+import jellyfin_auth
 import scheduler
 import updater
 
@@ -161,13 +162,19 @@ def _fetch_latest_release(repo):
 def _fetch_direct_version(integration):
     """(label, repo, version) for an app whose kind identifies it, or (None, None, error).
 
-    Jellyfin authenticates with X-Emby-Token and Seerr with X-Api-Key, so the header
-    differs; everything else is the same shape."""
+    Jellyfin and Seerr authenticate differently, so the headers differ; everything
+    else is the same shape. Jellyfin's go through jellyfin_auth.auth_headers() rather
+    than being built here - see that function for why the token must travel in the
+    `Authorization` header, and note this call site was missed on the first pass of
+    that migration precisely because it builds its own header instead of sharing
+    one."""
     label, repo, path, key = DIRECT_APPS[integration["kind"]]
-    header = "X-Emby-Token" if integration["kind"] == "jellyfin" else "X-Api-Key"
+    headers = (jellyfin_auth.auth_headers(integration["api_key"])
+               if integration["kind"] == "jellyfin"
+               else {"X-Api-Key": integration["api_key"]})
     try:
         r = requests.get(f"{integration['base_url'].rstrip('/')}{path}",
-                          headers={header: integration["api_key"]},
+                          headers=headers,
                           timeout=integrations.TIMEOUT)
         r.raise_for_status()
         version = (r.json() or {}).get(key)

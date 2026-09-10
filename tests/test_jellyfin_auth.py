@@ -218,8 +218,12 @@ def test_the_api_key_is_sent_as_an_emby_token_header(jellyfin_integration, monke
     monkeypatch.setattr(jellyfin_auth.requests, "get", fake_get)
     jellyfin_auth.sync_users()
     assert captured["url"] == "http://jellyfin.invalid/Users"
-    assert captured["headers"]["X-Emby-Token"] == "apikey"
+    # The token travels *inside* the Authorization header, not in X-Emby-Token:
+    # Jellyfin 12.0 stops reading the legacy headers by default. See
+    # jellyfin_auth.auth_headers().
+    assert 'Token="apikey"' in captured["headers"]["Authorization"]
     assert "MediaBrowser Client=" in captured["headers"]["Authorization"]
+    assert "X-Emby-Token" not in captured["headers"]
     assert captured["timeout"] == config.JELLYFIN_AUTH_TIMEOUT_SECONDS
 
 
@@ -297,7 +301,9 @@ def test_the_short_lived_access_token_is_revoked_immediately(jellyfin_integratio
     urls = [url for url, _ in capture["calls"]]
     assert urls == ["http://jellyfin.invalid/Users/AuthenticateByName",
                     "http://jellyfin.invalid/Sessions/Logout"]
-    assert capture["calls"][1][1]["headers"]["X-Emby-Token"] == "tok"
+    revoke_headers = capture["calls"][1][1]["headers"]
+    assert 'Token="tok"' in revoke_headers["Authorization"]
+    assert "X-Emby-Token" not in revoke_headers
 
 
 def test_a_failed_revocation_does_not_fail_the_sign_in(jellyfin_integration, monkeypatch):

@@ -20,6 +20,7 @@ import requests
 
 import config
 import db
+import jellyfin_auth
 import monitoring
 import scheduler
 
@@ -164,7 +165,7 @@ def fetch_byparr_status(base_url, api_key):
 
 def fetch_jellyfin_status(base_url, api_key):
     base_url = base_url.rstrip("/")
-    headers = {"X-Emby-Token": api_key}
+    headers = jellyfin_auth.auth_headers(api_key)
     try:
         info = requests.get(f"{base_url}/System/Info", headers=headers, timeout=TIMEOUT)
         info.raise_for_status()
@@ -328,7 +329,7 @@ def search_jellyfin(base_url, api_key, query, jellyfin_user_id=None, limit=12):
               "Fields": "ProductionYear", "EnableTotalRecordCount": "false"}
     if jellyfin_user_id:
         params["userId"] = jellyfin_user_id
-    r = requests.get(f"{base_url}/Items", headers={"X-Emby-Token": api_key},
+    r = requests.get(f"{base_url}/Items", headers=jellyfin_auth.auth_headers(api_key),
                       params=params, timeout=config.SEARCH_TIMEOUT_SECONDS)
     r.raise_for_status()
     payload = r.json()
@@ -1378,7 +1379,7 @@ def fetch_jellyfin_sessions(base_url, api_key):
     load. Best-effort: any failure returns 0 rather than raising, same
     degrade-gracefully pattern as every fetcher above."""
     base_url = base_url.rstrip("/")
-    headers = {"X-Emby-Token": api_key}
+    headers = jellyfin_auth.auth_headers(api_key)
     try:
         r = requests.get(f"{base_url}/Sessions", headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
@@ -1394,7 +1395,7 @@ def fetch_jellyfin_running_tasks(base_url, api_key):
     scheduled task is the only way the Jellyfin API surfaces them. Best-effort:
     any failure returns []."""
     base_url = base_url.rstrip("/")
-    headers = {"X-Emby-Token": api_key}
+    headers = jellyfin_auth.auth_headers(api_key)
     try:
         r = requests.get(f"{base_url}/ScheduledTasks", headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
