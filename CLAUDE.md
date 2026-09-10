@@ -110,6 +110,8 @@ have bitten someone on exactly that change.
 | A new public (non-`/admin/`) POST route | *Conventions* → `_csrf_required_for()`; the exemption is a decision, not a default |
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
 | Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
+| Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
+| Any call to Jellyfin | *Talking to Jellyfin* → one header builder, and never a `X-Emby-*` header |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -2575,6 +2577,140 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   `session["logged_in"]`) - the configuration page not rendering them for a plain
   visitor is not itself an authorization boundary, and a forged POST must not be able
   to smuggle them in.
+
+## Requesting through Seerr (`integrations.request_via_seerr()`) — read before touching it
+
+Everything here exists because of one incident: two orphaned `media_request` rows in
+Adam's Seerr with `mediaId` NULL and their `season_request` children intact, which broke
+the profile page of the user they belonged to (`docs/HISTORY.md` → "the requests that
+were never made"). This is the only code in the portal that creates anything in Seerr,
+and the rules below are what stop it asking for something Seerr will half-do.
+
+- **`is4k` must always be sent, and this is the least obvious rule in the file.** It is
+  optional in Seerr's API and the portal used to omit it, which silently disabled
+  Seerr's *own* duplicate protection for every request the portal made. Seerr's
+  `MediaRequest.request()` dedupes by comparing the **incoming** value twice —
+  `.where('request.is4k = :is4k', ...)` for "already requested", and
+  `request.is4k === requestBody.is4k` when working out which seasons a previous request
+  already covers — while the row it writes takes `false` from the column default. So
+  `undefined` goes in and `false` is stored: every request the portal made was invisible
+  to the dedupe of the next one, and asking twice produced two overlapping request rows
+  instead of a 409. Verified against `seerr-team/seerr`'s own source, not deduced. If
+  4K requesting is ever added, it becomes a real value — never an omission again.
+- **A 2xx from `/api/v1/request` does not mean a request was created.** Seerr maps its
+  `NoSeasonsAvailableError` to **HTTP 202** with `{"message": "No seasons available to
+  request"}` and creates nothing, and `raise_for_status()` is blind to it — so the
+  portal told visitors "Requested. You'll be notified when it arrives" about requests
+  that did not exist. Only a **201 carrying an `id`** counts; anything else raises
+  `integrations.SeerrRequestNotCreated` with Seerr's own message. **Don't reduce this
+  back to `raise_for_status()`.**
+- **A created request is checked for attached media, and a media-less one is logged at
+  ERROR with its id.** `media_request.mediaId` is nullable in Seerr's schema (its
+  `@ManyToOne(() => Media, ...)` sets `onDelete: 'CASCADE'` but never
+  `nullable: false`), so a 201 can describe exactly the orphan that started this. The
+  portal cannot stop Seerr writing that row, but it can refuse to call it a success and
+  name the id, which is the difference between a quiet corruption and something
+  findable. That log line is the point of the check — keep it.
+- **`SeerrRequestNotCreated` is caught before the `RequestException`/`ValueError`
+  branch in `media_search.request()`, and must stay separate from it.** "Seerr answered
+  fine and made nothing" is a different thing from "Seerr is unreachable", and "try
+  again in a moment" is wrong advice for the first.
+- **Never send an empty season list.** `seasons: []` asks Seerr for nothing. The check
+  is truthiness, not `is not None` — that distinction was the bug. Refused with a
+  sentence in `media_search.request()` and again as a structural backstop in
+  `request_via_seerr()`.
+- **Numeric form fields are validated, never filtered.** `search_request()` used to
+  build seasons with `if s.isdigit()`, which turns a mangled submission into a
+  *partial* one — a series quietly requested with three of its five seasons and nothing
+  anywhere saying so. Refuse the submission instead; the same applies to `profile_id`
+  and `tags`.
+- **Three layers stop a duplicate, and each covers what the others can't.** Deleting
+  any one of them leaves a real gap: `static/js/search_request_submit.js` disables the
+  submit button (the only layer that can stop a double-click's second POST ever being
+  sent, since both are in flight before the server has written anything);
+  `app._request_recently_submitted()` keys a short per-session window on
+  `media_type:tmdb_id:seasons` (covers a refresh or a back-and-resubmit, and lets a
+  *different* season selection through on purpose); and `is4k` restores Seerr's own
+  409, which is the only one that reaches another device. A failed submission is
+  forgotten immediately (`_forget_submitted_request()`) — the guard exists to stop a
+  *successful* request happening twice, not to lock a title out because Seerr was down
+  for one press.
+- **The wire payload is worth asserting on directly.** These bugs all lived in what was
+  actually sent and what came back, which a mocked `request_via_seerr` cannot see —
+  `tests/test_search.py`'s `_capture_post`/`_SeerrResponse` exist for that, and the
+  live smoke test in `docs/HISTORY.md` drove the real form against a stand-in Seerr that
+  records every POST.
+
+## Talking to Jellyfin (`jellyfin_auth.auth_headers()`) — the 12.0 auth migration
+
+Jellyfin **12.0** (released 2026-09-08, straight after the 10.11.x line) turns
+*legacy authorization* off by default, and ships a migration that turns it off on
+existing installs too. Every authenticated call this portal made used one of the
+mechanisms it stopped reading, so all seven of them would have returned 401 against a
+12.0 server.
+
+- **`jellyfin_auth.auth_headers(token=None)` is the only place a Jellyfin request's
+  headers are built.** Every call site goes through it — `fetch_users`, the sign-in,
+  the token revocation, `fetch_jellyfin_status`, `search_jellyfin`,
+  `fetch_jellyfin_sessions`, `fetch_jellyfin_running_tasks`, and
+  `version_checks._fetch_direct_version`. That last one is the reason this is a rule
+  rather than a habit: it built its own header, lives in a different module from the
+  other six, and was missed on the first pass of the migration.
+- **The token goes inside the `Authorization` header, never in `X-Emby-Token`.** What
+  12.0 still reads is the `Authorization` header with the `MediaBrowser` scheme
+  (`Token="..."` inside it) and the **`ApiKey`** query parameter. What it ignores by
+  default: the `X-Emby-Token`, `X-MediaBrowser-Token` and `X-Emby-Authorization`
+  headers, the lowercase **`api_key`** query parameter, and the `Emby` scheme. Note
+  the two query parameters differ only in case and one of them still works — that is
+  a genuinely easy thing to misread.
+- **This is not a 12.0-only form, so there is no version sniffing and no fallback.**
+  Reading Jellyfin's own `AuthorizationContext.cs` at v10.6.4, v10.7.7, v10.8.13,
+  v10.10.7, v10.11.11 and v12.0, `Token=` inside the `Authorization` header is the
+  **first** branch every one of those versions checks. That is why the legacy headers
+  were dropped outright rather than sent alongside: on every Jellyfin that ever read
+  them, this header won anyway. Don't reintroduce them "just in case" — they are
+  scheduled for removal entirely in a later release.
+- **`/Users/AuthenticateByName` takes no token but still needs the header.** It is the
+  one call that authenticates nobody, and 12.0 still wants the
+  Client/Device/DeviceId/Version fields from the `MediaBrowser` scheme — which is also
+  what keeps the portal a single named device in Jellyfin's device list (see
+  `DEVICE_ID`). Calling `auth_headers()` with no argument is that case.
+- **Two convention tests enforce this** (`tests/test_conventions.py`): no module may
+  use a legacy header, and no module other than `jellyfin_auth.py` may contain the
+  string `MediaBrowser Client=`. The second is the one that would have caught
+  `version_checks.py`. Both are exact string checks with no heuristics, so neither can
+  fire on innocent code.
+- **All eight endpoints this portal uses survive 12.0 and none are deprecated** —
+  `/System/Info`, `/System/ActivityLog/Entries`, `/Users`, `/Users/AuthenticateByName`,
+  `/Sessions`, `/Sessions/Logout`, `/ScheduledTasks`, `/Items` — checked against the
+  official `jellyfin-openapi-stable.json`, which now reports version `12.0.0`. If you
+  add a Jellyfin call, check it against that document first: 12.0's stated policy is
+  that **an endpoint absent from the OpenAPI spec must not be used by clients** and
+  may be removed in any major release without warning.
+- **`GetItems` changed behaviour in 12.0** — it now applies `recursive` when filters
+  are requested, for requests that include `includeItemTypes`, so the same query can
+  return a different set than it did on 10.11. `search_jellyfin()` already passes both
+  `Recursive=true` and `IncludeItemTypes`, so it is unaffected; a *new* `/Items` caller
+  is the thing to check.
+- **One build covers Jellyfin 10.8 → 12.0, and there are three auth eras behind
+  that.** Don't add version detection; the single header form is accepted by all of
+  them, for a reason worth knowing:
+  - **10.0 – 10.10** read `X-Emby-Authorization` *first* and fall back to
+    `Authorization` only when it is empty. This is why dropping `X-Emby-Authorization`
+    was necessary rather than merely tidy — had it been left in place alongside, these
+    versions would have kept parsing the legacy header and the migration would have
+    been untested on exactly the servers most people run.
+  - **10.11** reads `Authorization` first, legacy still enabled.
+  - **12.0** is the same code with legacy authorization off by default.
+- **Verified against stand-ins, not a real server.** This sandbox has no Jellyfin, so a
+  driver reproduces `AuthorizationContext.cs` for each of the three eras and runs every
+  call the portal makes against all of them — plus a counter-check proving the old
+  `X-Emby-Token` request is accepted by the first two and 401s on the third, so the
+  stand-ins genuinely discriminate rather than passing everything. Endpoint
+  availability comes from Jellyfin's controller source at 10.8.13/10.10.7 and the
+  published OpenAPI document for 12.0. That validates the authorization mechanism and
+  the endpoint surface; it says nothing about a live install's behaviour.
+  **The supported range is stated in `README.md` — update it there if it changes.**
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

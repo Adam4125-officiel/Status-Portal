@@ -66,14 +66,35 @@ DEVICE_ID = "status-portal"
 TASK_NAME = "jellyfin_user_sync"
 
 
-def _auth_header():
-    """Jellyfin's client-identification header. Sent as both `Authorization` and
-    `X-Emby-Authorization`: modern Jellyfin reads the former, older versions (and
-    Emby-derived builds) read the latter, and sending both costs nothing while
-    removing an entire class of "works on my server" bug report."""
-    value = (f'MediaBrowser Client="{CLIENT_NAME}", Device="{DEVICE_NAME}", '
-             f'DeviceId="{DEVICE_ID}", Version="{config.VERSION}"')
-    return {"Authorization": value, "X-Emby-Authorization": value}
+def auth_headers(token=None):
+    """The one way this portal authenticates to Jellyfin, for every call in the app.
+
+    **The token goes inside the `Authorization` header, never in `X-Emby-Token`.**
+    Jellyfin 12.0 turned off "legacy authorization" by default (a migration flips it
+    on existing installs too), and the deprecated mechanisms it stops reading are
+    exactly the ones this portal used to rely on: the `X-Emby-Token`,
+    `X-MediaBrowser-Token` and `X-Emby-Authorization` headers, the lowercase `api_key`
+    query parameter, and the `Emby` authorization scheme. What survives is the
+    `Authorization` header with the `MediaBrowser` scheme (this) and the `ApiKey`
+    query parameter - and the 12.0 OpenAPI document now declares that `Authorization`
+    header as its *only* security scheme.
+
+    Reading Jellyfin's own `AuthorizationContext` at v10.6.4, v10.7.7, v10.8.13,
+    v10.10.7, v10.11.11 and v12.0, `Token=` inside this header is the **first** place
+    every one of those versions looks - so this is not a 12.0-only form that breaks
+    older servers, it is the form that has always worked. That is why the legacy
+    headers could be dropped outright rather than sent alongside as a fallback: on
+    every Jellyfin that has ever read them, this header was checked first anyway.
+
+    `token` is omitted for `/Users/AuthenticateByName`, which is the one call that
+    authenticates nobody - it still needs the Client/Device/DeviceId/Version fields,
+    which is what identifies the portal in Jellyfin's own device list (see DEVICE_ID
+    above for why that is fixed rather than random)."""
+    parts = [f'MediaBrowser Client="{CLIENT_NAME}"', f'Device="{DEVICE_NAME}"',
+             f'DeviceId="{DEVICE_ID}"', f'Version="{config.VERSION}"']
+    if token:
+        parts.append(f'Token="{token}"')
+    return {"Authorization": ", ".join(parts)}
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +155,7 @@ def fetch_users(base_url, api_key):
     any failure - the caller (the scheduled task) turns that into a recorded failure
     with the message intact, which is more useful than a swallowed error."""
     r = requests.get(f"{base_url.rstrip('/')}/Users",
-                      headers={"X-Emby-Token": api_key, **_auth_header()},
+                      headers=auth_headers(api_key),
                       timeout=config.JELLYFIN_AUTH_TIMEOUT_SECONDS)
     r.raise_for_status()
     payload = r.json()
@@ -218,7 +239,7 @@ def authenticate(username, password):
     try:
         r = requests.post(f"{base_url}/Users/AuthenticateByName",
                            json={"Username": username, "Pw": password},
-                           headers={"Content-Type": "application/json", **_auth_header()},
+                           headers={"Content-Type": "application/json", **auth_headers()},
                            timeout=config.JELLYFIN_AUTH_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         _logger.warning("Jellyfin sign-in attempt could not reach the server: %s", e)
@@ -270,7 +291,7 @@ def _revoke_token(base_url, token):
         return
     try:
         requests.post(f"{base_url}/Sessions/Logout",
-                       headers={"X-Emby-Token": token, **_auth_header()},
+                       headers=auth_headers(token),
                        timeout=config.JELLYFIN_AUTH_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         _logger.info("Could not revoke the short-lived Jellyfin token after sign-in: %s", e)

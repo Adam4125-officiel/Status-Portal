@@ -273,6 +273,12 @@ def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name="",
         tmdb_id = int(tmdb_id)
     except (TypeError, ValueError):
         return False, "That isn't a valid item."
+    if media_type == "tv" and seasons is not None and not seasons:
+        # Unticking every box on the configuration page. Seerr answers a season-less
+        # series request with HTTP 202 and creates nothing, which read as success here
+        # until SeerrRequestNotCreated existed - but the honest answer is that this
+        # never needed to leave the portal at all.
+        return False, "Pick at least one season to request."
 
     seerr_user_id = seerr_user_id_for(jellyfin_user_id)
     try:
@@ -288,6 +294,14 @@ def request(media_type, tmdb_id, jellyfin_user_id, jellyfin_user_name="",
             return False, "That has already been requested."
         _logger.warning("Seerr refused a request from '%s': %s", jellyfin_user_name, e)
         return False, f"Seerr refused the request ({status})."
+    except integrations.SeerrRequestNotCreated as e:
+        # Caught before the RequestException/ValueError branch below, and deliberately
+        # not folded into it: "Seerr answered fine but made nothing" is a different
+        # thing from "Seerr is unreachable", and telling somebody to try again in a
+        # moment would be wrong advice for it.
+        _logger.warning("Seerr did not create a request for '%s' (%s/%s): %s",
+                        jellyfin_user_name, media_type, tmdb_id, e)
+        return False, str(e)
     except (requests.RequestException, ValueError) as e:
         _logger.warning("Could not reach Seerr to make a request: %s", e)
         return False, "Couldn't reach Seerr just now - try again in a moment."

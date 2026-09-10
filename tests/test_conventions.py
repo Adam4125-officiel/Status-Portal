@@ -390,6 +390,62 @@ def test_reorderable_sections_are_not_underscore_prefixed():
 # ---------------------------------------------------------------------------
 # Forms
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Jellyfin authentication: one builder, no legacy headers
+# ---------------------------------------------------------------------------
+# Jellyfin 12.0 disables "legacy authorization" by default, which stops the server
+# reading exactly the headers this portal used to authenticate with. Every Jellyfin
+# call must therefore go through jellyfin_auth.auth_headers(), which puts the token in
+# the `Authorization` header. This is a static check because the failure mode is a
+# silent 401 against a server nobody has in the test sandbox - see CLAUDE.md under
+# "Talking to Jellyfin".
+LEGACY_JELLYFIN_AUTH = ("X-Emby-Token", "X-MediaBrowser-Token", "X-Emby-Authorization")
+
+
+def test_no_module_authenticates_to_jellyfin_with_a_legacy_header():
+    """Jellyfin 12.0 ignores these by default, so a call using one gets a 401.
+
+    jellyfin_auth.auth_headers() is the only sanctioned builder. It is exempt from the
+    string check itself because its docstring names the headers it exists to replace -
+    the check looks for a header being *used*, i.e. as a dict key, not mentioned."""
+    offenders = []
+    for name, source in _python_modules():
+        for header in LEGACY_JELLYFIN_AUTH:
+            # As a dict key (`{"X-Emby-Token": ...}`) or an assigned string value -
+            # both are how one actually gets onto a request.
+            if re.search(rf'"{header}"\s*[:,)]', source) or re.search(rf'=\s*"{header}"', source):
+                offenders.append(f"{name} uses {header}")
+    assert not offenders, (
+        "These build a Jellyfin request with an authorization header that Jellyfin "
+        "12.0 no longer reads (legacy authorization is off by default, and a migration "
+        "turns it off on existing installs too):\n  "
+        + "\n  ".join(offenders)
+        + "\nUse jellyfin_auth.auth_headers(token) instead - it puts the token in the "
+          "`Authorization` header, which every Jellyfin from 10.6 to 12.0 reads first."
+    )
+
+
+def test_only_jellyfin_auth_builds_the_mediabrowser_authorization_header():
+    """The modern header has to come from one place too, not just the legacy one.
+
+    The check above stops a module reaching for `X-Emby-Token`; this one stops the
+    opposite mistake - hand-rolling the *correct* header inline and quietly owning a
+    second copy of the client name, device id and token format. version_checks.py
+    built its own Jellyfin header and was missed on the first pass of the 12.0
+    migration for exactly that reason.
+
+    Exact rather than heuristic: the scheme string `MediaBrowser Client=` appears in
+    no other context, so this cannot fire on innocent code."""
+    offenders = [name for name, source in _python_modules()
+                 if name != "jellyfin_auth.py" and "MediaBrowser Client=" in source]
+    assert not offenders, (
+        "These build Jellyfin's Authorization header themselves:\n  "
+        + "\n  ".join(offenders)
+        + "\nCall jellyfin_auth.auth_headers(token) instead. One builder is what makes "
+          "an auth change a one-line edit rather than a hunt for every call site."
+    )
+
+
 def test_no_native_multi_selects_in_templates():
     """CLAUDE.md: use a checkbox list, never <select multiple>, for any service/entity
     picker. A <select multiple> here shipped a real bug where an admin submitted
