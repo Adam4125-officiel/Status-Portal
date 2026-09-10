@@ -1700,6 +1700,111 @@ source and OpenAPI spec, not from observing a running server. The `is4k` claim i
 worth re-checking against the real thing - it is the fix most likely to change how Seerr
 answers a repeat request (it should now be a 409 rather than a second row).
 
+## The Jellyfin 12.0 authorization migration (2026-09-10)
+
+### How it came up
+
+Not from a bug report - the user mentioned Jellyfin had released 12.0 with "a complete
+db rewrite" and asked for the API changes to be checked before they tested the pending
+release. Worth recording as a workflow note: this was found by *reading release notes
+for a dependency*, and it would otherwise have surfaced as "Jellyfin sign-in stopped
+working" the day they upgraded.
+
+The version number is genuinely 12.0, released 2026-09-08 - the project went from the
+10.11.x line straight to 12.0 after seven release candidates, so "10.12" and "11" do
+not exist as releases.
+
+### What actually breaks
+
+Jellyfin 12.0 disables **legacy authorization** by default, and ships a migration that
+turns it off on existing installs as well - so upgrading an existing server is enough
+to trigger this, no configuration change required. The mechanisms it stops reading are
+listed in `jellyfin/jellyfin` PR #13306, which introduced the switch:
+
+> The only method we'll allow is the `Authorization` header with `MediaBrowser` scheme
+> and the `ApiKey` query parameter. The other headers (`X-Emby-Authorization`,
+> `X-Emby-Token`, `X-MediaBrowser-Token`), query parameter (`api_key`) and
+> authorization scheme (`Emby`) are all deprecated.
+
+This portal authenticated every single Jellyfin call with `X-Emby-Token`. Seven call
+sites across three modules, all of which would have answered 401:
+
+- `jellyfin_auth.fetch_users` (`/Users`) and the sign-in token revocation
+  (`/Sessions/Logout`)
+- `integrations.fetch_jellyfin_status` (`/System/Info` + `/System/ActivityLog/Entries`),
+  `search_jellyfin` (`/Items`), `fetch_jellyfin_sessions` (`/Sessions`),
+  `fetch_jellyfin_running_tasks` (`/ScheduledTasks`)
+- `version_checks._fetch_direct_version` (`/System/Info`)
+
+`_auth_header()` already sent a correct-looking `Authorization: MediaBrowser Client=...`
+header, which is why this was easy to miss on a skim - but it carried
+Client/Device/DeviceId/Version and **no `Token=`**. The credential was only ever in the
+legacy header. The one call that kept working is `/Users/AuthenticateByName`, because it
+authenticates nobody and only needs the client identity fields.
+
+### Why there is no fallback and no version sniffing
+
+The tempting shape is "send both, let the server pick". Reading Jellyfin's own
+`Jellyfin.Server.Implementations/Security/AuthorizationContext.cs` at v10.6.4, v10.7.7,
+v10.8.13, v10.10.7, v10.11.11 and v12.0, the resolution order is the same in all of
+them and `auth.TryGetValue("Token", out token)` - the `Authorization` header - is the
+**first** branch. The legacy headers are only consulted when that came back empty, and
+in 12.0 only when `EnableLegacyAuthorization` is true:
+
+```
+1. Token= inside `Authorization: MediaBrowser ...`   always
+2. X-Emby-Token header                               legacy only
+3. X-MediaBrowser-Token header                       legacy only
+4. ApiKey query parameter                            always
+5. api_key query parameter                           legacy only
+```
+
+So on every Jellyfin that has ever read `X-Emby-Token`, the header we moved to was
+already winning. Sending both would have been pure cargo cult, and the legacy ones are
+slated for removal outright in a later release. Note items 4 and 5: the two query
+parameters differ only in case, and one of them still works.
+
+### The call site that was missed on the first pass
+
+Six of the seven were found by grepping `X-Emby-Token`. `version_checks.py` was found
+only by re-running the grep across the whole tree afterwards - it builds its own header
+inline (`header = "X-Emby-Token" if integration["kind"] == "jellyfin" else "X-Api-Key"`)
+and lives in a module about *version* checking, not about Jellyfin.
+
+That is the whole argument for `jellyfin_auth.auth_headers()` being the single builder,
+and for the second convention test: **no module other than `jellyfin_auth.py` may
+contain the string `MediaBrowser Client=`.** A hand-rolled correct header is invisible
+to a grep for the *wrong* one. The first version of that test was a heuristic
+("mentions a Jellyfin endpoint and doesn't mention `auth_headers`") and it silently
+passed when the violation was introduced - it was rewritten as the exact string check
+after the deliberate-failure step caught it being useless, which is precisely what that
+step exists for.
+
+### Verified
+
+No Jellyfin exists in this sandbox, so a stand-in was built that reproduces
+`AuthorizationContext.cs`'s token resolution with `EnableLegacyAuthorization = false`,
+and it was made to prove itself first: a request carrying only `X-Emby-Token` - exactly
+what the old code sent - gets **401**, and the `MediaBrowser` header gets 200.
+
+Against that server, all six read paths and the full sign-in flow pass, and the server's
+own log of what it received shows every authenticated call resolving its token from the
+`Authorization` header with **no legacy header sent at all**. The sign-in flow
+(`AuthenticateByName` with no token, then `Sessions/Logout` carrying the user's own
+short-lived token) was exercised separately and revokes correctly.
+
+All eight endpoints the portal uses were checked against the official
+`jellyfin-openapi-stable.json`, which now reports `12.0.0`: all present, none
+deprecated.
+
+**What this does not prove**: anything about a real Jellyfin 12.0 install. The stand-in
+validates the header format and that every call site reaches it. The database rewrite,
+the required post-upgrade library scan, and 12.0's `GetItems` behaviour change are all
+things only the user's own server can confirm. `search_jellyfin()` already sends
+`Recursive=true` alongside `IncludeItemTypes`, which is the condition that change is
+scoped to, so it should be unaffected - but that is reasoning from release notes, not
+an observation.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

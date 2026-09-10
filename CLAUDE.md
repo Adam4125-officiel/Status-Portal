@@ -111,6 +111,7 @@ have bitten someone on exactly that change.
 | Anything touching the theme | *The user account page* → three inputs, two implementations of the precedence; they must agree |
 | Anything in the search path | *Unified search* → the one sanctioned live outbound call in a request handler |
 | Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
+| Any call to Jellyfin | *Talking to Jellyfin* → one header builder, and never a `X-Emby-*` header |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -2639,6 +2640,64 @@ and the rules below are what stop it asking for something Seerr will half-do.
   `tests/test_search.py`'s `_capture_post`/`_SeerrResponse` exist for that, and the
   live smoke test in `docs/HISTORY.md` drove the real form against a stand-in Seerr that
   records every POST.
+
+## Talking to Jellyfin (`jellyfin_auth.auth_headers()`) — the 12.0 auth migration
+
+Jellyfin **12.0** (released 2026-09-08, straight after the 10.11.x line) turns
+*legacy authorization* off by default, and ships a migration that turns it off on
+existing installs too. Every authenticated call this portal made used one of the
+mechanisms it stopped reading, so all seven of them would have returned 401 against a
+12.0 server.
+
+- **`jellyfin_auth.auth_headers(token=None)` is the only place a Jellyfin request's
+  headers are built.** Every call site goes through it — `fetch_users`, the sign-in,
+  the token revocation, `fetch_jellyfin_status`, `search_jellyfin`,
+  `fetch_jellyfin_sessions`, `fetch_jellyfin_running_tasks`, and
+  `version_checks._fetch_direct_version`. That last one is the reason this is a rule
+  rather than a habit: it built its own header, lives in a different module from the
+  other six, and was missed on the first pass of the migration.
+- **The token goes inside the `Authorization` header, never in `X-Emby-Token`.** What
+  12.0 still reads is the `Authorization` header with the `MediaBrowser` scheme
+  (`Token="..."` inside it) and the **`ApiKey`** query parameter. What it ignores by
+  default: the `X-Emby-Token`, `X-MediaBrowser-Token` and `X-Emby-Authorization`
+  headers, the lowercase **`api_key`** query parameter, and the `Emby` scheme. Note
+  the two query parameters differ only in case and one of them still works — that is
+  a genuinely easy thing to misread.
+- **This is not a 12.0-only form, so there is no version sniffing and no fallback.**
+  Reading Jellyfin's own `AuthorizationContext.cs` at v10.6.4, v10.7.7, v10.8.13,
+  v10.10.7, v10.11.11 and v12.0, `Token=` inside the `Authorization` header is the
+  **first** branch every one of those versions checks. That is why the legacy headers
+  were dropped outright rather than sent alongside: on every Jellyfin that ever read
+  them, this header won anyway. Don't reintroduce them "just in case" — they are
+  scheduled for removal entirely in a later release.
+- **`/Users/AuthenticateByName` takes no token but still needs the header.** It is the
+  one call that authenticates nobody, and 12.0 still wants the
+  Client/Device/DeviceId/Version fields from the `MediaBrowser` scheme — which is also
+  what keeps the portal a single named device in Jellyfin's device list (see
+  `DEVICE_ID`). Calling `auth_headers()` with no argument is that case.
+- **Two convention tests enforce this** (`tests/test_conventions.py`): no module may
+  use a legacy header, and no module other than `jellyfin_auth.py` may contain the
+  string `MediaBrowser Client=`. The second is the one that would have caught
+  `version_checks.py`. Both are exact string checks with no heuristics, so neither can
+  fire on innocent code.
+- **All eight endpoints this portal uses survive 12.0 and none are deprecated** —
+  `/System/Info`, `/System/ActivityLog/Entries`, `/Users`, `/Users/AuthenticateByName`,
+  `/Sessions`, `/Sessions/Logout`, `/ScheduledTasks`, `/Items` — checked against the
+  official `jellyfin-openapi-stable.json`, which now reports version `12.0.0`. If you
+  add a Jellyfin call, check it against that document first: 12.0's stated policy is
+  that **an endpoint absent from the OpenAPI spec must not be used by clients** and
+  may be removed in any major release without warning.
+- **`GetItems` changed behaviour in 12.0** — it now applies `recursive` when filters
+  are requested, for requests that include `includeItemTypes`, so the same query can
+  return a different set than it did on 10.11. `search_jellyfin()` already passes both
+  `Recursive=true` and `IncludeItemTypes`, so it is unaffected; a *new* `/Items` caller
+  is the thing to check.
+- **Verified against a stand-in that enforces 12.0's rules, not a real server.** This
+  sandbox has no Jellyfin, so `tests/` plus a live driver reproduce
+  `AuthorizationContext.cs`'s exact token-resolution order with legacy authorization
+  off — including proving the *old* header is rejected by it. That validates the header
+  format and the call sites; it cannot validate anything about a real 12.0 install's
+  behaviour beyond authorization. See `docs/HISTORY.md`.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
