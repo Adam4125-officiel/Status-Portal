@@ -70,9 +70,16 @@ KNOWN_APPS = {
 # Note the project formerly known as Jellyseerr is now **Seerr** (seerr-team/seerr).
 # The integration *kind* stays "jellyseerr" because it's stored in every existing
 # database; only what's displayed changes.
+#
+# gamesportal is a sibling project (same author/server), tags its GitHub releases
+# v-prefixed with the same v-X.Y.Z[-rc.N] shape this project's own tags use (checked
+# against its repo directly, not assumed) - parse_version()/_fetch_latest_release()
+# above already strip the leading "v" and any "-rc.N"/"+build" suffix, so no special
+# handling was needed to add it here.
 DIRECT_APPS = {
     "jellyfin": ("Jellyfin", "jellyfin/jellyfin", "/System/Info", "Version"),
     "jellyseerr": ("Seerr", "seerr-team/seerr", "/api/v1/status", "version"),
+    "gamesportal": ("Games Portal", "Adam4125-officiel/Games-Portal", "/health", "version"),
 }
 
 

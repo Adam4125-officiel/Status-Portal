@@ -38,6 +38,7 @@ def fetch_integration_status(integration):
         "tdarr": fetch_tdarr_status,
         "byparr": fetch_byparr_status,
         "qbittorrent": fetch_qbittorrent_status,
+        "gamesportal": fetch_gamesportal_status,
     }
     fn = fetchers.get(integration["kind"])
     if not fn:
@@ -161,6 +162,36 @@ def fetch_byparr_status(base_url, api_key):
     if not r.ok:
         return {"reachable": False, "version": None, "issues": [], "error": f"Unexpected status {r.status_code}"}
     return {"reachable": True, "version": None, "issues": [], "error": None}
+
+
+def fetch_gamesportal_status(base_url, api_key):
+    """Games Portal - a sibling project on the same server (a Steam game request
+    portal) - exposes GET /health, requiring the standard X-Api-Key header (like
+    most integrations here, not Bazarr's query-param exception). Always 200 with a
+    valid key while the app is up: {"status": "ok", "version": "1.1.0",
+    "pending_requests": 0}. A 401 for a missing/wrong key therefore falls through
+    raise_for_status() into the same RequestException branch every other fetcher
+    here uses - a real integration error, not a special "unreachable" case.
+    pending_requests is informational only, surfaced as an issue so it's visible
+    on the Integrations page - it never affects reachable/degraded, since a queue
+    of pending requests isn't something wrong with the app."""
+    base_url = base_url.rstrip("/")
+    headers = {"X-Api-Key": api_key}
+    try:
+        r = requests.get(f"{base_url}/health", headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        return {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    except ValueError:
+        return {"reachable": False, "version": None, "issues": [], "error": "Unexpected (non-JSON) response"}
+
+    issues = []
+    pending = data.get("pending_requests")
+    if isinstance(pending, int) and pending > 0:
+        issues.append({"level": "warning",
+                        "message": f"{pending} pending request(s) waiting for review"})
+    return {"reachable": True, "version": data.get("version"), "issues": issues, "error": None}
 
 
 def fetch_jellyfin_status(base_url, api_key):
