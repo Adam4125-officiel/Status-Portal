@@ -680,11 +680,12 @@ def init_db():
     _ensure_column(conn, "user_preferences", "notify_email_announcements", "INTEGER NOT NULL DEFAULT 1")
     # Games Portal (a sibling project) delegates its own notifications through this
     # portal's /api/notify/user - see CLAUDE.md's "Cross-repo: gamesportal" section.
-    # Its own column rather than reusing notify_email_requests: that one is Seerr's
-    # "something you requested" concept, and a user may want one without the other.
-    # Off by default, same reasoning as notify_email_maintenance - this is chatty by
-    # nature. Discord DM is deliberately not wired up yet (no column here for it).
+    # Its own columns rather than reusing notify_requests/notify_discord_requests:
+    # those are Seerr's "something you requested" concept, and a user may want one
+    # without the other. Off by default, same reasoning as notify_email_maintenance -
+    # this is chatty by nature.
     _ensure_column(conn, "user_preferences", "notify_email_gamesportal", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "user_preferences", "notify_discord_gamesportal", "INTEGER NOT NULL DEFAULT 0")
     # The announcement display window. Empty on every pre-existing row, which is the
     # "no bound" sentinel, so an install upgrading into this shows exactly what it
     # showed before - nothing silently expires on upgrade.
@@ -2292,6 +2293,7 @@ DEFAULT_USER_PREFERENCES = {
     "contact_prompt_dismissed": False,
     "notify_email_announcements": True,
     "notify_email_gamesportal": False,
+    "notify_discord_gamesportal": False,
 }
 
 
@@ -2305,7 +2307,7 @@ NOTIFICATION_TOGGLE_FIELDS = (
     "notify_email_reports", "notify_email_requests", "notify_email_maintenance",
     "notify_email_announcements", "notify_email_gamesportal",
     "notify_discord_reports", "notify_discord_requests", "notify_discord_maintenance",
-    "notify_discord_seerr_events",
+    "notify_discord_seerr_events", "notify_discord_gamesportal",
 )
 
 NOTIFICATION_TOGGLE_LABELS = {
@@ -2318,6 +2320,7 @@ NOTIFICATION_TOGGLE_LABELS = {
     "notify_discord_requests": ("Discord DM", "When something requested becomes available"),
     "notify_discord_maintenance": ("Discord DM", "Maintenance on any service"),
     "notify_discord_seerr_events": ("Discord DM", "Seerr events — approvals, declines, availability, and issues"),
+    "notify_discord_gamesportal": ("Discord DM", "Game requests from Games Portal"),
 }
 
 NOTIFY_DEFAULT_SETTING_PREFIX = "notify_default_"
@@ -2370,6 +2373,7 @@ def get_user_preferences(user_id):
         prefs["contact_prompt_dismissed"] = bool(row["contact_prompt_dismissed"])
         prefs["notify_email_announcements"] = bool(row["notify_email_announcements"])
         prefs["notify_email_gamesportal"] = bool(row["notify_email_gamesportal"])
+        prefs["notify_discord_gamesportal"] = bool(row["notify_discord_gamesportal"])
     else:
         # No row means genuinely unconfigured, not "agrees with the defaults" - see
         # notification_defaults()'s docstring.
@@ -2393,6 +2397,7 @@ _USER_PREFERENCE_FIELDS = {
     "notify_discord_seerr_events": lambda v: int(bool(v)),
     "notify_email_announcements": lambda v: int(bool(v)),
     "notify_email_gamesportal": lambda v: int(bool(v)),
+    "notify_discord_gamesportal": lambda v: int(bool(v)),
     "seerr_user_id": str,
     "contact_prompt_dismissed": lambda v: int(bool(v)),
 }

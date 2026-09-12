@@ -69,19 +69,29 @@ def test_gamesportal_request_is_gated_by_its_own_column_not_requests(enabled):
     assert db.get_user_preferences("wants_games")["notify_email_gamesportal"] is True
 
 
-def test_gamesportal_request_has_no_discord_channel_yet(enabled, monkeypatch):
-    """Discord DM to the individual requester is explicitly deferred - a gamesportal_
-    request notification must never go out over Discord even if the person has a
-    Discord ID on file and every other event's Discord toggle on."""
-    db.set_user_preferences("u1", notify_email="me@example.invalid", notify_discord_id="123",
-                             notify_email_gamesportal=True)
+def test_gamesportal_request_discord_dm_is_gated_by_its_own_column(enabled, monkeypatch):
+    """notify_discord_gamesportal is its own toggle, separate from
+    notify_discord_requests (Seerr's concept) and independent of the email half -
+    someone can want one channel without the other."""
+    db.set_user_preferences("u1", notify_discord_id="123", notify_discord_gamesportal=True,
+                             notify_discord_requests=False)
     dms = []
     monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
-    monkeypatch.setattr(notifications, "send_email", lambda s, b, recipients=None: True)
+    user_notify.notify_user("u1", "gamesportal_request", "New request", "Body")
+    user_notify.run_delivery_task()
+    assert dms == ["123"]
+
+
+def test_gamesportal_request_discord_dm_off_by_default(enabled, monkeypatch):
+    """Both notify_email_gamesportal and notify_discord_gamesportal default off, same
+    reasoning as notify_email_maintenance - this is chatty by nature."""
+    db.set_user_preferences("u1", notify_discord_id="123")
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
     user_notify.notify_user("u1", "gamesportal_request", "New request", "Body")
     user_notify.run_delivery_task()
     assert dms == []
-    assert db.notification_queue_summary()["sent"] == 1
+    assert db.notification_queue_summary()["sent"] == 1  # still "delivered": nowhere to send it
 
 
 def test_service_events_go_only_to_people_who_opted_in(enabled):

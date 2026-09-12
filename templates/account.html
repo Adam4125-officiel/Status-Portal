@@ -209,6 +209,10 @@
           <input type="checkbox" name="notify_discord_seerr_events" {{ 'checked' if prefs.notify_discord_seerr_events }}>
           Seerr events — approvals, declines, availability, and issues
         </label>
+        <label class="field-check">
+          <input type="checkbox" name="notify_discord_gamesportal" {{ 'checked' if prefs.notify_discord_gamesportal }}>
+          Game requests from Games Portal
+        </label>
       </div>
     </div>
     {% endif %}

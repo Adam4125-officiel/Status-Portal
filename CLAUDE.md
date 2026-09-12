@@ -2759,14 +2759,16 @@ directly (cross-session messaging), not guessed at from either side.
   switched off portal-wide is checked *before* enqueueing (same reason, surfaced
   earlier) rather than silently queueing something that can never deliver.
 - **`"gamesportal_request"` is a genuinely new event**, with its own preference
-  column `notify_email_gamesportal` (default off, same reasoning as
-  `notify_email_maintenance` - this is chatty by nature) - deliberately *not*
-  folded into `notify_requests`/`notify_email_requests`, which is Seerr's "something
-  you requested" concept; a person may want one without the other. Discord is
-  `None` in `EVENT_CHANNEL_PREFERENCE` for this event on purpose - a per-requester
-  Discord DM is explicitly deferred to a later batch, agreed on both sides. Wired
-  into `/account` (and therefore `/admin/users/<id>/account`, which shares the same
-  template and save path) like every other per-channel toggle.
+  columns `notify_email_gamesportal`/`notify_discord_gamesportal` (both default
+  off, same reasoning as `notify_email_maintenance` - this is chatty by nature) -
+  deliberately *not* folded into `notify_requests`/`notify_discord_requests`,
+  which is Seerr's "something you requested" concept; a person may want one
+  without the other. **Discord was initially left as `None` here** (a
+  per-requester DM explicitly deferred, agreed on both sides during the first
+  batch) and wired up as a same-day follow-up once the user asked for it - added
+  2026-09-12, after the cross-repo test above had already shipped as `-rc.1`.
+  Wired into `/account` (and therefore `/admin/users/<id>/account`, which shares
+  the same template and save path) like every other per-channel toggle.
 - **Both routes authenticate with one new static shared secret**
   (`NOTIFY_API_KEY_SETTING = "notify_api_key"`, a `settings` row, checked with
   `secrets.compare_digest` against the `X-Api-Key` header), generated and
@@ -2832,7 +2834,10 @@ right file. Jellyfin-backed sign-in (`jellyfin_auth.py`) was **off** on the dev
 instance used for all of this testing - `/api/notify/user` degrades correctly
 either way (it just has nobody real to resolve against without it), but this is
 worth checking on the actual production install before relying on
-`notify_email_gamesportal` reaching anyone for real.
+`notify_email_gamesportal`/`notify_discord_gamesportal` reaching anyone for real.
+The Discord half specifically (added after this round of cross-repo testing, see
+above) has only unit/route test coverage - not re-run against a live Games Portal
+instance the way the email path was.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

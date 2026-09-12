@@ -2023,7 +2023,7 @@ def user_login():
     return render_template("user_login.html", next_url=next_url)
 
 
-# The 9 checkbox names the account-settings form submits, shared by the visitor's own
+# The 10 checkbox names the account-settings form submits, shared by the visitor's own
 # POST handler and the admin-viewing-a-user's-account route (see
 # admin_user_account()) - one place naming the fields so the two can't drift apart.
 def _save_account_prefs(user_id, form):
@@ -2039,7 +2039,8 @@ def _save_account_prefs(user_id, form):
         notify_discord_maintenance=bool(form.get("notify_discord_maintenance")),
         notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")),
         notify_email_announcements=bool(form.get("notify_email_announcements")),
-        notify_email_gamesportal=bool(form.get("notify_email_gamesportal")))
+        notify_email_gamesportal=bool(form.get("notify_email_gamesportal")),
+        notify_discord_gamesportal=bool(form.get("notify_discord_gamesportal")))
 
 
 @app.route("/account", methods=["GET", "POST"])
