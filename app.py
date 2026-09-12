@@ -284,6 +284,16 @@ def _inject_branding():
 
 
 @app.context_processor
+def _inject_portal_version():
+    """Exposes the running version to every template (currently just the public
+    footer) without threading it through every route that renders public_base.html -
+    same reasoning as _inject_branding()/csrf_token() being globals rather than
+    hand-passed. VERSION_DISPLAY, not bare VERSION, so a +dev source checkout reads
+    as one - same value the About page already shows the admin."""
+    return {"portal_version_display": config.VERSION_DISPLAY}
+
+
+@app.context_processor
 def _inject_portal_user():
     """Who (if anyone) is signed in, plus whether the feature is on at all - needed
     by the public topbar, the report form and the sign-in page itself, so it goes
