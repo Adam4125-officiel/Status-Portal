@@ -1565,6 +1565,82 @@ def api_maintenance_history():
     return render_template("sections/_maintenance_fragment.html", windows=windows, history=True)
 
 
+# ---------------------------------------------------------------------------
+# Notification delegation API - lets a sibling app (currently: gamesportal) deliver
+# its own notifications through this portal's existing Discord/email machinery
+# instead of building its own. See CLAUDE.md's "Cross-repo: gamesportal" section.
+#
+# Authenticated with a static shared secret (NOTIFY_API_KEY_SETTING, see
+# /admin/notifications) checked with secrets.compare_digest against the X-Api-Key
+# header - deliberately NOT covered by the session-cookie CSRF mechanism
+# (_csrf_required_for()): CSRF defends against a browser's *ambient* session
+# credentials being exploited by another site, and there is no session here at all -
+# a cross-site page cannot make a victim's browser send a custom X-Api-Key header it
+# doesn't know, so the key itself is the entire defence. See
+# tests/test_conventions.py's public_post_exceptions for where this is made explicit.
+# ---------------------------------------------------------------------------
+NOTIFY_API_SUBJECT_MAX_LENGTH = 200
+NOTIFY_API_BODY_MAX_LENGTH = 2000
+
+
+def _check_notify_api_key():
+    """None when the request's X-Api-Key header matches the stored key, otherwise a
+    ready-to-return 401 response - same call pattern as _require_totp()."""
+    stored = db.get_setting(NOTIFY_API_KEY_SETTING, "")
+    submitted = request.headers.get("X-Api-Key", "")
+    if not stored or not submitted or not secrets.compare_digest(stored, submitted):
+        return jsonify({"error": "Missing or invalid API key"}), 401
+    return None
+
+
+@app.route("/api/notify/admin", methods=["POST"])
+def api_notify_admin():
+    """Routes straight into notifications.notify() - the same admin fan-out
+    (Discord webhook, ntfy, admin email list) a real incident/maintenance alert
+    already uses. No new delivery code: this is just an authenticated front door onto
+    the existing function, which is itself fire-and-forget and never raises - so a
+    200 here means "accepted and dispatched," not "confirmed delivered", exactly like
+    the "Send test notification" button."""
+    blocked = _check_notify_api_key()
+    if blocked:
+        return blocked
+    data = request.get_json(silent=True) or {}
+    subject = str(data.get("subject") or "").strip()[:NOTIFY_API_SUBJECT_MAX_LENGTH]
+    body = str(data.get("body") or "").strip()[:NOTIFY_API_BODY_MAX_LENGTH]
+    if not subject or not body:
+        return jsonify({"error": "subject and body are required"}), 400
+    notifications.notify(subject, body)
+    return jsonify({"status": "sent"}), 200
+
+
+@app.route("/api/notify/user", methods=["POST"])
+def api_notify_user():
+    """Queues a per-user notification via user_notify.notify_user() - delivered later
+    by the existing user_notifications scheduled task, not from this request, same as
+    every other per-user notification in this app. An unmatched/unlinked Jellyfin
+    user, or one with every applicable channel switched off, is not an error here any
+    more than it is anywhere else in this system - it resolves through the normal
+    user_notify.contact_for()/EVENT_CHANNEL_PREFERENCE machinery and "nowhere to send
+    it" is reported back as such, not as a failure."""
+    blocked = _check_notify_api_key()
+    if blocked:
+        return blocked
+    data = request.get_json(silent=True) or {}
+    jellyfin_user_id = str(data.get("jellyfin_user_id") or "").strip()
+    event = str(data.get("event") or "").strip()
+    subject = str(data.get("subject") or "").strip()[:NOTIFY_API_SUBJECT_MAX_LENGTH]
+    body = str(data.get("body") or "").strip()[:NOTIFY_API_BODY_MAX_LENGTH]
+    if not jellyfin_user_id or not event or not subject or not body:
+        return jsonify({"error": "jellyfin_user_id, event, subject and body are required"}), 400
+    if event not in user_notify.EVENT_CHANNEL_PREFERENCE:
+        return jsonify({"error": f"Unknown event: {event}"}), 400
+    if not user_notify.is_enabled():
+        return jsonify({"status": "not_queued",
+                        "reason": "Per-user notifications are switched off on this portal"}), 200
+    notification_id = user_notify.notify_user(jellyfin_user_id, event, subject, body)
+    return jsonify({"status": "queued", "notification_id": notification_id}), 200
+
+
 def compute_overall_status(services):
     """A service with ignore_in_overall_status set still shows its own real status on
     its own card - it's only excluded here, from the aggregate banner. E.g. an
@@ -1937,7 +2013,7 @@ def user_login():
     return render_template("user_login.html", next_url=next_url)
 
 
-# The 8 checkbox names the account-settings form submits, shared by the visitor's own
+# The 9 checkbox names the account-settings form submits, shared by the visitor's own
 # POST handler and the admin-viewing-a-user's-account route (see
 # admin_user_account()) - one place naming the fields so the two can't drift apart.
 def _save_account_prefs(user_id, form):
@@ -1952,7 +2028,8 @@ def _save_account_prefs(user_id, form):
         notify_discord_requests=bool(form.get("notify_discord_requests")),
         notify_discord_maintenance=bool(form.get("notify_discord_maintenance")),
         notify_discord_seerr_events=bool(form.get("notify_discord_seerr_events")),
-        notify_email_announcements=bool(form.get("notify_email_announcements")))
+        notify_email_announcements=bool(form.get("notify_email_announcements")),
+        notify_email_gamesportal=bool(form.get("notify_email_gamesportal")))
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -3973,6 +4050,16 @@ def admin_settings_general():
 
 
 # ---- Notifications ----
+# The shared secret external services (currently: the gamesportal integration) present
+# via X-Api-Key to POST /api/notify/admin and /api/notify/user - see those routes below
+# and CLAUDE.md's "Cross-repo: gamesportal" section. Deliberately a DB setting rather
+# than a PORTAL_* env var: it's generated and shown by this app, not typed in by the
+# admin, and the standard config split reserves env vars for things read from .env -
+# same reasoning as asset_cache_salt/the CSRF token being settings-table/session rather
+# than config.py.
+NOTIFY_API_KEY_SETTING = "notify_api_key"
+
+
 @app.route("/admin/notifications", methods=["GET", "POST"])
 @login_required
 def admin_notifications():
@@ -3992,6 +4079,7 @@ def admin_notifications():
                             email_host_configured=bool(config.SMTP_HOST),
                             legacy_env_recipients=bool(config.SMTP_TO)
                                 and not db.get_setting(notifications.RECIPIENTS_SETTING, "").strip(),
+                            notify_api_key=db.get_setting(NOTIFY_API_KEY_SETTING, ""),
                             active="notifications")
 
 
@@ -4113,6 +4201,21 @@ def admin_notifications_test():
                           "notifications are working.")
     flash("Test notification sent. Check your channel(s) - delivery failures are "
           "logged, not reported back here.", "success")
+    return redirect(url_for("admin_notifications"))
+
+
+@app.route("/admin/notifications/api-key/regenerate", methods=["POST"])
+@login_required
+def admin_notifications_regenerate_api_key():
+    """Generates a fresh key for /api/notify/* and throws the old one away outright -
+    there is no "current + previous" grace period, since the only caller (currently:
+    gamesportal) has to be handed the new value out of band anyway before it can use
+    it again. Shown in plain text on the page afterwards, same as this is the only
+    place it's ever displayed - there's nothing else in this admin panel to mask it
+    from."""
+    db.set_setting(NOTIFY_API_KEY_SETTING, secrets.token_hex(24))
+    flash("New API key generated. The old key stopped working immediately - update "
+          "anything using it.", "success")
     return redirect(url_for("admin_notifications"))
 
 
