@@ -105,4 +105,29 @@
     {% endif %}
   </form>
 </div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">External notification API</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    Lets another app on your server (currently: Games Portal) deliver its own
+    notifications through this portal's channels above, instead of running its own
+    Discord/email setup. It POSTs to <code>/api/notify/admin</code> (goes to the admin
+    channels above) or <code>/api/notify/user</code> (queued for one signed-in visitor,
+    subject to their own notification preferences on their account page), with this key
+    in an <code>X-Api-Key</code> header.
+  </p>
+  {% if notify_api_key %}
+    <div class="field">
+      <label for="notify_api_key">Current key</label>
+      <input type="text" id="notify_api_key" name="notify_api_key" value="{{ notify_api_key }}" readonly onclick="this.select()">
+      <div class="field-hint">Give this to the other app's admin settings, not to end users.</div>
+    </div>
+  {% else %}
+    <p class="field-hint">No key generated yet - the API refuses every request until one exists.</p>
+  {% endif %}
+  <form method="POST" action="{{ url_for('admin_notifications_regenerate_api_key') }}"
+        onsubmit="return {{ 'confirm(\'Generate a new key? The current one will stop working immediately.\')' if notify_api_key else 'true' }}">
+    <button type="submit" class="btn secondary">{{ 'Regenerate key' if notify_api_key else 'Generate key' }}</button>
+  </form>
+</div>
 {% endblock %}

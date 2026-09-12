@@ -225,15 +225,23 @@ def test_every_post_route_is_csrf_covered_or_a_known_public_exception():
     route added *outside* /admin/ silently gets no protection at all.
 
     The hook delegates to app._csrf_required_for(path, method), which covers
-    everything under /admin/ plus an explicit set of public paths. /report is the one
-    remaining deliberate exception, and only while nobody is signed in: its original
+    everything under /admin/ plus an explicit set of public paths. /report is one
+    deliberate exception, and only while nobody is signed in: its original
     justification was that it exercises no authenticated privilege, which stops being
     true once a report is attributable to a Jellyfin user, so it becomes protected
     exactly then (see report_problem() and _report_login_required()).
 
-    Adding a second unprotected public POST route is a decision to make on purpose,
+    /api/notify/admin and /api/notify/user are the other two, unconditionally: they
+    authenticate with a static X-Api-Key header (app._check_notify_api_key()), not a
+    session cookie, so there is no ambient browser credential for a cross-site request
+    to exploit in the first place - the session-based CSRF concept this hook defends
+    against doesn't apply to a machine-to-machine bearer secret, and the key itself is
+    the anti-abuse measure (see the module docstring above api_notify_admin() in
+    app.py).
+
+    Adding a further unprotected public POST route is a decision to make on purpose,
     which is what this test forces."""
-    public_post_exceptions = {"/report"}
+    public_post_exceptions = {"/report", "/api/notify/admin", "/api/notify/user"}
     unprotected = set()
     with app_module.app.test_request_context("/"):
         for rule in app_module.app.url_map.iter_rules():

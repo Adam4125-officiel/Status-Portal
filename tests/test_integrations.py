@@ -59,6 +59,10 @@ def test_fetch_integration_status_dispatch():
         {"kind": "arr", "base_url": "http://localhost:1", "api_key": "x"}
     )["reachable"] is False
 
+    assert integrations.fetch_integration_status(
+        {"kind": "gamesportal", "base_url": "http://localhost:1", "api_key": "x"}
+    )["reachable"] is False
+
     result = integrations.fetch_integration_status({"kind": "unknown", "base_url": "x", "api_key": "y"})
     assert "Unknown integration kind" in result["error"]
 
@@ -118,6 +122,45 @@ def test_fetch_tdarr_status_good_has_no_issues():
     with patch("requests.get", return_value=resp):
         result = integrations.fetch_tdarr_status("http://tdarr:8265", "")
     assert result["issues"] == []
+
+
+def test_fetch_gamesportal_status_unreachable():
+    result = integrations.fetch_gamesportal_status("http://localhost:1", "fake-key")
+    assert result["reachable"] is False
+    assert result["error"]
+
+
+def test_fetch_gamesportal_status_healthy_no_pending():
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value={"status": "ok", "version": "1.1.0", "pending_requests": 0})
+    with patch("requests.get", return_value=resp) as mock_get:
+        result = integrations.fetch_gamesportal_status("http://gamesportal:8080", "key")
+    assert result == {"reachable": True, "version": "1.1.0", "issues": [], "error": None}
+    # Standard X-Api-Key header, like most integrations here - not Bazarr's query-param
+    # exception.
+    assert mock_get.call_args.kwargs["headers"] == {"X-Api-Key": "key"}
+
+
+def test_fetch_gamesportal_status_surfaces_pending_requests_as_an_issue():
+    resp = Mock(status_code=200)
+    resp.raise_for_status = Mock()
+    resp.json = Mock(return_value={"status": "ok", "version": "1.1.0", "pending_requests": 3})
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_gamesportal_status("http://gamesportal:8080", "key")
+    assert result["reachable"] is True
+    assert result["issues"] == [{"level": "warning", "message": "3 pending request(s) waiting for review"}]
+
+
+def test_fetch_gamesportal_status_wrong_key_is_a_real_error_not_unreachable():
+    """A 401 falls through raise_for_status() into the same RequestException branch
+    every other fetcher here uses - a real integration error, not treated specially."""
+    resp = Mock(status_code=401)
+    resp.raise_for_status = Mock(side_effect=requests.HTTPError("401 Client Error"))
+    with patch("requests.get", return_value=resp):
+        result = integrations.fetch_gamesportal_status("http://gamesportal:8080", "wrong-key")
+    assert result["reachable"] is False
+    assert "401" in result["error"]
 
 
 def test_fetch_byparr_status_unreachable():

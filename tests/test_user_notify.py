@@ -55,6 +55,45 @@ def test_an_unknown_event_is_refused(enabled):
         user_notify.notify_user("u1", "made_up_event", "s", "b")
 
 
+def test_gamesportal_request_is_gated_by_its_own_column_not_requests(enabled):
+    """notify_email_gamesportal is deliberately separate from notify_email_requests -
+    that one is Seerr's "something you requested" concept, and a user may want one
+    without the other."""
+    db.set_user_preferences("wants_games", notify_email_gamesportal=True, notify_email_requests=False)
+    db.set_user_preferences("wants_seerr_only", notify_email_gamesportal=False, notify_email_requests=True)
+    user_notify.notify_user("wants_games", "gamesportal_request", "New request", "Body")
+    user_notify.notify_user("wants_seerr_only", "gamesportal_request", "New request", "Body")
+    assert db.notification_queue_summary()["pending"] == 2  # both queued...
+    user_notify.run_delivery_task()
+    # ...but only the one who actually opted into this event gets it delivered.
+    assert db.get_user_preferences("wants_games")["notify_email_gamesportal"] is True
+
+
+def test_gamesportal_request_discord_dm_is_gated_by_its_own_column(enabled, monkeypatch):
+    """notify_discord_gamesportal is its own toggle, separate from
+    notify_discord_requests (Seerr's concept) and independent of the email half -
+    someone can want one channel without the other."""
+    db.set_user_preferences("u1", notify_discord_id="123", notify_discord_gamesportal=True,
+                             notify_discord_requests=False)
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    user_notify.notify_user("u1", "gamesportal_request", "New request", "Body")
+    user_notify.run_delivery_task()
+    assert dms == ["123"]
+
+
+def test_gamesportal_request_discord_dm_off_by_default(enabled, monkeypatch):
+    """Both notify_email_gamesportal and notify_discord_gamesportal default off, same
+    reasoning as notify_email_maintenance - this is chatty by nature."""
+    db.set_user_preferences("u1", notify_discord_id="123")
+    dms = []
+    monkeypatch.setattr(discord_bot, "send_dm", lambda uid, text: (dms.append(uid), (True, ""))[1])
+    user_notify.notify_user("u1", "gamesportal_request", "New request", "Body")
+    user_notify.run_delivery_task()
+    assert dms == []
+    assert db.notification_queue_summary()["sent"] == 1  # still "delivered": nowhere to send it
+
+
 def test_service_events_go_only_to_people_who_opted_in(enabled):
     """"Anything about services I use" defaults off - nobody wants a message for every
     maintenance window on every service."""
@@ -222,6 +261,128 @@ def test_admin_notification_override_route_rejects_a_bad_field(client):
     resp = client.post("/admin/notifications/users/override",
                        data={"field": "notify_email"}, follow_redirects=True)
     assert b"Unknown setting" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# The external notification API (gamesportal delegation) - app.py's
+# /api/notify/admin and /api/notify/user, and the admin key that guards them.
+# ---------------------------------------------------------------------------
+def test_notifications_page_shows_no_key_until_one_is_generated(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    resp = client.get("/admin/notifications")
+    assert b"No key generated yet" in resp.data
+    assert b"Generate key" in resp.data
+
+
+def test_regenerating_the_api_key_changes_it_and_invalidates_the_old_one(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/notifications/api-key/regenerate")
+    first = db.get_setting(app_module.NOTIFY_API_KEY_SETTING, "")
+    assert first
+
+    resp = client.post("/api/notify/admin", json={"event": "x", "subject": "s", "body": "b"},
+                       headers={"X-Api-Key": first})
+    assert resp.status_code == 200
+
+    client.post("/admin/notifications/api-key/regenerate")
+    second = db.get_setting(app_module.NOTIFY_API_KEY_SETTING, "")
+    assert second != first
+
+    resp = client.post("/api/notify/admin", json={"event": "x", "subject": "s", "body": "b"},
+                       headers={"X-Api-Key": first})
+    assert resp.status_code == 401
+
+
+def test_notify_admin_requires_a_valid_key(isolated_db):
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/admin", json={"event": "x", "subject": "s", "body": "b"})
+        assert resp.status_code == 401
+
+        db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+        resp = client.post("/api/notify/admin", json={"event": "x", "subject": "s", "body": "b"},
+                           headers={"X-Api-Key": "wrong"})
+        assert resp.status_code == 401
+
+
+def test_notify_admin_dispatches_through_the_real_notify_function(isolated_db, monkeypatch):
+    """No parallel delivery code - this must go through the exact same
+    notifications.notify() every incident/maintenance alert already uses."""
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+    calls = []
+    monkeypatch.setattr(notifications, "notify", lambda title, message: calls.append((title, message)))
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/admin",
+                           json={"event": "game_request_new", "subject": "New request",
+                                 "body": "Someone asked for a game"},
+                           headers={"X-Api-Key": "the-real-key"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "sent"}
+    assert calls == [("New request", "Someone asked for a game")]
+
+
+def test_notify_admin_rejects_a_blank_subject_or_body(isolated_db):
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/admin", json={"event": "x", "subject": "", "body": "b"},
+                           headers={"X-Api-Key": "the-real-key"})
+    assert resp.status_code == 400
+
+
+def test_notify_user_requires_a_valid_key(isolated_db):
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/user",
+                           json={"jellyfin_user_id": "u1", "event": "gamesportal_request",
+                                 "subject": "s", "body": "b"})
+        assert resp.status_code == 401
+
+
+def test_notify_user_rejects_an_unknown_event(isolated_db):
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+    db.set_setting("user_notifications_enabled", "1")
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/user",
+                           json={"jellyfin_user_id": "u1", "event": "made_up",
+                                 "subject": "s", "body": "b"},
+                           headers={"X-Api-Key": "the-real-key"})
+    assert resp.status_code == 400
+
+
+def test_notify_user_queues_when_enabled(isolated_db):
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+    db.set_setting("user_notifications_enabled", "1")
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/user",
+                           json={"jellyfin_user_id": "u1", "event": "gamesportal_request",
+                                 "subject": "New request", "body": "Someone asked for a game"},
+                           headers={"X-Api-Key": "the-real-key"})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "queued"
+    pending = db.pending_notifications()
+    assert len(pending) == 1
+    assert pending[0]["user_id"] == "u1"
+    assert pending[0]["event"] == "gamesportal_request"
+
+
+def test_notify_user_reports_not_queued_while_the_feature_is_off(isolated_db):
+    """Per-user notifications being switched off portal-wide isn't an error from
+    gamesportal's point of view - same "nowhere to send it" shape as everywhere else
+    in this system, just surfaced before enqueueing rather than at delivery time."""
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "the-real-key")
+    app_module.app.config["TESTING"] = True
+    with app_module.app.test_client() as client:
+        resp = client.post("/api/notify/user",
+                           json={"jellyfin_user_id": "u1", "event": "gamesportal_request",
+                                 "subject": "s", "body": "b"},
+                           headers={"X-Api-Key": "the-real-key"})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "not_queued"
+    assert db.notification_queue_summary()["pending"] == 0
 
 
 def test_a_failed_send_is_retried_then_given_up_on(enabled, monkeypatch):

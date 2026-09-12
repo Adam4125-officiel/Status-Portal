@@ -258,6 +258,19 @@ def test_seerr_version_comes_from_its_status_endpoint(direct_app, monkeypatch):
     assert result["update_available"] is False
 
 
+def test_gamesportal_version_comes_from_its_health_endpoint(direct_app, monkeypatch):
+    _DirectApp.payloads = {"/health": {"status": "ok", "version": "1.1.0", "pending_requests": 0}}
+    monkeypatch.setattr(version_checks, "_fetch_latest_release",
+                        lambda repo: ("1.2.0", "https://example/rel"))
+    result = version_checks.check_one(
+        {"id": 1, "name": "Games Portal", "kind": "gamesportal", "base_url": direct_app,
+         "api_key": "k", "enabled": 1})
+    assert result["app"] == "Games Portal"
+    assert result["repo"] == "Adam4125-officiel/Games-Portal"
+    assert result["installed"] == "1.1.0"
+    assert result["update_available"] is True
+
+
 def test_the_kind_identifies_the_app_so_the_name_is_irrelevant(direct_app, monkeypatch):
     """No appName lookup for these, so an integration called anything at all still
     resolves to the right project."""

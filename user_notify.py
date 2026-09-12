@@ -69,6 +69,12 @@ EVENT_CHANNEL_PREFERENCE = {
     # per-user DM, so there is no per-user Discord preference to gate it by. The email
     # half does fan out per-user (notify_service_subscribers()) and is gated normally.
     "announcement": {"email": "notify_email_announcements", "discord": None},
+    # Games Portal (a sibling project) delegates its own notifications through this
+    # portal - see /api/notify/user in app.py and CLAUDE.md. Its own columns, not
+    # notify_requests/notify_discord_requests: those are Seerr's "something you
+    # requested" concept, and a user may want one without the other.
+    "gamesportal_request": {"email": "notify_email_gamesportal",
+                            "discord": "notify_discord_gamesportal"},
 }
 
 
