@@ -23,6 +23,9 @@ the full feature list and integrations at a glance.
 - Optional Discord/ntfy/**email** notifications, plus an optional Discord bot
   (self-editing status message, `/snapshot` command, and a watchdog that reconnects
   it by itself if the connection drops)
+- Optional **per-user notifications** (email + Discord DM) for signed-in visitors, and
+  a **notification delegation API** so another app on your server can send through
+  these same channels instead of building its own
 - **Kiosk mode** — a full-screen display at `/kiosk` for a wall-mounted TV or a spare
   tablet, rotating through services, incidents, VMs and resources on a timer
 - **Log viewer** in the admin panel — recent entries with a level filter, and the
