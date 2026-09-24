@@ -2578,13 +2578,28 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   timeout here) so a slow Jellyfin can't hold a request thread; each source failing
   independently; and a distinct "search is unavailable right now" state that must never
   be collapsed into "nothing found" — one is a system problem, the other is an answer.
-- **Signed-in visitors only, plus a per-session rate limit.** Three separate reasons:
-  the result set reveals the whole library, requesting is a write against Seerr that has
-  to be attributable to a person, and a search box wired to two external APIs is a
-  free denial-of-service amplifier. The limit is **per session**, unlike `_login_state`
-  and `_report_state` which are process-global — those defend a route open to anonymous
-  strangers, where a shared counter is the point; this one is already behind a sign-in,
-  so a global counter would let one enthusiastic searcher lock everybody else out.
+- **Signed-in visitors only, plus a per-person rate limit and a concurrency cap.** Three
+  separate reasons: the result set reveals the whole library, requesting is a write
+  against Seerr that has to be attributable to a person, and a search box wired to two
+  external APIs is a free denial-of-service amplifier. The limit is **per person**
+  (keyed on the Jellyfin user id), unlike `_login_state` and `_report_state` which are
+  process-global — those defend a route open to anonymous strangers, where a shared
+  counter is the point; this one is already behind a sign-in, so a global counter
+  would let one enthusiastic searcher lock everybody else out.
+- **The limit lives server-side, never in the session.** It used to be a counter in
+  the cookie, and replaying an older cookie reset it (160 searches against a limit of
+  40). `media_search.outbound_call(user_id)` is now the one gate: a sliding window of
+  `SEARCH_RATE_LIMIT` calls per `SEARCH_RATE_WINDOW_SECONDS`, plus a bounded semaphore
+  of `MAX_CONCURRENT_OUTBOUND` (a third of `WAITRESS_THREADS`). Without the cap, a few
+  slow searches could hold every request thread and take the status page down with
+  them. Past the cap the caller gets the rate-limit message, and a busy refusal
+  doesn't cost them allowance. **Every route that makes one of these calls goes
+  through it**: `/search`, `/search/live`, `/search/detail`, `/search/request/configure`
+  (which had no limit at all before) and `/search/request`. Checking, taking a slot and
+  recording happen under one lock, and the slot is released on the semaphore that was
+  acquired, because `clear_caches()` swaps it. The admin clear-caches button
+  deliberately doesn't call `media_search.clear_caches()`, same as login/report
+  throttling.
 - **The Seerr search query must be percent-encoded, not form-encoded.** Seerr proxies
   search to TMDB, and TMDB rejects `+` with HTTP 400 *"Parameter 'query' must be url
   encoded. Its value may not contain reserved characters."* — so `params={"query": ...}`

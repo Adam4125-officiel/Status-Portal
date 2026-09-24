@@ -391,7 +391,7 @@ ADMIN_SESSION_EPOCH_SETTING = "admin_session_epoch"
 # CSRF token is regenerated); the visitor's Jellyfin sign-in and its per-session
 # state are a separate identity and aren't the admin login's to end.
 _VISITOR_SESSION_KEYS = ("portal_user", "portal_user_last_seen", "recent_requests",
-                          "report_form_rendered_at", "search_count", "search_window_start")
+                          "report_form_rendered_at")
 # What a revoked admin session loses. Deliberately not session.clear(), for the same
 # reason: a revoked admin cookie in a browser also signed in as a visitor keeps the
 # visitor session. csrf_token stays because visitor forms use it too.
@@ -2342,7 +2342,8 @@ MIN_LIVE_QUERY_LENGTH = 3
 # before a second POST is ever sent) and Seerr's own duplicate check answers 409 (which
 # stops it across devices and sessions) - but a browser resending a POST minutes later
 # reaches neither. Kept in the session rather than a module-level dict because the
-# meaningful unit is one person's browser, exactly like _search_rate_limited().
+# meaningful unit is one person's browser: this guards against a resubmission, not
+# against abuse, which is what media_search.outbound_call()'s server-side limit is for.
 REQUEST_REPEAT_WINDOW_SECONDS = 60
 # Bounded because the session is a cookie: this rides along on every response, so it
 # must not grow with how much somebody searches for.
@@ -2379,18 +2380,6 @@ def _forget_submitted_request(key):
         session["recent_requests"] = recent
 
 
-def _search_rate_limited():
-    now = time.time()
-    if now - session.get("search_window_start", 0) > config.SEARCH_RATE_WINDOW_SECONDS:
-        session["search_window_start"] = now
-        session["search_count"] = 0
-    return session.get("search_count", 0) >= config.SEARCH_RATE_LIMIT
-
-
-def _register_search():
-    session["search_count"] = session.get("search_count", 0) + 1
-
-
 @app.route("/search")
 @user_login_required
 def search():
@@ -2411,11 +2400,10 @@ def search():
     limited = False
 
     if query:
-        if _search_rate_limited():
-            limited = True
-        else:
-            _register_search()
-            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        with media_search.outbound_call(user["id"]) as allowed:
+            if allowed:
+                outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        limited = not allowed
 
     return render_template("search.html", query=query, outcome=outcome,
                             rate_limited=limited,
@@ -2436,8 +2424,8 @@ def search_live():
     live results and the submitted results provably identical - they're the same
     template.
 
-    Behind the same sign-in and the same per-session rate limit as /search, because it
-    makes exactly the same outbound calls."""
+    Behind the same sign-in and the same rate limit as /search, because it makes
+    exactly the same outbound calls."""
     user = current_user()
     query = request.args.get("q", "").strip()[:100]
     outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
@@ -2446,11 +2434,10 @@ def search_live():
     # Below the minimum, answer with nothing rather than searching two APIs for "a".
     # The client enforces this too; this is the half that can't be bypassed.
     if len(query) >= MIN_LIVE_QUERY_LENGTH:
-        if _search_rate_limited():
-            limited = True
-        else:
-            _register_search()
-            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        with media_search.outbound_call(user["id"]) as allowed:
+            if allowed:
+                outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        limited = not allowed
 
     return render_template("sections/_search_results.html", query=query, outcome=outcome,
                             rate_limited=limited,
@@ -2463,17 +2450,17 @@ def search_live():
 def search_detail(media_type, tmdb_id):
     """A single result's full detail - poster, overview, genres, runtime, rating -
     reached by clicking a title in the search results. Counts against the same
-    per-session rate limit as searching, since it's another live outbound call.
+    rate limit as searching, since it's another live outbound call.
 
     in_library/jellyfin_id/requested arrive as query params from the results link
     rather than being re-derived here - this route has no independent way to know a
     single TMDB id's Jellyfin/Seerr status without a second live search, and they're
     read-only display info, not anything this route writes."""
-    if _search_rate_limited():
+    with media_search.outbound_call(current_user()["id"]) as allowed:
+        detail = media_search.detail(media_type, tmdb_id) if allowed else None
+    if not allowed:
         flash("You've made a lot of requests just now - give it a minute.", "error")
         return redirect(url_for("search", q=request.args.get("q", "")))
-    _register_search()
-    detail = media_search.detail(media_type, tmdb_id)
     if not detail:
         return render_template("error.html", code=404,
                                message="Couldn't find that title."), 404
@@ -2498,11 +2485,19 @@ def search_request_configure():
     submitting with Seerr's silent defaults - a season picker for everyone signed in,
     plus root folder/quality profile/tags only when the browser is *also* signed in as
     the portal admin (session["logged_in"]), since those reveal server filesystem
-    paths an ordinary visitor has no business seeing."""
+    paths an ordinary visitor has no business seeing.
+
+    Makes live calls to Seerr (and, for the admin, its *Arr servers), so it's behind
+    the same rate limit and concurrency cap as searching - it used to have neither."""
     media_type = request.args.get("media_type", "")
     tmdb_id = request.args.get("tmdb_id", "")
     is_admin = bool(session.get("logged_in"))
-    config = media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+    with media_search.outbound_call(current_user()["id"]) as allowed:
+        config = (media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+                  if allowed else None)
+    if not allowed:
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.args.get("q", "")))
     if not config:
         return render_template("error.html", code=404, message="Couldn't find that title."), 404
     return render_template("search_request_configure.html", config=config,
@@ -2518,12 +2513,18 @@ def search_request():
 
     A write against another service, so it's a POST, it's CSRF-protected (see
     _csrf_required_for), it requires a signed-in visitor, and it counts against the same
-    per-session rate limit as searching."""
+    rate limit and concurrency cap as searching - checked first, before anything else,
+    exactly as before they moved server-side."""
     user = current_user()
-    if _search_rate_limited():
-        flash("You've made a lot of requests just now - give it a minute.", "error")
-        return redirect(url_for("search", q=request.form.get("q", "")))
-    _register_search()
+    with media_search.outbound_call(user["id"]) as allowed:
+        if not allowed:
+            flash("You've made a lot of requests just now - give it a minute.", "error")
+            return redirect(url_for("search", q=request.form.get("q", "")))
+        return _submit_search_request(user)
+
+
+def _submit_search_request(user):
+    """search_request()'s body, run while it holds its outbound slot."""
     media_type = request.form.get("media_type", "")
     tmdb_id = request.form.get("tmdb_id", "")
 

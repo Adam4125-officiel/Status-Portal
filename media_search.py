@@ -14,10 +14,11 @@ carries its own safety machinery:
 - **A clear degraded state.** Each source fails independently; one being down returns
   the other's results plus a note, and both being down returns "search is unavailable
   right now" rather than an error page.
-- **Signed-in visitors only, plus a per-session rate limit** (enforced in app.py). The
-  result set reveals the whole library, requesting is a write against Seerr that has to
-  be attributable to a person, and a search box wired to two external APIs is otherwise
-  a free denial-of-service amplifier.
+- **Signed-in visitors only, plus a per-person rate limit and a cap on how many of
+  these calls run at once** (outbound_call() below, wrapped around every search route in
+  app.py). The result set reveals the whole library, requesting is a write against Seerr
+  that has to be attributable to a person, and a search box wired to two external APIs
+  is otherwise a free denial-of-service amplifier.
 
 Whose Seerr account a request goes through
 ------------------------------------------
@@ -32,13 +33,83 @@ attribute one person's request to another, and an unattributed request is a much
 smaller problem than a misattributed one.
 """
 import logging
+import threading
+import time
+from collections import deque
+from contextlib import contextmanager
 
 import requests
 
+import config
 import db
 import integrations
 
 _logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Who may make a live outbound call right now
+# ---------------------------------------------------------------------------
+# Server-side, keyed on the Jellyfin user id. The limit used to live in the session
+# cookie, so replaying an older cookie reset it: 160 outbound searches went through
+# against a limit of 40. Here it's a sliding window of the last SEARCH_RATE_LIMIT call
+# times per person - the same numbers as before, just somewhere a client can't rewind.
+_rate_state = {}
+_rate_lock = threading.Lock()
+# Every call through here can hold a request thread for SEARCH_TIMEOUT_SECONDS or more,
+# so a handful of concurrent searches used to be able to occupy every waitress thread
+# and take the public status page down with them. A third of the pool is the most search
+# may hold at once; past that, a caller is told to wait exactly as if rate-limited.
+MAX_CONCURRENT_OUTBOUND = max(1, config.WAITRESS_THREADS // 3)
+_outbound_slots = threading.BoundedSemaphore(MAX_CONCURRENT_OUTBOUND)
+
+
+def clear_caches():
+    """Forgets every rate-limit window and resets the concurrency cap. Called between
+    tests; the admin panel's clear-caches button deliberately doesn't, for the same
+    reason it leaves login and report throttling alone."""
+    global _outbound_slots
+    with _rate_lock:
+        _rate_state.clear()
+        _outbound_slots = threading.BoundedSemaphore(MAX_CONCURRENT_OUTBOUND)
+
+
+def _try_enter(user_id):
+    """The semaphore this call took, or None when it must be refused. Checking the
+    window, taking a slot and recording the call happen under one lock, so neither
+    two concurrent requests nor a refusal for being busy can slip past or eat into
+    the limit."""
+    now = time.monotonic()
+    with _rate_lock:
+        hits = _rate_state.setdefault(user_id, deque())
+        while hits and now - hits[0] >= config.SEARCH_RATE_WINDOW_SECONDS:
+            hits.popleft()
+        if len(hits) >= config.SEARCH_RATE_LIMIT:
+            return None
+        slots = _outbound_slots
+        if not slots.acquire(blocking=False):
+            return None
+        hits.append(now)
+        return slots
+
+
+@contextmanager
+def outbound_call(user_id):
+    """Yields True when `user_id` may make one of this module's live outbound calls
+    now, False when they have to be told to wait - over their rate limit, or every
+    slot already taken. The slot is held until the block exits.
+
+        with media_search.outbound_call(user["id"]) as allowed:
+            if allowed:
+                outcome = media_search.search(...)"""
+    slots = _try_enter(user_id)
+    try:
+        yield slots is not None
+    finally:
+        # Released on the semaphore that was acquired, not whatever the global holds
+        # now - clear_caches() may have replaced it in the meantime.
+        if slots is not None:
+            slots.release()
 
 
 def jellyfin_integration():
