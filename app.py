@@ -2346,10 +2346,10 @@ def user_account_push_seerr_contact():
 # ---------------------------------------------------------------------------
 # Unified search (signed-in visitors only)
 # ---------------------------------------------------------------------------
-# Per *session*, not process-global like the login and report limiters. Those defend a
-# route open to anonymous strangers, where a shared counter is the point; this one is
-# behind a Jellyfin sign-in, so the meaningful unit is "this person", and a global
-# counter would let one enthusiastic searcher lock everybody else out.
+# The search rate limit and concurrency cap live in media_search.outbound_call(): per
+# person (the Jellyfin user id), not process-global like the login and report limiters,
+# and server-side rather than in the session cookie, where replaying an old cookie
+# reset it.
 # Typing "dune" shouldn't search TMDB for "d". Enforced on both sides: the client to
 # avoid the request, the server because the client can't be trusted to.
 MIN_LIVE_QUERY_LENGTH = 3
