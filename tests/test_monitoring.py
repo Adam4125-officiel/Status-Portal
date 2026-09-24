@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from types import SimpleNamespace
 
@@ -499,6 +500,9 @@ def test_background_refresh_now_starts_on_every_platform(monkeypatch):
     monkeypatch.setattr(monitoring.threading, "Thread",
                         lambda **kwargs: started.append(kwargs) or SimpleNamespace(start=lambda: None))
     monkeypatch.setattr(monitoring.os, "name", "posix")
+    # Restored afterwards: a max_age left behind tells every later test in this
+    # process that a background loop is running.
+    monkeypatch.setitem(monitoring._CPU_CACHE, "max_age", None)
     monitoring.start_background_refresh(10)
     assert len(started) == 1
     assert monitoring._CPU_CACHE["max_age"] == 35
@@ -525,8 +529,11 @@ def test_clear_caches_resets_every_module_cache(clean_cpu_cache):
     monitoring._volume_label_cache["/dev/sda1"] = "Media"
     monitoring._perdisk_io_cache["PhysicalDrive0"] = {"time": 1.0, "read_bytes": 1, "write_bytes": 1}
     monitoring._net_cache.update({"time": 1.0, "sent_bytes": 1, "recv_bytes": 1})
+    monitoring._RATES_CACHE.update({"network": {"up_mb_s": 1, "down_mb_s": 1},
+                                    "disk_io": {"PhysicalDrive0": {}}, "updated_at": 1.0})
 
     monitoring.clear_caches()
+    assert monitoring._RATES_CACHE == {"network": None, "disk_io": {}, "updated_at": None}
 
     assert monitoring._WINDOWS_CACHE["vms"] == []
     assert monitoring._WINDOWS_CACHE["cpu_temp_c"] is None
@@ -534,3 +541,228 @@ def test_clear_caches_resets_every_module_cache(clean_cpu_cache):
     assert monitoring._volume_label_cache == {}
     assert monitoring._perdisk_io_cache == {}
     assert monitoring._net_cache["time"] is None
+
+
+# ---------------------------------------------------------------------------
+# Windows queries on their own cadence, off the CPU sampler's thread (PERF-01)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def fake_windows_jobs(monkeypatch):
+    """Both Windows jobs replaced by recorders, their schedule reset, and every
+    thread they start joined before the test ends."""
+    calls = []
+    for name in list(monitoring._WINDOWS_JOBS):
+        interval, _ = monitoring._WINDOWS_JOBS[name]
+        monkeypatch.setitem(monitoring._WINDOWS_JOBS, name,
+                            (interval, lambda name=name: calls.append(name)))
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+    yield calls
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+
+
+def _run_due(now):
+    for thread in monitoring._dispatch_due_windows_jobs(now):
+        thread.join(timeout=5)
+
+
+def test_each_windows_job_runs_on_its_own_cadence(fake_windows_jobs):
+    """VMs and CPU temperature every minute, the disk mapping and temperatures every
+    twelve - not all three PowerShell queries every ten seconds."""
+    _run_due(1000)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
+    fake_windows_jobs.clear()
+    _run_due(1030)
+    assert fake_windows_jobs == []
+    _run_due(1060)
+    assert fake_windows_jobs == ["vms_and_cpu_temp"]
+    fake_windows_jobs.clear()
+    _run_due(1000 + 12 * 60)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
+
+
+def test_a_job_still_running_is_not_started_again(monkeypatch, fake_windows_jobs):
+    release = threading.Event()
+    starts = []
+
+    def hanging():
+        starts.append(1)
+        release.wait(timeout=5)
+
+    monkeypatch.setitem(monitoring._WINDOWS_JOBS, "disk_details", (1, hanging))
+    first = monitoring._dispatch_due_windows_jobs(1000)
+    monitoring._dispatch_due_windows_jobs(2000)      # long past due, but still running
+    release.set()
+    for thread in first:
+        thread.join(timeout=5)
+    assert starts == [1]
+    _run_due(3000)
+    assert starts == [1, 1]
+
+
+def test_the_cpu_sample_keeps_refreshing_while_a_powershell_query_hangs(monkeypatch, clean_cpu_cache):
+    """The point of moving the queries off the loop's thread: a PowerShell call stuck
+    until its timeout must not hold up the CPU sample, or the cache goes stale and
+    every page falls back to a blocking psutil read."""
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    release = threading.Event()
+    entered = threading.Event()
+
+    def hanging_powershell(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(monitoring.subprocess, "run", hanging_powershell)
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: [25.0])
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+    try:
+        monitoring._CPU_CACHE["sampled_at"] = time.time() - 5
+        started = time.monotonic()
+        monitoring._background_tick()
+        assert entered.wait(timeout=5)             # a query is now stuck in PowerShell
+        assert time.monotonic() - started < 2      # ...and the tick didn't wait for it
+        first = monitoring._CPU_CACHE["updated_at"]
+        assert monitoring._CPU_CACHE["per_core"] == [25.0]
+
+        monitoring._CPU_CACHE["sampled_at"] = time.time() - 5
+        monitoring._background_tick()               # the next tick, query still stuck
+        assert monitoring._CPU_CACHE["updated_at"] > first
+        assert any(job["running"] for job in monitoring._windows_job_state.values())
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name.startswith("monitoring-") and thread is not threading.current_thread():
+                thread.join(timeout=10)
+        for job in monitoring._windows_job_state.values():
+            job.update({"due_at": 0.0, "running": False})
+
+
+def test_the_windows_jobs_fill_the_same_cache_as_before(monkeypatch):
+    """Same values exposed, just refreshed on their own schedules."""
+    monkeypatch.setattr(monitoring, "get_vm_snapshot", lambda: [{"name": "vm1"}])
+    monkeypatch.setattr(monitoring, "_query_cpu_temp", lambda: 41.5)
+    monkeypatch.setattr(monitoring, "_query_windows_disk_details",
+                        lambda: {"C": {"disk_number": 0, "temp_c": 30.0}})
+    monkeypatch.setitem(monitoring._WINDOWS_CACHE, "vms", [])
+    monitoring._refresh_vms_and_cpu_temp()
+    monitoring._refresh_disk_details()
+    assert monitoring._WINDOWS_CACHE["vms"] == [{"name": "vm1"}]
+    assert monitoring._WINDOWS_CACHE["cpu_temp_c"] == 41.5
+    assert monitoring._WINDOWS_CACHE["disk_details"] == {"C": {"disk_number": 0, "temp_c": 30.0}}
+    monitoring.clear_caches()
+
+
+def test_clearing_the_caches_makes_every_windows_job_due_again(fake_windows_jobs):
+    """Otherwise the disk mapping would stay empty for up to twelve minutes after the
+    admin's clear-caches button, and every disk's temperature and I/O with it."""
+    _run_due(1000)
+    fake_windows_jobs.clear()
+    monitoring.clear_caches()
+    _run_due(1001)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
+
+
+# ---------------------------------------------------------------------------
+# Throughput rates computed by the loop, not by whoever asks (PERF-08)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def running_loop(monkeypatch):
+    """What a started background loop looks like to readers, restored afterwards."""
+    monkeypatch.setitem(monitoring._CPU_CACHE, "max_age", 35)
+    saved = dict(monitoring._RATES_CACHE), dict(monitoring._net_cache)
+    yield
+    monitoring._RATES_CACHE.update(saved[0])
+    monitoring._net_cache.update(saved[1])
+
+
+def _net_counters(sent, recv):
+    return SimpleNamespace(bytes_sent=sent, bytes_recv=recv)
+
+
+def test_callers_read_the_rate_the_loop_published(running_loop, monkeypatch):
+    """Two callers milliseconds apart used to each move the shared baseline, turning a
+    steady transfer into a spike. Now neither takes a reading at all."""
+    monitoring._RATES_CACHE.update({"network": {"up_mb_s": 1.5, "down_mb_s": 4.0},
+                                    "disk_io": {}, "updated_at": time.time()})
+
+    def explode():
+        raise AssertionError("a caller must not take its own network reading")
+
+    monkeypatch.setattr(monitoring.psutil, "net_io_counters", explode)
+    baseline = dict(monitoring._net_cache)
+    first = monitoring.get_resource_snapshot()["network"]
+    second = monitoring.get_resource_snapshot()["network"]
+    assert first == second == {"up_mb_s": 1.5, "down_mb_s": 4.0}
+    assert monitoring._net_cache == baseline
+
+
+def test_the_loop_measures_each_rate_over_one_tick(running_loop, monkeypatch):
+    readings = iter([_net_counters(0, 0), _net_counters(10 * 1024 ** 2, 20 * 1024 ** 2)])
+    monkeypatch.setattr(monitoring.psutil, "net_io_counters", lambda: next(readings))
+    clock = iter([1000.0, 1000.0, 1010.0, 1010.0])
+    monkeypatch.setattr(monitoring.time, "time", lambda: next(clock))
+    monitoring._net_cache.update({"time": None, "sent_bytes": None, "recv_bytes": None})
+
+    monitoring._refresh_rates()
+    assert monitoring._RATES_CACHE["network"] is None       # first tick: a baseline only
+    monitoring._refresh_rates()
+    assert monitoring._RATES_CACHE["network"] == {"up_mb_s": 1.0, "down_mb_s": 2.0}
+
+
+def test_per_disk_io_is_read_from_the_loop_too(running_loop, monkeypatch):
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    monkeypatch.setattr(monitoring, "_get_volume_label", lambda mountpoint, device: None)
+    monkeypatch.setattr(monitoring.psutil, "disk_partitions", lambda all=False: [
+        SimpleNamespace(device="C:\\", mountpoint="C:\\", fstype="NTFS")])
+    monkeypatch.setattr(monitoring.psutil, "disk_usage", lambda path: SimpleNamespace(
+        percent=50.0, used=50 * 1024 ** 3, total=100 * 1024 ** 3, free=50 * 1024 ** 3))
+    monkeypatch.setitem(monitoring._WINDOWS_CACHE, "disk_details",
+                        {"C": {"disk_number": 0, "temp_c": 33.0}})
+    monitoring._RATES_CACHE.update({"network": None, "updated_at": time.time(),
+                                    "disk_io": {"PhysicalDrive0": {"read_mb_s": 5.0, "write_mb_s": 1.0}}})
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a caller must not take its own disk reading")
+
+    monkeypatch.setattr(monitoring.psutil, "disk_io_counters", explode)
+    [disk] = monitoring._get_disk_snapshots()
+    assert disk["io"] == {"read_mb_s": 5.0, "write_mb_s": 1.0}
+    assert disk["temp_c"] == 33.0
+
+
+def test_before_the_loop_publishes_there_is_no_rate_rather_than_a_callers_own(running_loop, monkeypatch):
+    """The first tick after startup (or after clear_caches) has nothing yet. Readers
+    get "no reading", the same answer the very first call always gave."""
+    monitoring._RATES_CACHE.update({"network": None, "disk_io": {}, "updated_at": None})
+    monkeypatch.setattr(monitoring.psutil, "net_io_counters",
+                        lambda: (_ for _ in ()).throw(AssertionError("no own reading")))
+    assert monitoring.get_resource_snapshot()["network"] is None
+
+
+@pytest.mark.parametrize("state", ["no loop", "dead loop"])
+def test_without_a_live_loop_callers_measure_for_themselves(running_loop, monkeypatch, state):
+    """Tests, an entry point that never started the loop, or a loop that died: a real
+    reading beats a frozen number, so the old per-call delta is still there."""
+    if state == "no loop":
+        monkeypatch.setitem(monitoring._CPU_CACHE, "max_age", None)
+        monitoring._RATES_CACHE.update({"network": None, "updated_at": None})
+    else:
+        monitoring._RATES_CACHE.update({"network": {"up_mb_s": 9.0, "down_mb_s": 9.0},
+                                        "updated_at": time.time() - 500})
+    monitoring._net_cache.update({"time": time.time() - 10, "sent_bytes": 0, "recv_bytes": 0})
+    monkeypatch.setattr(monitoring.psutil, "net_io_counters",
+                        lambda: _net_counters(10 * 1024 ** 2, 10 * 1024 ** 2))
+    rate = monitoring.get_resource_snapshot()["network"]
+    assert rate is not None and rate != {"up_mb_s": 9.0, "down_mb_s": 9.0}
+    assert 0.8 < rate["up_mb_s"] < 1.2
+
+
+def test_every_tick_publishes_fresh_rates(running_loop, monkeypatch):
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent", lambda interval=None, percpu=False: [1.0])
+    monitoring._RATES_CACHE["updated_at"] = None
+    monitoring._background_tick()
+    assert monitoring._RATES_CACHE["updated_at"] is not None

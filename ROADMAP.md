@@ -98,9 +98,11 @@ Rules that follow from that, none of them optional:
   blocking `requests` calls, and doing that directly inside a coroutine stalls the
   gateway heartbeat for the duration — see the bot-disconnect investigation below,
   where that is a leading suspect. Wrap them in `asyncio.to_thread(...)`.
-- **Rate-limit per Discord user.** The web search is limited per session; a
-  slash command has no session, and the underlying calls are the same two external
-  APIs.
+- **Rate-limit per Discord user.** The web search is limited per person,
+  server-side, by `media_search.outbound_call()` (keyed on the Jellyfin user id, with a
+  cap on concurrent calls). A slash command should go through the same gate, keyed on
+  whoever the Discord user maps to - the underlying calls are the same two external
+  APIs, and a second, separate limiter would let each surface spend the full budget.
 
 **Priority:** Medium-High — `/requests` and `/search` are small on top of what
 exists and are the two people would use daily · **Effort:** M for the two read
@@ -292,6 +294,37 @@ hard way instead:
 power cut and not) · **Effort:** S with a wrapper (`WinSW`/`NSSM` plus an
 installer step and a documentation page) · S for the scheduled-task fallback.
 
+## Security hardening still open (from the 1.9.1 audit)
+
+The 1.9.1 audit's remaining findings, left out of that release on purpose. Each needs
+a decision before code, which is why they're here rather than done. How the implemented
+ones presented is in `docs/HISTORY.md` → "The 1.9.1 security and performance audit".
+
+- **Step-up for the database backup download** (SEC-02). The backup holds the TOTP
+  seed and every integration API key, and downloading it needs only a session.
+  Making it a POST behind `_require_totp()` changes the Settings page (a code field),
+  which is why it wasn't done under a no-UI-change rule. **S.**
+- **Throttling the public Jellyfin sign-in** (SEC-08). Every `/login` attempt reaches
+  Jellyfin from the portal's IP, so it can trip Jellyfin's own per-user lockout and
+  hides the attacker from anything watching Jellyfin's logs. Options: a per-username
+  cap below Jellyfin's threshold, or per-IP throttling behind the proxy, which would
+  break the "global, not per-IP" convention. **M.**
+- **Global lockout counters are reachable from the internet** (SEC-10). Five bad
+  passwords every five minutes keeps the admin out; ten junk reports an hour silences
+  `/report`. Cloudflare Access in front of `/admin/*` needs no code at all. **S (ops)
+  or M (code).**
+- **Drop `'unsafe-inline'` from the CSP** (SEC-14). Needs the four inline scripts moved
+  to files and the remaining `on*=` handlers converted, then a real-browser pass over
+  every page. **M.**
+- **Signed releases** (SEC-16). Integrity checks protect the transfer, not the
+  publisher; a detached signature with the public key in the repo would. **M.**
+- **Scope for the Games Portal notify key** (SEC-17). A leaked key can message any user
+  as the portal: prefix the source, rate-limit per key, and require the user to exist.
+  **S.**
+- **Incident retention.** Auto-incidents are never pruned; a flapping service adds one
+  per flap. v1.9.1 indexed the lookup but kept everything. **S**, once a retention
+  period is chosen.
+
 ## Known issues to investigate
 
 Symptoms whose cause is not established. Written down so the next session starts
@@ -311,7 +344,8 @@ leading theory is heartbeat starvation: everything the refresh tick read
 `monitoring.get_resource_snapshot()`'s blocking psutil CPU sample and its
 `disk_usage()` walk of every mountpoint) ran on the same event loop that answers
 Discord's heartbeat. Enough missed heartbeats and Discord drops the session. All of
-that now runs off the loop, which is correct regardless — but "the symptom stopped"
+that now runs off the loop (and v1.9.1 moved the last read found still on it, the
+guild-whitelist lookup in `on_ready`/`on_guild_join`), which is correct regardless — but "the symptom stopped"
 is not the same as "that was the cause", and a v1.8.3 that runs for weeks without
 dropping is evidence, not proof.
 

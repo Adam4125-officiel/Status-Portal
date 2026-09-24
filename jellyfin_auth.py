@@ -115,8 +115,9 @@ def auth_integration():
     then reports itself as not configured, which is what it now is."""
     raw = db.get_setting("jellyfin_auth_integration_id", "")
     candidates = [i for i in db.list_integrations() if i["kind"] == "jellyfin" and i["enabled"]]
-    if raw.isdigit():
-        chosen = next((i for i in candidates if i["id"] == int(raw)), None)
+    chosen_id = db.parse_int(raw)
+    if chosen_id is not None:
+        chosen = next((i for i in candidates if i["id"] == chosen_id), None)
         if chosen:
             return chosen
         return None

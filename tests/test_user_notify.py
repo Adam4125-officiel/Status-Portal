@@ -440,11 +440,35 @@ def test_delivered_rows_are_eventually_pruned(enabled, monkeypatch):
     assert db.prune_notification_queue(days=30) == 1
 
 
+def test_rows_given_up_on_are_pruned_too_but_never_a_row_still_retrying(enabled):
+    """Rows that failed MAX_NOTIFICATION_ATTEMPTS times used to stay forever. They age
+    out like delivered rows now, by when they were queued; anything still being
+    retried stays whatever its age."""
+    old, fresh, retrying = (db.enqueue_notification("u1", "report_reply", "S", "B") for _ in range(3))
+    conn = db.get_db()
+    conn.execute("UPDATE notification_queue SET attempts=? WHERE id IN (?, ?)",
+                 (db.MAX_NOTIFICATION_ATTEMPTS, old, fresh))
+    conn.execute("UPDATE notification_queue SET created_at='2020-01-01T00:00:00+00:00' "
+                 "WHERE id IN (?, ?)", (old, retrying))
+    conn.commit()
+    conn.close()
+
+    assert db.prune_notification_queue(days=30) == 1
+    conn = db.get_db()
+    remaining = {r[0] for r in conn.execute("SELECT id FROM notification_queue")}
+    conn.close()
+    assert remaining == {fresh, retrying}
+
+
 # ---------------------------------------------------------------------------
 # Matching a Jellyfin user to a Seerr user - the part that must fail closed
 # ---------------------------------------------------------------------------
 def _seerr_users(monkeypatch, users):
     monkeypatch.setattr(integrations, "fetch_seerr_users", lambda url, key, limit=200, with_notification_settings=False: users)
+    # The one-user settings call a live lookup makes; {} keeps the Discord ID the user
+    # list carried, and stops it reaching for the network.
+    monkeypatch.setattr(integrations, "fetch_seerr_notification_settings",
+                        lambda url, key, seerr_user_id: {})
 
 
 def test_a_real_jellyfin_link_is_followed(enabled, monkeypatch):
@@ -1531,3 +1555,118 @@ def test_a_non_address_is_never_adopted_from_seerr(isolated_db):
     prefs = db.get_user_preferences("u1")
     assert prefs["notify_email"] == ""
     assert prefs["notify_discord_id"] == "123456789012345678"   # the good half survives
+
+
+def test_a_quote_in_a_username_cannot_break_out_of_the_seerr_push_confirm(admin, isolated_db, monkeypatch):
+    """The confirm used to be an inline onsubmit with the Jellyfin username inside a JS
+    string: Jinja escaped "O'Brien" to O&#39;Brien, the browser decoded it back and
+    the quote ended the string. The question now lives in data-confirm, where the
+    escaped name is only ever an attribute value."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "O'Brien"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "OB", "email": "ob@example.invalid",
+                                 "discord_id": "999", "jellyfin_user_id": "u1"}])
+    html = admin.get("/admin/users/u1/account").data.decode()
+    assert "Send these details to Seerr" in html
+    assert ('data-confirm="This will update O&#39;Brien\'s Seerr account with the contact '
+            'details saved above. Continue?"') in html
+    assert "onsubmit" not in html
+
+
+# ---------------------------------------------------------------------------
+# Seerr lookups on the request path (PERF-02): the mirror for display, and at
+# most two calls when Seerr itself has to be asked
+# ---------------------------------------------------------------------------
+class _SeerrHTTP:
+    """Stands in for requests.get underneath the real integration functions, so what
+    is counted is actual HTTP calls, not function calls."""
+
+    def __init__(self, linked=30, discord="555"):
+        self.calls = []
+        self.users = [{"id": n, "displayName": f"User {n}", "email": f"u{n}@example.invalid",
+                       "jellyfinUserId": f"u{n}"} for n in range(1, linked + 1)]
+        self.discord = discord
+
+    def __call__(self, url, **kwargs):
+        self.calls.append(url)
+        if url.endswith("/settings/notifications"):
+            payload = {"discordIds": [self.discord]}
+        elif url.endswith("/api/v1/user"):
+            payload = {"results": self.users}
+        else:
+            raise AssertionError(f"unexpected Seerr call: {url}")
+        return type("R", (), {"raise_for_status": lambda self: None,
+                              "json": lambda self, p=payload: p})()
+
+
+@pytest.fixture
+def seerr_http(enabled, monkeypatch):
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    fake = _SeerrHTTP()
+    monkeypatch.setattr(integrations.requests, "get", fake)
+    return fake
+
+
+def test_a_mirrored_account_is_displayed_without_asking_seerr(seerr_http):
+    """The account pages used to ask Seerr for every linked user's settings - 1 + N
+    calls - on first render, inside the request. Someone the hourly sync already
+    mirrored now costs none."""
+    db.replace_seerr_contacts([{"jellyfin_user_id": "u1", "seerr_user_id": "1",
+                                 "display_name": "User 1", "email": "u1@example.invalid",
+                                 "discord_id": "111"}])
+    account = user_notify.find_seerr_account("u1")
+    assert account == {"id": "1", "display_name": "User 1", "email": "u1@example.invalid",
+                       "discord_id": "111", "jellyfin_user_id": "u1"}
+    assert seerr_http.calls == []
+
+
+def test_someone_not_mirrored_yet_costs_two_calls_however_many_users_seerr_has(seerr_http):
+    account = user_notify.find_seerr_account("u7")
+    assert len(seerr_http.calls) == 2          # the list, then only u7's settings
+    assert account["id"] == "7" and account["discord_id"] == "555"
+    # Written through, so the next render reads the mirror and asks nobody.
+    assert db.get_seerr_contact("u7")["discord_id"] == "555"
+    user_notify.find_seerr_account("u7")
+    assert len(seerr_http.calls) == 2
+
+
+def test_no_link_is_one_call_and_is_remembered_briefly(seerr_http):
+    assert user_notify.find_seerr_account("stranger") is None
+    assert len(seerr_http.calls) == 1          # no match, so no settings call either
+    assert user_notify.find_seerr_account("stranger") is None
+    assert len(seerr_http.calls) == 1
+
+
+def test_a_write_asks_seerr_even_when_the_mirror_has_an_answer(seerr_http):
+    """What decides whose Seerr account gets written to must not be an hour old."""
+    db.replace_seerr_contacts([{"jellyfin_user_id": "u2", "seerr_user_id": "99",
+                                 "display_name": "stale", "email": "", "discord_id": ""}])
+    account = user_notify.find_seerr_account("u2", live=True)
+    assert account["id"] == "2"
+    assert len(seerr_http.calls) == 2
+    assert db.get_seerr_contact("u2")["seerr_user_id"] == "2"
+
+
+def test_after_a_push_the_next_display_asks_seerr_again(seerr_http):
+    """Otherwise "Linked to X in Seerr, which has: ..." would show the pre-push values
+    until the next hourly sync."""
+    user_notify.find_seerr_account("u3")
+    seerr_http.discord = "777"
+    user_notify._invalidate_seerr_account_cache("u3")
+    assert user_notify.find_seerr_account("u3")["discord_id"] == "777"
+    assert len(seerr_http.calls) == 4
+    assert db.get_seerr_contact("u3")["discord_id"] == "777"
+    user_notify.find_seerr_account("u3")
+    assert len(seerr_http.calls) == 4          # and back to the mirror after that
+
+
+def test_the_account_page_for_a_mirrored_user_makes_no_seerr_call(seerr_http, signed_in_visitor):
+    db.replace_seerr_contacts([{"jellyfin_user_id": "u1", "seerr_user_id": "1",
+                                 "display_name": "Adam in Seerr", "email": "adam@example.invalid",
+                                 "discord_id": "123456789012345678"}])
+    body = signed_in_visitor.get("/account").data.decode()
+    assert "Adam in Seerr" in body
+    assert seerr_http.calls == []

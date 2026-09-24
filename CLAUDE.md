@@ -195,6 +195,12 @@ DB-backed Settings pages, not a code edit.
   classifies it as `down`, not `degraded`, because it means whatever's in front of the
   service couldn't reach it at all. Both decisions have real bug reports behind them
   (`docs/HISTORY.md` → "Basic-auth services misread as degraded", "502 split out").
+  **Since only the status code matters, the check never reads the body**:
+  `_run_single_check()` requests with `stream=True` and closes the response once the
+  headers are in. So `elapsed_ms`, and the `slow_threshold_ms` comparison, measure
+  time to the response headers, not to the last byte (before 1.9.1 it was the full
+  download). A server that sends headers and then stalls its body is "reachable",
+  consistent with the rule above.
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
   `app._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —
@@ -213,6 +219,13 @@ DB-backed Settings pages, not a code edit.
   handler), not a bug. `retry_count=0` (the default, and the value every pre-existing
   service gets via `_ensure_column`) preserves the exact original single-attempt
   behavior.
+- **`_refresh_integration_cache()` fetches in parallel and decides sequentially.** The
+  network calls go through a `HEALTH_CHECK_WORKERS`-bounded pool, like the service
+  checks, because one after another a few down integrations (10s per *Arr, 30s per
+  Byparr) pushed the cycle past `CHECK_INTERVAL_SECONDS`. The cache writes and every
+  `_handle_integration_incident_lifecycle()` call then run on the loop thread, in list
+  order, exactly as before. Keep that split: parallelising the lifecycle calls too
+  would make incident handling depend on thread scheduling.
 - **`_handle_incident_lifecycle()`'s open side must stay level-triggered, not
   edge-triggered.** Open whenever `new_status == "down"`, full stop, relying only on
   the `get_open_auto_incident_for_service()` idempotency guard — never on a
@@ -272,7 +285,10 @@ DB-backed Settings pages, not a code edit.
   destructive action means calling this helper, not re-inlining the check: three
   hand-maintained copies is three chances for one to quietly stop matching the
   others. (The login flow and `/admin/2fa` enable/disable are *not* step-up and
-  correctly don't use it — those are primary auth and enrollment.)
+  correctly don't use it — those are primary auth and enrollment. `/admin/2fa/disable`
+  does share `_login_state` through `_login_locked()`/`_register_login_failure()`/
+  `_register_login_success()`, though: without it the form was an unthrottled
+  code-guessing loop for anyone holding a session cookie.)
 - **Never interpolate a value from outside the portal's own admin into an inline JS
   event-handler attribute** (e.g. `onsubmit="return confirm('...' + x + '...')"`).
   Jinja's HTML-attribute escaping does not protect a value the browser HTML-decodes
@@ -284,7 +300,12 @@ DB-backed Settings pages, not a code edit.
   different and lower-risk (only the already-fully-privileged portal admin sets those
   names — self-XSS, no privilege gain) and was deliberately left alone, but **don't
   copy that pattern** for any value that can originate from outside the portal's own
-  admin (an external API, another local account/service, etc.).
+  admin (an external API, another local account/service, etc.). **This is now a
+  convention test** (`test_no_template_values_inside_inline_event_handlers`): any
+  `{{ }}` inside an `on*=` attribute fails unless it's an explicit entry in
+  `_INLINE_HANDLER_EXPRESSIONS_ALLOWED`. The second real instance was a Jellyfin
+  username in `account.html`'s "Send these details to Seerr" confirm, now a
+  `data-confirm` attribute read by `static/js/account.js`.
 - **A background thread that can shell out to run a real OS command (host
   restart/shutdown, VM control) must never be exercised for real in this sandbox, or
   against any environment you're not certain you're allowed to affect** — not even to
@@ -395,6 +416,18 @@ DB-backed Settings pages, not a code edit.
   and the integration's *different* `auto_incident` concept can't share one HTML
   name on one form, so the integration's is deliberately `check_auto_incident` in
   the template and mapped explicitly in the route.
+- **Numeric settings, query parameters and form fields go through `db.parse_int()`,
+  never `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
+  Unicode digits that `int()` then rejects, and any length at all, which overflows
+  SQLite's INTEGER. Both were unauthenticated 500s (a hostile `?offset=`), and a
+  stored "²" broke the public page for everyone. `parse_int()` takes ASCII digits
+  only and clamps to `[minimum, maximum]` (at most `db.MAX_SQLITE_INT`). A setting
+  where 0 means something different from "the minimum", like the history retention,
+  checks for 0 itself instead of clamping. Settings writes use
+  `app._setting_digits()`, the same parser in the stored-string form. Form fields keep
+  their own error behaviour: the search request's seasons/profile/tags are *refused*
+  with the usual "didn't make sense" flash, and the service form's `depends_on`
+  *skips* anything that isn't an id - only the parser changed.
 - **An admin page's on-page `<h1>`, its `{% block title %}` and its nav label must all
   match** — they drift independently, and the `<h1>` is the one the user actually
   sees. Check all three when a page's scope or nav label changes
@@ -611,6 +644,27 @@ DB-backed Settings pages, not a code edit.
   live/directly-callable (that's what's unit-tested by mocking `subprocess.run`);
   `get_cached_vm_snapshot()` and `get_resource_snapshot()`'s `cpu_temp_c`/per-disk
   `temp_c`/`io` fields are the cache-reading wrappers request handlers should use.
+- **The Windows queries run on their own cadence and never on the loop's thread**
+  (`_WINDOWS_JOBS`): VMs plus CPU temperature every 60s, the disk mapping plus drive
+  temperatures every 12 minutes. When one comes due, `_dispatch_due_windows_jobs()`
+  starts it on a one-shot thread and the loop moves on. Before 1.9.1 all three
+  PowerShell queries ran inline every 10s (~26k cold starts a day), and a slow one
+  (up to 10+10+15s on timeouts) delayed the CPU sample past its `max_age`, sending
+  every page back to the blocking psutil read. A job never overlaps itself.
+  `clear_caches()` makes every job due again, or the disk mapping, and with it every
+  disk's temperature and I/O, would stay blank for up to 12 minutes after the admin's
+  clear-caches button. **Only confirmed with mocked `subprocess`; this sandbox has no
+  Windows.** Verify on the real host before trusting the cadence.
+- **Network and per-disk I/O rates are computed by the loop, once per tick**
+  (`_refresh_rates()` into `_RATES_CACHE`), and callers read them. A rate is a delta
+  between two readings, and when every caller (request threads, the health loop, the
+  Discord bot) took its own, each moved the shared baseline for the others: two
+  callers milliseconds apart turned a steady transfer into a spike and a false
+  high-load badge. `_rates_from_the_loop()` decides: loop running means read the cache,
+  and "not published yet" is no reading rather than a caller's own. With no loop
+  (tests, an entry point that never started it) or a dead one, callers fall back to
+  the old per-call delta. The rates deliberately aren't a row in `cache_summary()`,
+  which would have changed `/admin/system`.
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,
@@ -1205,6 +1259,19 @@ time, rotating on a timer, no nav and no footer. Off by default.
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
   restart, self-update — not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
+- **A TOTP code is deliberately *not* single-use.** It works for its whole
+  `valid_window`, so logging in and then immediately doing a step-up can take the same
+  code twice. A replay guard (record the accepted time step, refuse it again) was built
+  during the 1.9.1 audit work and removed at the user's request before release. Don't
+  reintroduce it without asking. The brute-force protection that *is* wanted is the
+  shared `_login_state` counter, which `/admin/2fa/disable` now goes through too.
+  Turning 2FA off goes through `twofactor.disable()`, used by both the admin page and
+  the RESET_2FA flag.
+- **`/admin/2fa/enable` is refused outright while 2FA is already on** (GET and POST,
+  checked before anything touches a secret). Without that, a stolen session cookie
+  could enrol the attacker's own authenticator over the admin's and then pass every
+  step-up check. Switching device means disabling first, which needs a current code.
+  `test_destructive_routes_go_through_require_totp` checks the refusal comes first.
 - **Resetting 2FA is a host-level action, not a web one, on purpose.**
   `twofactor.check_and_process_reset_flag()` looks for an empty file at
   `instance/RESET_2FA` on every hit of `/admin/login` (cheap `os.path.exists()`, no
@@ -1233,6 +1300,12 @@ time, rotating on a timer, no nav and no footer. Off by default.
   `REPORT_MIN_SECONDS_TO_FILL`), and a rate limit
   (`_report_state`/`_report_rate_limited()`, mirroring `_login_state`'s shape). No
   external rate-limiting library was added for this one route.
+- **The report notification is sent with `allow_mentions=False`**, which adds
+  `allowed_mentions: {"parse": []}` to the Discord webhook payload: the text is a
+  stranger's, and "@everyone" in it must not ping the admin's whole server. It's a
+  keyword on `notifications.notify()` so every other webhook post (incidents,
+  maintenance, the Games Portal relay) stays byte-for-byte what it was, and the
+  bot's announcement posts don't go through this path at all.
 - `problem_reports.service_id` is optional (a report can reference a specific service's
   card via `?service_id=N`, or be general) and `ON DELETE SET NULL`, so deleting a
   service later detaches rather than cascade-deletes reports about it.
@@ -1286,6 +1359,13 @@ time, rotating on a timer, no nav and no footer. Off by default.
   instead, so a run is findable inside a file that spans several of them.
   The old `app.log.1`…`.3` files stay listed and downloadable on an upgraded install
   — they stop being written, but hiding them would strand history someone may want.
+- **One day's file is capped at `MAX_BYTES_PER_FILE` (20 MB)** by
+  `_CappedDailyFileHandler`: past it, one marker entry and then nothing until
+  midnight's rotation. That bounds the disk to roughly the cap times the retention
+  days, even under a flood of tracebacks. It drops rather than rotating early because
+  a second file for the same day would collide with the date-named backups the
+  retention count and `_LOG_NAME` rely on. It subclasses `TimedRotatingFileHandler`,
+  so anything checking for that type still finds it.
 - **Every read is bounded, which is why this is allowed in a request handler at
   all.** `read_tail()` seeks to the last `TAIL_MAX_BYTES` rather than reading a 2 MB
   file, and the page's `limit` is validated against a fixed tuple (`LOG_PAGE_SIZES`)
@@ -1381,11 +1461,14 @@ time, rotating on a timer, no nav and no footer. Off by default.
   *current* database → atomic replace → restart. A refusal at any point must leave the
   live database byte-identical and take no snapshot; there are tests asserting exactly
   that for junk files, foreign databases, bad zips and zip bombs.
-- **Validation is three checks, and the third is the one people forget.** The SQLite
+- **Validation is four checks, and the third is the one people forget.** The SQLite
   header, then `PRAGMA integrity_check`, then **`RESTORE_REQUIRED_TABLES` must all be
   present**. The first two only prove "a valid SQLite database" — which a Jellyfin
   library, a browser cookie store or an *Arr database all also are, and restoring one
-  of those silently wipes the portal and leaves it unable to start. Validation opens
+  of those silently wipes the portal and leaves it unable to start. Fourth, **the
+  backup's `settings` must hold a non-empty `admin_password_hash`**: a database
+  without one is a portal in first-run state, and restoring it would hand the admin
+  account to whoever reached the login page next. Validation opens
   the file **read-only via a `file:...?mode=ro` URI**, so checking a file can never
   create or modify one.
 - **The WAL sidecars must be deleted as part of the replace** (`db.restore_from_file`).
@@ -1516,8 +1599,12 @@ time, rotating on a timer, no nav and no footer. Off by default.
   was scoped out as a bigger feature for later if it turns out to actually be
   wanted, rather than bundled in here. Same opt-in-per-service public visibility
   as run_target above: `services.show_dependencies_public` (off by default)
-  shows "Depends on: X, Y" on the public card, resolved from
-  `db.get_service_dependencies()` in `_enrich_services()`.
+  shows "Depends on: X, Y" on the public card, resolved in `_enrich_services()` by
+  one grouped `db.list_dependencies_for_services()` call (only for services that
+  opted in), not a query per service. The same goes for each maintenance window's
+  services (`_attach_window_services()`) and each report's service name
+  (`_attach_report_services()`). `test_the_public_page_query_count_does_not_grow_with_the_data`
+  fails if a per-item query in a loop comes back.
 - **Low disk space alert** (`monitoring.evaluate_low_disk()` +
   `app._check_low_disk_space()`) extends the already-cross-platform per-disk
   `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same
@@ -1546,7 +1633,13 @@ time, rotating on a timer, no nav and no footer. Off by default.
   returns) computes `run_target_label`/`dependency_names` only when the
   corresponding `show_*_public` flag is set — the raw `run_target` column and
   `service_dependencies` rows are otherwise never resolved into public-facing
-  values, so nothing leaks for a service that hasn't opted in. `_run_target_label()`
+  values. **That was not true of `/api/status` until 1.9.1**: it serialised whole
+  `services` rows, raw `run_target` and every internal `check_url` included, for
+  services that never opted in. `_api_service_view()` now drops `check_url` always
+  and the raw `run_target` unless `show_run_target_public` is set. It removes exactly
+  those two keys and nothing else, because external dashboards read this endpoint; a
+  test pins the full key set, so trimming more is a deliberate edit to that test.
+  `_run_target_label()`
   is a small standalone helper (`app.py`) mirroring the inline Jinja logic already
   in `admin_services.html` — not deduplicated into one shared place since one side
   is Python and the other is a template, and the duplication is two short
@@ -1603,6 +1696,37 @@ time, rotating on a timer, no nav and no footer. Off by default.
   session has to redirect to the login page - the CSRF token lives in the very
   session being cleared, so the other order turns "your session expired" into a bare
   400. If you add another `before_request` hook, mind where you define it.
+- **Admin sessions are revocable through `admin_session_epoch`, and only three things
+  rotate it: a password change, enabling 2FA and disabling 2FA.** A signed cookie
+  can't be invalidated server-side on its own, so a copied one used to survive both
+  logout and a password change. `_start_admin_session()` stamps the current epoch;
+  `_enforce_session_timeout` pops the admin keys (`_ADMIN_SESSION_KEYS`, never
+  `session.clear()`) of any session whose stamp doesn't match and redirects `/admin/`
+  paths to the login page. It lives inside that hook rather than a new one because it
+  has to run before `_check_csrf`, for the same reason the idle expiry does.
+  `_rotate_admin_session_epoch()` re-stamps the browser making the change, so the
+  admin who changed the password stays signed in. **Logout stays local on purpose**
+  (other devices stay signed in). An unset setting and an unstamped session both read
+  as `""`, which is why upgrading signed nobody out. **A database restore carries the
+  live epoch into the restored file**: the backup's own epoch would sign out the
+  admin doing the restore, and an older one would bring back revoked cookies.
+- **`_start_admin_session()` clears the session before stamping it**, keeping only
+  `_VISITOR_SESSION_KEYS`. That's what stops anything planted before authentication
+  (a known CSRF token included) carrying into the admin session; the CSRF token is
+  regenerated on the next render. A new session key that belongs to the *visitor*
+  side has to be added to that tuple, or an admin login in the same browser will
+  quietly drop it. Anything read from the session during login (`login_next`) must
+  be read *before* the call.
+- **First-run password setup is only accepted from a local client**
+  (`_first_run_setup_allowed()`): loopback, private, link-local or Tailscale's
+  100.64.0.0/10, which `ipaddress` doesn't count as private. Otherwise a fresh install
+  (new Docker volume, reinstall) with a tunnel up belonged to whoever reached the login
+  page first. Without `BEHIND_PROXY`, any forwarding header (`X-Forwarded-For`,
+  `CF-Connecting-IP`, …) refuses outright, because cloudflared on the same host
+  connects from 127.0.0.1 for every internet visitor. With it, `remote_addr` is
+  ProxyFix's answer and is trusted. Only the *first-run* branch checks this; a normal
+  login works from anywhere. When testing it, use real public addresses:
+  `ipaddress` counts the documentation ranges (203.0.113.0/24, …) as private.
 - **The idle check is server-side (`session["last_seen"]`), not just the cookie's
   Max-Age.** A cookie's expiry attribute isn't covered by the signature, so a client
   that keeps sending an "expired" cookie would otherwise stay logged in forever. The
@@ -1668,6 +1792,11 @@ time, rotating on a timer, no nav and no footer. Off by default.
   psutil's *first* `interval=None` call always answers 0.0, which is why
   `_refresh_cpu_cache()` won't publish a window shorter than
   `MIN_CPU_SAMPLE_WINDOW_SECONDS`.
+- **Everything under `/admin` and `/account` is sent `Cache-Control: no-store`**
+  (`set_security_headers`), so neither the back button nor a shared machine can bring
+  a signed-in page back after logout. It overrides `send_file()`'s own header too,
+  which the backup and log downloads want anyway. Public pages and `/static/` are
+  untouched.
 - **`SEND_FILE_MAX_AGE_DEFAULT` is 30 days, which is only safe because `asset_url()`
   cache-busts every CSS/JS URL.** If you ever add a static reference that bypasses
   `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup
@@ -2087,7 +2216,12 @@ public page, which has to be a deliberate choice.
   route means a deliberate decision in that function; the convention test reads it.
 - **`_safe_next_url()` exists because `/login` is reachable with no authentication
   at all** — an open redirect there is a phishing primitive. Anything not a
-  single-slash relative path is discarded rather than sanitised.
+  single-slash relative path is discarded rather than sanitised, and so is anything
+  containing a backslash or a control character (`/\host` reads as `//host` in a
+  browser). **Every `next` that ends in a redirect goes through it, the admin login
+  included** — `/admin/login?next=` used to be honoured verbatim, which let a genuine
+  portal link drop the admin on a look-alike page straight after a real login. The
+  TOTP step re-checks the stored `login_next` at use, not only where it's stored.
 - **Security note worth repeating to the user, not just the code**: enabling this
   publishes a Jellyfin login form wherever the portal is reachable. That's the
   actual risk of the feature, and it's why it's off by default.
@@ -2197,6 +2331,10 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   that can never succeed must not sit in the queue burning attempts.
 - **Partial delivery counts as sent.** Retrying would re-deliver to the channel that
   already worked.
+- **`prune_notification_queue()` removes given-up rows too**, after the same 30 days
+  as delivered ones, aged by `created_at` since they have no `sent_at`. Before 1.9.1
+  a row that hit `MAX_NOTIFICATION_ATTEMPTS` stayed forever. A row still being retried
+  is never pruned, whatever its age.
 - **`DEFAULT_USER_PREFERENCES` must list every field `set_user_preferences()` can
   write.** A missing key reads back as `None`, is coerced to `0`/`""` when some *other*
   field is saved, and silently switches an on-by-default preference off. That happened
@@ -2250,6 +2388,14 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   `fetch_seerr_users(with_notification_settings=True)` does the extra per-user request;
   it's an N+1 and that's the accepted cost, since it runs hourly in a background task and
   only for users with a real Jellyfin link.
+- **That N+1 must never run in a request.** `find_seerr_account()` used to do it on the
+  first render of every `/account` and `/admin/users/<id>/account` page. Now display
+  reads the `seerr_contacts` mirror and makes no call for anyone in it. Anything about
+  to write to Seerr (`save_contact()`, the push route) passes `live=True`, which asks
+  Seerr in at most two calls: the user list without settings, then the matched user's
+  settings. A person the mirror doesn't know gets the same two-call lookup, written
+  through to the mirror. `_invalidate_seerr_account_cache()` makes the next display ask
+  Seerr again, or the page would show pre-push values until the next hourly sync.
 - **It's `discordIds`, a list.** Current Seerr stores several per user; this portal sends
   to the first non-empty one. The older singular `discordId` is still read as a fallback.
 - **Seerr's settings POSTs overwrite every field they read from the body**, so writing
@@ -2482,16 +2628,35 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   be background-refreshed.
 - **What makes the carve-out acceptable is the safety machinery, so don't remove any of
   it**: `config.SEARCH_TIMEOUT_SECONDS` (6s, deliberately shorter than every other
-  timeout here) so a slow Jellyfin can't hold a request thread; each source failing
+  timeout here) so a slow Jellyfin can't hold a request thread; the two sources asked
+  **in parallel** (Seerr on a helper thread, Jellyfin on the request's), so two slow
+  backends cost one timeout of thread time rather than two; each source failing
   independently; and a distinct "search is unavailable right now" state that must never
   be collapsed into "nothing found" — one is a system problem, the other is an answer.
-- **Signed-in visitors only, plus a per-session rate limit.** Three separate reasons:
-  the result set reveals the whole library, requesting is a write against Seerr that has
-  to be attributable to a person, and a search box wired to two external APIs is a
-  free denial-of-service amplifier. The limit is **per session**, unlike `_login_state`
-  and `_report_state` which are process-global — those defend a route open to anonymous
-  strangers, where a shared counter is the point; this one is already behind a sign-in,
-  so a global counter would let one enthusiastic searcher lock everybody else out.
+  Neither search fetcher touches the database, which is what makes the helper thread
+  safe: the pooled connection is thread-local and must never cross threads.
+- **Signed-in visitors only, plus a per-person rate limit and a concurrency cap.** Three
+  separate reasons: the result set reveals the whole library, requesting is a write
+  against Seerr that has to be attributable to a person, and a search box wired to two
+  external APIs is a free denial-of-service amplifier. The limit is **per person**
+  (keyed on the Jellyfin user id), unlike `_login_state` and `_report_state` which are
+  process-global — those defend a route open to anonymous strangers, where a shared
+  counter is the point; this one is already behind a sign-in, so a global counter
+  would let one enthusiastic searcher lock everybody else out.
+- **The limit lives server-side, never in the session.** It used to be a counter in
+  the cookie, and replaying an older cookie reset it (160 searches against a limit of
+  40). `media_search.outbound_call(user_id)` is now the one gate: a sliding window of
+  `SEARCH_RATE_LIMIT` calls per `SEARCH_RATE_WINDOW_SECONDS`, plus a bounded semaphore
+  of `MAX_CONCURRENT_OUTBOUND` (a third of `WAITRESS_THREADS`). Without the cap, a few
+  slow searches could hold every request thread and take the status page down with
+  them. Past the cap the caller gets the rate-limit message, and a busy refusal
+  doesn't cost them allowance. **Every route that makes one of these calls goes
+  through it**: `/search`, `/search/live`, `/search/detail`, `/search/request/configure`
+  (which had no limit at all before) and `/search/request`. Checking, taking a slot and
+  recording happen under one lock, and the slot is released on the semaphore that was
+  acquired, because `clear_caches()` swaps it. The admin clear-caches button
+  deliberately doesn't call `media_search.clear_caches()`, same as login/report
+  throttling.
 - **The Seerr search query must be percent-encoded, not form-encoded.** Seerr proxies
   search to TMDB, and TMDB rejects `+` with HTTP 400 *"Parameter 'query' must be url
   encoded. Its value may not contain reserved characters."* — so `params={"query": ...}`
@@ -2882,7 +3047,10 @@ instance the way the email path was.
   2026-08-19, when a fresh sandbox had neither. **Just install it** (the user has
   standing authorization to install tooling in this sandbox without asking):
   `pip install playwright && python -m playwright install --with-deps chromium`, ~1
-  minute. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
+  minute. **On the Ubuntu 20.04 codespace that fails** (found 2026-09-24): current
+  Playwright no longer supports 20.04, and `--with-deps` trips over an unsigned yarn
+  apt repository. `pip install playwright==1.48.0 && python -m playwright install
+  chromium` (no `--with-deps`; the system libraries are already there) works. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
   `requestfailed` so an error can't pass unnoticed. This caught a real bug:
   `report_problem()` never passed `site_name` to `report.html`, silently leaving the
   topbar brand text and page title blank — every route-level pytest test for that route
@@ -2890,6 +3058,12 @@ instance the way the email path was.
   syntactically valid, just missing content. (Red herring to ignore along the way: an
   `ERR_CONNECTION_RESET` console error from the sandbox having no egress to
   `fonts.googleapis.com` — unrelated to app code.)
+- **The suite takes ~150s serially and ~75s with `pytest-xdist`**
+  (`pip install pytest-xdist`, then `python -m pytest -q -n 8 -p no:cacheprovider`).
+  Every test gets its own `tmp_path` database, so it is safe in parallel; worth it
+  when running the whole suite after every commit. A test that monkeypatches module
+  state without `isolated_db` doesn't get `_reset_module_state()`, so reset what it
+  touches itself.
 - **When curl-smoke-testing a multi-request flow that depends on session state** (login
   steps, flash messages, anything the server writes back via `Set-Cookie`), every
   request needs *both* `-b cookiejar` (send) *and* `-c cookiejar` (save the response's

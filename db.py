@@ -161,6 +161,10 @@ def validate_backup_file(path):
             return f"That database failed SQLite's integrity check ({detail})."
         names = {row[0] for row in
                  conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        password_row = None
+        if "settings" in names:
+            password_row = conn.execute(
+                "SELECT value FROM settings WHERE key = 'admin_password_hash'").fetchone()
     except sqlite3.DatabaseError as e:
         return f"That file couldn't be opened as a database: {e}"
     finally:
@@ -171,6 +175,12 @@ def validate_backup_file(path):
     if missing:
         return ("That's a valid SQLite database, but it isn't a Status Portal backup - "
                 f"it has no {', '.join(missing)} table(s).")
+    # A database with no admin password is a portal in first-run state: whoever
+    # reached the login page next would get to set one. Restoring that is handing the
+    # admin account to a stranger, not a recovery.
+    if not password_row or not password_row[0]:
+        return ("That backup has no admin password in it. Restoring it would let whoever "
+                "reaches the login page first set one, so it was refused.")
     return None
 
 
@@ -768,6 +778,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_service_dependencies_service ON service_dependencies (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_service ON problem_reports (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_integrations_service ON integrations (service_id)",
+        # get_open_auto_incident_for_service() runs every health-check cycle for every
+        # down service, and incidents are never pruned - a flapping service adds one per
+        # flap. Without this it scanned the whole table each time.
+        "CREATE INDEX IF NOT EXISTS idx_incidents_service_auto "
+        "ON incidents (service_id, auto_created, status)",
         # Login looks a user up by name, not by id (the id is what Jellyfin returns
         # *after* a successful authentication). Small table, but this is the one
         # query on the sign-in path, and an index costs nothing here.
@@ -863,6 +878,36 @@ def looks_like_email(value):
     and "something that isn't an address" are both "can't send", and every caller
     treats them identically."""
     return bool(value) and bool(EMAIL_RE.match(value.strip()))
+
+
+# The largest value an SQLite INTEGER holds. Anything parsed from outside that ends up
+# bound into a query has to stay at or under it, or the query raises OverflowError.
+MAX_SQLITE_INT = 2**63 - 1
+# 19 digits reach past MAX_SQLITE_INT; anything longer is clamped without calling
+# int() at all, which past 4300 digits raises rather than parses.
+_MAX_INT_DIGITS = 19
+
+
+def parse_int(raw, default=None, minimum=0, maximum=MAX_SQLITE_INT):
+    """`raw` as an int when it is a plain run of ASCII digits, clamped to
+    [minimum, maximum]; `default` for anything else - None, blank, a sign, a decimal
+    point, letters.
+
+    The one parser for numeric settings and query parameters, because the pattern it
+    replaces - `int(raw) if raw.isdigit() else default` - was a real 500:
+    str.isdigit() also accepts superscripts and other Unicode digits ("²") that int()
+    then rejects, and any length at all, which overflows SQLite. Lives here, like
+    looks_like_email(), because db.py is the one module every settings reader imports.
+
+    Clamping rather than rejecting means an absurdly large value behaves like the
+    largest one allowed. A caller for whom 0 means something different from "the
+    minimum" (a retention period, say) checks for it itself rather than clamping."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text or not text.isascii() or not text.isdigit():
+        return default
+    digits = text.lstrip("0") or "0"
+    value = int(digits) if len(digits) <= _MAX_INT_DIGITS else maximum
+    return max(minimum, min(maximum, value))
 
 
 # ---------- Services ----------
@@ -1401,6 +1446,27 @@ def get_service_dependencies(service_id):
     return [r["depends_on_id"] for r in rows]
 
 
+def list_dependencies_for_services(service_ids):
+    """{service_id: [depends_on_id, ...]} for every id in service_ids, in the same
+    per-service order get_service_dependencies() returns (ascending depends_on_id, the
+    primary key's order) - one grouped query instead of one per service, for
+    app._enrich_services() on every public page load."""
+    service_ids = list(service_ids)
+    result = {sid: [] for sid in service_ids}
+    if not service_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(service_ids))
+    rows = conn.execute(f"""
+        SELECT service_id, depends_on_id FROM service_dependencies
+        WHERE service_id IN ({placeholders}) ORDER BY service_id, depends_on_id
+    """, service_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["service_id"]].append(r["depends_on_id"])
+    return result
+
+
 def set_service_dependencies(service_id, depends_on_ids):
     """Replaces the full dependency set for a service in one go, same pattern as
     replace_service_links(). A service can't depend on itself - filtered out here
@@ -1601,8 +1667,23 @@ def _get_window_services(window_id):
 
 
 def _attach_window_services(windows):
+    """Every window's covered services in one grouped query, not one per window - this
+    runs for the public page, /api/status and the kiosk. Same rows and per-window order
+    as _get_window_services()."""
+    by_window = {w["id"]: [] for w in windows}
+    if by_window:
+        conn = get_db()
+        placeholders = ",".join("?" * len(by_window))
+        rows = conn.execute(f"""
+            SELECT mws.window_id, s.id, s.name FROM maintenance_window_services mws
+            JOIN services s ON s.id = mws.service_id
+            WHERE mws.window_id IN ({placeholders}) ORDER BY s.sort_order, s.id
+        """, list(by_window)).fetchall()
+        conn.close()
+        for r in rows:
+            by_window[r["window_id"]].append({"id": r["id"], "name": r["name"]})
     for w in windows:
-        w["services"] = _get_window_services(w["id"])
+        w["services"] = by_window[w["id"]]
         w["service_names"] = ", ".join(s["name"] for s in w["services"])
     return windows
 
@@ -1894,20 +1975,32 @@ def create_problem_report(message, contact="", service_id=None, reporter_user=""
     return new_id
 
 
+def _attach_report_services(reports):
+    """Each report's service_name (None for a general report, or one whose service has
+    since been deleted) from one lookup for the whole list, not a get_service() per
+    report."""
+    ids = sorted({r["service_id"] for r in reports if r["service_id"]})
+    names = {}
+    if ids:
+        conn = get_db()
+        placeholders = ",".join("?" * len(ids))
+        names = {row["id"]: row["name"] for row in conn.execute(
+            f"SELECT id, name FROM services WHERE id IN ({placeholders})", ids)}
+        conn.close()
+    for r in reports:
+        r["service_name"] = names.get(r["service_id"]) if r["service_id"] else None
+    return reports
+
+
 def _attach_report_service(report):
-    if report["service_id"]:
-        service = get_service(report["service_id"])
-        report["service_name"] = service["name"] if service else None
-    else:
-        report["service_name"] = None
-    return report
+    return _attach_report_services([report])[0]
 
 
 def list_problem_reports():
     conn = get_db()
     rows = conn.execute("SELECT * FROM problem_reports ORDER BY created_at DESC").fetchall()
     conn.close()
-    return [_attach_report_service(dict(r)) for r in rows]
+    return _attach_report_services([dict(r) for r in rows])
 
 
 def get_problem_report(rid):
@@ -2220,7 +2313,7 @@ def list_reports_for_user(user_id):
         ORDER BY r.created_at DESC
     """, (user_id,)).fetchall()
     conn.close()
-    return [_attach_report_service(dict(r)) for r in rows]
+    return _attach_report_services([dict(r) for r in rows])
 
 
 def count_unseen_replies(user_id):
@@ -2585,11 +2678,19 @@ def mark_notification_failed(notification_id, error):
 def prune_notification_queue(days=30):
     """Delivered rows are history, not state. Kept briefly so an admin can see that
     something went out, then removed - this table would otherwise grow forever like
-    status_history did."""
+    status_history did.
+
+    Rows that were given up on (MAX_NOTIFICATION_ATTEMPTS failures) are history too,
+    and used to be kept forever. They go after the same number of days, counted from
+    when they were queued since they never got a sent_at. A row still being retried is
+    never touched, however old."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     conn = get_db()
-    cur = conn.execute("DELETE FROM notification_queue WHERE sent_at IS NOT NULL AND sent_at < ?",
-                        (cutoff,))
+    cur = conn.execute("""
+        DELETE FROM notification_queue
+        WHERE (sent_at IS NOT NULL AND sent_at < ?)
+           OR (sent_at IS NULL AND attempts >= ? AND created_at < ?)
+    """, (cutoff, MAX_NOTIFICATION_ATTEMPTS, cutoff))
     conn.commit()
     deleted = cur.rowcount
     conn.close()

@@ -180,6 +180,47 @@ def test_one_dead_source_still_returns_the_others_results(isolated_db, stub):
     assert outcome["available"] is True
 
 
+def test_the_two_sources_are_searched_at_the_same_time(isolated_db, stub, monkeypatch):
+    """Sequentially, a slow Jellyfin and a slow Seerr cost two whole search timeouts of
+    request-thread time. Each fake below waits for the other to have started, which
+    can only happen if both are in flight at once - run one after the other, the
+    barrier times out."""
+    _configure(stub)
+    both_started = threading.Barrier(2, timeout=5)
+
+    def jellyfin(*args):
+        both_started.wait()
+        return [{"title": "Dune", "year": 2021, "in_library": True, "jellyfin_id": "j1",
+                 "media_type": "movie", "source": "jellyfin"}]
+
+    def seerr(*args):
+        both_started.wait()
+        return [{"title": "Dune", "year": 2021, "in_library": False, "tmdb_id": 438631,
+                 "media_type": "movie", "source": "seerr"}]
+
+    monkeypatch.setattr(integrations, "search_jellyfin", jellyfin)
+    monkeypatch.setattr(integrations, "search_seerr", seerr)
+    outcome = media_search.search("dune")
+    assert outcome["errors"] == {}
+    assert outcome["available"] is True
+    assert len(outcome["results"]) == 1
+    assert outcome["results"][0]["jellyfin_id"] == "j1"
+    assert outcome["results"][0]["tmdb_id"] == 438631
+
+
+def test_an_unexpected_error_in_the_parallel_source_still_propagates(isolated_db, stub, monkeypatch):
+    """Only network and parse failures degrade to a per-source note, as before; a bug
+    on the helper thread must not be swallowed into an empty result."""
+    _configure(stub)
+    monkeypatch.setattr(integrations, "search_jellyfin", lambda *a: [])
+
+    def broken(*args):
+        raise KeyError("bug")
+    monkeypatch.setattr(integrations, "search_seerr", broken)
+    with pytest.raises(KeyError):
+        media_search.search("dune")
+
+
 def test_both_sources_down_reports_unavailable_rather_than_empty(isolated_db, stub):
     """"Search is unavailable right now" and "we don't have that" must not look the
     same - one is a system problem and the other is an answer."""
@@ -523,6 +564,141 @@ def test_searching_is_rate_limited_per_session(visitor, monkeypatch):
     for _ in range(2):
         assert b"lot of searching" not in visitor.get("/search?q=dune").data
     assert b"lot of searching" in visitor.get("/search?q=dune").data
+
+
+def _empty_search(monkeypatch):
+    calls = []
+    monkeypatch.setattr(media_search, "search",
+                        lambda q, jellyfin_user_id=None: calls.append(q) or {
+                            "results": [], "errors": {}, "available": True})
+    return calls
+
+
+def test_replaying_an_older_cookie_does_not_reset_the_rate_limit(visitor, monkeypatch):
+    """The limit used to live in the session cookie, so sending back a cookie from
+    before the searches reset it - 160 outbound searches against a limit of 40. It is
+    server-side now, keyed on the Jellyfin user."""
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 2)
+    calls = _empty_search(monkeypatch)
+    fresh_cookie = visitor.get_cookie("session").value
+    for _ in range(2):
+        visitor.get("/search?q=dune")
+    visitor.set_cookie("session", fresh_cookie)
+    assert b"lot of searching" in visitor.get("/search?q=dune").data
+    assert len(calls) == 2
+
+
+def test_the_limit_is_per_person_not_global(visitor, monkeypatch):
+    """One enthusiastic searcher must not lock everybody else out."""
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 1)
+    _empty_search(monkeypatch)
+    visitor.get("/search?q=dune")
+    assert b"lot of searching" in visitor.get("/search?q=dune").data
+    with media_search.outbound_call("someone-else") as allowed:
+        assert allowed is True
+
+
+def test_the_window_slides(monkeypatch):
+    """A sliding window, same numbers as before: calls older than the window stop
+    counting, so the allowance comes back gradually rather than all at once."""
+    media_search.clear_caches()  # no isolated_db here, so no automatic reset
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 2)
+    monkeypatch.setattr(config, "SEARCH_RATE_WINDOW_SECONDS", 60)
+    now = [1000.0]
+    monkeypatch.setattr(media_search.time, "monotonic", lambda: now[0])
+    for _ in range(2):
+        with media_search.outbound_call("u1") as allowed:
+            assert allowed
+        now[0] += 20
+    with media_search.outbound_call("u1") as allowed:
+        assert not allowed          # t=1040: both calls still inside the window
+    now[0] = 1061
+    with media_search.outbound_call("u1") as allowed:
+        assert allowed              # the first one (t=1000) has aged out
+    with media_search.outbound_call("u1") as allowed:
+        assert not allowed          # ...but the second (t=1020) hasn't
+
+
+def test_a_full_house_is_answered_with_the_rate_limit_message(visitor, monkeypatch):
+    """Each search can hold a request thread for the search timeout, so only a third of
+    the pool may be searching at once. Past that, the answer is the same one a
+    rate-limited visitor gets - and it doesn't cost them any of their allowance."""
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 1)
+    calls = _empty_search(monkeypatch)
+    held = [media_search._outbound_slots.acquire(blocking=False)
+            for _ in range(media_search.MAX_CONCURRENT_OUTBOUND)]
+    assert all(held)
+    try:
+        assert b"lot of searching" in visitor.get("/search?q=dune").data
+        assert b"lot of searching" in visitor.get("/search/live?q=dune").data
+        resp = visitor.get("/search/detail/movie/1", follow_redirects=True)
+        assert b"lot of requests" in resp.data
+        assert calls == []
+    finally:
+        for _ in held:
+            media_search._outbound_slots.release()
+    # Busy refusals didn't use up the one allowed search.
+    assert b"lot of searching" not in visitor.get("/search?q=dune").data
+    assert calls == ["dune"]
+
+
+def test_concurrent_callers_beyond_the_cap_are_refused_not_queued():
+    """Real threads, all arriving while the first few are still inside a slow call:
+    exactly MAX_CONCURRENT_OUTBOUND get in and the rest are refused at once rather
+    than waiting for a thread that may be held for the whole search timeout."""
+    media_search.clear_caches()
+    release = threading.Event()
+    inside = threading.Barrier(media_search.MAX_CONCURRENT_OUTBOUND + 1)
+    outcomes = []
+
+    def caller(n):
+        with media_search.outbound_call(f"user-{n}") as allowed:
+            outcomes.append(allowed)
+            if allowed:
+                inside.wait(timeout=5)
+                release.wait(timeout=5)
+
+    threads = [threading.Thread(target=caller, args=(n,))
+               for n in range(media_search.MAX_CONCURRENT_OUTBOUND)]
+    for t in threads:
+        t.start()
+    inside.wait(timeout=5)                   # every slot is now held
+    extra = [threading.Thread(target=caller, args=(100 + n,)) for n in range(3)]
+    for t in extra:
+        t.start()
+    for t in extra:
+        t.join(timeout=5)
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+    assert outcomes.count(True) == media_search.MAX_CONCURRENT_OUTBOUND
+    assert outcomes.count(False) == 3
+    with media_search.outbound_call("after") as allowed:
+        assert allowed                        # and every slot came back
+
+
+def test_a_slot_is_given_back_even_when_the_call_fails(visitor, monkeypatch):
+    def boom(q, jellyfin_user_id=None):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(media_search, "search", boom)
+    for _ in range(media_search.MAX_CONCURRENT_OUTBOUND + 1):
+        with pytest.raises(RuntimeError):
+            with media_search.outbound_call("u1"):
+                media_search.search("x")
+    with media_search.outbound_call("u1") as allowed:
+        assert allowed
+
+
+def test_the_request_configuration_page_is_rate_limited_too(visitor, monkeypatch):
+    """It makes live calls to Seerr and used to have no limit at all."""
+    monkeypatch.setattr(config, "SEARCH_RATE_LIMIT", 1)
+    calls = []
+    monkeypatch.setattr(media_search, "request_configuration",
+                        lambda *a, **k: calls.append(a) or None)
+    assert visitor.get("/search/request/configure?media_type=movie&tmdb_id=1").status_code == 404
+    resp = visitor.get("/search/request/configure?media_type=movie&tmdb_id=1", follow_redirects=True)
+    assert b"lot of requests" in resp.data
+    assert len(calls) == 1
 
 
 def test_an_empty_query_does_not_count_against_the_limit(visitor, monkeypatch):
@@ -934,3 +1110,48 @@ def test_a_single_word_query_worked_all_along(strict_seerr):
     """Why this went unnoticed: "test" has nothing to encode."""
     integrations.search_seerr(strict_seerr, "k", "test")
     assert _TmdbStrictSeerr.seen[0] == "query=test&page=1"
+
+
+@pytest.mark.parametrize("seasons", [["1", "²"], ["١"], ["9" * 5000]])
+def test_a_unicode_or_absurd_season_number_is_refused_not_a_500(visitor, stub, monkeypatch, seasons):
+    """str.isdigit() accepts "²" and Arabic-Indic digits, which int() then rejected with
+    a 500. They now get the same refusal as any other mangled season value."""
+    _configure(stub, jellyfin=False)
+    calls = []
+    monkeypatch.setattr(integrations, "request_via_seerr", lambda *a, **k: calls.append(a))
+    resp = visitor.post("/search/request", data={"media_type": "tv", "tmdb_id": "1",
+                                                  "seasons": seasons}, follow_redirects=True)
+    assert resp.status_code == 200
+    if seasons == ["9" * 5000]:
+        # ASCII digits, so a valid shape: clamped rather than refused, and Seerr is the
+        # one that says no to a season that doesn't exist.
+        assert len(calls) == 1
+    else:
+        assert b"didn&#39;t make sense" in resp.data or b"didn't make sense" in resp.data
+        assert calls == []
+
+
+@pytest.mark.parametrize("field", [{"profile_id": "²"}, {"tags": ["1", "²"]}, {"profile_id": "-3"}])
+def test_a_mangled_admin_request_field_is_refused_not_a_500(visitor, stub, monkeypatch, field):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    calls = []
+    monkeypatch.setattr(integrations, "request_via_seerr", lambda *a, **k: calls.append(a))
+    resp = visitor.post("/search/request", data={"media_type": "movie", "tmdb_id": "1", **field},
+                        follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"didn&#39;t make sense" in resp.data or b"didn't make sense" in resp.data
+    assert calls == []
+
+
+def test_valid_admin_request_fields_still_go_through_unchanged(visitor, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sent = {}
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, seasons=None, root_folder=None,
+                               profile_id=None, tags=None:
+                        sent.update({"profile_id": profile_id, "tags": tags}))
+    visitor.post("/search/request", data={"media_type": "movie", "tmdb_id": "1",
+                                           "profile_id": "6", "tags": ["1", "2"]})
+    assert sent == {"profile_id": "6", "tags": ["1", "2"]}

@@ -71,6 +71,50 @@ LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 # the middle of the line. Found by reading the real log file, not by a test.
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# A ceiling on one day's file. Rotation is by day, not size, so without this a flood of
+# entries - every unauthenticated 500 writes a multi-KB traceback - could fill the disk
+# before midnight and bury the entries that matter under it. A normal day here is
+# kilobytes; the busiest one seen so far was under half a megabyte.
+MAX_BYTES_PER_FILE = 20 * 1024 * 1024
+
+
+class _CappedDailyFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """Daily rotation exactly as before, plus a size ceiling: once today's file
+    reaches max_bytes, one marker entry says so and everything after it is dropped
+    until midnight's rotation opens a fresh file.
+
+    Dropping rather than rotating early is deliberate. A second file for the same
+    day would collide with the date-named backups that the retention count, the log
+    page's file list and its name whitelist (_LOG_NAME) all rely on."""
+
+    def __init__(self, *args, max_bytes=MAX_BYTES_PER_FILE, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_bytes = max_bytes
+        self._capped = False
+
+    def doRollover(self):
+        super().doRollover()
+        self._capped = False
+
+    def emit(self, record):
+        # BaseRotatingHandler.emit()'s own shape, with the ceiling checked after the
+        # rollover so a new day always starts writing again.
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            if self.stream is not None and os.fstat(self.stream.fileno()).st_size >= self.max_bytes:
+                if self._capped:
+                    return
+                self._capped = True
+                record = logging.makeLogRecord({
+                    "name": __name__, "levelno": logging.WARNING, "levelname": "WARNING",
+                    "msg": f"Log file reached its {self.max_bytes // (1024 * 1024)} MB daily "
+                           "limit - further entries are dropped until the next rotation."})
+            logging.FileHandler.emit(self, record)
+        except Exception:  # noqa: BLE001 - logging's own contract: a handler never raises
+            self.handleError(record)
+
+
 _configured = False
 
 
@@ -84,7 +128,7 @@ def init_logging():
     os.makedirs(LOG_DIR, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
-    file_handler = logging.handlers.TimedRotatingFileHandler(
+    file_handler = _CappedDailyFileHandler(
         LOG_FILE, when="midnight", backupCount=config.LOG_RETENTION_DAYS, encoding="utf-8")
     file_handler.setFormatter(formatter)
 

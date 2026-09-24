@@ -34,6 +34,14 @@ _perdisk_io_cache = {}
 # Same idea for network throughput (aggregate across all interfaces).
 _net_cache = {"time": None, "sent_bytes": None, "recv_bytes": None}
 
+# The throughput rates themselves, as the background loop last computed them. A rate
+# is a delta between two readings, and when every caller computed its own - request
+# threads, the health loop, the Discord bot - each one moved the shared baseline for
+# all the others: two callers milliseconds apart turned a steady transfer into a spike
+# and a false high-load badge. The loop now takes the readings, one per tick, and
+# callers read the result. disk_io is keyed like _perdisk_io_cache ("PhysicalDriveN").
+_RATES_CACHE = {"network": None, "disk_io": {}, "updated_at": None}
+
 # Best-effort Windows-only data that requires a PowerShell/CIM subprocess call (CPU
 # temperature, per-disk temperature/drive-letter mapping, Hyper-V VMs) - populated by
 # a background thread (see start_background_refresh()) instead of queried live inside
@@ -91,6 +99,13 @@ def _refresh_cpu_cache():
     _CPU_CACHE["sampled_at"] = now
 
 
+def _published_recently(updated_at):
+    """Whether something the background loop stamped at `updated_at` is still current.
+    max_age is set when the loop starts; without a loop, any published value counts."""
+    max_age = _CPU_CACHE["max_age"]
+    return updated_at is not None and (max_age is None or time.time() - updated_at <= max_age)
+
+
 def _get_cpu_percentages():
     """Per-core CPU usage, from the background cache when it has a fresh reading.
 
@@ -99,9 +114,7 @@ def _get_cpu_percentages():
     unit tests) or when the cache has gone stale enough to suggest the thread died -
     a stale number is worse than a 0.2s wait, and silently showing minutes-old load
     as if it were current is the failure mode worth avoiding here."""
-    updated_at = _CPU_CACHE["updated_at"]
-    max_age = _CPU_CACHE["max_age"]
-    if updated_at is not None and (max_age is None or time.time() - updated_at <= max_age):
+    if _published_recently(_CPU_CACHE["updated_at"]):
         return _CPU_CACHE["per_core"]
     per_core = psutil.cpu_percent(interval=CPU_FALLBACK_SAMPLE_SECONDS, percpu=True) or []
     # That call reset psutil's internal per-call baseline, so tell the background
@@ -125,9 +138,37 @@ def get_resource_snapshot():
         "mem_used_gb": round(mem.used / (1024 ** 3), 1),
         "mem_total_gb": round(mem.total / (1024 ** 3), 1),
         "disks": _get_disk_snapshots(),
-        "network": _get_network_rate(),
+        "network": _current_network_rate(),
         "gpus": _get_gpu_snapshot(),
     }
+
+
+def _refresh_rates():
+    """Takes this tick's network and per-disk I/O readings and publishes the rates
+    since the previous tick. Only the background loop calls this, so every rate is
+    measured over one steady loop interval instead of "since whoever asked last"."""
+    disk_io = {}
+    if os.name == "nt":
+        for key, counters in (psutil.disk_io_counters(perdisk=True) or {}).items():
+            disk_io[key] = _get_perdisk_io_rate(key, counters)
+    _RATES_CACHE["network"] = _get_network_rate()
+    _RATES_CACHE["disk_io"] = disk_io
+    _RATES_CACHE["updated_at"] = time.time()
+
+
+def _rates_from_the_loop():
+    """True when callers should read _RATES_CACHE rather than take readings of their
+    own: the loop is running and has published recently. With no loop at all (tests,
+    an entry point that never started it) or a dead one, callers compute the rate
+    themselves as before - a reading beats a frozen number."""
+    return _CPU_CACHE["max_age"] is not None and (
+        _RATES_CACHE["updated_at"] is None or _published_recently(_RATES_CACHE["updated_at"]))
+
+
+def _current_network_rate():
+    if _rates_from_the_loop():
+        return _RATES_CACHE["network"]
+    return _get_network_rate()
 
 
 def evaluate_high_load(snapshot, thresholds):
@@ -202,7 +243,11 @@ def _get_disk_snapshots():
             best_by_device[device] = part
 
     by_drive_letter = _WINDOWS_CACHE["disk_details"]
-    perdisk_counters = psutil.disk_io_counters(perdisk=True) or {} if os.name == "nt" else {}
+    # The loop's rates when it is publishing them (see _RATES_CACHE); only without one
+    # does this take its own readings, as it always used to.
+    loop_rates = _RATES_CACHE["disk_io"] if _rates_from_the_loop() else None
+    perdisk_counters = (psutil.disk_io_counters(perdisk=True) or {}
+                        if os.name == "nt" and loop_rates is None else {})
 
     disks = []
     for part in best_by_device.values():
@@ -217,9 +262,13 @@ def _get_disk_snapshots():
             detail = by_drive_letter.get(part.mountpoint[0].upper())
             if detail:
                 temp_c = detail["temp_c"]
-                counters = perdisk_counters.get(f"PhysicalDrive{detail['disk_number']}")
-                if counters is not None:
-                    io = _get_perdisk_io_rate(f"PhysicalDrive{detail['disk_number']}", counters)
+                key = f"PhysicalDrive{detail['disk_number']}"
+                if loop_rates is not None:
+                    io = loop_rates.get(key)
+                else:
+                    counters = perdisk_counters.get(key)
+                    if counters is not None:
+                        io = _get_perdisk_io_rate(key, counters)
         disks.append({
             "path": part.mountpoint,
             "label": label,
@@ -596,19 +645,82 @@ def _query_windows_disk_details():
     return by_drive_letter
 
 
-def _refresh_windows_cache():
+def _refresh_vms_and_cpu_temp():
     _WINDOWS_CACHE["vms"] = get_vm_snapshot()
     _WINDOWS_CACHE["cpu_temp_c"] = _query_cpu_temp()
+    _WINDOWS_CACHE["updated_at"] = time.time()
+
+
+def _refresh_disk_details():
     _WINDOWS_CACHE["disk_details"] = _query_windows_disk_details()
     _WINDOWS_CACHE["updated_at"] = time.time()
+
+
+# The Windows queries, each on its own cadence rather than every loop tick. Every one
+# of these is a cold PowerShell start - three every 10s was ~26k a day - and
+# Get-PhysicalDisk | Get-StorageReliabilityCounter may wake spun-down drives. VM state
+# and CPU temperature are worth a minute's freshness; which disk holds which drive
+# letter, and drive temperatures, barely change at all. Name -> (seconds, function);
+# a dict so tests can swap an entry.
+_WINDOWS_JOBS = {
+    "vms_and_cpu_temp": (60, _refresh_vms_and_cpu_temp),
+    "disk_details": (12 * 60, _refresh_disk_details),
+}
+# When each job is next due (time.monotonic()) and whether a run is still in flight.
+# 0.0 means "at the next tick", which is what startup and clear_caches() want.
+_windows_job_state = {name: {"due_at": 0.0, "running": False} for name in _WINDOWS_JOBS}
+_windows_job_lock = threading.Lock()
+
+
+def _run_windows_job(name, refresh):
+    try:
+        refresh()
+    except Exception:
+        _logger.exception("Windows %s refresh failed", name)
+    finally:
+        with _windows_job_lock:
+            _windows_job_state[name]["running"] = False
+
+
+def _dispatch_due_windows_jobs(now=None):
+    """Starts every Windows job that is due and not already running, each on its own
+    short-lived thread, and returns those threads.
+
+    Off the loop's thread on purpose: the loop also publishes the CPU sample every
+    tick, and running PowerShell inline (up to 10+10+15s when queries time out) is
+    what let that sample go stale, dropping every public page back to a blocking
+    0.2s psutil read. A job never overlaps itself, so a hung query costs one stuck
+    thread until its subprocess timeout, never a pile of them. Due times are counted
+    from when a run starts, so a slow run doesn't push the schedule back."""
+    now = time.monotonic() if now is None else now
+    started = []
+    for name, (interval, refresh) in _WINDOWS_JOBS.items():
+        with _windows_job_lock:
+            job = _windows_job_state[name]
+            if job["running"] or now < job["due_at"]:
+                continue
+            job["running"] = True
+            job["due_at"] = now + interval
+        thread = threading.Thread(target=_run_windows_job, args=(name, refresh),
+                                  daemon=True, name=f"monitoring-{name}")
+        thread.start()
+        started.append(thread)
+    return started
+
+
+def _background_tick():
+    """One pass of the polling loop: the CPU sample and the throughput rates every
+    time, and whichever Windows jobs have come due, without waiting on them."""
+    _refresh_cpu_cache()
+    _refresh_rates()
+    if os.name == "nt":
+        _dispatch_due_windows_jobs()
 
 
 def _background_refresh_loop(interval_seconds):
     while True:
         try:
-            _refresh_cpu_cache()
-            if os.name == "nt":
-                _refresh_windows_cache()
+            _background_tick()
         except Exception:
             _logger.exception("background refresh error")
         time.sleep(interval_seconds)
@@ -658,12 +770,20 @@ def clear_caches():
     The delta-based caches (per-disk I/O, network throughput) lose their baseline
     along with everything else, which means the very next reading reports no rate at
     all rather than a wrong one - they re-establish themselves on the following
-    sample, exactly as they do at startup."""
+    sample, exactly as they do at startup.
+
+    The Windows jobs are made due again at the next tick. On their own cadence the
+    disk mapping would otherwise stay empty for up to twelve minutes, taking every
+    disk's temperature and I/O off the resources page with it."""
     _WINDOWS_CACHE.update({"vms": [], "cpu_temp_c": None, "disk_details": {}, "updated_at": None})
+    with _windows_job_lock:
+        for job in _windows_job_state.values():
+            job["due_at"] = 0.0
     _CPU_CACHE.update({"per_core": [], "updated_at": None, "sampled_at": None})
     _volume_label_cache.clear()
     _perdisk_io_cache.clear()
     _net_cache.update({"time": None, "sent_bytes": None, "recv_bytes": None})
+    _RATES_CACHE.update({"network": None, "disk_io": {}, "updated_at": None})
 
 
 def _as_iso(epoch):

@@ -69,3 +69,22 @@ def test_reset_flag_file_disables_2fa_and_is_self_cleaning(isolated_db, monkeypa
 
     # Idempotent - calling again with the file already gone is a clean no-op.
     assert twofactor.check_and_process_reset_flag() is False
+
+
+def test_a_code_stays_valid_for_its_whole_window(isolated_db):
+    """Deliberately no single-use rule: a code keeps working until valid_window moves
+    past it, so a step-up straight after logging in can reuse the code just typed."""
+    secret = twofactor.generate_secret()
+    code = pyotp.TOTP(secret).now()
+    assert twofactor.verify_code(secret, code) is True
+    assert twofactor.verify_code(secret, code) is True
+
+
+def test_disable_turns_2fa_off_and_forgets_the_secret(isolated_db):
+    """The one off-switch the admin page and the RESET_2FA flag both use."""
+    db.set_setting("admin_totp_enabled", "1")
+    db.set_setting("admin_totp_secret", twofactor.generate_secret())
+    twofactor.disable()
+    assert twofactor.is_enabled() is False
+    assert db.get_setting("admin_totp_secret") == ""
+    assert db.get_setting("admin_totp_enabled") == "0"

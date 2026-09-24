@@ -64,6 +64,13 @@ def verify_code(secret, code):
         return False
 
 
+def disable():
+    """Turns 2FA off and forgets the secret. Used by both the admin page and the
+    host-level reset flag, so the two can't drift."""
+    db.set_setting("admin_totp_enabled", "0")
+    db.set_setting("admin_totp_secret", "")
+
+
 def qr_code_svg(uri):
     """Renders the otpauth:// URI as an inline SVG QR code."""
     img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
@@ -79,8 +86,7 @@ def check_and_process_reset_flag():
     action, not a standing backdoor left enabled by accident."""
     if not os.path.exists(RESET_FLAG_PATH):
         return False
-    db.set_setting("admin_totp_enabled", "0")
-    db.set_setting("admin_totp_secret", "")
+    disable()
     try:
         os.remove(RESET_FLAG_PATH)
     except OSError:

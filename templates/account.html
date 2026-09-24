@@ -329,7 +329,7 @@
             <button type="submit" class="btn secondary">Use these details here</button>
           </form>
           <form method="POST" action="{{ url_for('admin_user_contact', user_id=target_user.id) }}"
-                onsubmit="return confirm('This will update {{ target_user.name }}\'s Seerr account with the contact details saved above. Continue?');">
+                data-confirm="This will update {{ target_user.name }}'s Seerr account with the contact details saved above. Continue?">
             <input type="hidden" name="notify_email" value="{{ prefs.notify_email }}">
             <input type="hidden" name="notify_discord_id" value="{{ prefs.notify_discord_id }}">
             <input type="hidden" name="next" value="{{ url_for('admin_user_account', user_id=target_user.id) }}">
@@ -340,7 +340,7 @@
             <button type="submit" class="btn secondary">Use these details here</button>
           </form>
           <form method="POST" action="{{ url_for('user_account_push_seerr_contact') }}"
-                onsubmit="return confirm('This will update your Seerr account with the contact details saved above. Continue?');">
+                data-confirm="This will update your Seerr account with the contact details saved above. Continue?">
             <button type="submit" class="btn secondary">Send my details to Seerr</button>
           </form>
         {% endif %}

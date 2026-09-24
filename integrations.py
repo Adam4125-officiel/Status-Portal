@@ -717,8 +717,7 @@ MAX_CALENDAR_DAYS = 90
 
 
 def calendar_days():
-    raw = db.get_setting("media_calendar_days", str(DEFAULT_CALENDAR_DAYS))
-    value = int(raw) if raw.isdigit() else DEFAULT_CALENDAR_DAYS
+    value = db.parse_int(db.get_setting("media_calendar_days", ""), DEFAULT_CALENDAR_DAYS)
     return max(MIN_CALENDAR_DAYS, min(MAX_CALENDAR_DAYS, value))
 
 
@@ -1303,8 +1302,9 @@ def seerr_integration():
     raw = db.get_setting(SEERR_INTEGRATION_SETTING, "")
     candidates = [i for i in db.list_integrations()
                   if i["kind"] == "jellyseerr" and i["enabled"]]
-    if raw.isdigit():
-        return next((i for i in candidates if i["id"] == int(raw)), None)
+    chosen_id = db.parse_int(raw)
+    if chosen_id is not None:
+        return next((i for i in candidates if i["id"] == chosen_id), None)
     return candidates[0] if candidates else None
 
 
@@ -1469,7 +1469,7 @@ def high_load_thresholds():
     """Admin-configurable thresholds (DB settings, editable at /admin/settings) -
     read here rather than duplicated in both app.py and discord_bot.py, since both
     need the exact same setting keys/defaults to stay in sync with each other."""
-    return {key: int(db.get_setting(f"highload_{key}", default))
+    return {key: db.parse_int(db.get_setting(f"highload_{key}", default), int(default))
             for key, default in HIGHLOAD_DEFAULTS.items()}
 
 

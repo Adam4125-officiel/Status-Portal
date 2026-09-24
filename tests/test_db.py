@@ -663,6 +663,33 @@ def test_uptime_query_is_answered_from_a_covering_index(isolated_db):
     assert any("COVERING INDEX idx_status_history_service_checked" in row[3] for row in plan), plan
 
 
+def test_the_open_auto_incident_lookup_uses_its_index(isolated_db):
+    """Runs every health-check cycle for every down service, against a table nothing
+    ever prunes - it has to stay an index search, not a scan."""
+    conn = db.get_db()
+    plan = conn.execute("""
+        EXPLAIN QUERY PLAN
+        SELECT * FROM incidents WHERE service_id=? AND auto_created=1 AND status != 'resolved'
+        ORDER BY started_at DESC LIMIT 1
+    """, (1,)).fetchall()
+    conn.close()
+    assert any("USING INDEX idx_incidents_service_auto" in row[3] for row in plan), plan
+
+
+def test_the_incidents_index_reaches_an_existing_database(isolated_db):
+    """Declared in init_db()'s index list, not in CREATE TABLE, so an existing
+    portal.db gets it on the next start."""
+    conn = db.get_db()
+    conn.execute("DROP INDEX idx_incidents_service_auto")
+    conn.commit()
+    conn.close()
+    db.init_db()
+    conn = db.get_db()
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    conn.close()
+    assert "idx_incidents_service_auto" in names
+
+
 def test_indexes_are_created_on_a_database_that_predates_them(isolated_db):
     """init_db() must be able to add an index to an existing database - the same
     problem _ensure_column() solves for columns. CREATE INDEX IF NOT EXISTS does
@@ -1218,3 +1245,32 @@ def test_a_stored_username_is_cleared_on_the_next_restart(isolated_db):
     # rewriting rows forever.
     db.init_db()
     assert db.get_user_preferences("u2")["notify_email"] == "real@example.com"
+
+
+# ---------------------------------------------------------------------------
+# parse_int(): the one parser for numeric settings and query parameters
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("raw", ["²", "١٢", "-5", "+5", "1.5", "1e3", "12a", "", "   ", None])
+def test_parse_int_refuses_anything_but_ascii_digits(raw):
+    """str.isdigit() accepts "²" and Arabic-Indic digits, which int() then rejects -
+    that was a real 500 on the public page once such a value was stored."""
+    assert db.parse_int(raw, default="fallback") == "fallback"
+
+
+def test_parse_int_parses_and_clamps():
+    assert db.parse_int(" 42 ") == 42
+    assert db.parse_int("007") == 7
+    assert db.parse_int("5", minimum=10) == 10
+    assert db.parse_int("500", maximum=90) == 90
+    assert db.parse_int(7) == 7
+
+
+def test_parse_int_never_overflows_sqlite_or_int():
+    """A 23-digit offset overflowed SQLite's INTEGER; past 4300 digits int() itself
+    raises. Both clamp to the maximum instead."""
+    assert db.parse_int("9" * 23) == db.MAX_SQLITE_INT
+    assert db.parse_int("9" * 5000) == db.MAX_SQLITE_INT
+    assert db.parse_int("0" * 30 + "12") == 12
+    conn = db.get_db()
+    conn.execute("SELECT ? + 0", (db.parse_int("9" * 23),)).fetchone()
+    conn.close()

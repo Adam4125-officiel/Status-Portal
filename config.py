@@ -201,9 +201,11 @@ SMTP_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SMTP_TIMEOUT_SECONDS", "10"))
 # other timeout here for that reason.
 SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"))
 
-# Per-session rate limit: how many searches in how long. A search box wired to two
-# external APIs is a free denial-of-service amplifier, and this is on top of the
-# signed-in-only restriction, not instead of it.
+# Per-person rate limit: how many searches in how long, as a sliding window kept
+# server-side by media_search.outbound_call() (it used to live in the session cookie,
+# where replaying an old cookie reset it). A search box wired to two external APIs is
+# a free denial-of-service amplifier, and this is on top of the signed-in-only
+# restriction, not instead of it.
 #
 # Raised from 20 when search became incremental: results now appear while typing, so one
 # person looking for one film costs two or three requests rather than one. The debounce

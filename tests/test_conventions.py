@@ -345,18 +345,40 @@ def test_admin_routes_are_all_gated_by_the_admin_decorator():
 # ---------------------------------------------------------------------------
 # Step-up 2FA on the destructive actions
 # ---------------------------------------------------------------------------
+# Routes that are refused outright while 2FA is on, instead of asking for a code.
+# Re-enrolling 2FA is the case: asking for a code from the *current* secret would
+# work too, but "disable first" was the decision, and disabling already needs one.
+_REFUSED_WHILE_2FA_ENABLED = {"admin_2fa_enable"}
+
+
 @pytest.mark.parametrize("route_func", [
     "admin_host_control", "admin_system_restart", "admin_update",
+    "admin_2fa_enable",
 ])
 def test_destructive_routes_go_through_require_totp(route_func):
-    """CLAUDE.md: these three are the actions where a stolen/replayed session cookie
-    alone must not be enough, and they must call the shared _require_totp() helper
-    rather than each hand-rolling the check - three copies is three chances for one to
-    quietly stop matching the others."""
+    """CLAUDE.md: these are the actions where a stolen/replayed session cookie alone
+    must not be enough, and they must call the shared _require_totp() helper rather
+    than each hand-rolling the check - three copies is three chances for one to
+    quietly stop matching the others.
+
+    admin_2fa_enable is the one that refuses instead of asking: with a stolen cookie
+    it would otherwise swap the admin's authenticator for the attacker's, which
+    defeats every other route in this list at once."""
     tree = ast.parse(_read("app.py"))
     func = next((n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == route_func), None)
     assert func is not None, f"{route_func}() not found in app.py - was it renamed?"
+    if route_func in _REFUSED_WHILE_2FA_ENABLED:
+        # The refusal has to come first, before anything reads or writes a secret.
+        first = next(n for n in func.body
+                     if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)))
+        assert (isinstance(first, ast.If)
+                and "twofactor.is_enabled()" in ast.unparse(first.test)
+                and any(isinstance(n, ast.Return) for n in first.body)), (
+            f"{route_func}() must start by refusing while twofactor.is_enabled() - "
+            "re-enrolling 2FA from a session alone would hand a stolen cookie the "
+            "step-up code for every destructive action.")
+        return
     called = {n.func.id for n in ast.walk(func)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_require_totp" in called, (
@@ -467,6 +489,66 @@ def test_no_native_multi_selects_in_templates():
         "\nUse the shared .checkbox-list/.field-check styles instead.")
 
 
+# Template expressions allowed inside an inline on*= handler, keyed by template and
+# the exact expression. Anything else fails the test below.
+_INLINE_HANDLER_EXPRESSIONS_ALLOWED = {
+    # The "Delete <name>?" confirms. The name is one the portal's own admin typed, so a
+    # quote in it is self-XSS with no privilege gained - the accepted exception
+    # CLAUDE.md describes. Don't copy the pattern for anything else.
+    ("admin_integrations.html", "i.name"),
+    ("admin_services.html", "s.name"),
+    # Only string constants chosen in the template itself; nothing from outside.
+    ("admin_maintenance.html",
+     "' This will restore its service(s) immediately.' if w.applied and not w.ended else ''"),
+    ("admin_notifications.html",
+     "'confirm(\\'Generate a new key? The current one will stop working immediately.\\')' "
+     "if notify_api_key else 'true'"),
+}
+
+# An on*= attribute's value, treating {{ ... }} as atomic so a quote inside an
+# expression can't end the match early and hide the rest of it.
+_INLINE_HANDLER = re.compile(
+    r"""\son[a-z]+\s*=\s*(?:"((?:\{\{.*?\}\}|[^"])*)"|'((?:\{\{.*?\}\}|[^'])*)')""",
+    re.I | re.S)
+
+
+def test_no_template_values_inside_inline_event_handlers():
+    """CLAUDE.md: never interpolate a value into an inline on*= handler. Jinja's
+    attribute escaping doesn't help there - the browser HTML-decodes the attribute and
+    then parses it as JavaScript, so an escaped quote is a real quote again. That was
+    the VM-name XSS, and later a Jellyfin username in account.html.
+
+    Put the value in a data-* attribute and read it from a script instead (see
+    static/js/account.js or admin_vm_control.js)."""
+    offenders = []
+    for path, src in _template_files():
+        name = os.path.relpath(path, "templates")
+        for match in _INLINE_HANDLER.finditer(src):
+            value = match.group(1) if match.group(1) is not None else match.group(2)
+            for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S):
+                if (name, expr) not in _INLINE_HANDLER_EXPRESSIONS_ALLOWED:
+                    offenders.append(f"{path}:{src[:match.start()].count(chr(10)) + 1}: {{{{ {expr} }}}}")
+    assert not offenders, (
+        "Template values inside inline event handlers:\n  " + "\n  ".join(offenders) +
+        "\nMove the value into a data-* attribute and attach the handler from a script "
+        "that reads it with getAttribute() (static/js/account.js is a short example). "
+        "Only a value the portal's own admin typed may stay, and then only as an explicit "
+        "entry in _INLINE_HANDLER_EXPRESSIONS_ALLOWED.")
+
+
+def test_the_inline_handler_allow_list_has_no_stale_entries():
+    """An exception whose template was since fixed should be deleted, not left for the
+    next person to copy."""
+    found = set()
+    for path, src in _template_files():
+        name = os.path.relpath(path, "templates")
+        for match in _INLINE_HANDLER.finditer(src):
+            value = match.group(1) if match.group(1) is not None else match.group(2)
+            found.update((name, expr) for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S))
+    stale = _INLINE_HANDLER_EXPRESSIONS_ALLOWED - found
+    assert not stale, f"Allow-list entries that no longer match anything: {sorted(stale)}. Remove them."
+
+
 # ---------------------------------------------------------------------------
 # Test isolation
 # ---------------------------------------------------------------------------
@@ -485,6 +567,7 @@ def test_every_module_level_cache_is_reset_between_tests():
         "scheduler.py": _read("scheduler.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "updater.py": _read("updater.py").split("def clear_update_cache")[-1].split("\ndef ")[0],
         "user_notify.py": _read("user_notify.py").split("def clear_caches")[-1].split("\ndef ")[0],
+        "media_search.py": _read("media_search.py").split("def clear_caches")[-1].split("\ndef ")[0],
     }
     missing = []
     for name, src in _python_modules():

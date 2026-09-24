@@ -229,3 +229,49 @@ def test_init_logging_marks_where_a_run_starts(tmp_path, monkeypatch, caplog):
             if h not in before:
                 root.removeHandler(h)
         monkeypatch.setattr(logging_setup, "_configured", False)
+
+
+def test_a_days_log_stops_growing_at_its_size_cap(tmp_path):
+    """Rotation is by day, so a flood of entries (every unauthenticated 500 writes a
+    traceback) could otherwise fill the disk before midnight. Past the cap there is
+    one marker entry and then nothing, until the next rotation writes again."""
+    path = tmp_path / "app.log"
+    handler = logging_setup._CappedDailyFileHandler(
+        str(path), when="midnight", backupCount=2, encoding="utf-8", max_bytes=2000)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logger = logging.getLogger("cap-test")
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        for i in range(500):
+            logger.error("entry %d %s", i, "x" * 80)
+        text = path.read_text(encoding="utf-8")
+        assert path.stat().st_size < 2000 + 400
+        assert text.count("daily limit") == 1
+        assert "entry 499" not in text
+
+        handler.doRollover()
+        logger.error("after the rotation")
+        assert "after the rotation" in path.read_text(encoding="utf-8")
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def test_init_logging_installs_the_capped_handler(tmp_path, monkeypatch):
+    monkeypatch.setattr(logging_setup, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(logging_setup, "LOG_FILE", str(tmp_path / "logs" / "app.log"))
+    monkeypatch.setattr(logging_setup, "_configured", False)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        logging_setup.init_logging()
+        added = [h for h in root.handlers if h not in before]
+        capped = [h for h in added if isinstance(h, logging_setup._CappedDailyFileHandler)]
+        assert capped and capped[0].max_bytes == logging_setup.MAX_BYTES_PER_FILE
+    finally:
+        for h in list(root.handlers):
+            if h not in before:
+                root.removeHandler(h)
+                h.close()
+        monkeypatch.setattr(logging_setup, "_configured", False)

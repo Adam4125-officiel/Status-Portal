@@ -6,6 +6,7 @@ Admin panel: /admin (password is set on first launch)
 import gzip
 import hashlib
 import io
+import ipaddress
 import logging
 import os
 import platform
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -107,6 +109,12 @@ def set_security_headers(response):
         "frame-ancestors 'none'"
     )
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
+    # Signed-in pages must not be kept by the browser or anything in between:
+    # otherwise the back button, or the next person on a shared machine, can bring
+    # an admin or account page back after logout. Overrides the send_file() default
+    # too, which is what the two point-in-time downloads under /admin/ want anyway.
+    if request.path == "/admin" or request.path.startswith(("/admin/", "/account")):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -359,20 +367,67 @@ def _session_timeout_seconds():
     """None = no idle timeout configured. Clamped to MAX_SESSION_TIMEOUT_HOURS
     because anything beyond the cookie's own Max-Age is a promise this can't keep."""
     raw = db.get_setting("admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS))
-    hours = int(raw) if raw.isdigit() else DEFAULT_SESSION_TIMEOUT_HOURS
+    hours = db.parse_int(raw, DEFAULT_SESSION_TIMEOUT_HOURS)
     if hours <= 0:
         return None
     return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
 
 
+# Admin session revocation. A Flask session is a signed cookie, so nothing on the
+# server can invalidate a copy of one: logging out only clears the browser's own
+# copy, and a stolen cookie kept working after a password change. Every admin
+# session is stamped with this setting's value at login, and _enforce_session_timeout
+# rejects one whose stamp no longer matches. Rotating it therefore signs out every
+# other admin session at once. It rotates only on a password change and on enabling
+# or disabling 2FA; logout stays local to the browser that clicked it.
+#
+# Unset reads as "", which is also what a session stamped before this existed
+# compares as - so upgrading signs nobody out, and the first rotation revokes
+# everything older.
+ADMIN_SESSION_EPOCH_SETTING = "admin_session_epoch"
+
+# What survives an admin login's session.clear(). The admin keys are what the clear
+# is for (nothing from before authentication carries into the admin session, and the
+# CSRF token is regenerated); the visitor's Jellyfin sign-in and its per-session
+# state are a separate identity and aren't the admin login's to end.
+_VISITOR_SESSION_KEYS = ("portal_user", "portal_user_last_seen", "recent_requests",
+                          "report_form_rendered_at")
+# What a revoked admin session loses. Deliberately not session.clear(), for the same
+# reason: a revoked admin cookie in a browser also signed in as a visitor keeps the
+# visitor session. csrf_token stays because visitor forms use it too.
+_ADMIN_SESSION_KEYS = ("logged_in", "last_seen", "admin_epoch", "awaiting_totp",
+                        "login_next", "pending_totp_secret", "seerr_diagnosis")
+
+
+def _admin_session_epoch():
+    return db.get_setting(ADMIN_SESSION_EPOCH_SETTING, "")
+
+
+def _rotate_admin_session_epoch():
+    """Signs out every admin session except the one making this request, which is
+    re-stamped so that changing the password doesn't sign out the person who
+    changed it."""
+    epoch = secrets.token_hex(16)
+    db.set_setting(ADMIN_SESSION_EPOCH_SETTING, epoch)
+    if session.get("logged_in"):
+        session["admin_epoch"] = epoch
+
+
 def _start_admin_session():
-    """The one place a login becomes a logged-in session. Marks it permanent (so the
-    cookie gets an explicit Max-Age instead of dying with the browser) and stamps
-    last_seen so the idle clock starts now. Every place that logs someone in goes
-    through this - three hand-maintained copies is three chances for one to drift."""
+    """The one place a login becomes a logged-in session. Clears whatever the session
+    held before authenticating (visitor keys aside - see _VISITOR_SESSION_KEYS), which
+    also rotates the CSRF token; marks it permanent (so the cookie gets an explicit
+    Max-Age instead of dying with the browser); stamps last_seen so the idle clock
+    starts now; and stamps the revocation epoch. Every place that logs someone in
+    goes through this - three hand-maintained copies is three chances for one to
+    drift."""
+    visitor = {key: session[key] for key in _VISITOR_SESSION_KEYS if key in session}
+    session.clear()
+    session.update(visitor)
     session.permanent = True
     session["logged_in"] = True
     session["last_seen"] = time.time()
+    session["admin_epoch"] = _admin_session_epoch()
 
 
 # Restoring the database means uploading one, and a real portal.db is far larger than
@@ -431,6 +486,15 @@ def _enforce_session_timeout():
     attribute isn't covered by the signature, so a client that simply keeps sending
     an "expired" cookie would otherwise stay logged in indefinitely."""
     if not session.get("logged_in"):
+        return
+    # Revoked by a password or 2FA change made elsewhere (see
+    # ADMIN_SESSION_EPOCH_SETTING). Same redirect as an expiry, and here for the same
+    # ordering reason: a POST must reach the login page, not a CSRF 400.
+    if session.get("admin_epoch", "") != _admin_session_epoch():
+        for key in _ADMIN_SESSION_KEYS:
+            session.pop(key, None)
+        if request.path.startswith("/admin/"):
+            return redirect(url_for("admin_login", next=request.path))
         return
     session.permanent = True
     timeout = _session_timeout_seconds()
@@ -557,6 +621,37 @@ def login_required(f):
 
 def is_first_run():
     return db.get_setting("admin_password_hash") is None
+
+
+# Tailscale hands out addresses from here (RFC 6598 shared space), and ipaddress
+# doesn't count it as private, but a tailnet is exactly the kind of "my own network"
+# this portal is set up from.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+# Headers a reverse proxy or tunnel adds. Without BEHIND_PROXY, their presence means
+# the real client is somewhere this app can't see - cloudflared running on the same
+# host connects from 127.0.0.1 for every visitor on the internet.
+_FORWARDING_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded", "CF-Connecting-IP")
+
+
+def _first_run_setup_allowed():
+    """Whether this request may set the admin password on a portal that has none.
+
+    Whoever reaches the login page first on a fresh install (a new Docker volume, a
+    reinstall) claims the admin account, and with a tunnel up that can be anyone on
+    the internet. So first-run setup is only offered to a client on this machine or
+    a private, link-local or Tailscale address. With BEHIND_PROXY set,
+    request.remote_addr is already the proxy's X-Forwarded-For answer (see ProxyFix
+    above); without it, any forwarding header means "can't tell", which refuses."""
+    if not config.BEHIND_PROXY and any(h in request.headers for h in _FORWARDING_HEADERS):
+        return False
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or (ip.version == 4 and ip in _CGNAT_NETWORK))
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +914,10 @@ def _enrich_services(services):
     uptimes = _cached_uptime_percentages()
     service_names = {s["id"]: s["name"] for s in services}
     links_by_service = db.list_service_links_for_services([s["id"] for s in services])
+    # One grouped query, and only for the services that publish their dependencies -
+    # nothing is resolved for a service that hasn't opted in.
+    deps_by_service = db.list_dependencies_for_services(
+        [s["id"] for s in services if s["show_dependencies_public"]])
     for s in services:
         s["links"] = links_by_service[s["id"]]
         s["uptime"] = uptimes.get(s["id"])
@@ -827,7 +926,7 @@ def _enrich_services(services):
         s["open_reports_count"] = open_reports.get(s["id"], 0)
         s["run_target_label"] = _run_target_label(s["run_target"]) if s["show_run_target_public"] else None
         s["dependency_names"] = [
-            service_names.get(dep_id, "?") for dep_id in db.get_service_dependencies(s["id"])
+            service_names.get(dep_id, "?") for dep_id in deps_by_service[s["id"]]
         ] if s["show_dependencies_public"] else []
     return services
 
@@ -897,8 +996,7 @@ def _public_history_days():
     """Blank/unset (the default) means "show everything", unchanged from before this
     setting existed - an admin has to opt into hiding old resolved incidents, same
     "off by default" convention as every other opt-in behavior toggle in this app."""
-    raw = db.get_setting("public_history_days", "")
-    return int(raw) if raw.isdigit() else None
+    return db.parse_int(db.get_setting("public_history_days", ""))
 
 
 HISTORY_PAGE_SIZE = 10
@@ -982,17 +1080,30 @@ def _integration_severity(status):
     return "ok"
 
 
+def _fetch_integration_entry(integ):
+    """One integration's cache entry, stamped when its own answer arrived. Never raises
+    - a failure is an unreachable status, exactly as it always was."""
+    try:
+        status = integrations.fetch_integration_status(integ)
+    except Exception as e:
+        status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    return {"status": status, "checked_at": db.now_iso()}
+
+
 def _refresh_integration_cache():
     integrations_list = db.list_integrations()
-    for integ in integrations_list:
-        if not integ["enabled"]:
-            continue
+    enabled = [integ for integ in integrations_list if integ["enabled"]]
+    # The network calls run in parallel, bounded like the service checks above them:
+    # one after another, a down *Arr (v3 then v1) cost 10s, a down Byparr 30s, and a
+    # few of those pushed the cycle well past CHECK_INTERVAL_SECONDS. Everything that
+    # acts on the answers - the cache write and the incident lifecycle - stays
+    # sequential, in list order, below: only the waiting is parallel, not a decision.
+    with ThreadPoolExecutor(max_workers=config.HEALTH_CHECK_WORKERS) as pool:
+        entries = list(pool.map(_fetch_integration_entry, enabled))
+    for integ, entry in zip(enabled, entries):
         previous = _integration_status_cache.get(integ["id"])
-        try:
-            status = integrations.fetch_integration_status(integ)
-        except Exception as e:
-            status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
-        _integration_status_cache[integ["id"]] = {"status": status, "checked_at": db.now_iso()}
+        status = entry["status"]
+        _integration_status_cache[integ["id"]] = entry
         if integ["auto_incident"] and integ["service_id"] and previous is not None:
             linked_service = db.get_service(integ["service_id"])
             if not linked_service or not _within_grace_period(linked_service):
@@ -1358,8 +1469,7 @@ def kiosk_enabled():
 
 
 def _kiosk_rotation_seconds():
-    raw = db.get_setting("kiosk_rotation_seconds", "")
-    seconds = int(raw) if raw.isdigit() else KIOSK_DEFAULT_ROTATION_SECONDS
+    seconds = db.parse_int(db.get_setting("kiosk_rotation_seconds", ""), KIOSK_DEFAULT_ROTATION_SECONDS)
     return max(KIOSK_MIN_ROTATION_SECONDS, min(KIOSK_MAX_ROTATION_SECONDS, seconds))
 
 
@@ -1504,11 +1614,25 @@ def api_status():
     return jsonify({
         "site_name": db.get_setting("site_name", "Server"),
         "overall": compute_overall_status(services),
-        "services": services,
+        "services": [_api_service_view(s) for s in services],
         "announcements": announcements,
         "incidents": incidents,
         "maintenance_windows": db.list_public_maintenance_windows(),
     })
+
+
+def _api_service_view(service):
+    """A service row as /api/status publishes it: every field it has always carried,
+    minus the two that map the private network. check_url is the address the portal
+    probes (LAN IPs and ports), for every service; the raw run_target names a VM or
+    host, and only goes out when show_run_target_public says so - the same opt-in the
+    HTML page applies via run_target_label. Everything else stays exactly as it was,
+    because external dashboards read this endpoint and a missing key breaks them."""
+    view = dict(service)
+    view.pop("check_url", None)
+    if not service.get("show_run_target_public"):
+        view.pop("run_target", None)
+    return view
 
 
 @app.route("/api/incidents/more")
@@ -1550,7 +1674,9 @@ def api_incidents_more():
     if "seen" not in request.args:
         return ""
     raw = request.args.get("seen", "")
-    seen = [int(part) for part in raw.split(",") if part.strip().isdigit()]
+    # Same skip-what-isn't-an-id rule as before, through db.parse_int(): "²" passed
+    # isdigit() and then failed int(), and a 23-digit id overflowed SQLite - both 500s.
+    seen = [n for n in (db.parse_int(part) for part in raw.split(",")) if n is not None]
     if len(seen) > SEEN_IDS_LIMIT:
         return ""
     incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, exclude_ids=seen))
@@ -1570,7 +1696,9 @@ def api_maintenance_history():
     offset pagination is safe here (unlike incidents) because every call into
     this endpoint uses the exact same unfiltered query - there's no
     filtered-vs-unfiltered mismatch to cause the offset to drift."""
-    offset = request.args.get("offset", type=int, default=0)
+    # ASCII digits only, clamped to what SQLite can bind: "²" and a 23-digit offset
+    # were both unauthenticated 500s. Anything else (negative included) is page one.
+    offset = db.parse_int(request.args.get("offset"), default=0)
     windows = db.list_ended_maintenance_windows(limit=HISTORY_PAGE_SIZE, offset=offset)
     return render_template("sections/_maintenance_fragment.html", windows=windows, history=True)
 
@@ -1783,7 +1911,7 @@ def feed():
     return Response(xml_bytes, mimetype="application/rss+xml")
 
 
-def _notify_async(title, message):
+def _notify_async(title, message, **kwargs):
     """Fires notifications.notify() on its own one-shot daemon thread instead of
     inline - same shape as _send_announcement_discord()/_restart_process()'s delayed
     action, applied here because notify() itself can block on up to three sequential
@@ -1795,7 +1923,8 @@ def _notify_async(title, message):
     reads a return value or shows delivery status in the response - so moving the
     call off the request thread changes nothing about what happens, only how long
     the request waits for it to."""
-    threading.Thread(target=notifications.notify, args=(title, message), daemon=True).start()
+    threading.Thread(target=notifications.notify, args=(title, message), kwargs=kwargs,
+                     daemon=True).start()
 
 
 @app.route("/report", methods=["GET", "POST"])
@@ -1850,7 +1979,8 @@ def report_problem():
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
-        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}")
+        # Anonymous visitor text going into the admin's Discord channel: no pings.
+        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}", allow_mentions=False)
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()
@@ -2192,7 +2322,9 @@ def user_account_push_seerr_contact():
     user = current_user()
     prefs = db.get_user_preferences(user["id"])
     integration = user_notify.seerr_integration()
-    account = user_notify.find_seerr_account(user["id"])
+    # Live, not the hourly mirror: this writes to a Seerr account, so which one is
+    # decided by what Seerr says now.
+    account = user_notify.find_seerr_account(user["id"], live=True)
     if not integration or not account:
         flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
         return redirect(url_for("user_account"))
@@ -2214,10 +2346,10 @@ def user_account_push_seerr_contact():
 # ---------------------------------------------------------------------------
 # Unified search (signed-in visitors only)
 # ---------------------------------------------------------------------------
-# Per *session*, not process-global like the login and report limiters. Those defend a
-# route open to anonymous strangers, where a shared counter is the point; this one is
-# behind a Jellyfin sign-in, so the meaningful unit is "this person", and a global
-# counter would let one enthusiastic searcher lock everybody else out.
+# The search rate limit and concurrency cap live in media_search.outbound_call(): per
+# person (the Jellyfin user id), not process-global like the login and report limiters,
+# and server-side rather than in the session cookie, where replaying an old cookie
+# reset it.
 # Typing "dune" shouldn't search TMDB for "d". Enforced on both sides: the client to
 # avoid the request, the server because the client can't be trusted to.
 MIN_LIVE_QUERY_LENGTH = 3
@@ -2229,7 +2361,8 @@ MIN_LIVE_QUERY_LENGTH = 3
 # before a second POST is ever sent) and Seerr's own duplicate check answers 409 (which
 # stops it across devices and sessions) - but a browser resending a POST minutes later
 # reaches neither. Kept in the session rather than a module-level dict because the
-# meaningful unit is one person's browser, exactly like _search_rate_limited().
+# meaningful unit is one person's browser: this guards against a resubmission, not
+# against abuse, which is what media_search.outbound_call()'s server-side limit is for.
 REQUEST_REPEAT_WINDOW_SECONDS = 60
 # Bounded because the session is a cookie: this rides along on every response, so it
 # must not grow with how much somebody searches for.
@@ -2266,18 +2399,6 @@ def _forget_submitted_request(key):
         session["recent_requests"] = recent
 
 
-def _search_rate_limited():
-    now = time.time()
-    if now - session.get("search_window_start", 0) > config.SEARCH_RATE_WINDOW_SECONDS:
-        session["search_window_start"] = now
-        session["search_count"] = 0
-    return session.get("search_count", 0) >= config.SEARCH_RATE_LIMIT
-
-
-def _register_search():
-    session["search_count"] = session.get("search_count", 0) + 1
-
-
 @app.route("/search")
 @user_login_required
 def search():
@@ -2298,11 +2419,10 @@ def search():
     limited = False
 
     if query:
-        if _search_rate_limited():
-            limited = True
-        else:
-            _register_search()
-            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        with media_search.outbound_call(user["id"]) as allowed:
+            if allowed:
+                outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        limited = not allowed
 
     return render_template("search.html", query=query, outcome=outcome,
                             rate_limited=limited,
@@ -2323,8 +2443,8 @@ def search_live():
     live results and the submitted results provably identical - they're the same
     template.
 
-    Behind the same sign-in and the same per-session rate limit as /search, because it
-    makes exactly the same outbound calls."""
+    Behind the same sign-in and the same rate limit as /search, because it makes
+    exactly the same outbound calls."""
     user = current_user()
     query = request.args.get("q", "").strip()[:100]
     outcome = {"results": [], "errors": {}, "available": media_search.is_available()}
@@ -2333,11 +2453,10 @@ def search_live():
     # Below the minimum, answer with nothing rather than searching two APIs for "a".
     # The client enforces this too; this is the half that can't be bypassed.
     if len(query) >= MIN_LIVE_QUERY_LENGTH:
-        if _search_rate_limited():
-            limited = True
-        else:
-            _register_search()
-            outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        with media_search.outbound_call(user["id"]) as allowed:
+            if allowed:
+                outcome = media_search.search(query, jellyfin_user_id=user["id"])
+        limited = not allowed
 
     return render_template("sections/_search_results.html", query=query, outcome=outcome,
                             rate_limited=limited,
@@ -2350,17 +2469,17 @@ def search_live():
 def search_detail(media_type, tmdb_id):
     """A single result's full detail - poster, overview, genres, runtime, rating -
     reached by clicking a title in the search results. Counts against the same
-    per-session rate limit as searching, since it's another live outbound call.
+    rate limit as searching, since it's another live outbound call.
 
     in_library/jellyfin_id/requested arrive as query params from the results link
     rather than being re-derived here - this route has no independent way to know a
     single TMDB id's Jellyfin/Seerr status without a second live search, and they're
     read-only display info, not anything this route writes."""
-    if _search_rate_limited():
+    with media_search.outbound_call(current_user()["id"]) as allowed:
+        detail = media_search.detail(media_type, tmdb_id) if allowed else None
+    if not allowed:
         flash("You've made a lot of requests just now - give it a minute.", "error")
         return redirect(url_for("search", q=request.args.get("q", "")))
-    _register_search()
-    detail = media_search.detail(media_type, tmdb_id)
     if not detail:
         return render_template("error.html", code=404,
                                message="Couldn't find that title."), 404
@@ -2385,11 +2504,19 @@ def search_request_configure():
     submitting with Seerr's silent defaults - a season picker for everyone signed in,
     plus root folder/quality profile/tags only when the browser is *also* signed in as
     the portal admin (session["logged_in"]), since those reveal server filesystem
-    paths an ordinary visitor has no business seeing."""
+    paths an ordinary visitor has no business seeing.
+
+    Makes live calls to Seerr (and, for the admin, its *Arr servers), so it's behind
+    the same rate limit and concurrency cap as searching - it used to have neither."""
     media_type = request.args.get("media_type", "")
     tmdb_id = request.args.get("tmdb_id", "")
     is_admin = bool(session.get("logged_in"))
-    config = media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+    with media_search.outbound_call(current_user()["id"]) as allowed:
+        config = (media_search.request_configuration(media_type, tmdb_id, include_admin_fields=is_admin)
+                  if allowed else None)
+    if not allowed:
+        flash("You've made a lot of requests just now - give it a minute.", "error")
+        return redirect(url_for("search", q=request.args.get("q", "")))
     if not config:
         return render_template("error.html", code=404, message="Couldn't find that title."), 404
     return render_template("search_request_configure.html", config=config,
@@ -2405,26 +2532,33 @@ def search_request():
 
     A write against another service, so it's a POST, it's CSRF-protected (see
     _csrf_required_for), it requires a signed-in visitor, and it counts against the same
-    per-session rate limit as searching."""
+    rate limit and concurrency cap as searching - checked first, before anything else,
+    exactly as before they moved server-side."""
     user = current_user()
-    if _search_rate_limited():
-        flash("You've made a lot of requests just now - give it a minute.", "error")
-        return redirect(url_for("search", q=request.form.get("q", "")))
-    _register_search()
+    with media_search.outbound_call(user["id"]) as allowed:
+        if not allowed:
+            flash("You've made a lot of requests just now - give it a minute.", "error")
+            return redirect(url_for("search", q=request.form.get("q", "")))
+        return _submit_search_request(user)
+
+
+def _submit_search_request(user):
+    """search_request()'s body, run while it holds its outbound slot."""
     media_type = request.form.get("media_type", "")
     tmdb_id = request.form.get("tmdb_id", "")
 
     # Every numeric field is validated rather than filtered. Dropping what doesn't parse
     # is what the season list used to do, and it turns a mangled submission into a
     # *partial* one - a series quietly requested with three of its five seasons, with
-    # nothing anywhere saying so. Refusing says what happened.
+    # nothing anywhere saying so. Refusing says what happened. Parsed with
+    # db.parse_int(), not str.isdigit(), which let "²" through to an int() that raised.
     raw_seasons = request.form.getlist("seasons")
     seasons = None
     if media_type == "tv":
-        if not all(s.isdigit() for s in raw_seasons):
+        seasons = [db.parse_int(s) for s in raw_seasons]
+        if None in seasons:
             flash("That season selection didn't make sense - try again.", "error")
             return redirect(url_for("search", q=request.form.get("q", "")))
-        seasons = [int(s) for s in raw_seasons]
 
     root_folder = request.form.get("root_folder") or None
     profile_id = request.form.get("profile_id") or None
@@ -2435,8 +2569,10 @@ def search_request():
     # what the form actually showed.
     if not session.get("logged_in"):
         root_folder = profile_id = tags = None
-    if (profile_id is not None and not str(profile_id).isdigit()) or \
-            (tags is not None and not all(str(t).isdigit() for t in tags)):
+    # Validated with db.parse_int() - str.isdigit() let "²" through to the int() in
+    # request_via_seerr(), which raised - and then passed on as submitted.
+    if (profile_id is not None and db.parse_int(profile_id) is None) or \
+            (tags is not None and any(db.parse_int(t) is None for t in tags)):
         flash("That request configuration didn't make sense - try again.", "error")
         return redirect(url_for("search", q=request.form.get("q", "")))
 
@@ -2490,8 +2626,15 @@ def _safe_next_url(raw):
     """Only ever a path on this site. A `next` parameter that can name another host
     is an open redirect, and this one is reachable without any authentication at
     all. Anything that isn't a single-slash-prefixed relative path is discarded
-    rather than sanitised - there's no legitimate case here for the difference."""
+    rather than sanitised - there's no legitimate case here for the difference.
+
+    Backslashes and control characters are refused too: browsers read `/\\host` as
+    `//host`, and a tab or newline can be stripped on the way to the same result.
+    Werkzeug happens to percent-encode both in the Location header today, but that's
+    an implementation detail to not depend on."""
     if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return None
+    if "\\" in raw or any(unicodedata.category(ch) == "Cc" for ch in raw):
         return None
     return raw
 
@@ -2521,9 +2664,11 @@ def admin_login():
             secret = db.get_setting("admin_totp_secret")
             if secret and twofactor.verify_code(secret, code):
                 _register_login_success()
-                session.pop("awaiting_totp", None)
+                # Read before _start_admin_session(), which clears the session.
+                # Re-checked here as well as where it's stored, so a session written
+                # before that check existed can't still carry an off-site target.
+                nxt = _safe_next_url(session.pop("login_next", None)) or url_for("admin_dashboard")
                 _start_admin_session()
-                nxt = session.pop("login_next", None) or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect code.", "error")
@@ -2532,7 +2677,11 @@ def admin_login():
         password = request.form.get("password", "")
         if first_run:
             confirm = request.form.get("confirm", "")
-            if len(password) < 6:
+            if not _first_run_setup_allowed():
+                _logger.warning("Refused first-run admin password setup from %s", request.remote_addr)
+                flash("For safety, the admin password can only be set for the first time "
+                      "from this machine or your local network.", "error")
+            elif len(password) < 6:
                 flash("Password must be at least 6 characters.", "error")
             elif password != confirm:
                 flash("Passwords do not match.", "error")
@@ -2547,11 +2696,12 @@ def admin_login():
                     # Login isn't complete yet - don't reset the failure counter
                     # or set logged_in until the code step also succeeds.
                     session["awaiting_totp"] = True
-                    session["login_next"] = request.args.get("next") or url_for("admin_dashboard")
+                    session["login_next"] = (_safe_next_url(request.args.get("next"))
+                                             or url_for("admin_dashboard"))
                     return render_template("login.html", first_run=False, awaiting_totp=True)
                 _register_login_success()
                 _start_admin_session()
-                nxt = request.args.get("next") or url_for("admin_dashboard")
+                nxt = _safe_next_url(request.args.get("next")) or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect password.", "error")
@@ -2621,7 +2771,10 @@ def admin_service_edit(service_id):
         urls = request.form.getlist("link_url")
         links = [(label.strip(), url.strip()) for label, url in zip(labels, urls) if label.strip() and url.strip()]
         db.replace_service_links(service_id, links)
-        depends_on_ids = [int(i) for i in request.form.getlist("depends_on") if i.isdigit()]
+        # Anything that isn't a plain id is skipped, as before - through db.parse_int(),
+        # since str.isdigit() let "²" through to an int() that raised.
+        depends_on_ids = [n for n in (db.parse_int(i) for i in request.form.getlist("depends_on"))
+                          if n is not None]
         db.set_service_dependencies(service_id, depends_on_ids)
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))
@@ -3727,6 +3880,10 @@ def admin_restore_db():
     if not upload or not upload.filename:
         flash("Choose a backup file to restore.", "error")
         return redirect(url_for("admin_about"))
+    # Carried over into the restored database below. The backup holds whatever epoch
+    # it was taken with: keeping that would sign out the admin doing the restore, and
+    # restoring an older backup would bring back cookies revoked since it was taken.
+    session_epoch = _admin_session_epoch()
 
     # Staged next to the database rather than in the system temp directory, so the final
     # os.replace() is a rename within one filesystem (atomic) rather than a cross-device
@@ -3779,6 +3936,12 @@ def admin_restore_db():
         # release re-test, not by any test.
         _remove_sqlite_sidecars(installed or staged)
 
+    try:
+        db.set_setting(ADMIN_SESSION_EPOCH_SETTING, session_epoch)
+    except Exception:
+        # The restore itself has succeeded; the cost of this failing is at most
+        # signing in again, so it must not turn a good restore into an error.
+        _logger.exception("Could not carry the admin session epoch into the restored database")
     _logger.warning("Database restored from an uploaded backup; previous database saved to %s",
                      os.path.basename(snapshot))
     flash(f"Database restored. Your previous database was saved as "
@@ -3834,8 +3997,8 @@ def admin_seerr_instance():
     than one exists: before this, each feature independently took "the first enabled
     one", so the Integrations page could be diagnosing one server while search talked
     to another."""
-    raw = request.form.get("seerr_integration_id", "").strip()
-    db.set_setting(integrations.SEERR_INTEGRATION_SETTING, raw if raw.isdigit() else "")
+    db.set_setting(integrations.SEERR_INTEGRATION_SETTING,
+                    _setting_digits(request.form.get("seerr_integration_id"), ""))
     integrations.clear_caches()
     flash("Seerr instance saved.", "success")
     return redirect(url_for("admin_integrations"))
@@ -3970,6 +4133,9 @@ def admin_settings():
             flash("Passwords do not match.", "error")
         else:
             db.set_setting("admin_password_hash", generate_password_hash(new))
+            # The natural reaction to a suspected compromise, so it has to actually
+            # lock out a copied cookie - every other admin session ends here.
+            _rotate_admin_session_epoch()
             flash("Password changed.", "success")
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
@@ -4001,6 +4167,15 @@ def admin_settings():
                             active="settings")
 
 
+def _setting_digits(raw, fallback):
+    """A submitted number as the string stored for it, parsed by db.parse_int(), or
+    `fallback` when it isn't one. Checking with str.isdigit() alone used to store
+    values like "²", which every later read then failed to int() - on the public
+    page, for some of them."""
+    value = db.parse_int(raw)
+    return fallback if value is None else str(value)
+
+
 @app.route("/admin/settings/general", methods=["POST"])
 @login_required
 def admin_settings_general():
@@ -4009,20 +4184,17 @@ def admin_settings_general():
         db.set_setting(key, "1" if request.form.get(key) else "0")
     for key in _PUBLIC_MEDIA_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
-    calendar_days = request.form.get("media_calendar_days", "").strip()
-    db.set_setting("media_calendar_days",
-                    calendar_days if calendar_days.isdigit() else str(integrations.DEFAULT_CALENDAR_DAYS))
+    db.set_setting("media_calendar_days", _setting_digits(
+        request.form.get("media_calendar_days"), str(integrations.DEFAULT_CALENDAR_DAYS)))
     db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
-        raw = request.form.get(f"highload_{key}", "").strip()
-        db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)
+        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
     db.set_setting("kiosk_enabled", "1" if request.form.get("kiosk_enabled") else "0")
-    rotation = request.form.get("kiosk_rotation_seconds", "").strip()
-    db.set_setting("kiosk_rotation_seconds",
-                    rotation if rotation.isdigit() else str(KIOSK_DEFAULT_ROTATION_SECONDS))
+    db.set_setting("kiosk_rotation_seconds", _setting_digits(
+        request.form.get("kiosk_rotation_seconds"), str(KIOSK_DEFAULT_ROTATION_SECONDS)))
     # getlist() reads identically from repeated checkboxes as it would from a
     # <select multiple>, which is why the picker is a checkbox list. Whitelisted
     # against the declared views so only a real view key is ever stored, and stored
@@ -4031,23 +4203,20 @@ def admin_settings_general():
     # setting that was never saved at all.
     db.set_setting("kiosk_views", ",".join(
         key for key in request.form.getlist("kiosk_views") if key in KIOSK_VIEW_LABELS))
-    history_days = request.form.get("public_history_days", "").strip()
-    db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
-    lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()
-    db.set_setting("lowdisk_percent_threshold", lowdisk if lowdisk.isdigit() else "")
+    db.set_setting("public_history_days", _setting_digits(request.form.get("public_history_days"), ""))
+    db.set_setting("lowdisk_percent_threshold",
+                    _setting_digits(request.form.get("lowdisk_percent_threshold"), ""))
     # Both stored as plain digit strings; a non-numeric submission falls back to the
     # default rather than being stored blank, since neither has a meaningful
     # "unset" state the way the two optional thresholds above do.
-    timeout_hours = request.form.get("admin_session_timeout_hours", "").strip()
-    db.set_setting("admin_session_timeout_hours",
-                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_SESSION_TIMEOUT_HOURS))
-    retention = request.form.get("status_history_retention_days", "").strip()
+    db.set_setting("admin_session_timeout_hours", _setting_digits(
+        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
+    retention = db.parse_int(request.form.get("status_history_retention_days"))
     db.set_setting("status_history_retention_days",
-                    retention if (retention.isdigit() and int(retention) > 0)
-                    else str(DEFAULT_HISTORY_RETENTION_DAYS))
+                    str(retention) if retention else str(DEFAULT_HISTORY_RETENTION_DAYS))
     for key in SERVICE_DEFAULT_FIELDS:
-        raw = request.form.get(f"service_default_{key}", "").strip()
-        db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
+        db.set_setting(f"service_default_{key}",
+                        _setting_digits(request.form.get(f"service_default_{key}"), ""))
     db.set_setting("service_default_auto_incident", "1" if request.form.get("service_default_auto_incident") else "0")
     api_mode = request.form.get("service_default_api_health_mode", "off")
     db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
@@ -4301,6 +4470,16 @@ def admin_2fa():
 @app.route("/admin/2fa/enable", methods=["GET", "POST"])
 @login_required
 def admin_2fa_enable():
+    # Refused outright while 2FA is already on, for GET and POST alike. Otherwise a
+    # stolen session cookie alone could enrol the attacker's own authenticator over
+    # the admin's, then pass every _require_totp() step-up with it. Switching to a
+    # different device means disabling first, which does need a current code. The
+    # 2FA page never links here while enabled, so the real admin never sees this.
+    if twofactor.is_enabled():
+        flash("Two-factor authentication is already enabled. Disable it first to "
+              "enrol a different authenticator.", "error")
+        return redirect(url_for("admin_2fa"))
+
     if request.method == "POST":
         secret = session.get("pending_totp_secret")
         code = request.form.get("totp_code", "")
@@ -4308,6 +4487,7 @@ def admin_2fa_enable():
             db.set_setting("admin_totp_secret", secret)
             db.set_setting("admin_totp_enabled", "1")
             session.pop("pending_totp_secret", None)
+            _rotate_admin_session_epoch()
             flash("Two-factor authentication enabled.", "success")
             return redirect(url_for("admin_2fa"))
         flash("Incorrect code - scan the QR code again (or re-enter the manual "
@@ -4331,13 +4511,21 @@ def admin_2fa_enable():
 @app.route("/admin/2fa/disable", methods=["POST"])
 @login_required
 def admin_2fa_disable():
+    # Same counter as the login page and _require_totp(): with a stolen session
+    # cookie this form was otherwise an unthrottled 6-digit guessing loop, and
+    # winning it has the same end state as a stolen authenticator.
+    if _login_locked():
+        flash("Too many incorrect attempts - try again in a few minutes.", "error")
+        return redirect(url_for("admin_2fa"))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
     if secret and twofactor.verify_code(secret, code):
-        db.set_setting("admin_totp_secret", "")
-        db.set_setting("admin_totp_enabled", "0")
+        _register_login_success()
+        twofactor.disable()
+        _rotate_admin_session_epoch()
         flash("Two-factor authentication disabled.", "success")
     else:
+        _register_login_failure()
         flash("Incorrect code - 2FA was not disabled.", "error")
     return redirect(url_for("admin_2fa"))
 
@@ -4354,7 +4542,7 @@ def _user_session_timeout_seconds():
     signing in to file a problem report is not holding privileged access, and making
     them re-authenticate every twelve hours would just make the feature annoying."""
     raw = db.get_setting("user_session_timeout_hours", str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
-    hours = int(raw) if raw.isdigit() else DEFAULT_USER_SESSION_TIMEOUT_HOURS
+    hours = db.parse_int(raw, DEFAULT_USER_SESSION_TIMEOUT_HOURS)
     if hours <= 0:
         return None
     return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
@@ -4386,12 +4574,11 @@ def admin_users():
 @login_required
 def admin_users_settings():
     db.set_setting("jellyfin_auth_enabled", "1" if request.form.get("jellyfin_auth_enabled") else "0")
-    chosen = request.form.get("jellyfin_auth_integration_id", "").strip()
-    db.set_setting("jellyfin_auth_integration_id", chosen if chosen.isdigit() else "")
+    db.set_setting("jellyfin_auth_integration_id",
+                    _setting_digits(request.form.get("jellyfin_auth_integration_id"), ""))
     db.set_setting("report_requires_login", "1" if request.form.get("report_requires_login") else "0")
-    timeout_hours = request.form.get("user_session_timeout_hours", "").strip()
-    db.set_setting("user_session_timeout_hours",
-                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
+    db.set_setting("user_session_timeout_hours", _setting_digits(
+        request.form.get("user_session_timeout_hours"), str(DEFAULT_USER_SESSION_TIMEOUT_HOURS)))
     flash("User account settings updated.", "success")
     return redirect(url_for("admin_users"))
 
@@ -4763,12 +4950,21 @@ def _within_grace_period(service):
 
 
 def _run_single_check(check_url, slow_threshold_ms):
-    """One HTTP attempt against check_url. Returns (status, elapsed_ms)."""
+    """One HTTP attempt against check_url. Returns (status, elapsed_ms).
+
+    Streamed, and closed as soon as the status line and headers are in: the verdict
+    only ever depends on the status code (see _check_status_for_response), so
+    downloading the body - a whole web app's HTML, every cycle, for every service -
+    was pure waste. elapsed_ms is therefore time to the response headers, not to
+    the last byte of the body."""
     start = time.time()
     try:
-        r = requests.get(check_url, timeout=5)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
+        r = requests.get(check_url, timeout=5, stream=True)
+        try:
+            elapsed_ms = int((time.time() - start) * 1000)
+            return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
+        finally:
+            r.close()
     except requests.RequestException:
         return "down", None
 
@@ -4868,8 +5064,9 @@ def _merge_dependency_health(status, dependency_statuses):
 DEFAULT_HISTORY_RETENTION_DAYS = 90
 
 def _history_retention_days():
-    raw = db.get_setting("status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS))
-    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_HISTORY_RETENTION_DAYS
+    days = db.parse_int(db.get_setting("status_history_retention_days", ""))
+    # 0 isn't "keep nothing": it falls back to the default, like anything unparseable.
+    return days if days else DEFAULT_HISTORY_RETENTION_DAYS
 
 
 def _prune_status_history_task():
@@ -4912,8 +5109,7 @@ scheduler.register(
 
 
 def _lowdisk_threshold():
-    raw = db.get_setting("lowdisk_percent_threshold", "")
-    return int(raw) if raw.isdigit() else None
+    return db.parse_int(db.get_setting("lowdisk_percent_threshold", ""))
 
 
 def _check_low_disk_space(snapshot):

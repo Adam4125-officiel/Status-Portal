@@ -83,6 +83,10 @@ def test_compute_overall_status_ignores_flagged_services():
 class _FakeResponse:
     def __init__(self, status_code):
         self.status_code = status_code
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 def test_check_status_for_response_only_5xx_is_degraded():
@@ -139,10 +143,63 @@ def test_within_grace_period(monkeypatch):
     assert app_module._within_grace_period({"startup_grace_seconds": 60}) is False
 
 
+def test_a_health_check_never_downloads_the_body():
+    """Against a real server: the verdict only needs the status line, so the check
+    returns once the headers are in. The server here sends its headers and then takes
+    ten seconds over a large body - reading that body would take ten seconds and, past
+    the 5s read timeout, turn a perfectly healthy service "down"."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(10 * 1024 * 1024))
+            self.end_headers()
+            self.wfile.flush()
+            try:
+                for _ in range(10):
+                    time.sleep(1)
+                    self.wfile.write(b"x" * (1024 * 1024))
+            except (BrokenPipeError, ConnectionResetError):
+                pass    # the check hung up without reading, which is the point
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        started = time.monotonic()
+        status, elapsed_ms = app_module._run_single_check(
+            f"http://127.0.0.1:{server.server_port}/", slow_threshold_ms=None)
+        took = time.monotonic() - started
+    finally:
+        server.shutdown()
+    assert status == "operational"
+    assert took < 3, f"took {took:.1f}s - the body was downloaded"
+    assert elapsed_ms is not None and elapsed_ms < 3000
+
+
+def test_a_health_check_response_is_always_closed(monkeypatch):
+    responses = []
+
+    def fake_get(url, timeout, **kwargs):
+        assert kwargs.get("stream") is True
+        responses.append(_FakeResponse(503))
+        return responses[-1]
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    assert app_module._run_single_check("http://x", None)[0] == "degraded"
+    assert responses[0].closed is True
+
+
 def test_check_service_status_no_retry_marks_down_on_first_failure(monkeypatch):
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         calls.append(url)
         raise app_module.requests.RequestException("connection refused")
 
@@ -168,7 +225,7 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
         _FakeResponse(200),
     ]
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         result = responses.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -195,7 +252,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
         _FakeResponse(200),
     ]
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         result = responses.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -219,7 +276,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
 
 def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
     monkeypatch.setattr(app_module.requests, "get",
-                         lambda url, timeout: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
+                         lambda url, timeout, **kw: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
@@ -260,6 +317,63 @@ def test_first_run_password_creation(client):
     assert db.get_setting("admin_password_hash") is not None
 
 
+@pytest.mark.parametrize("addr", ["127.0.0.1", "::1", "192.168.1.20", "10.0.0.5",
+                                  "100.101.102.103", "fd7a:115c:a1e0::1", "::ffff:192.168.1.5"])
+def test_first_run_setup_is_allowed_from_this_machine_or_the_local_network(client, addr):
+    """Loopback, private ranges and Tailscale (100.64.0.0/10, not "private" to
+    ipaddress) are where an admin sets up their own portal from."""
+    resp = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                       environ_base={"REMOTE_ADDR": addr})
+    assert resp.status_code == 302
+    assert db.get_setting("admin_password_hash") is not None
+
+
+# Real public addresses: ipaddress counts the documentation ranges (203.0.113.0/24
+# and friends) as private, so they would prove nothing here.
+@pytest.mark.parametrize("addr", ["1.1.1.1", "8.8.8.8", "2001:4860:4860::8888", "not-an-ip"])
+def test_first_run_setup_is_refused_from_the_internet(client, addr):
+    """With a tunnel up, whoever reached a fresh install's login page first could
+    claim the admin account."""
+    resp = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                       environ_base={"REMOTE_ADDR": addr}, follow_redirects=True)
+    assert b"from this machine or your local network" in resp.data
+    assert db.get_setting("admin_password_hash") is None
+    assert client.get("/admin/services").status_code == 302
+
+
+@pytest.mark.parametrize("header", ["X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Forwarded"])
+def test_first_run_setup_through_an_undeclared_proxy_is_refused(client, monkeypatch, header):
+    """cloudflared on the same host connects from 127.0.0.1 for every internet
+    visitor. Without BEHIND_PROXY a forwarding header means the real client is
+    unknown, so setup is refused rather than trusting the loopback address."""
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", False)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={header: "1.1.1.1"})
+    assert db.get_setting("admin_password_hash") is None
+
+
+def test_first_run_setup_behind_a_declared_proxy_uses_the_forwarded_address(client, monkeypatch):
+    """With BEHIND_PROXY, ProxyFix has already turned X-Forwarded-For into
+    remote_addr, so that is what's judged - here simulated by setting it directly."""
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={"X-Forwarded-For": "1.1.1.1"}, environ_base={"REMOTE_ADDR": "1.1.1.1"})
+    assert db.get_setting("admin_password_hash") is None
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={"X-Forwarded-For": "192.168.1.7"}, environ_base={"REMOTE_ADDR": "192.168.1.7"})
+    assert db.get_setting("admin_password_hash") is not None
+
+
+def test_the_first_run_guard_does_not_affect_a_normal_login(client):
+    """Once a password exists, signing in from anywhere works exactly as before."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    resp = client.post("/admin/login", data={"password": "testpass123"},
+                       environ_base={"REMOTE_ADDR": "1.1.1.1"}, headers={"CF-Connecting-IP": "1.1.1.1"})
+    assert resp.status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
 def test_login_lockout(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     client.get("/admin/logout")
@@ -275,6 +389,59 @@ def test_admin_requires_login(client):
     resp = client.get("/admin/services")
     assert resp.status_code == 302
     assert "/admin/login" in resp.headers["Location"]
+
+
+_HOSTILE_NEXT_VALUES = ("https://evil.invalid/phish", "//evil.invalid/x", "/\\evil.invalid/x",
+                        "/\tevil", "/\r\nLocation: https://evil.invalid", "evil.invalid")
+
+
+@pytest.mark.parametrize("raw", _HOSTILE_NEXT_VALUES)
+def test_safe_next_url_refuses_anything_that_could_leave_the_site(raw):
+    assert app_module._safe_next_url(raw) is None
+
+
+def test_safe_next_url_keeps_a_relative_path_intact():
+    assert app_module._safe_next_url("/admin/settings?tab=general#x") == "/admin/settings?tab=general#x"
+    assert app_module._safe_next_url("") is None
+    assert app_module._safe_next_url(None) is None
+
+
+def test_admin_login_next_cannot_redirect_off_site(client):
+    """/admin/login?next= used to be honoured verbatim - a genuine portal link that
+    lands the admin on a look-alike page right after a real login."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    for hostile in _HOSTILE_NEXT_VALUES:
+        client.get("/admin/logout")
+        resp = client.post("/admin/login", query_string={"next": hostile},
+                            data={"password": "testpass123"})
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin"), hostile
+
+
+def test_admin_login_next_cannot_redirect_off_site_through_the_totp_step(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    for hostile in ("https://evil.invalid/phish", "/\\evil.invalid/x"):
+        client.get("/admin/logout")
+        client.post("/admin/login", query_string={"next": hostile}, data={"password": "testpass123"})
+        resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin"), hostile
+
+
+def test_admin_login_relative_next_is_still_honoured_on_both_paths(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    resp = client.post("/admin/login", query_string={"next": "/admin/settings"},
+                        data={"password": "testpass123"})
+    assert resp.headers["Location"].endswith("/admin/settings")
+
+    secret = _enable_totp_directly()
+    client.get("/admin/logout")
+    client.post("/admin/login", query_string={"next": "/admin/integrations"},
+                 data={"password": "testpass123"})
+    resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.headers["Location"].endswith("/admin/integrations")
 
 
 def _enable_totp_directly(secret=None):
@@ -376,6 +543,75 @@ def test_admin_2fa_disable_requires_correct_code(client):
     resp = client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
     assert resp.status_code == 302
     assert twofactor.is_enabled() is False
+
+
+def test_admin_2fa_disable_wrong_codes_share_the_login_lockout(client):
+    """With a stolen session cookie this form used to be an unthrottled guessing
+    loop. Wrong codes now fill the same _login_state counter as the login page, and
+    once locked even the right code is refused."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/admin/2fa/disable", data={"totp_code": "000000"})
+    assert app_module._login_locked() is True
+
+    resp = client.post("/admin/2fa/disable",
+                        data={"totp_code": pyotp.TOTP(secret).now()}, follow_redirects=True)
+    assert b"Too many incorrect attempts" in resp.data
+    assert twofactor.is_enabled() is True
+
+
+def test_admin_2fa_disable_success_resets_the_lockout_counter(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.post("/admin/2fa/disable", data={"totp_code": "000000"})
+    assert app_module._login_state["failures"] == 1
+
+    client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is False
+    assert app_module._login_state["failures"] == 0
+
+
+def test_a_totp_code_used_to_log_in_also_works_for_an_immediate_step_up(client, monkeypatch):
+    """A code works for its whole validity window, not once: logging in and then
+    straight away restarting (or updating, or restoring) takes the same code twice."""
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.get("/admin/logout")
+    code = pyotp.TOTP(secret).now()
+    client.post("/admin/login", data={"password": "testpass123"})
+    assert client.post("/admin/login", data={"totp_code": code}).status_code == 302
+
+    client.post("/admin/resources/host-control", data={"action": "restart", "totp_code": code})
+    assert calls == ["restart"]
+
+
+def test_admin_2fa_enable_is_refused_while_2fa_is_already_enabled(client):
+    """A stolen session cookie must not be able to re-enrol 2FA onto the attacker's
+    own authenticator: that would pass every _require_totp() step-up from then on
+    and lock the real admin's device out. GET and POST are both refused, and the
+    stored secret survives even a POST carrying a valid code for a planted secret."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.get("/admin/2fa/enable")
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/admin/2fa")
+    with client.session_transaction() as sess:
+        assert "pending_totp_secret" not in sess
+
+    attacker_secret = twofactor.generate_secret()
+    with client.session_transaction() as sess:
+        sess["pending_totp_secret"] = attacker_secret
+    resp = client.post("/admin/2fa/enable",
+                        data={"totp_code": pyotp.TOTP(attacker_secret).now()}, follow_redirects=True)
+    assert b"already enabled" in resp.data
+    assert db.get_setting("admin_totp_secret") == secret
+    assert twofactor.is_enabled() is True
 
 
 def test_admin_host_control_step_up_2fa_blocks_without_code(client, monkeypatch):
@@ -486,6 +722,170 @@ def test_admin_2fa_reset_flag_file(client, monkeypatch, tmp_path):
     assert resp.status_code == 302
     resp = client.get("/admin/services")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Admin session revocation (SEC-06): a copied cookie must stop working once the
+# password or 2FA changes. Logout deliberately stays local to its own browser.
+# ---------------------------------------------------------------------------
+def _copy_of_session_cookie(victim):
+    """A second client holding a copy of `victim`'s session cookie - what someone who
+    lifted it off plain-HTTP LAN traffic or a shared machine would have."""
+    thief = app_module.app.test_client()
+    thief.set_cookie("session", victim.get_cookie("session").value)
+    return thief
+
+
+def test_a_password_change_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    assert thief.get("/admin/services").status_code == 200
+
+    client.post("/admin/settings", data={"current_password": "testpass123",
+                                          "new_password": "changed456", "confirm_password": "changed456"})
+
+    resp = thief.get("/admin/services")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+    # The browser that made the change is re-stamped, not signed out.
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_a_failed_password_change_revokes_nothing(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    client.post("/admin/settings", data={"current_password": "wrong",
+                                          "new_password": "changed456", "confirm_password": "changed456"})
+    assert thief.get("/admin/services").status_code == 200
+
+
+def test_enabling_2fa_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    client.get("/admin/2fa/enable")
+    with client.session_transaction() as sess:
+        secret = sess["pending_totp_secret"]
+    client.post("/admin/2fa/enable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is True
+
+    assert thief.get("/admin/services").status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_disabling_2fa_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    thief = _copy_of_session_cookie(client)
+    client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is False
+
+    assert thief.get("/admin/services").status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_admin_logout_signs_out_only_that_browser(client):
+    """A decision, not an oversight: logout clears this browser's cookie and rotates
+    nothing, so the admin's other devices stay signed in. Revoking everywhere is what
+    a password change is for."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    other_device = _copy_of_session_cookie(client)
+    client.get("/admin/logout")
+    assert client.get("/admin/services").status_code == 302
+    assert other_device.get("/admin/services").status_code == 200
+
+
+def test_a_session_stamped_before_the_epoch_existed_survives_the_upgrade(client):
+    """Upgrading must not sign anybody out: an unstamped session matches an unset
+    epoch. The first rotation then revokes it like any other."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with client.session_transaction() as sess:
+        sess.pop("admin_epoch", None)
+    assert db.get_setting(app_module.ADMIN_SESSION_EPOCH_SETTING) is None
+    assert client.get("/admin/services").status_code == 200
+
+    legacy = _copy_of_session_cookie(client)
+    with app_module.app.test_request_context():
+        app_module._rotate_admin_session_epoch()
+    assert legacy.get("/admin/services").status_code == 302
+
+
+def test_admin_login_starts_a_clean_session_with_a_new_csrf_token(client):
+    """Nothing planted in the session before authenticating carries into the admin
+    session - including the CSRF token, which is regenerated on the next render."""
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "planted-before-login"
+        sess["pending_totp_secret"] = "PLANTED"
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess.get("csrf_token") != "planted-before-login"
+        assert "pending_totp_secret" not in sess
+        assert sess["logged_in"] is True
+
+
+def test_admin_login_and_revocation_leave_a_visitor_session_alone(client, user_auth, monkeypatch):
+    """The visitor's Jellyfin sign-in is a separate identity: an admin login in the
+    same browser keeps it, and so does that admin session being revoked later."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    _sign_in(client, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["id"] == "u1"
+        assert sess["logged_in"] is True
+
+    with app_module.app.test_request_context():
+        app_module._rotate_admin_session_epoch()
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
+
+
+def test_a_revoked_session_posting_to_admin_reaches_the_login_page_not_a_csrf_400(isolated_db, monkeypatch):
+    """Same ordering reason as the idle timeout: the revocation check runs in
+    _enforce_session_timeout, ahead of _check_csrf, so a revoked POST is redirected
+    rather than answered with a bare 400. Needs the real CSRF check, hence TESTING off."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    with app_module.app.test_client() as c:
+        token = _extract_csrf_token(c.get("/admin/login").data)
+        c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
+                                     "csrf_token": token})
+        token = _extract_csrf_token(c.get("/admin/settings").data)
+        with app_module.app.test_request_context():
+            app_module._rotate_admin_session_epoch()
+        resp = c.post("/admin/settings/general", data={"site_name": "x", "csrf_token": token})
+        assert resp.status_code == 302
+        assert "/admin/login" in resp.headers["Location"]
+    assert db.get_setting("site_name") is None
+
+
+def test_admin_and_account_pages_are_never_cached(client, user_auth, monkeypatch):
+    """Otherwise the back button, or the next person at a shared machine, can bring an
+    admin or account page back after logout."""
+    assert client.get("/admin/login").headers["Cache-Control"] == "no-store"
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    for path in ("/admin", "/admin/services", "/admin/settings"):
+        assert client.get(path).headers["Cache-Control"] == "no-store", path
+    _sign_in(client, monkeypatch)
+    assert client.get("/account").headers["Cache-Control"] == "no-store"
+
+
+def test_public_pages_and_static_files_keep_their_caching(client):
+    """The public page and the cache-busted static assets are unaffected."""
+    assert "no-store" not in client.get("/").headers.get("Cache-Control", "")
+    resp = client.get("/static/css/style.css")
+    assert "no-store" not in resp.headers.get("Cache-Control", "")
+    assert "max-age" in resp.headers.get("Cache-Control", "")
+    resp.close()
+
+
+def test_before_request_hooks_keep_their_order():
+    """Two of these depend on running before _check_csrf (see their docstrings), and
+    the revocation check lives inside _enforce_session_timeout for that reason. A new
+    hook is a deliberate edit here."""
+    assert [f.__name__ for f in app_module.app.before_request_funcs[None]] == [
+        "_open_scoped_db", "_allow_large_upload_for_restore", "_enforce_session_timeout",
+        "_enforce_user_session", "_check_csrf"]
 
 
 def test_auto_incident_lifecycle_opens_and_resolves(isolated_db):
@@ -857,6 +1257,89 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
+def _slow_arr_server(delay):
+    """A real threaded HTTP server answering *Arr health checks after `delay` seconds -
+    real sockets and real waiting, no mocked fetcher."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(delay)
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def _closed_port_url():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}"
+
+
+def test_integration_checks_run_in_parallel_in_real_time(isolated_db):
+    """Real timing, not mocks: three integrations that each take 1s to answer cost
+    about one second of the health-check cycle, not three."""
+    server, url = _slow_arr_server(1.0)
+    try:
+        for n in range(3):
+            db.create_integration({"name": f"Arr {n}", "kind": "arr", "base_url": url,
+                                    "api_key": "k", "enabled": 1})
+        started = time.monotonic()
+        app_module._refresh_integration_cache()
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+    assert elapsed < 2.5, f"took {elapsed:.1f}s - the checks ran one after another"
+    assert len(app_module._integration_status_cache) == 3
+    assert all(e["status"]["reachable"] for e in app_module._integration_status_cache.values())
+
+
+def test_integration_lifecycle_stays_level_triggered_with_real_fetches(isolated_db):
+    """CLAUDE.md: touching the integration lifecycle's caller needs a real-timing test
+    beside the mocked ones. Against a genuinely closed port: no incident on the first
+    check (nothing to compare with), one on the second even though the previous
+    answer was *also* unreachable - level-triggered, not edge - and it resolves once
+    the integration answers again."""
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": _closed_port_url(),
+                                  "api_key": "k", "enabled": 1, "service_id": sid,
+                                  "auto_incident": 1})
+    app_module._refresh_integration_cache()
+    assert db.get_open_auto_incident_for_service(sid) is None
+
+    app_module._refresh_integration_cache()
+    incident = db.get_open_auto_incident_for_service(sid)
+    assert incident is not None
+    app_module._refresh_integration_cache()
+    assert db.get_open_auto_incident_for_service(sid)["id"] == incident["id"]  # not a second one
+
+    server, url = _slow_arr_server(0)
+    try:
+        integ = db.get_integration(iid)
+        conn = db.get_db()
+        conn.execute("UPDATE integrations SET base_url=? WHERE id=?", (url, integ["id"]))
+        conn.commit()
+        conn.close()
+        app_module._refresh_integration_cache()
+    finally:
+        server.shutdown()
+    assert db.get_incident(incident["id"])["status"] == "resolved"
+
+
 def test_merge_api_health_off_passes_through_unchanged():
     assert app_module._merge_api_health("operational", "off", False) == "operational"
     assert app_module._merge_api_health("operational", "degrade", None) == "operational"
@@ -913,6 +1396,19 @@ def test_admin_service_edit_saves_dependencies(client):
     form_html = client.get(f"/admin/services/{seerr_id}/edit").data.decode()
     assert "Depends on" in form_html
     assert "Radarr" in form_html and "Sonarr" in form_html
+
+
+def test_a_junk_dependency_id_is_skipped_not_a_500(client):
+    """Same skip-what-isn't-an-id rule as before, but "²" used to pass isdigit() and
+    then fail int() with a 500."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    seerr_id = db.create_service({"name": "Seerr", "url": ""})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    resp = client.post(f"/admin/services/{seerr_id}/edit", data={
+        "name": "Seerr", "url": "", "depends_on": ["²", "abc", "", str(radarr_id)],
+    })
+    assert resp.status_code == 302
+    assert db.get_service_dependencies(seerr_id) == [radarr_id]
 
 
 def test_linked_integration_reachable_none_when_no_integration(isolated_db):
@@ -1048,7 +1544,8 @@ def test_report_problem_page_shows_site_name(client):
 
 def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     notified = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: notified.append((title, msg)))
+    monkeypatch.setattr(app_module.notifications, "notify",
+                        lambda title, msg, **kw: notified.append((title, msg, kw)))
     sid = db.list_services()[0]["id"]
 
     client.get(f"/report?service_id={sid}")  # sets the anti-spam timing session value
@@ -1067,6 +1564,8 @@ def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     assert reports[0]["service_id"] == sid
     assert reports[0]["status"] == "new"
     assert notified and "Jellyfin card" in notified[0][1]
+    # Visitor-written text: the webhook post must not be able to ping anyone.
+    assert notified[0][2] == {"allow_mentions": False}
 
 
 def test_report_problem_honeypot_silently_discards(client):
@@ -1157,6 +1656,104 @@ def test_api_status_includes_open_reports_count(client):
     data = client.get("/api/status").get_json()
     service = next(s for s in data["services"] if s["id"] == sid)
     assert service["open_reports_count"] == 1
+
+
+def test_api_status_never_leaks_check_urls_or_unpublished_run_targets(client):
+    """/api/status is public and used to serialise whole services rows: every
+    internal check_url, and raw VM names for services that never opted in. The HTML
+    page showed neither."""
+    hidden = db.create_service({"name": "Private", "url": "https://p.example",
+                                 "check_url": "http://192.168.1.50:8096/health",
+                                 "run_target": "vm:MEDIA-VM-01", "show_run_target_public": 0})
+    shown = db.create_service({"name": "Opted in", "url": "https://o.example",
+                                "check_url": "http://10.0.0.7:7878/ping",
+                                "run_target": "vm:ARR-VM", "show_run_target_public": 1})
+    resp = client.get("/api/status")
+    body = resp.get_data(as_text=True)
+    services = {s["id"]: s for s in resp.get_json()["services"]}
+
+    for s in services.values():
+        assert "check_url" not in s
+    assert "192.168.1.50" not in body and "10.0.0.7" not in body
+    assert "run_target" not in services[hidden]
+    assert "MEDIA-VM-01" not in body
+    # Opted in: published exactly as before, raw and as a label.
+    assert services[shown]["run_target"] == "vm:ARR-VM"
+    assert services[shown]["run_target_label"]
+
+
+def test_api_status_keeps_every_other_service_field(client):
+    """External devices read this endpoint, so the trim is exactly those two keys -
+    nothing else may disappear."""
+    sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
+                              "run_target": "host"})
+    row = db.get_service(sid)
+    published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
+    expected = (set(row) - {"check_url", "run_target"}) | {
+        "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
+        "run_target_label", "dependency_names"}
+    assert set(published) == expected
+
+
+def _statements_for(client, path, monkeypatch):
+    """How many SQL statements one request runs, counted with SQLite's own trace hook
+    on every connection it opens."""
+    real_connect = sqlite3.connect
+    statements = []
+
+    def tracing_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    with monkeypatch.context() as m:
+        m.setattr(sqlite3, "connect", tracing_connect)
+        assert client.get(path).status_code == 200
+    return len(statements)
+
+
+def test_the_public_page_query_count_does_not_grow_with_the_data(client, monkeypatch):
+    """Every per-item lookup on the public page is a grouped query now - dependencies,
+    each maintenance window's services - so five times the services, windows and
+    reports must cost the same number of statements. A new per-item query in a loop
+    shows up here as a difference."""
+    def add(n, start):
+        ids = [db.create_service({"name": f"S{start + i}", "url": "", "show_dependencies_public": 1})
+               for i in range(n)]
+        for sid in ids[1:]:
+            db.set_service_dependencies(sid, [ids[0]])
+        for i, sid in enumerate(ids):
+            db.create_maintenance_window({"title": f"W{start + i}", "starts_at": "2099-01-01T00:00",
+                                           "ends_at": "2099-01-02T00:00"}, service_ids=[sid])
+            db.create_problem_report("x", "", sid)
+
+    add(3, 0)
+    _statements_for(client, "/", monkeypatch)       # warm the uptime cache
+    few = _statements_for(client, "/", monkeypatch)
+    add(12, 100)
+    many = _statements_for(client, "/", monkeypatch)
+    assert many == few, f"{few} statements for 3 services, {many} for 15"
+
+
+def test_grouped_lookups_return_what_the_per_item_ones_did(isolated_db):
+    a, b, c = (db.create_service({"name": n, "url": "", "sort_order": i})
+               for i, n in enumerate(("A", "B", "C")))
+    db.set_service_dependencies(a, [c, b])
+    assert db.list_dependencies_for_services([a, b]) == {a: db.get_service_dependencies(a), b: []}
+
+    mid = db.create_maintenance_window({"title": "W", "starts_at": "2099-01-01T00:00",
+                                         "ends_at": "2099-01-02T00:00"}, service_ids=[c, a])
+    window = next(w for w in db.list_maintenance_windows() if w["id"] == mid)
+    assert window["services"] == db._get_window_services(mid)
+    assert window["service_names"] == "A, C"
+
+    db.create_problem_report("general", "", None)
+    db.create_problem_report("about b", "", b)
+    gone = db.create_service({"name": "Gone", "url": ""})
+    db.create_problem_report("orphan", "", gone)
+    db.delete_service(gone)
+    names = {r["message"]: r["service_name"] for r in db.list_problem_reports()}
+    assert names == {"general": None, "about b": "B", "orphan": None}
 
 
 def test_admin_report_create_incident(client):
@@ -2466,6 +3063,33 @@ def test_api_incidents_more_rejects_an_oversized_seen_list(client):
     assert client.get(f"/api/incidents/more?seen={too_many}").data.decode().strip() == ""
 
 
+@pytest.mark.parametrize("junk", ["%C2%B2", "9" * 23, "-5", "abc", "%D9%A1"])
+def test_api_incidents_more_skips_junk_ids_instead_of_500ing(client, junk):
+    """Unauthenticated: "²" passed isdigit() and then failed int(), and a 23-digit id
+    overflowed SQLite. Junk is skipped exactly like any other non-id, so the real ids
+    beside it still paginate correctly."""
+    sid = db.list_services()[0]["id"]
+    shown = db.create_incident({"service_id": sid, "title": "Already shown", "status": "resolved"})
+    db.create_incident({"service_id": sid, "title": "Next one", "status": "resolved"})
+    resp = client.get(f"/api/incidents/more?seen={junk},{shown}")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "Next one" in html
+    assert "Already shown" not in html
+    # Junk alone is the same as an empty seen list: page one, not a failure.
+    resp = client.get(f"/api/incidents/more?seen={junk}")
+    assert resp.status_code == 200
+    assert "Already shown" in resp.data.decode()
+
+
+def test_api_incidents_more_oversized_list_still_fails_closed_with_junk_in_it(client):
+    """SEEN_IDS_LIMIT still counts every parsed entry, clamped ones included."""
+    too_many = ",".join(["9" * 23] * (app_module.SEEN_IDS_LIMIT + 1))
+    resp = client.get(f"/api/incidents/more?seen={too_many}")
+    assert resp.status_code == 200
+    assert resp.data.decode().strip() == ""
+
+
 def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
     """Regression test for a real bug (2026-08-10): "load more" used to re-apply
     the same max_age_days filter as the initial view, so an incident older than
@@ -2546,6 +3170,60 @@ def test_api_maintenance_history_ignores_history_days_setting(client):
 
     resp = client.get("/api/maintenance/history?offset=0")
     assert "Long ago" in resp.data.decode()
+
+
+@pytest.mark.parametrize("offset", ["%C2%B2", "9" * 23, "-5", "abc", ""])
+def test_api_maintenance_history_never_500s_on_a_hostile_offset(client, offset):
+    """Unauthenticated: "²" passed isdigit() and a 23-digit offset overflowed SQLite,
+    both as 500s with a traceback in the log. Anything unparseable is page one."""
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Past window", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+    resp = client.get(f"/api/maintenance/history?offset={offset}")
+    assert resp.status_code == 200
+    if offset == "9" * 23:
+        assert "Past window" not in resp.data.decode()  # clamped past the end, not wrapped
+    else:
+        assert "Past window" in resp.data.decode()
+
+
+@pytest.mark.parametrize("key", ["public_history_days", "highload_cpu_percent",
+                                  "kiosk_rotation_seconds", "lowdisk_percent_threshold",
+                                  "media_calendar_days", "status_history_retention_days",
+                                  "admin_session_timeout_hours", "jellyfin_auth_integration_id",
+                                  "seerr_integration_id"])
+def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
+    """A value like "²" stored before the write side was fixed (or edited in by hand)
+    must read as unset, not raise on every page that reads it."""
+    db.set_setting(key, "²")
+    assert client.get("/").status_code == 200
+    # Every reader answers exactly as it would for an unset value.
+    assert app_module._public_history_days() is None
+    assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
+    assert app_module._lowdisk_threshold() is None
+    assert app_module._kiosk_rotation_seconds() == app_module.KIOSK_DEFAULT_ROTATION_SECONDS
+    assert app_module._session_timeout_seconds() == app_module.DEFAULT_SESSION_TIMEOUT_HOURS * 3600
+    assert app_module.integrations.high_load_thresholds()["cpu_percent"] == 90
+    assert app_module.integrations.calendar_days() == app_module.integrations.DEFAULT_CALENDAR_DAYS
+    assert app_module.jellyfin_auth.auth_integration() is None
+    assert app_module.integrations.seerr_integration() is None
+
+
+def test_settings_save_refuses_non_ascii_digits(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "public_history_days": "²", "lowdisk_percent_threshold": "١٢",
+        "highload_cpu_percent": "²", "status_history_retention_days": "²",
+        "admin_session_timeout_hours": "9" * 30, "kiosk_rotation_seconds": "30"})
+    assert db.get_setting("public_history_days") == ""
+    assert db.get_setting("lowdisk_percent_threshold") == ""
+    assert db.get_setting("highload_cpu_percent") == "90"
+    assert db.get_setting("status_history_retention_days") == str(app_module.DEFAULT_HISTORY_RETENTION_DAYS)
+    assert db.get_setting("admin_session_timeout_hours") == str(db.MAX_SQLITE_INT)
+    assert db.get_setting("kiosk_rotation_seconds") == "30"
+    assert client.get("/").status_code == 200
 
 
 def test_public_index_never_shows_ended_maintenance_by_default(client):

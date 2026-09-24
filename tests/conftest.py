@@ -4,6 +4,7 @@ import db
 import app as app_module
 import admin_search as admin_search_module
 import integrations as integrations_module
+import media_search as media_search_module
 import monitoring as monitoring_module
 import scheduler as scheduler_module
 import updater as updater_module
@@ -42,6 +43,7 @@ def _reset_module_state():
     updater_module.clear_update_cache()
     user_notify_module.clear_caches()
     admin_search_module.clear_caches()
+    media_search_module.clear_caches()
 
 
 @pytest.fixture
