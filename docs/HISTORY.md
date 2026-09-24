@@ -20,7 +20,7 @@ Read this when:
 - You need to know what has genuinely been verified against real Windows / a real
   Discord server / a real instance, versus only unit-tested here.
 
-Rough chronological range: 2026-07-22 through 2026-09-05.
+Rough chronological range: 2026-07-22 through 2026-09-24.
 
 ---
 
@@ -1840,6 +1840,100 @@ things only the user's own server can confirm. `search_jellyfin()` already sends
 `Recursive=true` alongside `IncludeItemTypes`, which is the condition that change is
 scoped to, so it should be unaffected - but that is reasoning from release notes, not
 an observation.
+
+## The 1.9.1 security and performance audit (2026-09-24)
+
+An audit of `main` at `62891f9` (v1.9.0 plus a docs commit) produced 18 security and
+10 performance findings, each backed by a proof script against the Flask test client.
+A subset was implemented on the `1.9.1-rc1` branch, one commit per finding, under a
+hard rule: backend fixes only, with no visible UI change and no change to existing
+workflows or response formats beyond what was explicitly agreed. The rules that came
+out of it are in `CLAUDE.md`; this is how the problems presented.
+
+**Implemented:** SEC-01, 03, 04, 05, 06, 07, 09, 11, 12, 13, 15, 18 and PERF-01 to 10.
+**Deliberately not touched:** SEC-02 (backup download step-up), SEC-08 (Jellyfin
+sign-in throttling), SEC-10 (global login lockout), SEC-14 (CSP `unsafe-inline`),
+SEC-16 (update signing), SEC-17 (Games Portal key scope), and incident retention.
+
+### What a stolen admin cookie could do
+
+Four findings combined badly. `/admin/2fa/enable` never checked whether 2FA was
+already on, so a stolen session could enrol its own authenticator and pass every
+step-up check from then on (SEC-01, proven: the stored secret was replaced).
+`/admin/2fa/disable` accepted unlimited guesses: 50 wrong codes, counter still at 0
+(SEC-03). A copied cookie survived logout *and* a password change, which is the
+natural reaction to a suspected compromise (SEC-06, proven). And `/admin/login?next=`
+redirected anywhere, including `//evil.example`, which sets up phishing for both the
+password and a live TOTP code, replayable within its window (SEC-05).
+
+Fixes: refuse re-enrolment while enabled; share `_login_state` on disable; accept
+each TOTP time step once (`admin_totp_last_step`); an `admin_session_epoch` that
+rotates on password change and 2FA enable/disable; `_safe_next_url()` on both admin
+login paths. Two details were only found while building the epoch. Clearing the
+session at login would have dropped `login_next` before the TOTP step read it. And a
+database restore would have brought back the backup's own epoch: that signs out the
+admin doing the restore, and an older backup revives cookies revoked since. The
+restore therefore carries the live epoch forward.
+
+### Public data that shouldn't have been public
+
+`/api/status` serialised whole `services` rows: every internal `check_url`
+(`http://192.168.1.50:8096/health`) and raw `run_target` VM names for services that
+never opted in, while the HTML page showed neither (SEC-04). The trim is exactly those
+two keys, because external dashboards read the endpoint. Anonymous report text reached
+the admin's Discord webhook with mentions live (SEC-09). And authenticated pages had
+no `Cache-Control`, so the back button could show them after logout (SEC-15).
+
+### Unauthenticated 500s from a digit that isn't one
+
+`"²".isdigit()` is True and `int("²")` raises, and a 23-digit number passes
+`isdigit()` and then overflows SQLite. `?seen=%C2%B2` and `?offset=<23 digits>` were
+both unauthenticated 500s, each writing a multi-KB traceback into a log with no size
+cap (SEC-11). A settings value of "²" (which the save handler's own `isdigit()` let
+through) broke the public page for everyone. `db.parse_int()` replaced the pattern.
+The log got a 20 MB daily cap, dropping rather than rotating early so the date-named
+backups stay intact. The `/api/incidents/more` change went in its own commit, given
+that endpoint's history (see "four pagination bugs in sequence").
+
+### Smaller ones
+
+A Jellyfin username went into an inline `onsubmit` (SEC-12): `O'Brien` rendered as
+`O&#39;Brien`, which the browser decodes back to a quote before running it as
+JavaScript. It's now a convention test. A passwordless database, from a fresh volume
+or a restore, let whoever reached `/admin/login` first set the password (SEC-13).
+First-run setup is now local-only, and a restore without `admin_password_hash` is
+refused. One trap there: behind a Cloudflare tunnel on the same host, every visitor
+arrives from 127.0.0.1, so a forwarding header without `BEHIND_PROXY` has to mean
+"refuse". The visitor search limit lived in the session cookie, and replaying an older
+cookie reset it: 160 searches against a limit of 40 (SEC-07). It is now server-side
+with a concurrency cap.
+
+### Performance
+
+Measured before and after in the sandbox: `/` issued 37 SQL statements with 3
+services and 61 with 15; it now issues 33 for both (PERF-07). A health-check body is no
+longer downloaded (PERF-09). Integration statuses are fetched in parallel (PERF-04):
+three 1s endpoints took about 3s of the cycle and now take about 1s. Search asks
+Jellyfin and Seerr at once (PERF-03). The account pages' Seerr lookup used to be 31
+calls for 30 linked users, inside the request; now it is none for anyone the hourly
+mirror knows and at most 2 otherwise (PERF-02). On Windows, the three PowerShell
+queries moved off the CPU sampler's thread onto 60s and 12-minute cadences (PERF-01),
+and throughput rates are computed once per loop tick rather than by every caller
+(PERF-08).
+
+### Verification record — sandbox, 2026-09-24
+
+- Full suite after every commit (1213 at the start, 1345 at the end), all passing.
+- Every new test that guards a fix was also run against the code before it, and failed
+  there.
+- A live `python app.py` run of the auth and public-endpoint fixes (27 checks), and a
+  Chromium sweep of all 38 parameterless GET pages: no 5xx, no JavaScript errors.
+- The SEC-12 confirm dialog was driven in real Chromium against a stand-in Seerr
+  recording every request: the same dialog text, with the quote intact; Cancel posts
+  nothing; OK writes through.
+- **Not verified:** PERF-01 and PERF-08 on real Windows (mocked `subprocess` only), and
+  PERF-02 and the SEC-07 cap against a real Seerr or Jellyfin. The requests bump (SEC-18)
+  raises the minimum Python to 3.10.
 
 ## Release history notes
 
