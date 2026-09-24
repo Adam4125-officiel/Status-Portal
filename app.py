@@ -690,7 +690,7 @@ def _require_totp(failure_message, redirect_endpoint):
         return redirect(url_for(redirect_endpoint))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
-    if twofactor.verify_code(secret, code):
+    if twofactor.verify_and_consume(secret, code):
         _register_login_success()
         return None
     _register_login_failure()
@@ -2519,7 +2519,7 @@ def admin_login():
         if awaiting_totp:
             code = request.form.get("totp_code", "")
             secret = db.get_setting("admin_totp_secret")
-            if secret and twofactor.verify_code(secret, code):
+            if secret and twofactor.verify_and_consume(secret, code):
                 _register_login_success()
                 session.pop("awaiting_totp", None)
                 _start_admin_session()
@@ -4314,7 +4314,7 @@ def admin_2fa_enable():
     if request.method == "POST":
         secret = session.get("pending_totp_secret")
         code = request.form.get("totp_code", "")
-        if secret and twofactor.verify_code(secret, code):
+        if secret and twofactor.verify_and_consume(secret, code):
             db.set_setting("admin_totp_secret", secret)
             db.set_setting("admin_totp_enabled", "1")
             session.pop("pending_totp_secret", None)
@@ -4341,13 +4341,20 @@ def admin_2fa_enable():
 @app.route("/admin/2fa/disable", methods=["POST"])
 @login_required
 def admin_2fa_disable():
+    # Same counter as the login page and _require_totp(): with a stolen session
+    # cookie this form was otherwise an unthrottled 6-digit guessing loop, and
+    # winning it has the same end state as a stolen authenticator.
+    if _login_locked():
+        flash("Too many incorrect attempts - try again in a few minutes.", "error")
+        return redirect(url_for("admin_2fa"))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
-    if secret and twofactor.verify_code(secret, code):
-        db.set_setting("admin_totp_secret", "")
-        db.set_setting("admin_totp_enabled", "0")
+    if secret and twofactor.verify_and_consume(secret, code):
+        _register_login_success()
+        twofactor.disable()
         flash("Two-factor authentication disabled.", "success")
     else:
+        _register_login_failure()
         flash("Incorrect code - 2FA was not disabled.", "error")
     return redirect(url_for("admin_2fa"))
 

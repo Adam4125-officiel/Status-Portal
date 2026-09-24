@@ -272,7 +272,10 @@ DB-backed Settings pages, not a code edit.
   destructive action means calling this helper, not re-inlining the check: three
   hand-maintained copies is three chances for one to quietly stop matching the
   others. (The login flow and `/admin/2fa` enable/disable are *not* step-up and
-  correctly don't use it — those are primary auth and enrollment.)
+  correctly don't use it — those are primary auth and enrollment. `/admin/2fa/disable`
+  does share `_login_state` through `_login_locked()`/`_register_login_failure()`/
+  `_register_login_success()`, though: without it the form was an unthrottled
+  code-guessing loop for anyone holding a session cookie.)
 - **Never interpolate a value from outside the portal's own admin into an inline JS
   event-handler attribute** (e.g. `onsubmit="return confirm('...' + x + '...')"`).
   Jinja's HTML-attribute escaping does not protect a value the browser HTML-decodes
@@ -1205,6 +1208,14 @@ time, rotating on a timer, no nav and no footer. Off by default.
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
   restart, self-update — not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
+- **A TOTP code is accepted once.** Every check that grants something (login,
+  `_require_totp()`, enable, disable) goes through `twofactor.verify_and_consume()`,
+  which records the accepted time step (`admin_totp_last_step`) and refuses any step
+  at or before it. `verify_code()` alone would let a phished code be replayed for as
+  long as `valid_window` keeps it valid. The visible consequence is standard TOTP
+  behaviour: a step-up straight after logging in needs the *next* code. Turning 2FA
+  off goes through `twofactor.disable()`, which also forgets the step, so re-enrolling
+  inside the same 30s isn't refused as a reuse.
 - **`/admin/2fa/enable` is refused outright while 2FA is already on** (GET and POST,
   checked before anything touches a secret). Without that, a stolen session cookie
   could enrol the attacker's own authenticator over the admin's and then pass every

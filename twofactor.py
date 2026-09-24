@@ -13,9 +13,11 @@ requirements.txt) - both are small, pure-Python packages, not lazy-imported
 optional ones like nvidia-ml-py/discord.py, since 2FA is a core, always-available
 feature rather than a rare integration.
 """
+import datetime
 import io
 import logging
 import os
+import threading
 
 import pyotp
 import qrcode
@@ -35,6 +37,16 @@ ISSUER_NAME = "Status Portal"
 # stronger trust boundary than knowing the admin password or holding a stolen
 # session cookie.
 RESET_FLAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "RESET_2FA")
+
+# The last TOTP time step (30s counter) a code was accepted for. A code is only good
+# once: without this, a code phished from the admin could be replayed for as long as
+# valid_window keeps it valid (up to ~90s). Persisted rather than held in memory so
+# a restart can't reopen that window. Cleared by disable(), so re-enrolling straight
+# after disabling isn't refused for reusing the step the disable code consumed.
+LAST_STEP_SETTING = "admin_totp_last_step"
+# Read-compare-write on one settings row: two requests carrying the same code at the
+# same moment must not both see it as unused.
+_consume_lock = threading.Lock()
 
 
 def is_enabled():
@@ -64,6 +76,50 @@ def verify_code(secret, code):
         return False
 
 
+def _accepted_step(secret, code):
+    """The time step `code` is valid for under the same valid_window=1 rule as
+    verify_code(), or None. pyotp's verify() only answers yes/no, and the replay
+    guard needs to know *which* step matched."""
+    if not secret or not code:
+        return None
+    try:
+        totp = pyotp.totp.TOTP(secret)
+        code = str(code).strip()
+        current = totp.timecode(datetime.datetime.now())
+        for step in (current - 1, current, current + 1):
+            if pyotp.utils.strings_equal(code, totp.generate_otp(step)):
+                return step
+    except Exception:
+        return None
+    return None
+
+
+def verify_and_consume(secret, code):
+    """verify_code(), plus each time step being accepted at most once. Use this for
+    every check that grants something (login, step-up, enabling, disabling) -
+    verify_code() on its own would accept the same code again until it expires.
+
+    Any step at or before the last accepted one is refused, not just an exact
+    repeat, as RFC 6238 section 5.2 recommends."""
+    step = _accepted_step(secret, code)
+    if step is None:
+        return False
+    with _consume_lock:
+        last = db.get_setting(LAST_STEP_SETTING, "")
+        if last.isdigit() and step <= int(last):
+            return False
+        db.set_setting(LAST_STEP_SETTING, str(step))
+    return True
+
+
+def disable():
+    """Turns 2FA off and forgets the secret and the replay guard's last step. Used
+    by both the admin page and the host-level reset flag, so the two can't drift."""
+    db.set_setting("admin_totp_enabled", "0")
+    db.set_setting("admin_totp_secret", "")
+    db.set_setting(LAST_STEP_SETTING, "")
+
+
 def qr_code_svg(uri):
     """Renders the otpauth:// URI as an inline SVG QR code."""
     img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
@@ -79,8 +135,7 @@ def check_and_process_reset_flag():
     action, not a standing backdoor left enabled by accident."""
     if not os.path.exists(RESET_FLAG_PATH):
         return False
-    db.set_setting("admin_totp_enabled", "0")
-    db.set_setting("admin_totp_secret", "")
+    disable()
     try:
         os.remove(RESET_FLAG_PATH)
     except OSError:

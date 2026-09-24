@@ -378,6 +378,73 @@ def test_admin_2fa_disable_requires_correct_code(client):
     assert twofactor.is_enabled() is False
 
 
+def test_admin_2fa_disable_wrong_codes_share_the_login_lockout(client):
+    """With a stolen session cookie this form used to be an unthrottled guessing
+    loop. Wrong codes now fill the same _login_state counter as the login page, and
+    once locked even the right code is refused."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        client.post("/admin/2fa/disable", data={"totp_code": "000000"})
+    assert app_module._login_locked() is True
+
+    resp = client.post("/admin/2fa/disable",
+                        data={"totp_code": pyotp.TOTP(secret).now()}, follow_redirects=True)
+    assert b"Too many incorrect attempts" in resp.data
+    assert twofactor.is_enabled() is True
+
+
+def test_admin_2fa_disable_success_resets_the_lockout_counter(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.post("/admin/2fa/disable", data={"totp_code": "000000"})
+    assert app_module._login_state["failures"] == 1
+
+    client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is False
+    assert app_module._login_state["failures"] == 0
+
+
+def test_a_totp_code_used_to_log_in_cannot_be_replayed_for_step_up(client, monkeypatch):
+    """One code, one use, across every route that checks one - a code phished from
+    the login page must not then also authorise a destructive action."""
+    calls = []
+    monkeypatch.setattr(app_module.monitoring, "control_host",
+                         lambda action: calls.append(action) or (True, "Host restart command sent."))
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.get("/admin/logout")
+    code = pyotp.TOTP(secret).now()
+    client.post("/admin/login", data={"password": "testpass123"})
+    assert client.post("/admin/login", data={"totp_code": code}).status_code == 302
+
+    resp = client.post("/admin/resources/host-control",
+                        data={"action": "restart", "totp_code": code}, follow_redirects=True)
+    assert b"2FA code" in resp.data
+    assert calls == []
+
+    client.post("/admin/resources/host-control",
+                 data={"action": "restart", "totp_code": pyotp.TOTP(secret).at(time.time() + 30)})
+    assert calls == ["restart"]
+
+
+def test_admin_2fa_can_be_re_enrolled_straight_after_disabling(client):
+    """Disabling forgets the replay guard's last step, so a new secret's code in the
+    same 30s window isn't refused as a reuse."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    old = _enable_totp_directly()
+    client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(old).now()})
+    assert twofactor.is_enabled() is False
+
+    client.get("/admin/2fa/enable")
+    with client.session_transaction() as sess:
+        new = sess["pending_totp_secret"]
+    client.post("/admin/2fa/enable", data={"totp_code": pyotp.TOTP(new).now()})
+    assert twofactor.is_enabled() is True
+    assert db.get_setting("admin_totp_secret") == new
+
+
 def test_admin_2fa_enable_is_refused_while_2fa_is_already_enabled(client):
     """A stolen session cookie must not be able to re-enrol 2FA onto the attacker's
     own authenticator: that would pass every _require_totp() step-up from then on
