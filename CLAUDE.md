@@ -195,6 +195,12 @@ DB-backed Settings pages, not a code edit.
   classifies it as `down`, not `degraded`, because it means whatever's in front of the
   service couldn't reach it at all. Both decisions have real bug reports behind them
   (`docs/HISTORY.md` → "Basic-auth services misread as degraded", "502 split out").
+  **Since only the status code matters, the check never reads the body**:
+  `_run_single_check()` requests with `stream=True` and closes the response once the
+  headers are in. So `elapsed_ms`, and the `slow_threshold_ms` comparison, measure
+  time to the response headers, not to the last byte (before 1.9.1 it was the full
+  download). A server that sends headers and then stalls its body is "reachable",
+  consistent with the rule above.
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
   `app._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —

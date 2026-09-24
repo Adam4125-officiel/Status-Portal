@@ -83,6 +83,10 @@ def test_compute_overall_status_ignores_flagged_services():
 class _FakeResponse:
     def __init__(self, status_code):
         self.status_code = status_code
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 def test_check_status_for_response_only_5xx_is_degraded():
@@ -139,10 +143,63 @@ def test_within_grace_period(monkeypatch):
     assert app_module._within_grace_period({"startup_grace_seconds": 60}) is False
 
 
+def test_a_health_check_never_downloads_the_body():
+    """Against a real server: the verdict only needs the status line, so the check
+    returns once the headers are in. The server here sends its headers and then takes
+    ten seconds over a large body - reading that body would take ten seconds and, past
+    the 5s read timeout, turn a perfectly healthy service "down"."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(10 * 1024 * 1024))
+            self.end_headers()
+            self.wfile.flush()
+            try:
+                for _ in range(10):
+                    time.sleep(1)
+                    self.wfile.write(b"x" * (1024 * 1024))
+            except (BrokenPipeError, ConnectionResetError):
+                pass    # the check hung up without reading, which is the point
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        started = time.monotonic()
+        status, elapsed_ms = app_module._run_single_check(
+            f"http://127.0.0.1:{server.server_port}/", slow_threshold_ms=None)
+        took = time.monotonic() - started
+    finally:
+        server.shutdown()
+    assert status == "operational"
+    assert took < 3, f"took {took:.1f}s - the body was downloaded"
+    assert elapsed_ms is not None and elapsed_ms < 3000
+
+
+def test_a_health_check_response_is_always_closed(monkeypatch):
+    responses = []
+
+    def fake_get(url, timeout, **kwargs):
+        assert kwargs.get("stream") is True
+        responses.append(_FakeResponse(503))
+        return responses[-1]
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    assert app_module._run_single_check("http://x", None)[0] == "degraded"
+    assert responses[0].closed is True
+
+
 def test_check_service_status_no_retry_marks_down_on_first_failure(monkeypatch):
     calls = []
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         calls.append(url)
         raise app_module.requests.RequestException("connection refused")
 
@@ -168,7 +225,7 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
         _FakeResponse(200),
     ]
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         result = responses.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -195,7 +252,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
         _FakeResponse(200),
     ]
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, **kwargs):
         result = responses.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -219,7 +276,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
 
 def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
     monkeypatch.setattr(app_module.requests, "get",
-                         lambda url, timeout: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
+                         lambda url, timeout, **kw: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 

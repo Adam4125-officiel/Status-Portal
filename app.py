@@ -4942,12 +4942,21 @@ def _within_grace_period(service):
 
 
 def _run_single_check(check_url, slow_threshold_ms):
-    """One HTTP attempt against check_url. Returns (status, elapsed_ms)."""
+    """One HTTP attempt against check_url. Returns (status, elapsed_ms).
+
+    Streamed, and closed as soon as the status line and headers are in: the verdict
+    only ever depends on the status code (see _check_status_for_response), so
+    downloading the body - a whole web app's HTML, every cycle, for every service -
+    was pure waste. elapsed_ms is therefore time to the response headers, not to
+    the last byte of the body."""
     start = time.time()
     try:
-        r = requests.get(check_url, timeout=5)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
+        r = requests.get(check_url, timeout=5, stream=True)
+        try:
+            elapsed_ms = int((time.time() - start) * 1000)
+            return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
+        finally:
+            r.close()
     except requests.RequestException:
         return "down", None
 
