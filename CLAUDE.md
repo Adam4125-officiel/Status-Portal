@@ -3047,7 +3047,10 @@ instance the way the email path was.
   2026-08-19, when a fresh sandbox had neither. **Just install it** (the user has
   standing authorization to install tooling in this sandbox without asking):
   `pip install playwright && python -m playwright install --with-deps chromium`, ~1
-  minute. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
+  minute. **On the Ubuntu 20.04 codespace that fails** (found 2026-09-24): current
+  Playwright no longer supports 20.04, and `--with-deps` trips over an unsigned yarn
+  apt repository. `pip install playwright==1.48.0 && python -m playwright install
+  chromium` (no `--with-deps`; the system libraries are already there) works. Then drive it with `sync_playwright()`, hooking `console`, `pageerror` and
   `requestfailed` so an error can't pass unnoticed. This caught a real bug:
   `report_problem()` never passed `site_name` to `report.html`, silently leaving the
   topbar brand text and page title blank — every route-level pytest test for that route
@@ -3055,6 +3058,12 @@ instance the way the email path was.
   syntactically valid, just missing content. (Red herring to ignore along the way: an
   `ERR_CONNECTION_RESET` console error from the sandbox having no egress to
   `fonts.googleapis.com` — unrelated to app code.)
+- **The suite takes ~150s serially and ~75s with `pytest-xdist`**
+  (`pip install pytest-xdist`, then `python -m pytest -q -n 8 -p no:cacheprovider`).
+  Every test gets its own `tmp_path` database, so it is safe in parallel; worth it
+  when running the whole suite after every commit. A test that monkeypatches module
+  state without `isolated_db` doesn't get `_reset_module_state()`, so reset what it
+  touches itself.
 - **When curl-smoke-testing a multi-request flow that depends on session state** (login
   steps, flash messages, anything the server writes back via `Set-Cookie`), every
   request needs *both* `-b cookiejar` (send) *and* `-c cookiejar` (save the response's

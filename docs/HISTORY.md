@@ -1938,6 +1938,16 @@ and throughput rates are computed once per loop tick rather than by every caller
 - **Not verified:** PERF-01 and PERF-08 on real Windows (mocked `subprocess` only), and
   PERF-02 and the SEC-07 cap against a real Seerr or Jellyfin. The requests bump (SEC-18)
   raises the minimum Python to 3.10.
+- Released as the `v1.9.1-rc.1` pre-release, then promoted to `v1.9.1` the same day on
+  the user's "stable enough". No results from the Windows host were reported back
+  during the session, so the Windows items above are still unconfirmed on real
+  hardware. The checklist handed over for it: VMs, CPU temperature and per-disk
+  temperatures and I/O present within ~15s of start; `powershell.exe` launching about
+  twice a minute; the clear-caches button bringing disk data back within ~10s; steady
+  rates while refreshing during a transfer.
+- The rc's archive was run through `updater._archive_members()` before upload (183
+  files accepted, version read as `1.9.1-rc.1`), and `updater.fetch_releases()` saw it
+  as the newest on the unstable channel while stable stayed on 1.9.0.
 
 ## Release history notes
 
