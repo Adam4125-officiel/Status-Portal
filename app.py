@@ -4301,6 +4301,16 @@ def admin_2fa():
 @app.route("/admin/2fa/enable", methods=["GET", "POST"])
 @login_required
 def admin_2fa_enable():
+    # Refused outright while 2FA is already on, for GET and POST alike. Otherwise a
+    # stolen session cookie alone could enrol the attacker's own authenticator over
+    # the admin's, then pass every _require_totp() step-up with it. Switching to a
+    # different device means disabling first, which does need a current code. The
+    # 2FA page never links here while enabled, so the real admin never sees this.
+    if twofactor.is_enabled():
+        flash("Two-factor authentication is already enabled. Disable it first to "
+              "enrol a different authenticator.", "error")
+        return redirect(url_for("admin_2fa"))
+
     if request.method == "POST":
         secret = session.get("pending_totp_secret")
         code = request.form.get("totp_code", "")

@@ -345,18 +345,40 @@ def test_admin_routes_are_all_gated_by_the_admin_decorator():
 # ---------------------------------------------------------------------------
 # Step-up 2FA on the destructive actions
 # ---------------------------------------------------------------------------
+# Routes that are refused outright while 2FA is on, instead of asking for a code.
+# Re-enrolling 2FA is the case: asking for a code from the *current* secret would
+# work too, but "disable first" was the decision, and disabling already needs one.
+_REFUSED_WHILE_2FA_ENABLED = {"admin_2fa_enable"}
+
+
 @pytest.mark.parametrize("route_func", [
     "admin_host_control", "admin_system_restart", "admin_update",
+    "admin_2fa_enable",
 ])
 def test_destructive_routes_go_through_require_totp(route_func):
-    """CLAUDE.md: these three are the actions where a stolen/replayed session cookie
-    alone must not be enough, and they must call the shared _require_totp() helper
-    rather than each hand-rolling the check - three copies is three chances for one to
-    quietly stop matching the others."""
+    """CLAUDE.md: these are the actions where a stolen/replayed session cookie alone
+    must not be enough, and they must call the shared _require_totp() helper rather
+    than each hand-rolling the check - three copies is three chances for one to
+    quietly stop matching the others.
+
+    admin_2fa_enable is the one that refuses instead of asking: with a stolen cookie
+    it would otherwise swap the admin's authenticator for the attacker's, which
+    defeats every other route in this list at once."""
     tree = ast.parse(_read("app.py"))
     func = next((n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == route_func), None)
     assert func is not None, f"{route_func}() not found in app.py - was it renamed?"
+    if route_func in _REFUSED_WHILE_2FA_ENABLED:
+        # The refusal has to come first, before anything reads or writes a secret.
+        first = next(n for n in func.body
+                     if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)))
+        assert (isinstance(first, ast.If)
+                and "twofactor.is_enabled()" in ast.unparse(first.test)
+                and any(isinstance(n, ast.Return) for n in first.body)), (
+            f"{route_func}() must start by refusing while twofactor.is_enabled() - "
+            "re-enrolling 2FA from a session alone would hand a stolen cookie the "
+            "step-up code for every destructive action.")
+        return
     called = {n.func.id for n in ast.walk(func)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_require_totp" in called, (

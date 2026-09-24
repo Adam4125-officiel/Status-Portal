@@ -378,6 +378,30 @@ def test_admin_2fa_disable_requires_correct_code(client):
     assert twofactor.is_enabled() is False
 
 
+def test_admin_2fa_enable_is_refused_while_2fa_is_already_enabled(client):
+    """A stolen session cookie must not be able to re-enrol 2FA onto the attacker's
+    own authenticator: that would pass every _require_totp() step-up from then on
+    and lock the real admin's device out. GET and POST are both refused, and the
+    stored secret survives even a POST carrying a valid code for a planted secret."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+
+    resp = client.get("/admin/2fa/enable")
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/admin/2fa")
+    with client.session_transaction() as sess:
+        assert "pending_totp_secret" not in sess
+
+    attacker_secret = twofactor.generate_secret()
+    with client.session_transaction() as sess:
+        sess["pending_totp_secret"] = attacker_secret
+    resp = client.post("/admin/2fa/enable",
+                        data={"totp_code": pyotp.TOTP(attacker_secret).now()}, follow_redirects=True)
+    assert b"already enabled" in resp.data
+    assert db.get_setting("admin_totp_secret") == secret
+    assert twofactor.is_enabled() is True
+
+
 def test_admin_host_control_step_up_2fa_blocks_without_code(client, monkeypatch):
     calls = []
     monkeypatch.setattr(app_module.monitoring, "control_host",

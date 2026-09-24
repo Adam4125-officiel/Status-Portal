@@ -1205,6 +1205,11 @@ time, rotating on a timer, no nav and no footer. Off by default.
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
   restart, self-update — not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
+- **`/admin/2fa/enable` is refused outright while 2FA is already on** (GET and POST,
+  checked before anything touches a secret). Without that, a stolen session cookie
+  could enrol the attacker's own authenticator over the admin's and then pass every
+  step-up check. Switching device means disabling first, which needs a current code.
+  `test_destructive_routes_go_through_require_totp` checks the refusal comes first.
 - **Resetting 2FA is a host-level action, not a web one, on purpose.**
   `twofactor.check_and_process_reset_flag()` looks for an empty file at
   `instance/RESET_2FA` on every hit of `/admin/login` (cheap `os.path.exists()`, no
