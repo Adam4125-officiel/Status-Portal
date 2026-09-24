@@ -2322,7 +2322,9 @@ def user_account_push_seerr_contact():
     user = current_user()
     prefs = db.get_user_preferences(user["id"])
     integration = user_notify.seerr_integration()
-    account = user_notify.find_seerr_account(user["id"])
+    # Live, not the hourly mirror: this writes to a Seerr account, so which one is
+    # decided by what Seerr says now.
+    account = user_notify.find_seerr_account(user["id"], live=True)
     if not integration or not account:
         flash("Couldn't find a Seerr account linked to your Jellyfin login.", "error")
         return redirect(url_for("user_account"))

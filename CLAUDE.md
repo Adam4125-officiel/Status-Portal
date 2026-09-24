@@ -2385,6 +2385,14 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   `fetch_seerr_users(with_notification_settings=True)` does the extra per-user request;
   it's an N+1 and that's the accepted cost, since it runs hourly in a background task and
   only for users with a real Jellyfin link.
+- **That N+1 must never run in a request.** `find_seerr_account()` used to do it on the
+  first render of every `/account` and `/admin/users/<id>/account` page. Now display
+  reads the `seerr_contacts` mirror and makes no call for anyone in it. Anything about
+  to write to Seerr (`save_contact()`, the push route) passes `live=True`, which asks
+  Seerr in at most two calls: the user list without settings, then the matched user's
+  settings. A person the mirror doesn't know gets the same two-call lookup, written
+  through to the mirror. `_invalidate_seerr_account_cache()` makes the next display ask
+  Seerr again, or the page would show pre-push values until the next hourly sync.
 - **It's `discordIds`, a list.** Current Seerr stores several per user; this portal sends
   to the first non-empty one. The older singular `discordId` is still read as a fallback.
 - **Seerr's settings POSTs overwrite every field they read from the body**, so writing
