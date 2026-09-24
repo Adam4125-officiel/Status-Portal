@@ -1449,6 +1449,43 @@ def test_api_status_includes_open_reports_count(client):
     assert service["open_reports_count"] == 1
 
 
+def test_api_status_never_leaks_check_urls_or_unpublished_run_targets(client):
+    """/api/status is public and used to serialise whole services rows: every
+    internal check_url, and raw VM names for services that never opted in. The HTML
+    page showed neither."""
+    hidden = db.create_service({"name": "Private", "url": "https://p.example",
+                                 "check_url": "http://192.168.1.50:8096/health",
+                                 "run_target": "vm:MEDIA-VM-01", "show_run_target_public": 0})
+    shown = db.create_service({"name": "Opted in", "url": "https://o.example",
+                                "check_url": "http://10.0.0.7:7878/ping",
+                                "run_target": "vm:ARR-VM", "show_run_target_public": 1})
+    resp = client.get("/api/status")
+    body = resp.get_data(as_text=True)
+    services = {s["id"]: s for s in resp.get_json()["services"]}
+
+    for s in services.values():
+        assert "check_url" not in s
+    assert "192.168.1.50" not in body and "10.0.0.7" not in body
+    assert "run_target" not in services[hidden]
+    assert "MEDIA-VM-01" not in body
+    # Opted in: published exactly as before, raw and as a label.
+    assert services[shown]["run_target"] == "vm:ARR-VM"
+    assert services[shown]["run_target_label"]
+
+
+def test_api_status_keeps_every_other_service_field(client):
+    """External devices read this endpoint, so the trim is exactly those two keys -
+    nothing else may disappear."""
+    sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
+                              "run_target": "host"})
+    row = db.get_service(sid)
+    published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
+    expected = (set(row) - {"check_url", "run_target"}) | {
+        "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
+        "run_target_label", "dependency_names"}
+    assert set(published) == expected
+
+
 def test_admin_report_create_incident(client):
     sid = db.list_services()[0]["id"]
     rid = db.create_problem_report("Jellyfin login is broken", "", sid)

@@ -1562,7 +1562,13 @@ time, rotating on a timer, no nav and no footer. Off by default.
   returns) computes `run_target_label`/`dependency_names` only when the
   corresponding `show_*_public` flag is set — the raw `run_target` column and
   `service_dependencies` rows are otherwise never resolved into public-facing
-  values, so nothing leaks for a service that hasn't opted in. `_run_target_label()`
+  values. **That was not true of `/api/status` until 1.9.1**: it serialised whole
+  `services` rows, raw `run_target` and every internal `check_url` included, for
+  services that never opted in. `_api_service_view()` now drops `check_url` always
+  and the raw `run_target` unless `show_run_target_public` is set. It removes exactly
+  those two keys and nothing else, because external dashboards read this endpoint; a
+  test pins the full key set, so trimming more is a deliberate edit to that test.
+  `_run_target_label()`
   is a small standalone helper (`app.py`) mirroring the inline Jinja logic already
   in `admin_services.html` — not deduplicated into one shared place since one side
   is Python and the other is a template, and the duplication is two short

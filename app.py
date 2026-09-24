@@ -1561,11 +1561,25 @@ def api_status():
     return jsonify({
         "site_name": db.get_setting("site_name", "Server"),
         "overall": compute_overall_status(services),
-        "services": services,
+        "services": [_api_service_view(s) for s in services],
         "announcements": announcements,
         "incidents": incidents,
         "maintenance_windows": db.list_public_maintenance_windows(),
     })
+
+
+def _api_service_view(service):
+    """A service row as /api/status publishes it: every field it has always carried,
+    minus the two that map the private network. check_url is the address the portal
+    probes (LAN IPs and ports), for every service; the raw run_target names a VM or
+    host, and only goes out when show_run_target_public says so - the same opt-in the
+    HTML page applies via run_target_label. Everything else stays exactly as it was,
+    because external dashboards read this endpoint and a missing key breaks them."""
+    view = dict(service)
+    view.pop("check_url", None)
+    if not service.get("show_run_target_public"):
+        view.pop("run_target", None)
+    return view
 
 
 @app.route("/api/incidents/more")
