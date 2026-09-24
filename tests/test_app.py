@@ -634,6 +634,150 @@ def test_admin_2fa_reset_flag_file(client, monkeypatch, tmp_path):
     assert resp.status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# Admin session revocation (SEC-06): a copied cookie must stop working once the
+# password or 2FA changes. Logout deliberately stays local to its own browser.
+# ---------------------------------------------------------------------------
+def _copy_of_session_cookie(victim):
+    """A second client holding a copy of `victim`'s session cookie - what someone who
+    lifted it off plain-HTTP LAN traffic or a shared machine would have."""
+    thief = app_module.app.test_client()
+    thief.set_cookie("session", victim.get_cookie("session").value)
+    return thief
+
+
+def test_a_password_change_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    assert thief.get("/admin/services").status_code == 200
+
+    client.post("/admin/settings", data={"current_password": "testpass123",
+                                          "new_password": "changed456", "confirm_password": "changed456"})
+
+    resp = thief.get("/admin/services")
+    assert resp.status_code == 302
+    assert "/admin/login" in resp.headers["Location"]
+    # The browser that made the change is re-stamped, not signed out.
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_a_failed_password_change_revokes_nothing(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    client.post("/admin/settings", data={"current_password": "wrong",
+                                          "new_password": "changed456", "confirm_password": "changed456"})
+    assert thief.get("/admin/services").status_code == 200
+
+
+def test_enabling_2fa_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    thief = _copy_of_session_cookie(client)
+    client.get("/admin/2fa/enable")
+    with client.session_transaction() as sess:
+        secret = sess["pending_totp_secret"]
+    client.post("/admin/2fa/enable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is True
+
+    assert thief.get("/admin/services").status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_disabling_2fa_revokes_every_other_admin_session(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    thief = _copy_of_session_cookie(client)
+    client.post("/admin/2fa/disable", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert twofactor.is_enabled() is False
+
+    assert thief.get("/admin/services").status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_admin_logout_signs_out_only_that_browser(client):
+    """A decision, not an oversight: logout clears this browser's cookie and rotates
+    nothing, so the admin's other devices stay signed in. Revoking everywhere is what
+    a password change is for."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    other_device = _copy_of_session_cookie(client)
+    client.get("/admin/logout")
+    assert client.get("/admin/services").status_code == 302
+    assert other_device.get("/admin/services").status_code == 200
+
+
+def test_a_session_stamped_before_the_epoch_existed_survives_the_upgrade(client):
+    """Upgrading must not sign anybody out: an unstamped session matches an unset
+    epoch. The first rotation then revokes it like any other."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with client.session_transaction() as sess:
+        sess.pop("admin_epoch", None)
+    assert db.get_setting(app_module.ADMIN_SESSION_EPOCH_SETTING) is None
+    assert client.get("/admin/services").status_code == 200
+
+    legacy = _copy_of_session_cookie(client)
+    with app_module.app.test_request_context():
+        app_module._rotate_admin_session_epoch()
+    assert legacy.get("/admin/services").status_code == 302
+
+
+def test_admin_login_starts_a_clean_session_with_a_new_csrf_token(client):
+    """Nothing planted in the session before authenticating carries into the admin
+    session - including the CSRF token, which is regenerated on the next render."""
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "planted-before-login"
+        sess["pending_totp_secret"] = "PLANTED"
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess.get("csrf_token") != "planted-before-login"
+        assert "pending_totp_secret" not in sess
+        assert sess["logged_in"] is True
+
+
+def test_admin_login_and_revocation_leave_a_visitor_session_alone(client, user_auth, monkeypatch):
+    """The visitor's Jellyfin sign-in is a separate identity: an admin login in the
+    same browser keeps it, and so does that admin session being revoked later."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    _sign_in(client, monkeypatch)
+    client.post("/admin/login", data={"password": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess["portal_user"]["id"] == "u1"
+        assert sess["logged_in"] is True
+
+    with app_module.app.test_request_context():
+        app_module._rotate_admin_session_epoch()
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
+
+
+def test_a_revoked_session_posting_to_admin_reaches_the_login_page_not_a_csrf_400(isolated_db, monkeypatch):
+    """Same ordering reason as the idle timeout: the revocation check runs in
+    _enforce_session_timeout, ahead of _check_csrf, so a revoked POST is redirected
+    rather than answered with a bare 400. Needs the real CSRF check, hence TESTING off."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    with app_module.app.test_client() as c:
+        token = _extract_csrf_token(c.get("/admin/login").data)
+        c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
+                                     "csrf_token": token})
+        token = _extract_csrf_token(c.get("/admin/settings").data)
+        with app_module.app.test_request_context():
+            app_module._rotate_admin_session_epoch()
+        resp = c.post("/admin/settings/general", data={"site_name": "x", "csrf_token": token})
+        assert resp.status_code == 302
+        assert "/admin/login" in resp.headers["Location"]
+    assert db.get_setting("site_name") is None
+
+
+def test_before_request_hooks_keep_their_order():
+    """Two of these depend on running before _check_csrf (see their docstrings), and
+    the revocation check lives inside _enforce_session_timeout for that reason. A new
+    hook is a deliberate edit here."""
+    assert [f.__name__ for f in app_module.app.before_request_funcs[None]] == [
+        "_open_scoped_db", "_allow_large_upload_for_restore", "_enforce_session_timeout",
+        "_enforce_user_session", "_check_csrf"]
+
+
 def test_auto_incident_lifecycle_opens_and_resolves(isolated_db):
     service = db.list_services()[0]
 

@@ -366,14 +366,61 @@ def _session_timeout_seconds():
     return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
 
 
+# Admin session revocation. A Flask session is a signed cookie, so nothing on the
+# server can invalidate a copy of one: logging out only clears the browser's own
+# copy, and a stolen cookie kept working after a password change. Every admin
+# session is stamped with this setting's value at login, and _enforce_session_timeout
+# rejects one whose stamp no longer matches. Rotating it therefore signs out every
+# other admin session at once. It rotates only on a password change and on enabling
+# or disabling 2FA; logout stays local to the browser that clicked it.
+#
+# Unset reads as "", which is also what a session stamped before this existed
+# compares as - so upgrading signs nobody out, and the first rotation revokes
+# everything older.
+ADMIN_SESSION_EPOCH_SETTING = "admin_session_epoch"
+
+# What survives an admin login's session.clear(). The admin keys are what the clear
+# is for (nothing from before authentication carries into the admin session, and the
+# CSRF token is regenerated); the visitor's Jellyfin sign-in and its per-session
+# state are a separate identity and aren't the admin login's to end.
+_VISITOR_SESSION_KEYS = ("portal_user", "portal_user_last_seen", "recent_requests",
+                          "report_form_rendered_at", "search_count", "search_window_start")
+# What a revoked admin session loses. Deliberately not session.clear(), for the same
+# reason: a revoked admin cookie in a browser also signed in as a visitor keeps the
+# visitor session. csrf_token stays because visitor forms use it too.
+_ADMIN_SESSION_KEYS = ("logged_in", "last_seen", "admin_epoch", "awaiting_totp",
+                        "login_next", "pending_totp_secret", "seerr_diagnosis")
+
+
+def _admin_session_epoch():
+    return db.get_setting(ADMIN_SESSION_EPOCH_SETTING, "")
+
+
+def _rotate_admin_session_epoch():
+    """Signs out every admin session except the one making this request, which is
+    re-stamped so that changing the password doesn't sign out the person who
+    changed it."""
+    epoch = secrets.token_hex(16)
+    db.set_setting(ADMIN_SESSION_EPOCH_SETTING, epoch)
+    if session.get("logged_in"):
+        session["admin_epoch"] = epoch
+
+
 def _start_admin_session():
-    """The one place a login becomes a logged-in session. Marks it permanent (so the
-    cookie gets an explicit Max-Age instead of dying with the browser) and stamps
-    last_seen so the idle clock starts now. Every place that logs someone in goes
-    through this - three hand-maintained copies is three chances for one to drift."""
+    """The one place a login becomes a logged-in session. Clears whatever the session
+    held before authenticating (visitor keys aside - see _VISITOR_SESSION_KEYS), which
+    also rotates the CSRF token; marks it permanent (so the cookie gets an explicit
+    Max-Age instead of dying with the browser); stamps last_seen so the idle clock
+    starts now; and stamps the revocation epoch. Every place that logs someone in
+    goes through this - three hand-maintained copies is three chances for one to
+    drift."""
+    visitor = {key: session[key] for key in _VISITOR_SESSION_KEYS if key in session}
+    session.clear()
+    session.update(visitor)
     session.permanent = True
     session["logged_in"] = True
     session["last_seen"] = time.time()
+    session["admin_epoch"] = _admin_session_epoch()
 
 
 # Restoring the database means uploading one, and a real portal.db is far larger than
@@ -432,6 +479,15 @@ def _enforce_session_timeout():
     attribute isn't covered by the signature, so a client that simply keeps sending
     an "expired" cookie would otherwise stay logged in indefinitely."""
     if not session.get("logged_in"):
+        return
+    # Revoked by a password or 2FA change made elsewhere (see
+    # ADMIN_SESSION_EPOCH_SETTING). Same redirect as an expiry, and here for the same
+    # ordering reason: a POST must reach the login page, not a CSRF 400.
+    if session.get("admin_epoch", "") != _admin_session_epoch():
+        for key in _ADMIN_SESSION_KEYS:
+            session.pop(key, None)
+        if request.path.startswith("/admin/"):
+            return redirect(url_for("admin_login", next=request.path))
         return
     session.permanent = True
     timeout = _session_timeout_seconds()
@@ -2529,11 +2585,11 @@ def admin_login():
             secret = db.get_setting("admin_totp_secret")
             if secret and twofactor.verify_and_consume(secret, code):
                 _register_login_success()
-                session.pop("awaiting_totp", None)
-                _start_admin_session()
+                # Read before _start_admin_session(), which clears the session.
                 # Re-checked here as well as where it's stored, so a session written
                 # before that check existed can't still carry an off-site target.
                 nxt = _safe_next_url(session.pop("login_next", None)) or url_for("admin_dashboard")
+                _start_admin_session()
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect code.", "error")
@@ -3738,6 +3794,10 @@ def admin_restore_db():
     if not upload or not upload.filename:
         flash("Choose a backup file to restore.", "error")
         return redirect(url_for("admin_about"))
+    # Carried over into the restored database below. The backup holds whatever epoch
+    # it was taken with: keeping that would sign out the admin doing the restore, and
+    # restoring an older backup would bring back cookies revoked since it was taken.
+    session_epoch = _admin_session_epoch()
 
     # Staged next to the database rather than in the system temp directory, so the final
     # os.replace() is a rename within one filesystem (atomic) rather than a cross-device
@@ -3790,6 +3850,12 @@ def admin_restore_db():
         # release re-test, not by any test.
         _remove_sqlite_sidecars(installed or staged)
 
+    try:
+        db.set_setting(ADMIN_SESSION_EPOCH_SETTING, session_epoch)
+    except Exception:
+        # The restore itself has succeeded; the cost of this failing is at most
+        # signing in again, so it must not turn a good restore into an error.
+        _logger.exception("Could not carry the admin session epoch into the restored database")
     _logger.warning("Database restored from an uploaded backup; previous database saved to %s",
                      os.path.basename(snapshot))
     flash(f"Database restored. Your previous database was saved as "
@@ -3981,6 +4047,9 @@ def admin_settings():
             flash("Passwords do not match.", "error")
         else:
             db.set_setting("admin_password_hash", generate_password_hash(new))
+            # The natural reaction to a suspected compromise, so it has to actually
+            # lock out a copied cookie - every other admin session ends here.
+            _rotate_admin_session_epoch()
             flash("Password changed.", "success")
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
@@ -4329,6 +4398,7 @@ def admin_2fa_enable():
             db.set_setting("admin_totp_secret", secret)
             db.set_setting("admin_totp_enabled", "1")
             session.pop("pending_totp_secret", None)
+            _rotate_admin_session_epoch()
             flash("Two-factor authentication enabled.", "success")
             return redirect(url_for("admin_2fa"))
         flash("Incorrect code - scan the QR code again (or re-enter the manual "
@@ -4363,6 +4433,7 @@ def admin_2fa_disable():
     if secret and twofactor.verify_and_consume(secret, code):
         _register_login_success()
         twofactor.disable()
+        _rotate_admin_session_epoch()
         flash("Two-factor authentication disabled.", "success")
     else:
         _register_login_failure()

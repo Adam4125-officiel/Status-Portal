@@ -267,6 +267,28 @@ def test_a_valid_backup_replaces_the_database_and_restarts(admin, tmp_path, no_r
     assert no_restart == [True]
 
 
+def test_a_restore_keeps_the_current_admin_session_epoch(admin, tmp_path, no_restart):
+    """A backup carries the session epoch it was taken with. Restoring that would sign
+    out the admin doing the restore, and restoring an older backup would bring back a
+    cookie revoked since it was taken - so the live epoch is carried over."""
+    backup = _zip_of("portal.db", _valid_backup_bytes(tmp_path, "restored"))
+    stolen = admin.get_cookie("session").value
+    admin.post("/admin/settings", data={"current_password": "testpass123",
+                                         "new_password": "changed456", "confirm_password": "changed456"})
+    epoch = db.get_setting(app_module.ADMIN_SESSION_EPOCH_SETTING)
+    assert epoch
+
+    resp = _upload(admin, backup)
+    assert b"Database restored" in resp.data
+    assert db.get_setting("site_name") == "restored"
+    assert db.get_setting(app_module.ADMIN_SESSION_EPOCH_SETTING) == epoch
+    assert admin.get("/admin/services").status_code == 200
+
+    thief = app_module.app.test_client()
+    thief.set_cookie("session", stolen)
+    assert thief.get("/admin/services").status_code == 302
+
+
 def test_a_bare_db_file_is_accepted_too(admin, tmp_path, no_restart):
     """Someone who unzipped their own backup to look inside shouldn't be told it's
     invalid."""

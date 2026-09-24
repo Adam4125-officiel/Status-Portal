@@ -1619,6 +1619,27 @@ time, rotating on a timer, no nav and no footer. Off by default.
   session has to redirect to the login page - the CSRF token lives in the very
   session being cleared, so the other order turns "your session expired" into a bare
   400. If you add another `before_request` hook, mind where you define it.
+- **Admin sessions are revocable through `admin_session_epoch`, and only three things
+  rotate it: a password change, enabling 2FA and disabling 2FA.** A signed cookie
+  can't be invalidated server-side on its own, so a copied one used to survive both
+  logout and a password change. `_start_admin_session()` stamps the current epoch;
+  `_enforce_session_timeout` pops the admin keys (`_ADMIN_SESSION_KEYS`, never
+  `session.clear()`) of any session whose stamp doesn't match and redirects `/admin/`
+  paths to the login page. It lives inside that hook rather than a new one because it
+  has to run before `_check_csrf`, for the same reason the idle expiry does.
+  `_rotate_admin_session_epoch()` re-stamps the browser making the change, so the
+  admin who changed the password stays signed in. **Logout stays local on purpose**
+  (other devices stay signed in). An unset setting and an unstamped session both read
+  as `""`, which is why upgrading signed nobody out. **A database restore carries the
+  live epoch into the restored file**: the backup's own epoch would sign out the
+  admin doing the restore, and an older one would bring back revoked cookies.
+- **`_start_admin_session()` clears the session before stamping it**, keeping only
+  `_VISITOR_SESSION_KEYS`. That's what stops anything planted before authentication
+  (a known CSRF token included) carrying into the admin session; the CSRF token is
+  regenerated on the next render. A new session key that belongs to the *visitor*
+  side has to be added to that tuple, or an admin login in the same browser will
+  quietly drop it. Anything read from the session during login (`login_next`) must
+  be read *before* the call.
 - **The idle check is server-side (`session["last_seen"]`), not just the cookie's
   Max-Age.** A cookie's expiry attribute isn't covered by the signature, so a client
   that keeps sending an "expired" cookie would otherwise stay logged in forever. The
