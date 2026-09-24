@@ -50,6 +50,8 @@ the [project website](https://adam4125-officiel.github.io/Status-Portal/) and th
 
 ## Quick start
 
+Needs Python 3.10 or newer.
+
 ```bash
 cd status-portal
 pip install -r requirements.txt
