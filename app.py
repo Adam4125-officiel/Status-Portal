@@ -2550,14 +2550,15 @@ def _submit_search_request(user):
     # Every numeric field is validated rather than filtered. Dropping what doesn't parse
     # is what the season list used to do, and it turns a mangled submission into a
     # *partial* one - a series quietly requested with three of its five seasons, with
-    # nothing anywhere saying so. Refusing says what happened.
+    # nothing anywhere saying so. Refusing says what happened. Parsed with
+    # db.parse_int(), not str.isdigit(), which let "²" through to an int() that raised.
     raw_seasons = request.form.getlist("seasons")
     seasons = None
     if media_type == "tv":
-        if not all(s.isdigit() for s in raw_seasons):
+        seasons = [db.parse_int(s) for s in raw_seasons]
+        if None in seasons:
             flash("That season selection didn't make sense - try again.", "error")
             return redirect(url_for("search", q=request.form.get("q", "")))
-        seasons = [int(s) for s in raw_seasons]
 
     root_folder = request.form.get("root_folder") or None
     profile_id = request.form.get("profile_id") or None
@@ -2568,8 +2569,10 @@ def _submit_search_request(user):
     # what the form actually showed.
     if not session.get("logged_in"):
         root_folder = profile_id = tags = None
-    if (profile_id is not None and not str(profile_id).isdigit()) or \
-            (tags is not None and not all(str(t).isdigit() for t in tags)):
+    # Validated with db.parse_int() - str.isdigit() let "²" through to the int() in
+    # request_via_seerr(), which raised - and then passed on as submitted.
+    if (profile_id is not None and db.parse_int(profile_id) is None) or \
+            (tags is not None and any(db.parse_int(t) is None for t in tags)):
         flash("That request configuration didn't make sense - try again.", "error")
         return redirect(url_for("search", q=request.form.get("q", "")))
 
@@ -2768,7 +2771,10 @@ def admin_service_edit(service_id):
         urls = request.form.getlist("link_url")
         links = [(label.strip(), url.strip()) for label, url in zip(labels, urls) if label.strip() and url.strip()]
         db.replace_service_links(service_id, links)
-        depends_on_ids = [int(i) for i in request.form.getlist("depends_on") if i.isdigit()]
+        # Anything that isn't a plain id is skipped, as before - through db.parse_int(),
+        # since str.isdigit() let "²" through to an int() that raised.
+        depends_on_ids = [n for n in (db.parse_int(i) for i in request.form.getlist("depends_on"))
+                          if n is not None]
         db.set_service_dependencies(service_id, depends_on_ids)
         flash("Service updated.", "success")
         return redirect(url_for("admin_services"))

@@ -1398,6 +1398,19 @@ def test_admin_service_edit_saves_dependencies(client):
     assert "Radarr" in form_html and "Sonarr" in form_html
 
 
+def test_a_junk_dependency_id_is_skipped_not_a_500(client):
+    """Same skip-what-isn't-an-id rule as before, but "²" used to pass isdigit() and
+    then fail int() with a 500."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    seerr_id = db.create_service({"name": "Seerr", "url": ""})
+    radarr_id = db.create_service({"name": "Radarr", "url": ""})
+    resp = client.post(f"/admin/services/{seerr_id}/edit", data={
+        "name": "Seerr", "url": "", "depends_on": ["²", "abc", "", str(radarr_id)],
+    })
+    assert resp.status_code == 302
+    assert db.get_service_dependencies(seerr_id) == [radarr_id]
+
+
 def test_linked_integration_reachable_none_when_no_integration(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     assert app_module._linked_integration_reachable(sid) is None

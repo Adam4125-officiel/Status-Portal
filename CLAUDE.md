@@ -416,15 +416,18 @@ DB-backed Settings pages, not a code edit.
   and the integration's *different* `auto_incident` concept can't share one HTML
   name on one form, so the integration's is deliberately `check_auto_incident` in
   the template and mapped explicitly in the route.
-- **Numeric settings and query parameters go through `db.parse_int()`, never
-  `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
+- **Numeric settings, query parameters and form fields go through `db.parse_int()`,
+  never `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
   Unicode digits that `int()` then rejects, and any length at all, which overflows
   SQLite's INTEGER. Both were unauthenticated 500s (a hostile `?offset=`), and a
   stored "²" broke the public page for everyone. `parse_int()` takes ASCII digits
   only and clamps to `[minimum, maximum]` (at most `db.MAX_SQLITE_INT`). A setting
   where 0 means something different from "the minimum", like the history retention,
   checks for 0 itself instead of clamping. Settings writes use
-  `app._setting_digits()`, the same parser in the stored-string form.
+  `app._setting_digits()`, the same parser in the stored-string form. Form fields keep
+  their own error behaviour: the search request's seasons/profile/tags are *refused*
+  with the usual "didn't make sense" flash, and the service form's `depends_on`
+  *skips* anything that isn't an id - only the parser changed.
 - **An admin page's on-page `<h1>`, its `{% block title %}` and its nav label must all
   match** — they drift independently, and the `<h1>` is the one the user actually
   sees. Check all three when a page's scope or nav label changes

@@ -1110,3 +1110,48 @@ def test_a_single_word_query_worked_all_along(strict_seerr):
     """Why this went unnoticed: "test" has nothing to encode."""
     integrations.search_seerr(strict_seerr, "k", "test")
     assert _TmdbStrictSeerr.seen[0] == "query=test&page=1"
+
+
+@pytest.mark.parametrize("seasons", [["1", "²"], ["١"], ["9" * 5000]])
+def test_a_unicode_or_absurd_season_number_is_refused_not_a_500(visitor, stub, monkeypatch, seasons):
+    """str.isdigit() accepts "²" and Arabic-Indic digits, which int() then rejected with
+    a 500. They now get the same refusal as any other mangled season value."""
+    _configure(stub, jellyfin=False)
+    calls = []
+    monkeypatch.setattr(integrations, "request_via_seerr", lambda *a, **k: calls.append(a))
+    resp = visitor.post("/search/request", data={"media_type": "tv", "tmdb_id": "1",
+                                                  "seasons": seasons}, follow_redirects=True)
+    assert resp.status_code == 200
+    if seasons == ["9" * 5000]:
+        # ASCII digits, so a valid shape: clamped rather than refused, and Seerr is the
+        # one that says no to a season that doesn't exist.
+        assert len(calls) == 1
+    else:
+        assert b"didn&#39;t make sense" in resp.data or b"didn't make sense" in resp.data
+        assert calls == []
+
+
+@pytest.mark.parametrize("field", [{"profile_id": "²"}, {"tags": ["1", "²"]}, {"profile_id": "-3"}])
+def test_a_mangled_admin_request_field_is_refused_not_a_500(visitor, stub, monkeypatch, field):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    calls = []
+    monkeypatch.setattr(integrations, "request_via_seerr", lambda *a, **k: calls.append(a))
+    resp = visitor.post("/search/request", data={"media_type": "movie", "tmdb_id": "1", **field},
+                        follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"didn&#39;t make sense" in resp.data or b"didn't make sense" in resp.data
+    assert calls == []
+
+
+def test_valid_admin_request_fields_still_go_through_unchanged(visitor, stub, monkeypatch):
+    _configure(stub, jellyfin=False)
+    visitor.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    sent = {}
+    monkeypatch.setattr(integrations, "request_via_seerr",
+                        lambda url, key, mt, tid, uid=None, seasons=None, root_folder=None,
+                               profile_id=None, tags=None:
+                        sent.update({"profile_id": profile_id, "tags": tags}))
+    visitor.post("/search/request", data={"media_type": "movie", "tmdb_id": "1",
+                                           "profile_id": "6", "tags": ["1", "2"]})
+    assert sent == {"profile_id": "6", "tags": ["1", "2"]}

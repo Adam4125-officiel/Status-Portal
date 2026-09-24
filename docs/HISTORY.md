@@ -1889,7 +1889,9 @@ no `Cache-Control`, so the back button could show them after logout (SEC-15).
 ### Unauthenticated 500s from a digit that isn't one
 
 `"²".isdigit()` is True and `int("²")` raises, and a 23-digit number passes
-`isdigit()` and then overflows SQLite. `?seen=%C2%B2` and `?offset=<23 digits>` were
+`isdigit()` and then overflows SQLite. (The same pattern in the search request's
+season/profile/tag fields and the service form's `depends_on` was a 500 for a
+signed-in visitor or the admin; those were converted in a follow-up commit.) `?seen=%C2%B2` and `?offset=<23 digits>` were
 both unauthenticated 500s, each writing a multi-KB traceback into a log with no size
 cap (SEC-11). A settings value of "²" (which the save handler's own `isdigit()` let
 through) broke the public page for everyone. `db.parse_int()` replaced the pattern.
@@ -1925,7 +1927,7 @@ and throughput rates are computed once per loop tick rather than by every caller
 
 ### Verification record — sandbox, 2026-09-24
 
-- Full suite after every commit (1213 at the start, 1345 at the end), all passing.
+- Full suite after every commit (1213 at the start, 1350 at the end), all passing.
 - Every new test that guards a fix was also run against the code before it, and failed
   there.
 - A live `python app.py` run of the auth and public-endpoint fixes (27 checks), and a
