@@ -180,6 +180,47 @@ def test_one_dead_source_still_returns_the_others_results(isolated_db, stub):
     assert outcome["available"] is True
 
 
+def test_the_two_sources_are_searched_at_the_same_time(isolated_db, stub, monkeypatch):
+    """Sequentially, a slow Jellyfin and a slow Seerr cost two whole search timeouts of
+    request-thread time. Each fake below waits for the other to have started, which
+    can only happen if both are in flight at once - run one after the other, the
+    barrier times out."""
+    _configure(stub)
+    both_started = threading.Barrier(2, timeout=5)
+
+    def jellyfin(*args):
+        both_started.wait()
+        return [{"title": "Dune", "year": 2021, "in_library": True, "jellyfin_id": "j1",
+                 "media_type": "movie", "source": "jellyfin"}]
+
+    def seerr(*args):
+        both_started.wait()
+        return [{"title": "Dune", "year": 2021, "in_library": False, "tmdb_id": 438631,
+                 "media_type": "movie", "source": "seerr"}]
+
+    monkeypatch.setattr(integrations, "search_jellyfin", jellyfin)
+    monkeypatch.setattr(integrations, "search_seerr", seerr)
+    outcome = media_search.search("dune")
+    assert outcome["errors"] == {}
+    assert outcome["available"] is True
+    assert len(outcome["results"]) == 1
+    assert outcome["results"][0]["jellyfin_id"] == "j1"
+    assert outcome["results"][0]["tmdb_id"] == 438631
+
+
+def test_an_unexpected_error_in_the_parallel_source_still_propagates(isolated_db, stub, monkeypatch):
+    """Only network and parse failures degrade to a per-source note, as before; a bug
+    on the helper thread must not be swallowed into an empty result."""
+    _configure(stub)
+    monkeypatch.setattr(integrations, "search_jellyfin", lambda *a: [])
+
+    def broken(*args):
+        raise KeyError("bug")
+    monkeypatch.setattr(integrations, "search_seerr", broken)
+    with pytest.raises(KeyError):
+        media_search.search("dune")
+
+
 def test_both_sources_down_reports_unavailable_rather_than_empty(isolated_db, stub):
     """"Search is unavailable right now" and "we don't have that" must not look the
     same - one is a system problem and the other is an answer."""

@@ -36,6 +36,7 @@ import logging
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 import requests
@@ -179,27 +180,45 @@ def search(query, jellyfin_user_id=None):
     jellyfin, seerr = jellyfin_integration(), seerr_integration()
     jellyfin_items, seerr_items = [], []
 
-    if jellyfin:
-        try:
-            jellyfin_items = integrations.search_jellyfin(
+    # The two sources are asked at the same time: sequentially, a slow Jellyfin and a
+    # slow Seerr cost two full search timeouts of thread time, now at most one. Seerr
+    # runs on a helper thread and Jellyfin on this one; neither touches the database,
+    # so the request's pooled connection never crosses threads.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        seerr_future = (pool.submit(_search_source, "Seerr", integrations.search_seerr,
+                                    seerr["base_url"], seerr["api_key"], query)
+                        if seerr else None)
+        if jellyfin:
+            jellyfin_items, error = _search_source(
+                "Jellyfin", integrations.search_jellyfin,
                 jellyfin["base_url"], jellyfin["api_key"], query, jellyfin_user_id)
-            result["available"] = True
-        except (requests.RequestException, ValueError) as e:
-            # Warning, not info: this is a user-visible failure, and it used to be
-            # logged quietly enough that nobody could tell *why* search had degraded.
-            _logger.warning("Jellyfin search failed: %s", e)
-            result["errors"]["Jellyfin"] = integrations.describe_request_error(e)
-
-    if seerr:
-        try:
-            seerr_items = integrations.search_seerr(seerr["base_url"], seerr["api_key"], query)
-            result["available"] = True
-        except (requests.RequestException, ValueError) as e:
-            _logger.warning("Seerr search failed: %s", e)
-            result["errors"]["Seerr"] = integrations.describe_request_error(e)
+            _record_source(result, "Jellyfin", error)
+        if seerr_future:
+            seerr_items, error = seerr_future.result()
+            _record_source(result, "Seerr", error)
 
     result["results"] = merge(jellyfin_items, seerr_items)
     return result
+
+
+def _search_source(name, fetch, *args):
+    """One source's items and None, or [] and a description of why it failed. Anything
+    other than a network or parse failure still propagates, as it did before the two
+    ran in parallel."""
+    try:
+        return fetch(*args), None
+    except (requests.RequestException, ValueError) as e:
+        # Warning, not info: this is a user-visible failure, and it used to be logged
+        # quietly enough that nobody could tell *why* search had degraded.
+        _logger.warning("%s search failed: %s", name, e)
+        return [], integrations.describe_request_error(e)
+
+
+def _record_source(result, name, error):
+    if error is None:
+        result["available"] = True
+    else:
+        result["errors"][name] = error
 
 
 def seerr_user_id_for(jellyfin_user_id):

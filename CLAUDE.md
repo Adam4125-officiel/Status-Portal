@@ -2575,9 +2575,13 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   be background-refreshed.
 - **What makes the carve-out acceptable is the safety machinery, so don't remove any of
   it**: `config.SEARCH_TIMEOUT_SECONDS` (6s, deliberately shorter than every other
-  timeout here) so a slow Jellyfin can't hold a request thread; each source failing
+  timeout here) so a slow Jellyfin can't hold a request thread; the two sources asked
+  **in parallel** (Seerr on a helper thread, Jellyfin on the request's), so two slow
+  backends cost one timeout of thread time rather than two; each source failing
   independently; and a distinct "search is unavailable right now" state that must never
   be collapsed into "nothing found" — one is a system problem, the other is an answer.
+  Neither search fetcher touches the database, which is what makes the helper thread
+  safe: the pooled connection is thread-local and must never cross threads.
 - **Signed-in visitors only, plus a per-person rate limit and a concurrency cap.** Three
   separate reasons: the result set reveals the whole library, requesting is a write
   against Seerr that has to be attributable to a person, and a search box wired to two
