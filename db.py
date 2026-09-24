@@ -778,6 +778,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_service_dependencies_service ON service_dependencies (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_problem_reports_service ON problem_reports (service_id)",
         "CREATE INDEX IF NOT EXISTS idx_integrations_service ON integrations (service_id)",
+        # get_open_auto_incident_for_service() runs every health-check cycle for every
+        # down service, and incidents are never pruned - a flapping service adds one per
+        # flap. Without this it scanned the whole table each time.
+        "CREATE INDEX IF NOT EXISTS idx_incidents_service_auto "
+        "ON incidents (service_id, auto_created, status)",
         # Login looks a user up by name, not by id (the id is what Jellyfin returns
         # *after* a successful authentication). Small table, but this is the one
         # query on the sign-in path, and an index costs nothing here.

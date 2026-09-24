@@ -663,6 +663,33 @@ def test_uptime_query_is_answered_from_a_covering_index(isolated_db):
     assert any("COVERING INDEX idx_status_history_service_checked" in row[3] for row in plan), plan
 
 
+def test_the_open_auto_incident_lookup_uses_its_index(isolated_db):
+    """Runs every health-check cycle for every down service, against a table nothing
+    ever prunes - it has to stay an index search, not a scan."""
+    conn = db.get_db()
+    plan = conn.execute("""
+        EXPLAIN QUERY PLAN
+        SELECT * FROM incidents WHERE service_id=? AND auto_created=1 AND status != 'resolved'
+        ORDER BY started_at DESC LIMIT 1
+    """, (1,)).fetchall()
+    conn.close()
+    assert any("USING INDEX idx_incidents_service_auto" in row[3] for row in plan), plan
+
+
+def test_the_incidents_index_reaches_an_existing_database(isolated_db):
+    """Declared in init_db()'s index list, not in CREATE TABLE, so an existing
+    portal.db gets it on the next start."""
+    conn = db.get_db()
+    conn.execute("DROP INDEX idx_incidents_service_auto")
+    conn.commit()
+    conn.close()
+    db.init_db()
+    conn = db.get_db()
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    conn.close()
+    assert "idx_incidents_service_auto" in names
+
+
 def test_indexes_are_created_on_a_database_that_predates_them(isolated_db):
     """init_db() must be able to add an index to an existing database - the same
     problem _ensure_column() solves for columns. CREATE INDEX IF NOT EXISTS does
