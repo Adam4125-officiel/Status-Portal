@@ -398,6 +398,15 @@ DB-backed Settings pages, not a code edit.
   and the integration's *different* `auto_incident` concept can't share one HTML
   name on one form, so the integration's is deliberately `check_auto_incident` in
   the template and mapped explicitly in the route.
+- **Numeric settings and query parameters go through `db.parse_int()`, never
+  `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
+  Unicode digits that `int()` then rejects, and any length at all, which overflows
+  SQLite's INTEGER. Both were unauthenticated 500s (a hostile `?offset=`), and a
+  stored "²" broke the public page for everyone. `parse_int()` takes ASCII digits
+  only and clamps to `[minimum, maximum]` (at most `db.MAX_SQLITE_INT`). A setting
+  where 0 means something different from "the minimum", like the history retention,
+  checks for 0 itself instead of clamping. Settings writes use
+  `app._setting_digits()`, the same parser in the stored-string form.
 - **An admin page's on-page `<h1>`, its `{% block title %}` and its nav label must all
   match** — they drift independently, and the `<h1>` is the one the user actually
   sees. Check all three when a page's scope or nav label changes
@@ -1308,6 +1317,13 @@ time, rotating on a timer, no nav and no footer. Off by default.
   instead, so a run is findable inside a file that spans several of them.
   The old `app.log.1`…`.3` files stay listed and downloadable on an upgraded install
   — they stop being written, but hiding them would strand history someone may want.
+- **One day's file is capped at `MAX_BYTES_PER_FILE` (20 MB)** by
+  `_CappedDailyFileHandler`: past it, one marker entry and then nothing until
+  midnight's rotation. That bounds the disk to roughly the cap times the retention
+  days, even under a flood of tracebacks. It drops rather than rotating early because
+  a second file for the same day would collide with the date-named backups the
+  retention count and `_LOG_NAME` rely on. It subclasses `TimedRotatingFileHandler`,
+  so anything checking for that type still finds it.
 - **Every read is bounded, which is why this is allowed in a request handler at
   all.** `read_tail()` seeks to the last `TAIL_MAX_BYTES` rather than reading a 2 MB
   file, and the page's `limit` is validated against a fixed tuple (`LOG_PAGE_SIZES`)

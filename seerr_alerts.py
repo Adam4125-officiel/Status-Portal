@@ -75,8 +75,7 @@ def dm_enabled():
 def pending_count():
     """What the last poll found, for the admin panel. Persisted rather than cached in
     memory so a restart doesn't blank it until the next run."""
-    raw = db.get_setting(COUNT_SETTING, "")
-    return int(raw) if raw.isdigit() else 0
+    return db.parse_int(db.get_setting(COUNT_SETTING, ""), 0)
 
 
 def last_checked_at():

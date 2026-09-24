@@ -1218,3 +1218,32 @@ def test_a_stored_username_is_cleared_on_the_next_restart(isolated_db):
     # rewriting rows forever.
     db.init_db()
     assert db.get_user_preferences("u2")["notify_email"] == "real@example.com"
+
+
+# ---------------------------------------------------------------------------
+# parse_int(): the one parser for numeric settings and query parameters
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("raw", ["²", "١٢", "-5", "+5", "1.5", "1e3", "12a", "", "   ", None])
+def test_parse_int_refuses_anything_but_ascii_digits(raw):
+    """str.isdigit() accepts "²" and Arabic-Indic digits, which int() then rejects -
+    that was a real 500 on the public page once such a value was stored."""
+    assert db.parse_int(raw, default="fallback") == "fallback"
+
+
+def test_parse_int_parses_and_clamps():
+    assert db.parse_int(" 42 ") == 42
+    assert db.parse_int("007") == 7
+    assert db.parse_int("5", minimum=10) == 10
+    assert db.parse_int("500", maximum=90) == 90
+    assert db.parse_int(7) == 7
+
+
+def test_parse_int_never_overflows_sqlite_or_int():
+    """A 23-digit offset overflowed SQLite's INTEGER; past 4300 digits int() itself
+    raises. Both clamp to the maximum instead."""
+    assert db.parse_int("9" * 23) == db.MAX_SQLITE_INT
+    assert db.parse_int("9" * 5000) == db.MAX_SQLITE_INT
+    assert db.parse_int("0" * 30 + "12") == 12
+    conn = db.get_db()
+    conn.execute("SELECT ? + 0", (db.parse_int("9" * 23),)).fetchone()
+    conn.close()

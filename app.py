@@ -366,7 +366,7 @@ def _session_timeout_seconds():
     """None = no idle timeout configured. Clamped to MAX_SESSION_TIMEOUT_HOURS
     because anything beyond the cookie's own Max-Age is a promise this can't keep."""
     raw = db.get_setting("admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS))
-    hours = int(raw) if raw.isdigit() else DEFAULT_SESSION_TIMEOUT_HOURS
+    hours = db.parse_int(raw, DEFAULT_SESSION_TIMEOUT_HOURS)
     if hours <= 0:
         return None
     return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
@@ -960,8 +960,7 @@ def _public_history_days():
     """Blank/unset (the default) means "show everything", unchanged from before this
     setting existed - an admin has to opt into hiding old resolved incidents, same
     "off by default" convention as every other opt-in behavior toggle in this app."""
-    raw = db.get_setting("public_history_days", "")
-    return int(raw) if raw.isdigit() else None
+    return db.parse_int(db.get_setting("public_history_days", ""))
 
 
 HISTORY_PAGE_SIZE = 10
@@ -1421,8 +1420,7 @@ def kiosk_enabled():
 
 
 def _kiosk_rotation_seconds():
-    raw = db.get_setting("kiosk_rotation_seconds", "")
-    seconds = int(raw) if raw.isdigit() else KIOSK_DEFAULT_ROTATION_SECONDS
+    seconds = db.parse_int(db.get_setting("kiosk_rotation_seconds", ""), KIOSK_DEFAULT_ROTATION_SECONDS)
     return max(KIOSK_MIN_ROTATION_SECONDS, min(KIOSK_MAX_ROTATION_SECONDS, seconds))
 
 
@@ -1647,7 +1645,9 @@ def api_maintenance_history():
     offset pagination is safe here (unlike incidents) because every call into
     this endpoint uses the exact same unfiltered query - there's no
     filtered-vs-unfiltered mismatch to cause the offset to drift."""
-    offset = request.args.get("offset", type=int, default=0)
+    # ASCII digits only, clamped to what SQLite can bind: "²" and a 23-digit offset
+    # were both unauthenticated 500s. Anything else (negative included) is page one.
+    offset = db.parse_int(request.args.get("offset"), default=0)
     windows = db.list_ended_maintenance_windows(limit=HISTORY_PAGE_SIZE, offset=offset)
     return render_template("sections/_maintenance_fragment.html", windows=windows, history=True)
 
@@ -3933,8 +3933,8 @@ def admin_seerr_instance():
     than one exists: before this, each feature independently took "the first enabled
     one", so the Integrations page could be diagnosing one server while search talked
     to another."""
-    raw = request.form.get("seerr_integration_id", "").strip()
-    db.set_setting(integrations.SEERR_INTEGRATION_SETTING, raw if raw.isdigit() else "")
+    db.set_setting(integrations.SEERR_INTEGRATION_SETTING,
+                    _setting_digits(request.form.get("seerr_integration_id"), ""))
     integrations.clear_caches()
     flash("Seerr instance saved.", "success")
     return redirect(url_for("admin_integrations"))
@@ -4103,6 +4103,15 @@ def admin_settings():
                             active="settings")
 
 
+def _setting_digits(raw, fallback):
+    """A submitted number as the string stored for it, parsed by db.parse_int(), or
+    `fallback` when it isn't one. Checking with str.isdigit() alone used to store
+    values like "²", which every later read then failed to int() - on the public
+    page, for some of them."""
+    value = db.parse_int(raw)
+    return fallback if value is None else str(value)
+
+
 @app.route("/admin/settings/general", methods=["POST"])
 @login_required
 def admin_settings_general():
@@ -4111,20 +4120,17 @@ def admin_settings_general():
         db.set_setting(key, "1" if request.form.get(key) else "0")
     for key in _PUBLIC_MEDIA_KEYS:
         db.set_setting(key, "1" if request.form.get(key) else "0")
-    calendar_days = request.form.get("media_calendar_days", "").strip()
-    db.set_setting("media_calendar_days",
-                    calendar_days if calendar_days.isdigit() else str(integrations.DEFAULT_CALENDAR_DAYS))
+    db.set_setting("media_calendar_days", _setting_digits(
+        request.form.get("media_calendar_days"), str(integrations.DEFAULT_CALENDAR_DAYS)))
     db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
     for key, default in integrations.HIGHLOAD_DEFAULTS.items():
-        raw = request.form.get(f"highload_{key}", "").strip()
-        db.set_setting(f"highload_{key}", raw if raw.isdigit() else default)
+        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
     db.set_setting("kiosk_enabled", "1" if request.form.get("kiosk_enabled") else "0")
-    rotation = request.form.get("kiosk_rotation_seconds", "").strip()
-    db.set_setting("kiosk_rotation_seconds",
-                    rotation if rotation.isdigit() else str(KIOSK_DEFAULT_ROTATION_SECONDS))
+    db.set_setting("kiosk_rotation_seconds", _setting_digits(
+        request.form.get("kiosk_rotation_seconds"), str(KIOSK_DEFAULT_ROTATION_SECONDS)))
     # getlist() reads identically from repeated checkboxes as it would from a
     # <select multiple>, which is why the picker is a checkbox list. Whitelisted
     # against the declared views so only a real view key is ever stored, and stored
@@ -4133,23 +4139,20 @@ def admin_settings_general():
     # setting that was never saved at all.
     db.set_setting("kiosk_views", ",".join(
         key for key in request.form.getlist("kiosk_views") if key in KIOSK_VIEW_LABELS))
-    history_days = request.form.get("public_history_days", "").strip()
-    db.set_setting("public_history_days", history_days if history_days.isdigit() else "")
-    lowdisk = request.form.get("lowdisk_percent_threshold", "").strip()
-    db.set_setting("lowdisk_percent_threshold", lowdisk if lowdisk.isdigit() else "")
+    db.set_setting("public_history_days", _setting_digits(request.form.get("public_history_days"), ""))
+    db.set_setting("lowdisk_percent_threshold",
+                    _setting_digits(request.form.get("lowdisk_percent_threshold"), ""))
     # Both stored as plain digit strings; a non-numeric submission falls back to the
     # default rather than being stored blank, since neither has a meaningful
     # "unset" state the way the two optional thresholds above do.
-    timeout_hours = request.form.get("admin_session_timeout_hours", "").strip()
-    db.set_setting("admin_session_timeout_hours",
-                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_SESSION_TIMEOUT_HOURS))
-    retention = request.form.get("status_history_retention_days", "").strip()
+    db.set_setting("admin_session_timeout_hours", _setting_digits(
+        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
+    retention = db.parse_int(request.form.get("status_history_retention_days"))
     db.set_setting("status_history_retention_days",
-                    retention if (retention.isdigit() and int(retention) > 0)
-                    else str(DEFAULT_HISTORY_RETENTION_DAYS))
+                    str(retention) if retention else str(DEFAULT_HISTORY_RETENTION_DAYS))
     for key in SERVICE_DEFAULT_FIELDS:
-        raw = request.form.get(f"service_default_{key}", "").strip()
-        db.set_setting(f"service_default_{key}", raw if raw.isdigit() else "")
+        db.set_setting(f"service_default_{key}",
+                        _setting_digits(request.form.get(f"service_default_{key}"), ""))
     db.set_setting("service_default_auto_incident", "1" if request.form.get("service_default_auto_incident") else "0")
     api_mode = request.form.get("service_default_api_health_mode", "off")
     db.set_setting("service_default_api_health_mode", api_mode if api_mode in db.API_HEALTH_MODES else "off")
@@ -4475,7 +4478,7 @@ def _user_session_timeout_seconds():
     signing in to file a problem report is not holding privileged access, and making
     them re-authenticate every twelve hours would just make the feature annoying."""
     raw = db.get_setting("user_session_timeout_hours", str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
-    hours = int(raw) if raw.isdigit() else DEFAULT_USER_SESSION_TIMEOUT_HOURS
+    hours = db.parse_int(raw, DEFAULT_USER_SESSION_TIMEOUT_HOURS)
     if hours <= 0:
         return None
     return min(hours, MAX_SESSION_TIMEOUT_HOURS) * 3600
@@ -4507,12 +4510,11 @@ def admin_users():
 @login_required
 def admin_users_settings():
     db.set_setting("jellyfin_auth_enabled", "1" if request.form.get("jellyfin_auth_enabled") else "0")
-    chosen = request.form.get("jellyfin_auth_integration_id", "").strip()
-    db.set_setting("jellyfin_auth_integration_id", chosen if chosen.isdigit() else "")
+    db.set_setting("jellyfin_auth_integration_id",
+                    _setting_digits(request.form.get("jellyfin_auth_integration_id"), ""))
     db.set_setting("report_requires_login", "1" if request.form.get("report_requires_login") else "0")
-    timeout_hours = request.form.get("user_session_timeout_hours", "").strip()
-    db.set_setting("user_session_timeout_hours",
-                    timeout_hours if timeout_hours.isdigit() else str(DEFAULT_USER_SESSION_TIMEOUT_HOURS))
+    db.set_setting("user_session_timeout_hours", _setting_digits(
+        request.form.get("user_session_timeout_hours"), str(DEFAULT_USER_SESSION_TIMEOUT_HOURS)))
     flash("User account settings updated.", "success")
     return redirect(url_for("admin_users"))
 
@@ -4989,8 +4991,9 @@ def _merge_dependency_health(status, dependency_statuses):
 DEFAULT_HISTORY_RETENTION_DAYS = 90
 
 def _history_retention_days():
-    raw = db.get_setting("status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS))
-    return int(raw) if raw.isdigit() and int(raw) > 0 else DEFAULT_HISTORY_RETENTION_DAYS
+    days = db.parse_int(db.get_setting("status_history_retention_days", ""))
+    # 0 isn't "keep nothing": it falls back to the default, like anything unparseable.
+    return days if days else DEFAULT_HISTORY_RETENTION_DAYS
 
 
 def _prune_status_history_task():
@@ -5033,8 +5036,7 @@ scheduler.register(
 
 
 def _lowdisk_threshold():
-    raw = db.get_setting("lowdisk_percent_threshold", "")
-    return int(raw) if raw.isdigit() else None
+    return db.parse_int(db.get_setting("lowdisk_percent_threshold", ""))
 
 
 def _check_low_disk_space(snapshot):

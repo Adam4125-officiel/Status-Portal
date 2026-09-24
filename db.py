@@ -865,6 +865,36 @@ def looks_like_email(value):
     return bool(value) and bool(EMAIL_RE.match(value.strip()))
 
 
+# The largest value an SQLite INTEGER holds. Anything parsed from outside that ends up
+# bound into a query has to stay at or under it, or the query raises OverflowError.
+MAX_SQLITE_INT = 2**63 - 1
+# 19 digits reach past MAX_SQLITE_INT; anything longer is clamped without calling
+# int() at all, which past 4300 digits raises rather than parses.
+_MAX_INT_DIGITS = 19
+
+
+def parse_int(raw, default=None, minimum=0, maximum=MAX_SQLITE_INT):
+    """`raw` as an int when it is a plain run of ASCII digits, clamped to
+    [minimum, maximum]; `default` for anything else - None, blank, a sign, a decimal
+    point, letters.
+
+    The one parser for numeric settings and query parameters, because the pattern it
+    replaces - `int(raw) if raw.isdigit() else default` - was a real 500:
+    str.isdigit() also accepts superscripts and other Unicode digits ("²") that int()
+    then rejects, and any length at all, which overflows SQLite. Lives here, like
+    looks_like_email(), because db.py is the one module every settings reader imports.
+
+    Clamping rather than rejecting means an absurdly large value behaves like the
+    largest one allowed. A caller for whom 0 means something different from "the
+    minimum" (a retention period, say) checks for it itself rather than clamping."""
+    text = str(raw).strip() if raw is not None else ""
+    if not text or not text.isascii() or not text.isdigit():
+        return default
+    digits = text.lstrip("0") or "0"
+    value = int(digits) if len(digits) <= _MAX_INT_DIGITS else maximum
+    return max(minimum, min(maximum, value))
+
+
 # ---------- Services ----------
 def list_services():
     conn = get_db()

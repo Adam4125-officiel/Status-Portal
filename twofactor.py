@@ -105,8 +105,8 @@ def verify_and_consume(secret, code):
     if step is None:
         return False
     with _consume_lock:
-        last = db.get_setting(LAST_STEP_SETTING, "")
-        if last.isdigit() and step <= int(last):
+        last = db.parse_int(db.get_setting(LAST_STEP_SETTING, ""))
+        if last is not None and step <= last:
             return False
         db.set_setting(LAST_STEP_SETTING, str(step))
     return True

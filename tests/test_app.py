@@ -2898,6 +2898,60 @@ def test_api_maintenance_history_ignores_history_days_setting(client):
     assert "Long ago" in resp.data.decode()
 
 
+@pytest.mark.parametrize("offset", ["%C2%B2", "9" * 23, "-5", "abc", ""])
+def test_api_maintenance_history_never_500s_on_a_hostile_offset(client, offset):
+    """Unauthenticated: "²" passed isdigit() and a 23-digit offset overflowed SQLite,
+    both as 500s with a traceback in the log. Anything unparseable is page one."""
+    sid = db.list_services()[0]["id"]
+    db.create_maintenance_window({
+        "service_id": sid, "title": "Past window", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
+    })
+    db.process_maintenance_windows()
+    resp = client.get(f"/api/maintenance/history?offset={offset}")
+    assert resp.status_code == 200
+    if offset == "9" * 23:
+        assert "Past window" not in resp.data.decode()  # clamped past the end, not wrapped
+    else:
+        assert "Past window" in resp.data.decode()
+
+
+@pytest.mark.parametrize("key", ["public_history_days", "highload_cpu_percent",
+                                  "kiosk_rotation_seconds", "lowdisk_percent_threshold",
+                                  "media_calendar_days", "status_history_retention_days",
+                                  "admin_session_timeout_hours", "jellyfin_auth_integration_id",
+                                  "seerr_integration_id"])
+def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
+    """A value like "²" stored before the write side was fixed (or edited in by hand)
+    must read as unset, not raise on every page that reads it."""
+    db.set_setting(key, "²")
+    assert client.get("/").status_code == 200
+    # Every reader answers exactly as it would for an unset value.
+    assert app_module._public_history_days() is None
+    assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
+    assert app_module._lowdisk_threshold() is None
+    assert app_module._kiosk_rotation_seconds() == app_module.KIOSK_DEFAULT_ROTATION_SECONDS
+    assert app_module._session_timeout_seconds() == app_module.DEFAULT_SESSION_TIMEOUT_HOURS * 3600
+    assert app_module.integrations.high_load_thresholds()["cpu_percent"] == 90
+    assert app_module.integrations.calendar_days() == app_module.integrations.DEFAULT_CALENDAR_DAYS
+    assert app_module.jellyfin_auth.auth_integration() is None
+    assert app_module.integrations.seerr_integration() is None
+
+
+def test_settings_save_refuses_non_ascii_digits(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={
+        "public_history_days": "²", "lowdisk_percent_threshold": "١٢",
+        "highload_cpu_percent": "²", "status_history_retention_days": "²",
+        "admin_session_timeout_hours": "9" * 30, "kiosk_rotation_seconds": "30"})
+    assert db.get_setting("public_history_days") == ""
+    assert db.get_setting("lowdisk_percent_threshold") == ""
+    assert db.get_setting("highload_cpu_percent") == "90"
+    assert db.get_setting("status_history_retention_days") == str(app_module.DEFAULT_HISTORY_RETENTION_DAYS)
+    assert db.get_setting("admin_session_timeout_hours") == str(db.MAX_SQLITE_INT)
+    assert db.get_setting("kiosk_rotation_seconds") == "30"
+    assert client.get("/").status_code == 200
+
+
 def test_public_index_never_shows_ended_maintenance_by_default(client):
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({
