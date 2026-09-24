@@ -489,6 +489,66 @@ def test_no_native_multi_selects_in_templates():
         "\nUse the shared .checkbox-list/.field-check styles instead.")
 
 
+# Template expressions allowed inside an inline on*= handler, keyed by template and
+# the exact expression. Anything else fails the test below.
+_INLINE_HANDLER_EXPRESSIONS_ALLOWED = {
+    # The "Delete <name>?" confirms. The name is one the portal's own admin typed, so a
+    # quote in it is self-XSS with no privilege gained - the accepted exception
+    # CLAUDE.md describes. Don't copy the pattern for anything else.
+    ("admin_integrations.html", "i.name"),
+    ("admin_services.html", "s.name"),
+    # Only string constants chosen in the template itself; nothing from outside.
+    ("admin_maintenance.html",
+     "' This will restore its service(s) immediately.' if w.applied and not w.ended else ''"),
+    ("admin_notifications.html",
+     "'confirm(\\'Generate a new key? The current one will stop working immediately.\\')' "
+     "if notify_api_key else 'true'"),
+}
+
+# An on*= attribute's value, treating {{ ... }} as atomic so a quote inside an
+# expression can't end the match early and hide the rest of it.
+_INLINE_HANDLER = re.compile(
+    r"""\son[a-z]+\s*=\s*(?:"((?:\{\{.*?\}\}|[^"])*)"|'((?:\{\{.*?\}\}|[^'])*)')""",
+    re.I | re.S)
+
+
+def test_no_template_values_inside_inline_event_handlers():
+    """CLAUDE.md: never interpolate a value into an inline on*= handler. Jinja's
+    attribute escaping doesn't help there - the browser HTML-decodes the attribute and
+    then parses it as JavaScript, so an escaped quote is a real quote again. That was
+    the VM-name XSS, and later a Jellyfin username in account.html.
+
+    Put the value in a data-* attribute and read it from a script instead (see
+    static/js/account.js or admin_vm_control.js)."""
+    offenders = []
+    for path, src in _template_files():
+        name = os.path.relpath(path, "templates")
+        for match in _INLINE_HANDLER.finditer(src):
+            value = match.group(1) if match.group(1) is not None else match.group(2)
+            for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S):
+                if (name, expr) not in _INLINE_HANDLER_EXPRESSIONS_ALLOWED:
+                    offenders.append(f"{path}:{src[:match.start()].count(chr(10)) + 1}: {{{{ {expr} }}}}")
+    assert not offenders, (
+        "Template values inside inline event handlers:\n  " + "\n  ".join(offenders) +
+        "\nMove the value into a data-* attribute and attach the handler from a script "
+        "that reads it with getAttribute() (static/js/account.js is a short example). "
+        "Only a value the portal's own admin typed may stay, and then only as an explicit "
+        "entry in _INLINE_HANDLER_EXPRESSIONS_ALLOWED.")
+
+
+def test_the_inline_handler_allow_list_has_no_stale_entries():
+    """An exception whose template was since fixed should be deleted, not left for the
+    next person to copy."""
+    found = set()
+    for path, src in _template_files():
+        name = os.path.relpath(path, "templates")
+        for match in _INLINE_HANDLER.finditer(src):
+            value = match.group(1) if match.group(1) is not None else match.group(2)
+            found.update((name, expr) for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S))
+    stale = _INLINE_HANDLER_EXPRESSIONS_ALLOWED - found
+    assert not stale, f"Allow-list entries that no longer match anything: {sorted(stale)}. Remove them."
+
+
 # ---------------------------------------------------------------------------
 # Test isolation
 # ---------------------------------------------------------------------------

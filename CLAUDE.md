@@ -287,7 +287,12 @@ DB-backed Settings pages, not a code edit.
   different and lower-risk (only the already-fully-privileged portal admin sets those
   names — self-XSS, no privilege gain) and was deliberately left alone, but **don't
   copy that pattern** for any value that can originate from outside the portal's own
-  admin (an external API, another local account/service, etc.).
+  admin (an external API, another local account/service, etc.). **This is now a
+  convention test** (`test_no_template_values_inside_inline_event_handlers`): any
+  `{{ }}` inside an `on*=` attribute fails unless it's an explicit entry in
+  `_INLINE_HANDLER_EXPRESSIONS_ALLOWED`. The second real instance was a Jellyfin
+  username in `account.html`'s "Send these details to Seerr" confirm, now a
+  `data-confirm` attribute read by `static/js/account.js`.
 - **A background thread that can shell out to run a real OS command (host
   restart/shutdown, VM control) must never be exercised for real in this sandbox, or
   against any environment you're not certain you're allowed to affect** — not even to

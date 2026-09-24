@@ -1531,3 +1531,21 @@ def test_a_non_address_is_never_adopted_from_seerr(isolated_db):
     prefs = db.get_user_preferences("u1")
     assert prefs["notify_email"] == ""
     assert prefs["notify_discord_id"] == "123456789012345678"   # the good half survives
+
+
+def test_a_quote_in_a_username_cannot_break_out_of_the_seerr_push_confirm(admin, isolated_db, monkeypatch):
+    """The confirm used to be an inline onsubmit with the Jellyfin username inside a JS
+    string: Jinja escaped "O'Brien" to O&#39;Brien, the browser decoded it back and
+    the quote ended the string. The question now lives in data-confirm, where the
+    escaped name is only ever an attribute value."""
+    db.replace_jellyfin_users([{"id": "u1", "name": "O'Brien"}])
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "OB", "email": "ob@example.invalid",
+                                 "discord_id": "999", "jellyfin_user_id": "u1"}])
+    html = admin.get("/admin/users/u1/account").data.decode()
+    assert "Send these details to Seerr" in html
+    assert ('data-confirm="This will update O&#39;Brien\'s Seerr account with the contact '
+            'details saved above. Continue?"') in html
+    assert "onsubmit" not in html
