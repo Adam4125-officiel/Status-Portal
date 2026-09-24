@@ -1569,8 +1569,12 @@ time, rotating on a timer, no nav and no footer. Off by default.
   was scoped out as a bigger feature for later if it turns out to actually be
   wanted, rather than bundled in here. Same opt-in-per-service public visibility
   as run_target above: `services.show_dependencies_public` (off by default)
-  shows "Depends on: X, Y" on the public card, resolved from
-  `db.get_service_dependencies()` in `_enrich_services()`.
+  shows "Depends on: X, Y" on the public card, resolved in `_enrich_services()` by
+  one grouped `db.list_dependencies_for_services()` call (only for services that
+  opted in), not a query per service. The same goes for each maintenance window's
+  services (`_attach_window_services()`) and each report's service name
+  (`_attach_report_services()`). `test_the_public_page_query_count_does_not_grow_with_the_data`
+  fails if a per-item query in a loop comes back.
 - **Low disk space alert** (`monitoring.evaluate_low_disk()` +
   `app._check_low_disk_space()`) extends the already-cross-platform per-disk
   `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same

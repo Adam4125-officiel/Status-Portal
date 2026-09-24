@@ -1649,6 +1649,67 @@ def test_api_status_keeps_every_other_service_field(client):
     assert set(published) == expected
 
 
+def _statements_for(client, path, monkeypatch):
+    """How many SQL statements one request runs, counted with SQLite's own trace hook
+    on every connection it opens."""
+    real_connect = sqlite3.connect
+    statements = []
+
+    def tracing_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    with monkeypatch.context() as m:
+        m.setattr(sqlite3, "connect", tracing_connect)
+        assert client.get(path).status_code == 200
+    return len(statements)
+
+
+def test_the_public_page_query_count_does_not_grow_with_the_data(client, monkeypatch):
+    """Every per-item lookup on the public page is a grouped query now - dependencies,
+    each maintenance window's services - so five times the services, windows and
+    reports must cost the same number of statements. A new per-item query in a loop
+    shows up here as a difference."""
+    def add(n, start):
+        ids = [db.create_service({"name": f"S{start + i}", "url": "", "show_dependencies_public": 1})
+               for i in range(n)]
+        for sid in ids[1:]:
+            db.set_service_dependencies(sid, [ids[0]])
+        for i, sid in enumerate(ids):
+            db.create_maintenance_window({"title": f"W{start + i}", "starts_at": "2099-01-01T00:00",
+                                           "ends_at": "2099-01-02T00:00"}, service_ids=[sid])
+            db.create_problem_report("x", "", sid)
+
+    add(3, 0)
+    _statements_for(client, "/", monkeypatch)       # warm the uptime cache
+    few = _statements_for(client, "/", monkeypatch)
+    add(12, 100)
+    many = _statements_for(client, "/", monkeypatch)
+    assert many == few, f"{few} statements for 3 services, {many} for 15"
+
+
+def test_grouped_lookups_return_what_the_per_item_ones_did(isolated_db):
+    a, b, c = (db.create_service({"name": n, "url": "", "sort_order": i})
+               for i, n in enumerate(("A", "B", "C")))
+    db.set_service_dependencies(a, [c, b])
+    assert db.list_dependencies_for_services([a, b]) == {a: db.get_service_dependencies(a), b: []}
+
+    mid = db.create_maintenance_window({"title": "W", "starts_at": "2099-01-01T00:00",
+                                         "ends_at": "2099-01-02T00:00"}, service_ids=[c, a])
+    window = next(w for w in db.list_maintenance_windows() if w["id"] == mid)
+    assert window["services"] == db._get_window_services(mid)
+    assert window["service_names"] == "A, C"
+
+    db.create_problem_report("general", "", None)
+    db.create_problem_report("about b", "", b)
+    gone = db.create_service({"name": "Gone", "url": ""})
+    db.create_problem_report("orphan", "", gone)
+    db.delete_service(gone)
+    names = {r["message"]: r["service_name"] for r in db.list_problem_reports()}
+    assert names == {"general": None, "about b": "B", "orphan": None}
+
+
 def test_admin_report_create_incident(client):
     sid = db.list_services()[0]["id"]
     rid = db.create_problem_report("Jellyfin login is broken", "", sid)

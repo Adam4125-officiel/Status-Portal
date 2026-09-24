@@ -1446,6 +1446,27 @@ def get_service_dependencies(service_id):
     return [r["depends_on_id"] for r in rows]
 
 
+def list_dependencies_for_services(service_ids):
+    """{service_id: [depends_on_id, ...]} for every id in service_ids, in the same
+    per-service order get_service_dependencies() returns (ascending depends_on_id, the
+    primary key's order) - one grouped query instead of one per service, for
+    app._enrich_services() on every public page load."""
+    service_ids = list(service_ids)
+    result = {sid: [] for sid in service_ids}
+    if not service_ids:
+        return result
+    conn = get_db()
+    placeholders = ",".join("?" * len(service_ids))
+    rows = conn.execute(f"""
+        SELECT service_id, depends_on_id FROM service_dependencies
+        WHERE service_id IN ({placeholders}) ORDER BY service_id, depends_on_id
+    """, service_ids).fetchall()
+    conn.close()
+    for r in rows:
+        result[r["service_id"]].append(r["depends_on_id"])
+    return result
+
+
 def set_service_dependencies(service_id, depends_on_ids):
     """Replaces the full dependency set for a service in one go, same pattern as
     replace_service_links(). A service can't depend on itself - filtered out here
@@ -1646,8 +1667,23 @@ def _get_window_services(window_id):
 
 
 def _attach_window_services(windows):
+    """Every window's covered services in one grouped query, not one per window - this
+    runs for the public page, /api/status and the kiosk. Same rows and per-window order
+    as _get_window_services()."""
+    by_window = {w["id"]: [] for w in windows}
+    if by_window:
+        conn = get_db()
+        placeholders = ",".join("?" * len(by_window))
+        rows = conn.execute(f"""
+            SELECT mws.window_id, s.id, s.name FROM maintenance_window_services mws
+            JOIN services s ON s.id = mws.service_id
+            WHERE mws.window_id IN ({placeholders}) ORDER BY s.sort_order, s.id
+        """, list(by_window)).fetchall()
+        conn.close()
+        for r in rows:
+            by_window[r["window_id"]].append({"id": r["id"], "name": r["name"]})
     for w in windows:
-        w["services"] = _get_window_services(w["id"])
+        w["services"] = by_window[w["id"]]
         w["service_names"] = ", ".join(s["name"] for s in w["services"])
     return windows
 
@@ -1939,20 +1975,32 @@ def create_problem_report(message, contact="", service_id=None, reporter_user=""
     return new_id
 
 
+def _attach_report_services(reports):
+    """Each report's service_name (None for a general report, or one whose service has
+    since been deleted) from one lookup for the whole list, not a get_service() per
+    report."""
+    ids = sorted({r["service_id"] for r in reports if r["service_id"]})
+    names = {}
+    if ids:
+        conn = get_db()
+        placeholders = ",".join("?" * len(ids))
+        names = {row["id"]: row["name"] for row in conn.execute(
+            f"SELECT id, name FROM services WHERE id IN ({placeholders})", ids)}
+        conn.close()
+    for r in reports:
+        r["service_name"] = names.get(r["service_id"]) if r["service_id"] else None
+    return reports
+
+
 def _attach_report_service(report):
-    if report["service_id"]:
-        service = get_service(report["service_id"])
-        report["service_name"] = service["name"] if service else None
-    else:
-        report["service_name"] = None
-    return report
+    return _attach_report_services([report])[0]
 
 
 def list_problem_reports():
     conn = get_db()
     rows = conn.execute("SELECT * FROM problem_reports ORDER BY created_at DESC").fetchall()
     conn.close()
-    return [_attach_report_service(dict(r)) for r in rows]
+    return _attach_report_services([dict(r) for r in rows])
 
 
 def get_problem_report(rid):
@@ -2265,7 +2313,7 @@ def list_reports_for_user(user_id):
         ORDER BY r.created_at DESC
     """, (user_id,)).fetchall()
     conn.close()
-    return [_attach_report_service(dict(r)) for r in rows]
+    return _attach_report_services([dict(r) for r in rows])
 
 
 def count_unseen_replies(user_id):

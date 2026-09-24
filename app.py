@@ -914,6 +914,10 @@ def _enrich_services(services):
     uptimes = _cached_uptime_percentages()
     service_names = {s["id"]: s["name"] for s in services}
     links_by_service = db.list_service_links_for_services([s["id"] for s in services])
+    # One grouped query, and only for the services that publish their dependencies -
+    # nothing is resolved for a service that hasn't opted in.
+    deps_by_service = db.list_dependencies_for_services(
+        [s["id"] for s in services if s["show_dependencies_public"]])
     for s in services:
         s["links"] = links_by_service[s["id"]]
         s["uptime"] = uptimes.get(s["id"])
@@ -922,7 +926,7 @@ def _enrich_services(services):
         s["open_reports_count"] = open_reports.get(s["id"], 0)
         s["run_target_label"] = _run_target_label(s["run_target"]) if s["show_run_target_public"] else None
         s["dependency_names"] = [
-            service_names.get(dep_id, "?") for dep_id in db.get_service_dependencies(s["id"])
+            service_names.get(dep_id, "?") for dep_id in deps_by_service[s["id"]]
         ] if s["show_dependencies_public"] else []
     return services
 
