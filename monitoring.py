@@ -596,19 +596,81 @@ def _query_windows_disk_details():
     return by_drive_letter
 
 
-def _refresh_windows_cache():
+def _refresh_vms_and_cpu_temp():
     _WINDOWS_CACHE["vms"] = get_vm_snapshot()
     _WINDOWS_CACHE["cpu_temp_c"] = _query_cpu_temp()
+    _WINDOWS_CACHE["updated_at"] = time.time()
+
+
+def _refresh_disk_details():
     _WINDOWS_CACHE["disk_details"] = _query_windows_disk_details()
     _WINDOWS_CACHE["updated_at"] = time.time()
+
+
+# The Windows queries, each on its own cadence rather than every loop tick. Every one
+# of these is a cold PowerShell start - three every 10s was ~26k a day - and
+# Get-PhysicalDisk | Get-StorageReliabilityCounter may wake spun-down drives. VM state
+# and CPU temperature are worth a minute's freshness; which disk holds which drive
+# letter, and drive temperatures, barely change at all. Name -> (seconds, function);
+# a dict so tests can swap an entry.
+_WINDOWS_JOBS = {
+    "vms_and_cpu_temp": (60, _refresh_vms_and_cpu_temp),
+    "disk_details": (12 * 60, _refresh_disk_details),
+}
+# When each job is next due (time.monotonic()) and whether a run is still in flight.
+# 0.0 means "at the next tick", which is what startup and clear_caches() want.
+_windows_job_state = {name: {"due_at": 0.0, "running": False} for name in _WINDOWS_JOBS}
+_windows_job_lock = threading.Lock()
+
+
+def _run_windows_job(name, refresh):
+    try:
+        refresh()
+    except Exception:
+        _logger.exception("Windows %s refresh failed", name)
+    finally:
+        with _windows_job_lock:
+            _windows_job_state[name]["running"] = False
+
+
+def _dispatch_due_windows_jobs(now=None):
+    """Starts every Windows job that is due and not already running, each on its own
+    short-lived thread, and returns those threads.
+
+    Off the loop's thread on purpose: the loop also publishes the CPU sample every
+    tick, and running PowerShell inline (up to 10+10+15s when queries time out) is
+    what let that sample go stale, dropping every public page back to a blocking
+    0.2s psutil read. A job never overlaps itself, so a hung query costs one stuck
+    thread until its subprocess timeout, never a pile of them. Due times are counted
+    from when a run starts, so a slow run doesn't push the schedule back."""
+    now = time.monotonic() if now is None else now
+    started = []
+    for name, (interval, refresh) in _WINDOWS_JOBS.items():
+        with _windows_job_lock:
+            job = _windows_job_state[name]
+            if job["running"] or now < job["due_at"]:
+                continue
+            job["running"] = True
+            job["due_at"] = now + interval
+        thread = threading.Thread(target=_run_windows_job, args=(name, refresh),
+                                  daemon=True, name=f"monitoring-{name}")
+        thread.start()
+        started.append(thread)
+    return started
+
+
+def _background_tick():
+    """One pass of the polling loop: the CPU sample every time, and whichever Windows
+    jobs have come due, without waiting on them."""
+    _refresh_cpu_cache()
+    if os.name == "nt":
+        _dispatch_due_windows_jobs()
 
 
 def _background_refresh_loop(interval_seconds):
     while True:
         try:
-            _refresh_cpu_cache()
-            if os.name == "nt":
-                _refresh_windows_cache()
+            _background_tick()
         except Exception:
             _logger.exception("background refresh error")
         time.sleep(interval_seconds)
@@ -658,8 +720,15 @@ def clear_caches():
     The delta-based caches (per-disk I/O, network throughput) lose their baseline
     along with everything else, which means the very next reading reports no rate at
     all rather than a wrong one - they re-establish themselves on the following
-    sample, exactly as they do at startup."""
+    sample, exactly as they do at startup.
+
+    The Windows jobs are made due again at the next tick. On their own cadence the
+    disk mapping would otherwise stay empty for up to twelve minutes, taking every
+    disk's temperature and I/O off the resources page with it."""
     _WINDOWS_CACHE.update({"vms": [], "cpu_temp_c": None, "disk_details": {}, "updated_at": None})
+    with _windows_job_lock:
+        for job in _windows_job_state.values():
+            job["due_at"] = 0.0
     _CPU_CACHE.update({"per_core": [], "updated_at": None, "sampled_at": None})
     _volume_label_cache.clear()
     _perdisk_io_cache.clear()

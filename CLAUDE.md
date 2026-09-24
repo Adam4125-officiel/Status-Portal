@@ -641,6 +641,17 @@ DB-backed Settings pages, not a code edit.
   live/directly-callable (that's what's unit-tested by mocking `subprocess.run`);
   `get_cached_vm_snapshot()` and `get_resource_snapshot()`'s `cpu_temp_c`/per-disk
   `temp_c`/`io` fields are the cache-reading wrappers request handlers should use.
+- **The Windows queries run on their own cadence and never on the loop's thread**
+  (`_WINDOWS_JOBS`): VMs plus CPU temperature every 60s, the disk mapping plus drive
+  temperatures every 12 minutes. When one comes due, `_dispatch_due_windows_jobs()`
+  starts it on a one-shot thread and the loop moves on. Before 1.9.1 all three
+  PowerShell queries ran inline every 10s (~26k cold starts a day), and a slow one
+  (up to 10+10+15s on timeouts) delayed the CPU sample past its `max_age`, sending
+  every page back to the blocking psutil read. A job never overlaps itself.
+  `clear_caches()` makes every job due again, or the disk mapping, and with it every
+  disk's temperature and I/O, would stay blank for up to 12 minutes after the admin's
+  clear-caches button. **Only confirmed with mocked `subprocess`; this sandbox has no
+  Windows.** Verify on the real host before trusting the cadence.
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,

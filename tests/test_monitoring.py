@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from types import SimpleNamespace
 
@@ -534,3 +535,126 @@ def test_clear_caches_resets_every_module_cache(clean_cpu_cache):
     assert monitoring._volume_label_cache == {}
     assert monitoring._perdisk_io_cache == {}
     assert monitoring._net_cache["time"] is None
+
+
+# ---------------------------------------------------------------------------
+# Windows queries on their own cadence, off the CPU sampler's thread (PERF-01)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def fake_windows_jobs(monkeypatch):
+    """Both Windows jobs replaced by recorders, their schedule reset, and every
+    thread they start joined before the test ends."""
+    calls = []
+    for name in list(monitoring._WINDOWS_JOBS):
+        interval, _ = monitoring._WINDOWS_JOBS[name]
+        monkeypatch.setitem(monitoring._WINDOWS_JOBS, name,
+                            (interval, lambda name=name: calls.append(name)))
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+    yield calls
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+
+
+def _run_due(now):
+    for thread in monitoring._dispatch_due_windows_jobs(now):
+        thread.join(timeout=5)
+
+
+def test_each_windows_job_runs_on_its_own_cadence(fake_windows_jobs):
+    """VMs and CPU temperature every minute, the disk mapping and temperatures every
+    twelve - not all three PowerShell queries every ten seconds."""
+    _run_due(1000)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
+    fake_windows_jobs.clear()
+    _run_due(1030)
+    assert fake_windows_jobs == []
+    _run_due(1060)
+    assert fake_windows_jobs == ["vms_and_cpu_temp"]
+    fake_windows_jobs.clear()
+    _run_due(1000 + 12 * 60)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
+
+
+def test_a_job_still_running_is_not_started_again(monkeypatch, fake_windows_jobs):
+    release = threading.Event()
+    starts = []
+
+    def hanging():
+        starts.append(1)
+        release.wait(timeout=5)
+
+    monkeypatch.setitem(monitoring._WINDOWS_JOBS, "disk_details", (1, hanging))
+    first = monitoring._dispatch_due_windows_jobs(1000)
+    monitoring._dispatch_due_windows_jobs(2000)      # long past due, but still running
+    release.set()
+    for thread in first:
+        thread.join(timeout=5)
+    assert starts == [1]
+    _run_due(3000)
+    assert starts == [1, 1]
+
+
+def test_the_cpu_sample_keeps_refreshing_while_a_powershell_query_hangs(monkeypatch, clean_cpu_cache):
+    """The point of moving the queries off the loop's thread: a PowerShell call stuck
+    until its timeout must not hold up the CPU sample, or the cache goes stale and
+    every page falls back to a blocking psutil read."""
+    monkeypatch.setattr(monitoring.os, "name", "nt")
+    release = threading.Event()
+    entered = threading.Event()
+
+    def hanging_powershell(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=10)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(monitoring.subprocess, "run", hanging_powershell)
+    monkeypatch.setattr(monitoring.psutil, "cpu_percent",
+                        lambda interval=None, percpu=False: [25.0])
+    for job in monitoring._windows_job_state.values():
+        job.update({"due_at": 0.0, "running": False})
+    try:
+        monitoring._CPU_CACHE["sampled_at"] = time.time() - 5
+        started = time.monotonic()
+        monitoring._background_tick()
+        assert entered.wait(timeout=5)             # a query is now stuck in PowerShell
+        assert time.monotonic() - started < 2      # ...and the tick didn't wait for it
+        first = monitoring._CPU_CACHE["updated_at"]
+        assert monitoring._CPU_CACHE["per_core"] == [25.0]
+
+        monitoring._CPU_CACHE["sampled_at"] = time.time() - 5
+        monitoring._background_tick()               # the next tick, query still stuck
+        assert monitoring._CPU_CACHE["updated_at"] > first
+        assert any(job["running"] for job in monitoring._windows_job_state.values())
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name.startswith("monitoring-") and thread is not threading.current_thread():
+                thread.join(timeout=10)
+        for job in monitoring._windows_job_state.values():
+            job.update({"due_at": 0.0, "running": False})
+
+
+def test_the_windows_jobs_fill_the_same_cache_as_before(monkeypatch):
+    """Same values exposed, just refreshed on their own schedules."""
+    monkeypatch.setattr(monitoring, "get_vm_snapshot", lambda: [{"name": "vm1"}])
+    monkeypatch.setattr(monitoring, "_query_cpu_temp", lambda: 41.5)
+    monkeypatch.setattr(monitoring, "_query_windows_disk_details",
+                        lambda: {"C": {"disk_number": 0, "temp_c": 30.0}})
+    monkeypatch.setitem(monitoring._WINDOWS_CACHE, "vms", [])
+    monitoring._refresh_vms_and_cpu_temp()
+    monitoring._refresh_disk_details()
+    assert monitoring._WINDOWS_CACHE["vms"] == [{"name": "vm1"}]
+    assert monitoring._WINDOWS_CACHE["cpu_temp_c"] == 41.5
+    assert monitoring._WINDOWS_CACHE["disk_details"] == {"C": {"disk_number": 0, "temp_c": 30.0}}
+    monitoring.clear_caches()
+
+
+def test_clearing_the_caches_makes_every_windows_job_due_again(fake_windows_jobs):
+    """Otherwise the disk mapping would stay empty for up to twelve minutes after the
+    admin's clear-caches button, and every disk's temperature and I/O with it."""
+    _run_due(1000)
+    fake_windows_jobs.clear()
+    monitoring.clear_caches()
+    _run_due(1001)
+    assert sorted(fake_windows_jobs) == ["disk_details", "vms_and_cpu_temp"]
