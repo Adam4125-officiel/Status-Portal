@@ -96,20 +96,26 @@ def channel_summary():
     ]
 
 
-def notify(title, message):
-    """Sends `title`/`message` to every configured channel. No-op if none are set."""
+def notify(title, message, *, allow_mentions=True):
+    """Sends `title`/`message` to every configured channel. No-op if none are set.
+
+    allow_mentions=False is for a message carrying text a stranger wrote (the public
+    report form): Discord then pings nobody, whatever "@everyone" or role mention the
+    text contains. Everything else keeps the default, so its posts are unchanged."""
     if config.DISCORD_WEBHOOK_URL:
-        _send_discord(title, message)
+        _send_discord(title, message, allow_mentions=allow_mentions)
     if config.NTFY_URL:
         _send_ntfy(title, message)
     if email_configured():
         send_email(title, message)
 
 
-def _send_discord(title, message):
+def _send_discord(title, message, allow_mentions=True):
+    payload = {"content": f"**{title}**\n{message}"}
+    if not allow_mentions:
+        payload["allowed_mentions"] = {"parse": []}
     try:
-        requests.post(config.DISCORD_WEBHOOK_URL,
-                      json={"content": f"**{title}**\n{message}"}, timeout=TIMEOUT)
+        requests.post(config.DISCORD_WEBHOOK_URL, json=payload, timeout=TIMEOUT)
     except Exception as e:
         _logger.warning("Discord webhook failed: %s", e)
 

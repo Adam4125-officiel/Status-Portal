@@ -407,3 +407,26 @@ def test_send_email_still_sends_to_the_valid_half_of_a_mixed_list(monkeypatch, c
     assert ok is True
     assert _FakeSMTP.instances[0].sent[0]["To"] == "real@example.com"
     assert "saint boboniolo" in caplog.text
+
+
+def test_a_webhook_post_can_refuse_to_ping_anyone(monkeypatch):
+    """The public report form forwards a stranger's text into the admin's channel;
+    "@everyone" in it must not ping the whole server."""
+    _no_email(monkeypatch)
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    monkeypatch.setattr(config, "NTFY_URL", "")
+    calls = []
+    monkeypatch.setattr(notifications.requests, "post", lambda *a, **k: calls.append(k))
+    notifications.notify("Problem reported", "@everyone look", allow_mentions=False)
+    assert calls[0]["json"]["allowed_mentions"] == {"parse": []}
+
+
+def test_every_other_webhook_post_is_unchanged(monkeypatch):
+    """Only the report path opts out; the default payload has no allowed_mentions."""
+    _no_email(monkeypatch)
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
+    monkeypatch.setattr(config, "NTFY_URL", "")
+    calls = []
+    monkeypatch.setattr(notifications.requests, "post", lambda *a, **k: calls.append(k))
+    notifications.notify("Incident opened", "Jellyfin is down")
+    assert calls[0]["json"] == {"content": "**Incident opened**\nJellyfin is down"}

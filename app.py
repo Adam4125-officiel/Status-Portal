@@ -1854,7 +1854,7 @@ def feed():
     return Response(xml_bytes, mimetype="application/rss+xml")
 
 
-def _notify_async(title, message):
+def _notify_async(title, message, **kwargs):
     """Fires notifications.notify() on its own one-shot daemon thread instead of
     inline - same shape as _send_announcement_discord()/_restart_process()'s delayed
     action, applied here because notify() itself can block on up to three sequential
@@ -1866,7 +1866,8 @@ def _notify_async(title, message):
     reads a return value or shows delivery status in the response - so moving the
     call off the request thread changes nothing about what happens, only how long
     the request waits for it to."""
-    threading.Thread(target=notifications.notify, args=(title, message), daemon=True).start()
+    threading.Thread(target=notifications.notify, args=(title, message), kwargs=kwargs,
+                     daemon=True).start()
 
 
 @app.route("/report", methods=["GET", "POST"])
@@ -1921,7 +1922,8 @@ def report_problem():
         _register_report_submission()
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
-        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}")
+        # Anonymous visitor text going into the admin's Discord channel: no pings.
+        _notify_async("Problem reported", f"{prefix}{message[:200]}{who}", allow_mentions=False)
         flash("Thanks — your report has been submitted.", "success")
         return redirect(url_for("report_problem"))
     session["report_form_rendered_at"] = time.time()

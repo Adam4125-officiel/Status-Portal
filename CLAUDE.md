@@ -1249,6 +1249,12 @@ time, rotating on a timer, no nav and no footer. Off by default.
   `REPORT_MIN_SECONDS_TO_FILL`), and a rate limit
   (`_report_state`/`_report_rate_limited()`, mirroring `_login_state`'s shape). No
   external rate-limiting library was added for this one route.
+- **The report notification is sent with `allow_mentions=False`**, which adds
+  `allowed_mentions: {"parse": []}` to the Discord webhook payload: the text is a
+  stranger's, and "@everyone" in it must not ping the admin's whole server. It's a
+  keyword on `notifications.notify()` so every other webhook post (incidents,
+  maintenance, the Games Portal relay) stays byte-for-byte what it was, and the
+  bot's announcement posts don't go through this path at all.
 - `problem_reports.service_id` is optional (a report can reference a specific service's
   card via `?service_id=N`, or be general) and `ON DELETE SET NULL`, so deleting a
   service later detaches rather than cascade-deletes reports about it.

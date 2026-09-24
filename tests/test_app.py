@@ -1338,7 +1338,8 @@ def test_report_problem_page_shows_site_name(client):
 
 def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     notified = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: notified.append((title, msg)))
+    monkeypatch.setattr(app_module.notifications, "notify",
+                        lambda title, msg, **kw: notified.append((title, msg, kw)))
     sid = db.list_services()[0]["id"]
 
     client.get(f"/report?service_id={sid}")  # sets the anti-spam timing session value
@@ -1357,6 +1358,8 @@ def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     assert reports[0]["service_id"] == sid
     assert reports[0]["status"] == "new"
     assert notified and "Jellyfin card" in notified[0][1]
+    # Visitor-written text: the webhook post must not be able to ping anyone.
+    assert notified[0][2] == {"allow_mentions": False}
 
 
 def test_report_problem_honeypot_silently_discards(client):
