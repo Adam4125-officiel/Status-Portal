@@ -277,6 +277,61 @@ def test_admin_requires_login(client):
     assert "/admin/login" in resp.headers["Location"]
 
 
+_HOSTILE_NEXT_VALUES = ("https://evil.invalid/phish", "//evil.invalid/x", "/\\evil.invalid/x",
+                        "/\tevil", "/\r\nLocation: https://evil.invalid", "evil.invalid")
+
+
+@pytest.mark.parametrize("raw", _HOSTILE_NEXT_VALUES)
+def test_safe_next_url_refuses_anything_that_could_leave_the_site(raw):
+    assert app_module._safe_next_url(raw) is None
+
+
+def test_safe_next_url_keeps_a_relative_path_intact():
+    assert app_module._safe_next_url("/admin/settings?tab=general#x") == "/admin/settings?tab=general#x"
+    assert app_module._safe_next_url("") is None
+    assert app_module._safe_next_url(None) is None
+
+
+def test_admin_login_next_cannot_redirect_off_site(client):
+    """/admin/login?next= used to be honoured verbatim - a genuine portal link that
+    lands the admin on a look-alike page right after a real login."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    for hostile in _HOSTILE_NEXT_VALUES:
+        client.get("/admin/logout")
+        resp = client.post("/admin/login", query_string={"next": hostile},
+                            data={"password": "testpass123"})
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin"), hostile
+
+
+def test_admin_login_next_cannot_redirect_off_site_through_the_totp_step(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    totp = pyotp.TOTP(secret)
+    for offset, hostile in enumerate(("https://evil.invalid/phish", "/\\evil.invalid/x")):
+        client.get("/admin/logout")
+        client.post("/admin/login", query_string={"next": hostile}, data={"password": "testpass123"})
+        # A fresh step per round - each code is only accepted once.
+        resp = client.post("/admin/login", data={"totp_code": totp.at(time.time() + 30 * offset)})
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin"), hostile
+
+
+def test_admin_login_relative_next_is_still_honoured_on_both_paths(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    resp = client.post("/admin/login", query_string={"next": "/admin/settings"},
+                        data={"password": "testpass123"})
+    assert resp.headers["Location"].endswith("/admin/settings")
+
+    secret = _enable_totp_directly()
+    client.get("/admin/logout")
+    client.post("/admin/login", query_string={"next": "/admin/integrations"},
+                 data={"password": "testpass123"})
+    resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.headers["Location"].endswith("/admin/integrations")
+
+
 def _enable_totp_directly(secret=None):
     secret = secret or twofactor.generate_secret()
     db.set_setting("admin_totp_secret", secret)

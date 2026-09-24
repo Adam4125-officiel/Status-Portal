@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -2490,8 +2491,15 @@ def _safe_next_url(raw):
     """Only ever a path on this site. A `next` parameter that can name another host
     is an open redirect, and this one is reachable without any authentication at
     all. Anything that isn't a single-slash-prefixed relative path is discarded
-    rather than sanitised - there's no legitimate case here for the difference."""
+    rather than sanitised - there's no legitimate case here for the difference.
+
+    Backslashes and control characters are refused too: browsers read `/\\host` as
+    `//host`, and a tab or newline can be stripped on the way to the same result.
+    Werkzeug happens to percent-encode both in the Location header today, but that's
+    an implementation detail to not depend on."""
     if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return None
+    if "\\" in raw or any(unicodedata.category(ch) == "Cc" for ch in raw):
         return None
     return raw
 
@@ -2523,7 +2531,9 @@ def admin_login():
                 _register_login_success()
                 session.pop("awaiting_totp", None)
                 _start_admin_session()
-                nxt = session.pop("login_next", None) or url_for("admin_dashboard")
+                # Re-checked here as well as where it's stored, so a session written
+                # before that check existed can't still carry an off-site target.
+                nxt = _safe_next_url(session.pop("login_next", None)) or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect code.", "error")
@@ -2547,11 +2557,12 @@ def admin_login():
                     # Login isn't complete yet - don't reset the failure counter
                     # or set logged_in until the code step also succeeds.
                     session["awaiting_totp"] = True
-                    session["login_next"] = request.args.get("next") or url_for("admin_dashboard")
+                    session["login_next"] = (_safe_next_url(request.args.get("next"))
+                                             or url_for("admin_dashboard"))
                     return render_template("login.html", first_run=False, awaiting_totp=True)
                 _register_login_success()
                 _start_admin_session()
-                nxt = request.args.get("next") or url_for("admin_dashboard")
+                nxt = _safe_next_url(request.args.get("next")) or url_for("admin_dashboard")
                 return redirect(nxt)
             _register_login_failure()
             flash("Incorrect password.", "error")

@@ -2103,7 +2103,12 @@ public page, which has to be a deliberate choice.
   route means a deliberate decision in that function; the convention test reads it.
 - **`_safe_next_url()` exists because `/login` is reachable with no authentication
   at all** — an open redirect there is a phishing primitive. Anything not a
-  single-slash relative path is discarded rather than sanitised.
+  single-slash relative path is discarded rather than sanitised, and so is anything
+  containing a backslash or a control character (`/\host` reads as `//host` in a
+  browser). **Every `next` that ends in a redirect goes through it, the admin login
+  included** — `/admin/login?next=` used to be honoured verbatim, which let a genuine
+  portal link drop the admin on a look-alike page straight after a real login. The
+  TOTP step re-checks the stored `login_next` at use, not only where it's stored.
 - **Security note worth repeating to the user, not just the code**: enabling this
   publishes a Jellyfin login form wherever the portal is reachable. That's the
   actual risk of the feature, and it's why it's off by default.
