@@ -663,8 +663,7 @@ DB-backed Settings pages, not a code edit.
   high-load badge. `_rates_from_the_loop()` decides: loop running means read the cache,
   and "not published yet" is no reading rather than a caller's own. With no loop
   (tests, an entry point that never started it) or a dead one, callers fall back to
-  the old per-call delta. The rates deliberately aren't a row in `cache_summary()`,
-  which would have changed `/admin/system`.
+  the old per-call delta.
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,

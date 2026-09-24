@@ -302,8 +302,8 @@ ones presented is in `docs/HISTORY.md` → "The 1.9.1 security and performance a
 
 - **Step-up for the database backup download** (SEC-02). The backup holds the TOTP
   seed and every integration API key, and downloading it needs only a session.
-  Making it a POST behind `_require_totp()` changes the Settings page (a code field),
-  which is why it wasn't done under a no-UI-change rule. **S.**
+  Making it a POST behind `_require_totp()`, with a code field beside the Settings
+  page's backup button when 2FA is on, the same pattern the restore uses. **S.**
 - **Throttling the public Jellyfin sign-in** (SEC-08). Every `/login` attempt reaches
   Jellyfin from the portal's IP, so it can trip Jellyfin's own per-user lockout and
   hides the attacker from anything watching Jellyfin's logs. Options: a per-username

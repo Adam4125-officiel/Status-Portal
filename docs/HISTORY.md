@@ -1845,10 +1845,8 @@ an observation.
 
 An audit of `main` at `62891f9` (v1.9.0 plus a docs commit) produced 18 security and
 10 performance findings, each backed by a proof script against the Flask test client.
-A subset was implemented on the `1.9.1-rc1` branch, one commit per finding, under a
-hard rule: backend fixes only, with no visible UI change and no change to existing
-workflows or response formats beyond what was explicitly agreed. The rules that came
-out of it are in `CLAUDE.md`; this is how the problems presented.
+A subset was implemented on the `1.9.1-rc1` branch, one commit per finding. The rules
+that came out of it are in `CLAUDE.md`; this is how the problems presented.
 
 **Implemented:** SEC-01, 03, 04, 05, 06, 07, 09, 11, 12, 13, 15, 18 and PERF-01 to 10.
 **Deliberately not touched:** SEC-02 (backup download step-up), SEC-08 (Jellyfin
