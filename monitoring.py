@@ -34,6 +34,14 @@ _perdisk_io_cache = {}
 # Same idea for network throughput (aggregate across all interfaces).
 _net_cache = {"time": None, "sent_bytes": None, "recv_bytes": None}
 
+# The throughput rates themselves, as the background loop last computed them. A rate
+# is a delta between two readings, and when every caller computed its own - request
+# threads, the health loop, the Discord bot - each one moved the shared baseline for
+# all the others: two callers milliseconds apart turned a steady transfer into a spike
+# and a false high-load badge. The loop now takes the readings, one per tick, and
+# callers read the result. disk_io is keyed like _perdisk_io_cache ("PhysicalDriveN").
+_RATES_CACHE = {"network": None, "disk_io": {}, "updated_at": None}
+
 # Best-effort Windows-only data that requires a PowerShell/CIM subprocess call (CPU
 # temperature, per-disk temperature/drive-letter mapping, Hyper-V VMs) - populated by
 # a background thread (see start_background_refresh()) instead of queried live inside
@@ -91,6 +99,13 @@ def _refresh_cpu_cache():
     _CPU_CACHE["sampled_at"] = now
 
 
+def _published_recently(updated_at):
+    """Whether something the background loop stamped at `updated_at` is still current.
+    max_age is set when the loop starts; without a loop, any published value counts."""
+    max_age = _CPU_CACHE["max_age"]
+    return updated_at is not None and (max_age is None or time.time() - updated_at <= max_age)
+
+
 def _get_cpu_percentages():
     """Per-core CPU usage, from the background cache when it has a fresh reading.
 
@@ -99,9 +114,7 @@ def _get_cpu_percentages():
     unit tests) or when the cache has gone stale enough to suggest the thread died -
     a stale number is worse than a 0.2s wait, and silently showing minutes-old load
     as if it were current is the failure mode worth avoiding here."""
-    updated_at = _CPU_CACHE["updated_at"]
-    max_age = _CPU_CACHE["max_age"]
-    if updated_at is not None and (max_age is None or time.time() - updated_at <= max_age):
+    if _published_recently(_CPU_CACHE["updated_at"]):
         return _CPU_CACHE["per_core"]
     per_core = psutil.cpu_percent(interval=CPU_FALLBACK_SAMPLE_SECONDS, percpu=True) or []
     # That call reset psutil's internal per-call baseline, so tell the background
@@ -125,9 +138,37 @@ def get_resource_snapshot():
         "mem_used_gb": round(mem.used / (1024 ** 3), 1),
         "mem_total_gb": round(mem.total / (1024 ** 3), 1),
         "disks": _get_disk_snapshots(),
-        "network": _get_network_rate(),
+        "network": _current_network_rate(),
         "gpus": _get_gpu_snapshot(),
     }
+
+
+def _refresh_rates():
+    """Takes this tick's network and per-disk I/O readings and publishes the rates
+    since the previous tick. Only the background loop calls this, so every rate is
+    measured over one steady loop interval instead of "since whoever asked last"."""
+    disk_io = {}
+    if os.name == "nt":
+        for key, counters in (psutil.disk_io_counters(perdisk=True) or {}).items():
+            disk_io[key] = _get_perdisk_io_rate(key, counters)
+    _RATES_CACHE["network"] = _get_network_rate()
+    _RATES_CACHE["disk_io"] = disk_io
+    _RATES_CACHE["updated_at"] = time.time()
+
+
+def _rates_from_the_loop():
+    """True when callers should read _RATES_CACHE rather than take readings of their
+    own: the loop is running and has published recently. With no loop at all (tests,
+    an entry point that never started it) or a dead one, callers compute the rate
+    themselves as before - a reading beats a frozen number."""
+    return _CPU_CACHE["max_age"] is not None and (
+        _RATES_CACHE["updated_at"] is None or _published_recently(_RATES_CACHE["updated_at"]))
+
+
+def _current_network_rate():
+    if _rates_from_the_loop():
+        return _RATES_CACHE["network"]
+    return _get_network_rate()
 
 
 def evaluate_high_load(snapshot, thresholds):
@@ -202,7 +243,11 @@ def _get_disk_snapshots():
             best_by_device[device] = part
 
     by_drive_letter = _WINDOWS_CACHE["disk_details"]
-    perdisk_counters = psutil.disk_io_counters(perdisk=True) or {} if os.name == "nt" else {}
+    # The loop's rates when it is publishing them (see _RATES_CACHE); only without one
+    # does this take its own readings, as it always used to.
+    loop_rates = _RATES_CACHE["disk_io"] if _rates_from_the_loop() else None
+    perdisk_counters = (psutil.disk_io_counters(perdisk=True) or {}
+                        if os.name == "nt" and loop_rates is None else {})
 
     disks = []
     for part in best_by_device.values():
@@ -217,9 +262,13 @@ def _get_disk_snapshots():
             detail = by_drive_letter.get(part.mountpoint[0].upper())
             if detail:
                 temp_c = detail["temp_c"]
-                counters = perdisk_counters.get(f"PhysicalDrive{detail['disk_number']}")
-                if counters is not None:
-                    io = _get_perdisk_io_rate(f"PhysicalDrive{detail['disk_number']}", counters)
+                key = f"PhysicalDrive{detail['disk_number']}"
+                if loop_rates is not None:
+                    io = loop_rates.get(key)
+                else:
+                    counters = perdisk_counters.get(key)
+                    if counters is not None:
+                        io = _get_perdisk_io_rate(key, counters)
         disks.append({
             "path": part.mountpoint,
             "label": label,
@@ -660,9 +709,10 @@ def _dispatch_due_windows_jobs(now=None):
 
 
 def _background_tick():
-    """One pass of the polling loop: the CPU sample every time, and whichever Windows
-    jobs have come due, without waiting on them."""
+    """One pass of the polling loop: the CPU sample and the throughput rates every
+    time, and whichever Windows jobs have come due, without waiting on them."""
     _refresh_cpu_cache()
+    _refresh_rates()
     if os.name == "nt":
         _dispatch_due_windows_jobs()
 
@@ -733,6 +783,7 @@ def clear_caches():
     _volume_label_cache.clear()
     _perdisk_io_cache.clear()
     _net_cache.update({"time": None, "sent_bytes": None, "recv_bytes": None})
+    _RATES_CACHE.update({"network": None, "disk_io": {}, "updated_at": None})
 
 
 def _as_iso(epoch):

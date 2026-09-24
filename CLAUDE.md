@@ -652,6 +652,16 @@ DB-backed Settings pages, not a code edit.
   disk's temperature and I/O, would stay blank for up to 12 minutes after the admin's
   clear-caches button. **Only confirmed with mocked `subprocess`; this sandbox has no
   Windows.** Verify on the real host before trusting the cadence.
+- **Network and per-disk I/O rates are computed by the loop, once per tick**
+  (`_refresh_rates()` into `_RATES_CACHE`), and callers read them. A rate is a delta
+  between two readings, and when every caller (request threads, the health loop, the
+  Discord bot) took its own, each moved the shared baseline for the others: two
+  callers milliseconds apart turned a steady transfer into a spike and a false
+  high-load badge. `_rates_from_the_loop()` decides: loop running means read the cache,
+  and "not published yet" is no reading rather than a caller's own. With no loop
+  (tests, an entry point that never started it) or a dead one, callers fall back to
+  the old per-call delta. The rates deliberately aren't a row in `cache_summary()`,
+  which would have changed `/admin/system`.
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,
