@@ -1,5 +1,3 @@
-import time
-
 import pyotp
 
 import db
@@ -73,42 +71,20 @@ def test_reset_flag_file_disables_2fa_and_is_self_cleaning(isolated_db, monkeypa
     assert twofactor.check_and_process_reset_flag() is False
 
 
-def test_verify_and_consume_accepts_each_code_only_once(isolated_db):
-    """A phished code must not be replayable while valid_window keeps it valid."""
+def test_a_code_stays_valid_for_its_whole_window(isolated_db):
+    """Deliberately no single-use rule: a code keeps working until valid_window moves
+    past it, so a step-up straight after logging in can reuse the code just typed."""
     secret = twofactor.generate_secret()
     code = pyotp.TOTP(secret).now()
-    assert twofactor.verify_and_consume(secret, code) is True
-    assert twofactor.verify_and_consume(secret, code) is False
-    assert twofactor.verify_and_consume(secret, "000000") is False
+    assert twofactor.verify_code(secret, code) is True
+    assert twofactor.verify_code(secret, code) is True
 
 
-def test_verify_and_consume_refuses_an_earlier_step_after_a_later_one(isolated_db):
-    """RFC 6238 5.2: once a step has been accepted, nothing at or before it is. The
-    next step's code (inside valid_window) still works."""
-    secret = twofactor.generate_secret()
-    totp = pyotp.TOTP(secret)
-    current, following = totp.now(), totp.at(time.time() + 30)
-    assert twofactor.verify_and_consume(secret, following) is True
-    assert twofactor.verify_and_consume(secret, current) is False
-
-
-def test_verify_and_consume_handles_missing_and_garbage_input(isolated_db):
-    secret = twofactor.generate_secret()
-    for code in ("", None, "not-a-code"):
-        assert twofactor.verify_and_consume(secret, code) is False
-    assert twofactor.verify_and_consume("", "123456") is False
-    # Nothing was accepted, so nothing was recorded.
-    assert db.get_setting(twofactor.LAST_STEP_SETTING) is None
-
-
-def test_disable_forgets_the_last_accepted_step(isolated_db):
-    """Otherwise re-enrolling straight after disabling would refuse the new secret's
-    code for sharing a time step with the code that disabled the old one."""
-    old, new = twofactor.generate_secret(), twofactor.generate_secret()
+def test_disable_turns_2fa_off_and_forgets_the_secret(isolated_db):
+    """The one off-switch the admin page and the RESET_2FA flag both use."""
     db.set_setting("admin_totp_enabled", "1")
-    db.set_setting("admin_totp_secret", old)
-    assert twofactor.verify_and_consume(old, pyotp.TOTP(old).now()) is True
+    db.set_setting("admin_totp_secret", twofactor.generate_secret())
     twofactor.disable()
     assert twofactor.is_enabled() is False
-    assert db.get_setting(twofactor.LAST_STEP_SETTING) == ""
-    assert twofactor.verify_and_consume(new, pyotp.TOTP(new).now()) is True
+    assert db.get_setting("admin_totp_secret") == ""
+    assert db.get_setting("admin_totp_enabled") == "0"

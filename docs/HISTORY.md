@@ -1866,10 +1866,12 @@ natural reaction to a suspected compromise (SEC-06, proven). And `/admin/login?n
 redirected anywhere, including `//evil.example`, which sets up phishing for both the
 password and a live TOTP code, replayable within its window (SEC-05).
 
-Fixes: refuse re-enrolment while enabled; share `_login_state` on disable; accept
-each TOTP time step once (`admin_totp_last_step`); an `admin_session_epoch` that
-rotates on password change and 2FA enable/disable; `_safe_next_url()` on both admin
-login paths. Two details were only found while building the epoch. Clearing the
+Fixes: refuse re-enrolment while enabled; share `_login_state` on disable; an
+`admin_session_epoch` that rotates on password change and 2FA enable/disable;
+`_safe_next_url()` on both admin login paths. A TOTP replay guard (each 30s time step
+accepted once) was also built, then removed before the release candidate at the
+user's request: it meant a step-up straight after logging in needed the *next* code,
+and codes working for their whole window was the preferred behaviour. Two details were only found while building the epoch. Clearing the
 session at login would have dropped `login_next` before the TOTP step read it. And a
 database restore would have brought back the backup's own epoch: that signs out the
 admin doing the restore, and an older backup revives cookies revoked since. The

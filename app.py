@@ -785,7 +785,7 @@ def _require_totp(failure_message, redirect_endpoint):
         return redirect(url_for(redirect_endpoint))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
-    if twofactor.verify_and_consume(secret, code):
+    if twofactor.verify_code(secret, code):
         _register_login_success()
         return None
     _register_login_failure()
@@ -2659,7 +2659,7 @@ def admin_login():
         if awaiting_totp:
             code = request.form.get("totp_code", "")
             secret = db.get_setting("admin_totp_secret")
-            if secret and twofactor.verify_and_consume(secret, code):
+            if secret and twofactor.verify_code(secret, code):
                 _register_login_success()
                 # Read before _start_admin_session(), which clears the session.
                 # Re-checked here as well as where it's stored, so a session written
@@ -4477,7 +4477,7 @@ def admin_2fa_enable():
     if request.method == "POST":
         secret = session.get("pending_totp_secret")
         code = request.form.get("totp_code", "")
-        if secret and twofactor.verify_and_consume(secret, code):
+        if secret and twofactor.verify_code(secret, code):
             db.set_setting("admin_totp_secret", secret)
             db.set_setting("admin_totp_enabled", "1")
             session.pop("pending_totp_secret", None)
@@ -4513,7 +4513,7 @@ def admin_2fa_disable():
         return redirect(url_for("admin_2fa"))
     code = request.form.get("totp_code", "")
     secret = db.get_setting("admin_totp_secret")
-    if secret and twofactor.verify_and_consume(secret, code):
+    if secret and twofactor.verify_code(secret, code):
         _register_login_success()
         twofactor.disable()
         _rotate_admin_session_epoch()

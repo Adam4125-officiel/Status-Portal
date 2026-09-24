@@ -1256,14 +1256,14 @@ time, rotating on a timer, no nav and no footer. Off by default.
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
   restart, self-update — not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
-- **A TOTP code is accepted once.** Every check that grants something (login,
-  `_require_totp()`, enable, disable) goes through `twofactor.verify_and_consume()`,
-  which records the accepted time step (`admin_totp_last_step`) and refuses any step
-  at or before it. `verify_code()` alone would let a phished code be replayed for as
-  long as `valid_window` keeps it valid. The visible consequence is standard TOTP
-  behaviour: a step-up straight after logging in needs the *next* code. Turning 2FA
-  off goes through `twofactor.disable()`, which also forgets the step, so re-enrolling
-  inside the same 30s isn't refused as a reuse.
+- **A TOTP code is deliberately *not* single-use.** It works for its whole
+  `valid_window`, so logging in and then immediately doing a step-up can take the same
+  code twice. A replay guard (record the accepted time step, refuse it again) was built
+  during the 1.9.1 audit work and removed at the user's request before release. Don't
+  reintroduce it without asking. The brute-force protection that *is* wanted is the
+  shared `_login_state` counter, which `/admin/2fa/disable` now goes through too.
+  Turning 2FA off goes through `twofactor.disable()`, used by both the admin page and
+  the RESET_2FA flag.
 - **`/admin/2fa/enable` is refused outright while 2FA is already on** (GET and POST,
   checked before anything touches a secret). Without that, a stolen session cookie
   could enrol the attacker's own authenticator over the admin's and then pass every
