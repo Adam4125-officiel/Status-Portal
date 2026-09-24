@@ -1424,11 +1424,14 @@ time, rotating on a timer, no nav and no footer. Off by default.
   *current* database → atomic replace → restart. A refusal at any point must leave the
   live database byte-identical and take no snapshot; there are tests asserting exactly
   that for junk files, foreign databases, bad zips and zip bombs.
-- **Validation is three checks, and the third is the one people forget.** The SQLite
+- **Validation is four checks, and the third is the one people forget.** The SQLite
   header, then `PRAGMA integrity_check`, then **`RESTORE_REQUIRED_TABLES` must all be
   present**. The first two only prove "a valid SQLite database" — which a Jellyfin
   library, a browser cookie store or an *Arr database all also are, and restoring one
-  of those silently wipes the portal and leaves it unable to start. Validation opens
+  of those silently wipes the portal and leaves it unable to start. Fourth, **the
+  backup's `settings` must hold a non-empty `admin_password_hash`**: a database
+  without one is a portal in first-run state, and restoring it would hand the admin
+  account to whoever reached the login page next. Validation opens
   the file **read-only via a `file:...?mode=ro` URI**, so checking a file can never
   create or modify one.
 - **The WAL sidecars must be deleted as part of the replace** (`db.restore_from_file`).
@@ -1673,6 +1676,16 @@ time, rotating on a timer, no nav and no footer. Off by default.
   side has to be added to that tuple, or an admin login in the same browser will
   quietly drop it. Anything read from the session during login (`login_next`) must
   be read *before* the call.
+- **First-run password setup is only accepted from a local client**
+  (`_first_run_setup_allowed()`): loopback, private, link-local or Tailscale's
+  100.64.0.0/10, which `ipaddress` doesn't count as private. Otherwise a fresh install
+  (new Docker volume, reinstall) with a tunnel up belonged to whoever reached the login
+  page first. Without `BEHIND_PROXY`, any forwarding header (`X-Forwarded-For`,
+  `CF-Connecting-IP`, …) refuses outright, because cloudflared on the same host
+  connects from 127.0.0.1 for every internet visitor. With it, `remote_addr` is
+  ProxyFix's answer and is trusted. Only the *first-run* branch checks this; a normal
+  login works from anywhere. When testing it, use real public addresses:
+  `ipaddress` counts the documentation ranges (203.0.113.0/24, …) as private.
 - **The idle check is server-side (`session["last_seen"]`), not just the cookie's
   Max-Age.** A cookie's expiry attribute isn't covered by the signature, so a client
   that keeps sending an "expired" cookie would otherwise stay logged in forever. The

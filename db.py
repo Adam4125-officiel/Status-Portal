@@ -161,6 +161,10 @@ def validate_backup_file(path):
             return f"That database failed SQLite's integrity check ({detail})."
         names = {row[0] for row in
                  conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        password_row = None
+        if "settings" in names:
+            password_row = conn.execute(
+                "SELECT value FROM settings WHERE key = 'admin_password_hash'").fetchone()
     except sqlite3.DatabaseError as e:
         return f"That file couldn't be opened as a database: {e}"
     finally:
@@ -171,6 +175,12 @@ def validate_backup_file(path):
     if missing:
         return ("That's a valid SQLite database, but it isn't a Status Portal backup - "
                 f"it has no {', '.join(missing)} table(s).")
+    # A database with no admin password is a portal in first-run state: whoever
+    # reached the login page next would get to set one. Restoring that is handing the
+    # admin account to a stranger, not a recovery.
+    if not password_row or not password_row[0]:
+        return ("That backup has no admin password in it. Restoring it would let whoever "
+                "reaches the login page first set one, so it was refused.")
     return None
 
 

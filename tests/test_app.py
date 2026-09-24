@@ -260,6 +260,63 @@ def test_first_run_password_creation(client):
     assert db.get_setting("admin_password_hash") is not None
 
 
+@pytest.mark.parametrize("addr", ["127.0.0.1", "::1", "192.168.1.20", "10.0.0.5",
+                                  "100.101.102.103", "fd7a:115c:a1e0::1", "::ffff:192.168.1.5"])
+def test_first_run_setup_is_allowed_from_this_machine_or_the_local_network(client, addr):
+    """Loopback, private ranges and Tailscale (100.64.0.0/10, not "private" to
+    ipaddress) are where an admin sets up their own portal from."""
+    resp = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                       environ_base={"REMOTE_ADDR": addr})
+    assert resp.status_code == 302
+    assert db.get_setting("admin_password_hash") is not None
+
+
+# Real public addresses: ipaddress counts the documentation ranges (203.0.113.0/24
+# and friends) as private, so they would prove nothing here.
+@pytest.mark.parametrize("addr", ["1.1.1.1", "8.8.8.8", "2001:4860:4860::8888", "not-an-ip"])
+def test_first_run_setup_is_refused_from_the_internet(client, addr):
+    """With a tunnel up, whoever reached a fresh install's login page first could
+    claim the admin account."""
+    resp = client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                       environ_base={"REMOTE_ADDR": addr}, follow_redirects=True)
+    assert b"from this machine or your local network" in resp.data
+    assert db.get_setting("admin_password_hash") is None
+    assert client.get("/admin/services").status_code == 302
+
+
+@pytest.mark.parametrize("header", ["X-Forwarded-For", "CF-Connecting-IP", "X-Real-IP", "Forwarded"])
+def test_first_run_setup_through_an_undeclared_proxy_is_refused(client, monkeypatch, header):
+    """cloudflared on the same host connects from 127.0.0.1 for every internet
+    visitor. Without BEHIND_PROXY a forwarding header means the real client is
+    unknown, so setup is refused rather than trusting the loopback address."""
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", False)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={header: "1.1.1.1"})
+    assert db.get_setting("admin_password_hash") is None
+
+
+def test_first_run_setup_behind_a_declared_proxy_uses_the_forwarded_address(client, monkeypatch):
+    """With BEHIND_PROXY, ProxyFix has already turned X-Forwarded-For into
+    remote_addr, so that is what's judged - here simulated by setting it directly."""
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", True)
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={"X-Forwarded-For": "1.1.1.1"}, environ_base={"REMOTE_ADDR": "1.1.1.1"})
+    assert db.get_setting("admin_password_hash") is None
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"},
+                headers={"X-Forwarded-For": "192.168.1.7"}, environ_base={"REMOTE_ADDR": "192.168.1.7"})
+    assert db.get_setting("admin_password_hash") is not None
+
+
+def test_the_first_run_guard_does_not_affect_a_normal_login(client):
+    """Once a password exists, signing in from anywhere works exactly as before."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.get("/admin/logout")
+    resp = client.post("/admin/login", data={"password": "testpass123"},
+                       environ_base={"REMOTE_ADDR": "1.1.1.1"}, headers={"CF-Connecting-IP": "1.1.1.1"})
+    assert resp.status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
 def test_login_lockout(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     client.get("/admin/logout")

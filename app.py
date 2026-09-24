@@ -6,6 +6,7 @@ Admin panel: /admin (password is set on first launch)
 import gzip
 import hashlib
 import io
+import ipaddress
 import logging
 import os
 import platform
@@ -620,6 +621,37 @@ def login_required(f):
 
 def is_first_run():
     return db.get_setting("admin_password_hash") is None
+
+
+# Tailscale hands out addresses from here (RFC 6598 shared space), and ipaddress
+# doesn't count it as private, but a tailnet is exactly the kind of "my own network"
+# this portal is set up from.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+# Headers a reverse proxy or tunnel adds. Without BEHIND_PROXY, their presence means
+# the real client is somewhere this app can't see - cloudflared running on the same
+# host connects from 127.0.0.1 for every visitor on the internet.
+_FORWARDING_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded", "CF-Connecting-IP")
+
+
+def _first_run_setup_allowed():
+    """Whether this request may set the admin password on a portal that has none.
+
+    Whoever reaches the login page first on a fresh install (a new Docker volume, a
+    reinstall) claims the admin account, and with a tunnel up that can be anyone on
+    the internet. So first-run setup is only offered to a client on this machine or
+    a private, link-local or Tailscale address. With BEHIND_PROXY set,
+    request.remote_addr is already the proxy's X-Forwarded-For answer (see ProxyFix
+    above); without it, any forwarding header means "can't tell", which refuses."""
+    if not config.BEHIND_PROXY and any(h in request.headers for h in _FORWARDING_HEADERS):
+        return False
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or (ip.version == 4 and ip in _CGNAT_NETWORK))
 
 
 # ---------------------------------------------------------------------------
@@ -2622,7 +2654,11 @@ def admin_login():
         password = request.form.get("password", "")
         if first_run:
             confirm = request.form.get("confirm", "")
-            if len(password) < 6:
+            if not _first_run_setup_allowed():
+                _logger.warning("Refused first-run admin password setup from %s", request.remote_addr)
+                flash("For safety, the admin password can only be set for the first time "
+                      "from this machine or your local network.", "error")
+            elif len(password) < 6:
                 flash("Password must be at least 6 characters.", "error")
             elif password != confirm:
                 flash("Passwords do not match.", "error")

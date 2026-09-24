@@ -14,6 +14,7 @@ import zipfile
 
 import pyotp
 import pytest
+from werkzeug.security import generate_password_hash
 
 import app as app_module
 import db
@@ -24,13 +25,15 @@ import db
 # ---------------------------------------------------------------------------
 def _valid_backup_bytes(tmp_path, marker="restored-site"):
     """A real, complete Status Portal database, distinguishable from the live one by a
-    setting only it contains."""
+    setting only it contains. Has an admin password, like every real backup - one
+    without is refused (see test_a_backup_with_no_admin_password_is_refused)."""
     path = tmp_path / "donor.db"
     original = db.DB_PATH
     db.DB_PATH = str(path)
     try:
         db.init_db()
         db.set_setting("site_name", marker)
+        db.set_setting("admin_password_hash", generate_password_hash("donor-password"))
     finally:
         db.DB_PATH = original
     return path.read_bytes()
@@ -116,6 +119,38 @@ def test_accepts_a_real_backup(tmp_path, isolated_db):
     path = tmp_path / "good.db"
     path.write_bytes(_valid_backup_bytes(tmp_path))
     assert db.validate_backup_file(str(path)) is None
+
+
+@pytest.mark.parametrize("stored", [None, ""])
+def test_a_backup_with_no_admin_password_is_refused(tmp_path, stored):
+    """A database with no admin password is a portal in first-run state: restoring it
+    would let whoever reaches the login page first claim the admin account."""
+    path = tmp_path / "unclaimed.db"
+    original = db.DB_PATH
+    db.DB_PATH = str(path)
+    try:
+        db.init_db()
+        if stored is not None:
+            db.set_setting("admin_password_hash", stored)
+    finally:
+        db.DB_PATH = original
+    assert "no admin password" in db.validate_backup_file(str(path))
+
+
+def test_a_passwordless_upload_is_refused_and_changes_nothing(admin, tmp_path, no_restart):
+    path = tmp_path / "unclaimed.db"
+    original = db.DB_PATH
+    db.DB_PATH = str(path)
+    try:
+        db.init_db()
+        db.set_setting("site_name", "unclaimed")
+    finally:
+        db.DB_PATH = original
+    db.set_setting("site_name", "keep-me")
+    resp = _upload(admin, _zip_of("portal.db", path.read_bytes()))
+    assert b"no admin password" in resp.data
+    assert db.get_setting("site_name") == "keep-me"
+    assert no_restart == []
 
 
 def test_validation_never_creates_or_modifies_the_file_it_checks(tmp_path):
