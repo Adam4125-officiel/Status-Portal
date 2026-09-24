@@ -1076,17 +1076,30 @@ def _integration_severity(status):
     return "ok"
 
 
+def _fetch_integration_entry(integ):
+    """One integration's cache entry, stamped when its own answer arrived. Never raises
+    - a failure is an unreachable status, exactly as it always was."""
+    try:
+        status = integrations.fetch_integration_status(integ)
+    except Exception as e:
+        status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
+    return {"status": status, "checked_at": db.now_iso()}
+
+
 def _refresh_integration_cache():
     integrations_list = db.list_integrations()
-    for integ in integrations_list:
-        if not integ["enabled"]:
-            continue
+    enabled = [integ for integ in integrations_list if integ["enabled"]]
+    # The network calls run in parallel, bounded like the service checks above them:
+    # one after another, a down *Arr (v3 then v1) cost 10s, a down Byparr 30s, and a
+    # few of those pushed the cycle well past CHECK_INTERVAL_SECONDS. Everything that
+    # acts on the answers - the cache write and the incident lifecycle - stays
+    # sequential, in list order, below: only the waiting is parallel, not a decision.
+    with ThreadPoolExecutor(max_workers=config.HEALTH_CHECK_WORKERS) as pool:
+        entries = list(pool.map(_fetch_integration_entry, enabled))
+    for integ, entry in zip(enabled, entries):
         previous = _integration_status_cache.get(integ["id"])
-        try:
-            status = integrations.fetch_integration_status(integ)
-        except Exception as e:
-            status = {"reachable": False, "version": None, "issues": [], "error": str(e)}
-        _integration_status_cache[integ["id"]] = {"status": status, "checked_at": db.now_iso()}
+        status = entry["status"]
+        _integration_status_cache[integ["id"]] = entry
         if integ["auto_incident"] and integ["service_id"] and previous is not None:
             linked_service = db.get_service(integ["service_id"])
             if not linked_service or not _within_grace_period(linked_service):

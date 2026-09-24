@@ -213,6 +213,13 @@ DB-backed Settings pages, not a code edit.
   handler), not a bug. `retry_count=0` (the default, and the value every pre-existing
   service gets via `_ensure_column`) preserves the exact original single-attempt
   behavior.
+- **`_refresh_integration_cache()` fetches in parallel and decides sequentially.** The
+  network calls go through a `HEALTH_CHECK_WORKERS`-bounded pool, like the service
+  checks, because one after another a few down integrations (10s per *Arr, 30s per
+  Byparr) pushed the cycle past `CHECK_INTERVAL_SECONDS`. The cache writes and every
+  `_handle_integration_incident_lifecycle()` call then run on the loop thread, in list
+  order, exactly as before. Keep that split: parallelising the lifecycle calls too
+  would make incident handling depend on thread scheduling.
 - **`_handle_incident_lifecycle()`'s open side must stay level-triggered, not
   edge-triggered.** Open whenever `new_status == "down"`, full stop, relying only on
   the `get_open_auto_incident_for_service()` idempotency guard — never on a

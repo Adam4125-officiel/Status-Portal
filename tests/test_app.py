@@ -1224,6 +1224,89 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
+def _slow_arr_server(delay):
+    """A real threaded HTTP server answering *Arr health checks after `delay` seconds -
+    real sockets and real waiting, no mocked fetcher."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(delay)
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def _closed_port_url():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}"
+
+
+def test_integration_checks_run_in_parallel_in_real_time(isolated_db):
+    """Real timing, not mocks: three integrations that each take 1s to answer cost
+    about one second of the health-check cycle, not three."""
+    server, url = _slow_arr_server(1.0)
+    try:
+        for n in range(3):
+            db.create_integration({"name": f"Arr {n}", "kind": "arr", "base_url": url,
+                                    "api_key": "k", "enabled": 1})
+        started = time.monotonic()
+        app_module._refresh_integration_cache()
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+    assert elapsed < 2.5, f"took {elapsed:.1f}s - the checks ran one after another"
+    assert len(app_module._integration_status_cache) == 3
+    assert all(e["status"]["reachable"] for e in app_module._integration_status_cache.values())
+
+
+def test_integration_lifecycle_stays_level_triggered_with_real_fetches(isolated_db):
+    """CLAUDE.md: touching the integration lifecycle's caller needs a real-timing test
+    beside the mocked ones. Against a genuinely closed port: no incident on the first
+    check (nothing to compare with), one on the second even though the previous
+    answer was *also* unreachable - level-triggered, not edge - and it resolves once
+    the integration answers again."""
+    sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
+    iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": _closed_port_url(),
+                                  "api_key": "k", "enabled": 1, "service_id": sid,
+                                  "auto_incident": 1})
+    app_module._refresh_integration_cache()
+    assert db.get_open_auto_incident_for_service(sid) is None
+
+    app_module._refresh_integration_cache()
+    incident = db.get_open_auto_incident_for_service(sid)
+    assert incident is not None
+    app_module._refresh_integration_cache()
+    assert db.get_open_auto_incident_for_service(sid)["id"] == incident["id"]  # not a second one
+
+    server, url = _slow_arr_server(0)
+    try:
+        integ = db.get_integration(iid)
+        conn = db.get_db()
+        conn.execute("UPDATE integrations SET base_url=? WHERE id=?", (url, integ["id"]))
+        conn.commit()
+        conn.close()
+        app_module._refresh_integration_cache()
+    finally:
+        server.shutdown()
+    assert db.get_incident(incident["id"])["status"] == "resolved"
+
+
 def test_merge_api_health_off_passes_through_unchanged():
     assert app_module._merge_api_health("operational", "off", False) == "operational"
     assert app_module._merge_api_health("operational", "degrade", None) == "operational"
