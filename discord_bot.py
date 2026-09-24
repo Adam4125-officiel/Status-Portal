@@ -654,8 +654,11 @@ def _make_client_class(discord, app_commands, tasks):
             enforced by actually leaving, not just by refusing the slash command
             (an unwanted server could otherwise still see the bot's presence/status
             updates). An empty whitelist means unrestricted, same default-open
-            convention as the user allowlist. Returns True if it left."""
-            whitelist = allowed_guild_ids()
+            convention as the user allowlist. Returns True if it left.
+
+            The whitelist is a settings read, so it goes off the loop like every
+            other read here - on_ready runs this once per server the bot is in."""
+            whitelist = await _off_loop(allowed_guild_ids)
             if whitelist and str(guild.id) not in whitelist:
                 _logger.info("leaving server '%s' (%s) - not in the configured server whitelist",
                              guild.name, guild.id)

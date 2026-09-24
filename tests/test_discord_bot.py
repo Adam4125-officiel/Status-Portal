@@ -925,6 +925,35 @@ def test_enforce_guild_whitelist_unrestricted_when_empty(isolated_db):
     guild.leave.assert_not_called()
 
 
+def test_the_guild_whitelist_is_read_off_the_event_loop(isolated_db, monkeypatch):
+    """Same rule as test_refresh_does_not_block_the_event_loop: allowed_guild_ids()
+    is a SQLite read, and on_ready runs this once per joined server. Other coroutines
+    must get to run while it is in progress."""
+    bot = _build_bot()
+    window = {}
+
+    def slow_whitelist():
+        window["start"] = time.monotonic()
+        time.sleep(0.3)
+        window["end"] = time.monotonic()
+        return set()
+
+    monkeypatch.setattr(discord_bot, "allowed_guild_ids", slow_whitelist)
+    beats = []
+
+    async def heartbeat():
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            beats.append(time.monotonic())
+
+    async def main():
+        await asyncio.gather(bot._enforce_guild_whitelist(_make_guild(1)), heartbeat())
+
+    asyncio.run(main())
+    assert any(window["start"] < beat < window["end"] for beat in beats), \
+        "the event loop was blocked while the guild whitelist was read"
+
+
 def test_on_ready_re_enforces_whitelist_for_already_joined_guilds(isolated_db, monkeypatch):
     db.set_setting("discordbot_guild_whitelist", "111")
     bot = _build_bot()
