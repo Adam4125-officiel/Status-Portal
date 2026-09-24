@@ -769,6 +769,26 @@ def test_a_revoked_session_posting_to_admin_reaches_the_login_page_not_a_csrf_40
     assert db.get_setting("site_name") is None
 
 
+def test_admin_and_account_pages_are_never_cached(client, user_auth, monkeypatch):
+    """Otherwise the back button, or the next person at a shared machine, can bring an
+    admin or account page back after logout."""
+    assert client.get("/admin/login").headers["Cache-Control"] == "no-store"
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    for path in ("/admin", "/admin/services", "/admin/settings"):
+        assert client.get(path).headers["Cache-Control"] == "no-store", path
+    _sign_in(client, monkeypatch)
+    assert client.get("/account").headers["Cache-Control"] == "no-store"
+
+
+def test_public_pages_and_static_files_keep_their_caching(client):
+    """The public page and the cache-busted static assets are unaffected."""
+    assert "no-store" not in client.get("/").headers.get("Cache-Control", "")
+    resp = client.get("/static/css/style.css")
+    assert "no-store" not in resp.headers.get("Cache-Control", "")
+    assert "max-age" in resp.headers.get("Cache-Control", "")
+    resp.close()
+
+
 def test_before_request_hooks_keep_their_order():
     """Two of these depend on running before _check_csrf (see their docstrings), and
     the revocation check lives inside _enforce_session_timeout for that reason. A new

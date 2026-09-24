@@ -1717,6 +1717,11 @@ time, rotating on a timer, no nav and no footer. Off by default.
   psutil's *first* `interval=None` call always answers 0.0, which is why
   `_refresh_cpu_cache()` won't publish a window shorter than
   `MIN_CPU_SAMPLE_WINDOW_SECONDS`.
+- **Everything under `/admin` and `/account` is sent `Cache-Control: no-store`**
+  (`set_security_headers`), so neither the back button nor a shared machine can bring
+  a signed-in page back after logout. It overrides `send_file()`'s own header too,
+  which the backup and log downloads want anyway. Public pages and `/static/` are
+  untouched.
 - **`SEND_FILE_MAX_AGE_DEFAULT` is 30 days, which is only safe because `asset_url()`
   cache-busts every CSS/JS URL.** If you ever add a static reference that bypasses
   `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup

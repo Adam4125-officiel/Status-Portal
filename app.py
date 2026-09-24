@@ -108,6 +108,12 @@ def set_security_headers(response):
         "frame-ancestors 'none'"
     )
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
+    # Signed-in pages must not be kept by the browser or anything in between:
+    # otherwise the back button, or the next person on a shared machine, can bring
+    # an admin or account page back after logout. Overrides the send_file() default
+    # too, which is what the two point-in-time downloads under /admin/ want anyway.
+    if request.path == "/admin" or request.path.startswith(("/admin/", "/account")):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
