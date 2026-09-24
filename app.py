@@ -1625,7 +1625,9 @@ def api_incidents_more():
     if "seen" not in request.args:
         return ""
     raw = request.args.get("seen", "")
-    seen = [int(part) for part in raw.split(",") if part.strip().isdigit()]
+    # Same skip-what-isn't-an-id rule as before, through db.parse_int(): "²" passed
+    # isdigit() and then failed int(), and a 23-digit id overflowed SQLite - both 500s.
+    seen = [n for n in (db.parse_int(part) for part in raw.split(",")) if n is not None]
     if len(seen) > SEEN_IDS_LIMIT:
         return ""
     incidents = _enrich_incidents(db.list_incidents(limit=HISTORY_PAGE_SIZE, exclude_ids=seen))

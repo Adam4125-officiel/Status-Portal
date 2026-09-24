@@ -2816,6 +2816,33 @@ def test_api_incidents_more_rejects_an_oversized_seen_list(client):
     assert client.get(f"/api/incidents/more?seen={too_many}").data.decode().strip() == ""
 
 
+@pytest.mark.parametrize("junk", ["%C2%B2", "9" * 23, "-5", "abc", "%D9%A1"])
+def test_api_incidents_more_skips_junk_ids_instead_of_500ing(client, junk):
+    """Unauthenticated: "²" passed isdigit() and then failed int(), and a 23-digit id
+    overflowed SQLite. Junk is skipped exactly like any other non-id, so the real ids
+    beside it still paginate correctly."""
+    sid = db.list_services()[0]["id"]
+    shown = db.create_incident({"service_id": sid, "title": "Already shown", "status": "resolved"})
+    db.create_incident({"service_id": sid, "title": "Next one", "status": "resolved"})
+    resp = client.get(f"/api/incidents/more?seen={junk},{shown}")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "Next one" in html
+    assert "Already shown" not in html
+    # Junk alone is the same as an empty seen list: page one, not a failure.
+    resp = client.get(f"/api/incidents/more?seen={junk}")
+    assert resp.status_code == 200
+    assert "Already shown" in resp.data.decode()
+
+
+def test_api_incidents_more_oversized_list_still_fails_closed_with_junk_in_it(client):
+    """SEEN_IDS_LIMIT still counts every parsed entry, clamped ones included."""
+    too_many = ",".join(["9" * 23] * (app_module.SEEN_IDS_LIMIT + 1))
+    resp = client.get(f"/api/incidents/more?seen={too_many}")
+    assert resp.status_code == 200
+    assert resp.data.decode().strip() == ""
+
+
 def test_api_incidents_more_reveals_incidents_hidden_by_history_days(client):
     """Regression test for a real bug (2026-08-10): "load more" used to re-apply
     the same max_age_days filter as the initial view, so an incident older than
