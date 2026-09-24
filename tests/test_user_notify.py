@@ -440,6 +440,26 @@ def test_delivered_rows_are_eventually_pruned(enabled, monkeypatch):
     assert db.prune_notification_queue(days=30) == 1
 
 
+def test_rows_given_up_on_are_pruned_too_but_never_a_row_still_retrying(enabled):
+    """Rows that failed MAX_NOTIFICATION_ATTEMPTS times used to stay forever. They age
+    out like delivered rows now, by when they were queued; anything still being
+    retried stays whatever its age."""
+    old, fresh, retrying = (db.enqueue_notification("u1", "report_reply", "S", "B") for _ in range(3))
+    conn = db.get_db()
+    conn.execute("UPDATE notification_queue SET attempts=? WHERE id IN (?, ?)",
+                 (db.MAX_NOTIFICATION_ATTEMPTS, old, fresh))
+    conn.execute("UPDATE notification_queue SET created_at='2020-01-01T00:00:00+00:00' "
+                 "WHERE id IN (?, ?)", (old, retrying))
+    conn.commit()
+    conn.close()
+
+    assert db.prune_notification_queue(days=30) == 1
+    conn = db.get_db()
+    remaining = {r[0] for r in conn.execute("SELECT id FROM notification_queue")}
+    conn.close()
+    assert remaining == {fresh, retrying}
+
+
 # ---------------------------------------------------------------------------
 # Matching a Jellyfin user to a Seerr user - the part that must fail closed
 # ---------------------------------------------------------------------------

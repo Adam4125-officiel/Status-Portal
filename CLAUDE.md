@@ -2297,6 +2297,10 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   that can never succeed must not sit in the queue burning attempts.
 - **Partial delivery counts as sent.** Retrying would re-deliver to the channel that
   already worked.
+- **`prune_notification_queue()` removes given-up rows too**, after the same 30 days
+  as delivered ones, aged by `created_at` since they have no `sent_at`. Before 1.9.1
+  a row that hit `MAX_NOTIFICATION_ATTEMPTS` stayed forever. A row still being retried
+  is never pruned, whatever its age.
 - **`DEFAULT_USER_PREFERENCES` must list every field `set_user_preferences()` can
   write.** A missing key reads back as `None`, is coerced to `0`/`""` when some *other*
   field is saved, and silently switches an on-by-default preference off. That happened

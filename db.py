@@ -2630,11 +2630,19 @@ def mark_notification_failed(notification_id, error):
 def prune_notification_queue(days=30):
     """Delivered rows are history, not state. Kept briefly so an admin can see that
     something went out, then removed - this table would otherwise grow forever like
-    status_history did."""
+    status_history did.
+
+    Rows that were given up on (MAX_NOTIFICATION_ATTEMPTS failures) are history too,
+    and used to be kept forever. They go after the same number of days, counted from
+    when they were queued since they never got a sent_at. A row still being retried is
+    never touched, however old."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     conn = get_db()
-    cur = conn.execute("DELETE FROM notification_queue WHERE sent_at IS NOT NULL AND sent_at < ?",
-                        (cutoff,))
+    cur = conn.execute("""
+        DELETE FROM notification_queue
+        WHERE (sent_at IS NOT NULL AND sent_at < ?)
+           OR (sent_at IS NULL AND attempts >= ? AND created_at < ?)
+    """, (cutoff, MAX_NOTIFICATION_ATTEMPTS, cutoff))
     conn.commit()
     deleted = cur.rowcount
     conn.close()
