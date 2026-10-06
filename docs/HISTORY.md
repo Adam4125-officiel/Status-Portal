@@ -2010,6 +2010,12 @@ what follows is why the choices went the way they did.
   and port); the ~560 bytes of response headers, including a ~250-byte CSP line, against the ESP's
   header parser.
 
+### Confirmed end to end (2026-10-06)
+
+The owner tested v1.10.0-rc.1 end to end on the production portal with a real SmallTV-Ultra
+running Status-ESP 0.4.0-rc.1 (key from System -> Display device, portal LAN address on the
+device) and declared it stable; released as v1.10.0.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
