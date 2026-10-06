@@ -203,6 +203,7 @@ ALL_STATUSES = {"operational", "slow", "degraded", "maintenance", "down"}
     ("app", "STATUS_BADGE_COLOR"),
     ("discord_bot", "PRESENCE_TEXT"),
     ("discord_bot", "_EMBED_COLOR_NAME"),
+    ("device_api", "STATUS_RANK"),
 ])
 def test_status_maps_cover_every_status_including_slow(module, constant):
     """CLAUDE.md: 'slow' is a real fifth status, and any place the four original ones
@@ -239,6 +240,13 @@ def test_every_post_route_is_csrf_covered_or_a_known_public_exception():
     the anti-abuse measure (see the module docstring above api_notify_admin() in
     app.py).
 
+    /api/device/summary (the display-device API) is a GET, so this audit - which only
+    looks at POST - never sees it, and that is a decision rather than an oversight:
+    CSRF defends a state-changing request riding on a browser's ambient credentials,
+    this reads one document, and its credential is an X-Api-Key header with no session
+    behind it. It must stay read-only: test_the_device_api_is_get_only_and_gated_first
+    pins both halves.
+
     Adding a further unprotected public POST route is a decision to make on purpose,
     which is what this test forces."""
     public_post_exceptions = {"/report", "/api/notify/admin", "/api/notify/user"}
@@ -254,6 +262,32 @@ def test_every_post_route_is_csrf_covered_or_a_known_public_exception():
         "Either move the route under /admin/, add it to _CSRF_PROTECTED_PUBLIC_PATHS "
         "in app.py, or add it to public_post_exceptions here with its own anti-abuse "
         "measures (see report_problem()).")
+
+
+def test_the_device_api_is_get_only_and_gated_first():
+    """CLAUDE.md "Display device API": the one thing that makes a keyed public endpoint
+    safe to leave out of the CSRF audit is that it never changes anything, and the one
+    thing that makes the key worth having is that nothing is read before it is checked.
+
+    So: the route accepts GET only, and its first two statements are the 404 gate
+    (`device_api_enabled()`) and the shared key check (`_check_api_key()`), in that
+    order. A data lookup added above them would answer an unauthenticated request."""
+    tree = ast.parse(_read("app.py"))
+    func = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "api_device_summary"), None)
+    assert func is not None, "api_device_summary() not found in app.py - was it renamed?"
+    route = next(d for d in func.decorator_list
+                 if isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "route")
+    assert not any(kw.arg == "methods" for kw in route.keywords), (
+        "api_device_summary() declares methods=; it is GET-only by design. A write on a "
+        "route outside /admin/ is not covered by the CSRF hook - see the docstring above.")
+    body = [n for n in func.body
+            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+    assert "device_api_enabled()" in ast.unparse(body[0]), (
+        "The first statement of api_device_summary() must be the 'is it switched on' gate.")
+    assert "_check_api_key(" in ast.unparse(body[1]), (
+        "The second statement of api_device_summary() must be the shared key check, "
+        "before anything is read.")
 
 
 def test_the_report_form_becomes_csrf_protected_once_a_user_is_signed_in():

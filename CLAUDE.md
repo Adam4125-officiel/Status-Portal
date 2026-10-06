@@ -113,6 +113,7 @@ have bitten someone on exactly that change.
 | Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
 | Any call to Jellyfin | *Talking to Jellyfin* → one header builder, and never a `X-Emby-*` header |
 | The gamesportal integration, or `/api/notify/*` | *Cross-repo: gamesportal integration* → two different API keys, two different directions |
+| The display-device API (`/api/device/summary`, `device_api.py`, Status-ESP) | *Display device API* → bounded by construction, keyed, never a second key check |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -3002,6 +3003,83 @@ worth checking on the actual production install before relying on
 The Discord half specifically (added after this round of cross-repo testing, see
 above) has only unit/route test coverage - not re-run against a live Games Portal
 instance the way the email path was.
+
+## Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0
+
+A compact JSON summary for **Status-ESP**, the sibling firmware for a 240x240 ESP8266
+display (GeekMagic SmallTV-Ultra, ~35 KB of free RAM, plain HTTP only, no TLS). The
+shape is defined by `device_api.py`, and `device_api.example_summary()` — a full response
+built through the same code, which the admin page renders — is the living contract:
+change the shape and the example changes with it.
+
+- **It is its own endpoint, not `/api/status`.** `/api/status` is public, large, and a
+  published contract for external dashboards (a test pins its key set), so it cannot be
+  shrunk or extended for a device. This one has to stay under 4 KB and is allowed to
+  carry what the public pages hide, which is exactly why it is keyed.
+- **Auth is a key of its own: `X-Api-Key`, `secrets.compare_digest`, a settings row**
+  (`device_api_key`, plus `device_api_enabled`, default off) — the gamesportal
+  `/api/notify/*` mechanism, reused, not reinvented. **Never the same secret as
+  `notify_api_key`**: that one makes the portal post to Discord and send email, this one
+  can only read, and a display on a shelf (key sitting in its flash, sent in clear over
+  HTTP on the LAN) should not hold the stronger credential. A test pins that neither
+  key opens the other's door. Both keys go through the single `_check_api_key()`; a
+  third machine-to-machine key means calling it, not copying the comparison.
+- **Off is 404, not 401.** `device_api_enabled()` is "switched on **and** a key exists".
+  Disabled keeps the key (re-enabling reconnects the same device) but closes the
+  endpoint, and an install that never turned it on answers exactly as one that never had
+  it. A wrong or missing key is a JSON 401. The key is accepted **only in the header** —
+  a query-string key lands in access logs and proxy logs.
+- **The route's first two statements are the gate and the key check, and a convention
+  test enforces it** (`test_the_device_api_is_get_only_and_gated_first`): a lookup added
+  above them would answer an unauthenticated request. It is also **GET-only by test**.
+  That is what makes leaving it out of the CSRF audit a decision rather than an
+  oversight: CSRF defends a state change riding on a browser's ambient credentials; this
+  reads one document and has no session behind it. A future write route for a device is
+  a new decision, in `_csrf_required_for()` and the conventions list, not an extension
+  of this one.
+- **Resource data is returned regardless of the `show_public_*` switches — on purpose.**
+  Those switches decide what *visitors* see; the key decides what the admin's own display
+  sees. This is the opposite of the kiosk's rule ("shows nothing a visitor couldn't
+  already see"), and the difference is the credential: `/kiosk` is unauthenticated,
+  this is not. What must hold, and is tested with every `show_public_*` off, is that the
+  numbers are unreachable without the key. The admin page says so in as many words.
+- **Bounded by construction, proven against the worst case.** `device_api.py` is pure
+  shaping (no Flask, no database; `app.api_device_summary()` gathers rows and hands them
+  in). Every list has a fixed cap (`SERVICE_ITEMS`, `INCIDENT_ITEMS`, …) with a count
+  beside it for "+N more", and every string a fixed cap in UTF-8 **bytes**, not
+  characters (an emoji is four). `test_the_worst_possible_response_is_under_the_hard_cap`
+  fills every list with quotes, backslashes, emoji and control characters and asserts
+  `< MAX_BYTES` (4096); that case measures 3.5 KB and a realistic response about 1.2-2 KB.
+  **Raising a cap means re-running that test, not trusting arithmetic.** Strings are
+  one line (whitespace collapsed, non-printables dropped, cut with an ASCII `...`) and
+  sent as raw UTF-8, never `\uXXXX` — the device folds to ASCII itself and escapes would
+  triple every accented letter.
+- **It reuses the portal's decisions instead of re-deriving them**: `compute_overall_status()`
+  for the headline (so `slow` ranks where it does everywhere else), `ignore_in_overall_status`
+  honoured in the counts *and* the list (a device saying "all up" above a muted service
+  would contradict itself), `db.list_active_announcements()` (a scheduled announcement is
+  unpublished content), `applied` for "maintenance in progress" (the public page's own
+  test), `_request_snapshot()` and `monitoring._severity`'s `ok/warn/crit` passed through as
+  `*_sev` so the device colours its bars as the web page does and carries no second copy
+  of the thresholds. `STATUS_RANK` is in the status-map convention test (the `slow` rule).
+- **Open incidents come from `db.list_incidents(open_only=True)`**, never "newest N, then
+  filter": an old, still-open incident sitting behind eight newer resolved ones is the
+  incident a status display most needs to show. `open` is a separate `COUNT(*)`.
+- **Only requested sections cost anything.** `?sections=` (comma list; absent/blank = all;
+  unknown names ignored so a newer firmware keeps working; *only* unknown names is a 400,
+  because a header-only answer to a typo reads as a quiet portal). The resource
+  snapshot — the most expensive thing a public page does — is not taken unless asked for;
+  a test fails if it is. A failing snapshot degrades to `"resources": null`, not a 500.
+- **No new cache, no new loop, no slow I/O.** Everything is a database read or an
+  existing background cache, same as the public pages. The query count is asserted not to
+  grow with the data (grouped queries only).
+- **Timestamps are `YYYY-MM-DDTHH:MM:SSZ`, normalised** from the two shapes the database
+  holds (offset-bearing ISO for incidents, naive `datetime-local` for maintenance, which
+  the form documents as UTC). A response carries `now` so the device can age a timestamp
+  against the server's clock without trusting its own before NTP has synced.
+- **Verified against stand-ins and a real server, not a real device** — see
+  `docs/HISTORY.md` → "The display-device API". Status-ESP's firmware side (how it parses
+  this on 35 KB of RAM) is that repository's to verify.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

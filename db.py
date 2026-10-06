@@ -1198,8 +1198,12 @@ def _attach_incident_services(incidents):
     return incidents
 
 
-def list_incidents(limit=None, exclude_ids=None, max_age_days=None):
-    """max_age_days never hides a still-open incident (resolved_at IS NULL)
+def list_incidents(limit=None, exclude_ids=None, max_age_days=None, open_only=False):
+    """open_only keeps just the unresolved ones (resolved_at IS NULL). It exists for
+    callers that must not miss an old open incident behind newer resolved ones - taking
+    the newest N and filtering afterwards would do exactly that.
+
+    max_age_days never hides a still-open incident (resolved_at IS NULL)
     regardless of how long it's been going on - only a *resolved* incident's own
     age counts toward the cutoff, since an ongoing problem shouldn't disappear
     from the public page just because it started a while ago.
@@ -1232,6 +1236,8 @@ def list_incidents(limit=None, exclude_ids=None, max_age_days=None):
     q = "SELECT * FROM incidents"
     conditions = []
     params = []
+    if open_only:
+        conditions.append("resolved_at IS NULL")
     if max_age_days:
         conditions.append("(resolved_at IS NULL OR resolved_at >= datetime('now', ?))")
         params.append(f"-{int(max_age_days)} days")
@@ -1247,6 +1253,13 @@ def list_incidents(limit=None, exclude_ids=None, max_age_days=None):
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return _attach_incident_services([dict(r) for r in rows])
+
+
+def count_open_incidents():
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM incidents WHERE resolved_at IS NULL").fetchone()[0]
+    conn.close()
+    return count
 
 
 def get_incident(iid):
