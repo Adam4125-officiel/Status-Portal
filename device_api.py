@@ -291,3 +291,11 @@ def example_summary():
             ],
         },
     )
+
+
+def example_json():
+    """(pretty text for a human, size in bytes of what is actually sent) - the admin page
+    shows the first and quotes the second."""
+    example = example_summary()
+    return (json.dumps(example, ensure_ascii=False, indent=2),
+            len(dumps(example).encode("utf-8")))

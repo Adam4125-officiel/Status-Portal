@@ -3077,6 +3077,19 @@ change the shape and the example changes with it.
   holds (offset-bearing ISO for incidents, naive `datetime-local` for maintenance, which
   the form documents as UTC). A response carries `now` so the device can age a timestamp
   against the server's clock without trusting its own before NTP has synced.
+- **The admin side is its own page, `/admin/device` ("Display device", System group),
+  not a panel on Channels or Settings.** It is neither a notification (Channels is "how
+  do I get told") nor one more field of the big Settings form, whose nested-`<form>`
+  trap a key-regeneration button would walk straight into. It carries the enable switch,
+  the key (shown, regenerable — no grace period, like the notification key), the
+  "what to type into Status-ESP" steps and a **rendered example built from
+  `device_api.example_summary()`**, never hand-typed. Enabling with no key generates one
+  (an on-switch with nothing behind it would 404 while the page said "on"); disabling
+  keeps the key so the same device can reconnect. Page `<h1>`, title and nav label all
+  read "Display device"; it is registered in `admin_search.PAGES` and
+  `ADMIN_PAGES_FOR_MARKUP_CHECK`. The regenerate confirm is a constant string with no
+  `{{ }}` in it, so it needs no `_INLINE_HANDLER_EXPRESSIONS_ALLOWED` entry — keep it
+  that way.
 - **Verified against stand-ins and a real server, not a real device** — see
   `docs/HISTORY.md` → "The display-device API". Status-ESP's firmware side (how it parses
   this on 35 KB of RAM) is that repository's to verify.

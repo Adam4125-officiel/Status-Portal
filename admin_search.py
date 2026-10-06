@@ -84,6 +84,7 @@ PAGES = [
     ("admin_system.html", "admin_system", "System"),
     ("admin_logs.html", "admin_logs", "Logs"),
     ("admin_settings.html", "admin_settings", "Settings"),
+    ("admin_device.html", "admin_device", "Display device"),
     ("admin_users.html", "admin_users", "User accounts"),
     ("admin_2fa.html", "admin_2fa", "Two-factor auth"),
     ("admin_2fa_enable.html", "admin_2fa_enable", "Two-factor auth · Set up"),

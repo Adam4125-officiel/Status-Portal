@@ -4479,6 +4479,47 @@ def admin_notifications_regenerate_api_key():
     return redirect(url_for("admin_notifications"))
 
 
+@app.route("/admin/device", methods=["GET", "POST"])
+@login_required
+def admin_device():
+    """The switch, the key and the setup hints for the display-device API. Its own
+    page rather than a panel on Channels or Settings: it is neither a notification nor
+    one more checkbox in the big settings form (whose nested-<form> trap a key
+    regeneration button would walk straight into), and "where do I configure the
+    display" deserves one answer."""
+    if request.method == "POST":
+        enable = bool(request.form.get("device_api_enabled"))
+        db.set_setting(DEVICE_API_ENABLED_SETTING, "1" if enable else "0")
+        if enable and not db.get_setting(DEVICE_API_KEY_SETTING, ""):
+            # Turning it on with nothing to authenticate against would be an endpoint
+            # that 404s while the page says it is on.
+            db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
+            flash("Display device API enabled, and a key generated.", "success")
+        else:
+            flash("Display device API enabled." if enable else "Display device API disabled.",
+                  "success")
+        return redirect(url_for("admin_device"))
+    example, example_bytes = device_api.example_json()
+    return render_template("admin_device.html",
+                            device_api_enabled=db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1",
+                            device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
+                            port=config.PORT, example=example, example_bytes=example_bytes,
+                            max_bytes=device_api.MAX_BYTES, active="device")
+
+
+@app.route("/admin/device/key/regenerate", methods=["POST"])
+@login_required
+def admin_device_regenerate_key():
+    """A fresh key, and the old one is dead immediately - no grace period, for the same
+    reason as the notification key: the display has to be handed the new value by hand
+    before it can use it again. Independent of notify_api_key; rotating one never
+    touches the other."""
+    db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
+    flash("New display device key generated. The old key stopped working immediately - "
+          "enter the new one on the display.", "success")
+    return redirect(url_for("admin_device"))
+
+
 @app.route("/admin/settings/backup-db")
 @login_required
 def admin_settings_backup_db():

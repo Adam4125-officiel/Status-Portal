@@ -4760,7 +4760,7 @@ ADMIN_PAGES_FOR_MARKUP_CHECK = (
     "/admin/settings", "/admin/services", "/admin/announcements", "/admin/notifications",
     "/admin/tasks", "/admin/about", "/admin/system", "/admin/integrations",
     "/admin/reports", "/admin/users", "/admin/discord-bot", "/admin/incidents",
-    "/admin/maintenance", "/admin/logs", "/admin/2fa", "/admin/info",
+    "/admin/maintenance", "/admin/logs", "/admin/2fa", "/admin/info", "/admin/device",
 )
 
 

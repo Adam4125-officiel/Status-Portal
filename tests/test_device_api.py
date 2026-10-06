@@ -9,7 +9,9 @@ import json
 import sqlite3
 
 import pytest
+from markupsafe import escape
 
+import admin_search
 import app as app_module
 import db
 import device_api
@@ -552,3 +554,105 @@ def test_iso_utc(raw, expected):
 
 def test_the_count_order_and_the_rank_map_cover_the_same_statuses():
     assert set(device_api.COUNT_ORDER) == set(device_api.STATUS_RANK)
+
+
+# ---------------------------------------------------------------------------
+# The admin page: /admin/device
+# ---------------------------------------------------------------------------
+def _login(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+
+def test_the_admin_page_needs_a_login(client):
+    assert client.get("/admin/device").status_code == 302
+    assert client.post("/admin/device", data={"device_api_enabled": "on"}).status_code == 302
+    assert client.post("/admin/device/key/regenerate").status_code == 302
+    assert db.get_setting(app_module.DEVICE_API_KEY_SETTING, "") == ""
+
+
+def test_the_admin_page_renders_with_matching_title_heading_and_nav_label(client):
+    """CLAUDE.md: an admin page's <h1>, its title and its nav label must all agree."""
+    _login(client)
+    body = client.get("/admin/device").get_data(as_text=True)
+    assert "<title>Display device" in body
+    assert "<h1>Display device</h1>" in body
+    nav = body[body.index('<nav class="admin-nav">'):body.index("</nav>")]
+    assert ">Display device</a>" in nav and "class=\"active\"" in nav.split("Display device")[0][-120:]
+
+
+def test_the_page_says_how_to_configure_the_display_and_shows_a_real_example(client):
+    _login(client)
+    body = client.get("/admin/device").get_data(as_text=True)
+    assert f"http://192.168.1.10:{app_module.config.PORT}" in body
+    assert "X-Api-Key" in body and "/api/device/summary" in body
+    assert "even where the public pages hide them" in body
+    # The example is the real builder's output, not typed text.
+    pretty, size = device_api.example_json()
+    assert str(escape(pretty.splitlines()[1].strip())) in body
+    assert f"{size} bytes" in body
+
+
+def test_before_anything_is_set_up_the_page_offers_a_key_and_the_api_is_off(client):
+    _login(client)
+    body = client.get("/admin/device").get_data(as_text=True)
+    assert "No key generated yet" in body and "Generate key" in body
+    assert client.get(URL, headers=HEADERS).status_code == 404
+
+
+def test_enabling_for_the_first_time_generates_a_key_and_the_endpoint_goes_live(client):
+    _login(client)
+    resp = client.post("/admin/device", data={"device_api_enabled": "on"})
+    assert resp.status_code == 302
+    key = db.get_setting(app_module.DEVICE_API_KEY_SETTING, "")
+    assert len(key) == 48
+    assert key in client.get("/admin/device").get_data(as_text=True)
+    assert client.get(URL, headers={"X-Api-Key": key}).status_code == 200
+
+
+def test_disabling_closes_the_endpoint_but_keeps_the_key(client):
+    _login(client)
+    client.post("/admin/device", data={"device_api_enabled": "on"})
+    key = db.get_setting(app_module.DEVICE_API_KEY_SETTING, "")
+    client.post("/admin/device", data={})                  # an unticked box sends nothing
+    assert client.get(URL, headers={"X-Api-Key": key}).status_code == 404
+    assert db.get_setting(app_module.DEVICE_API_KEY_SETTING, "") == key
+    client.post("/admin/device", data={"device_api_enabled": "on"})
+    assert db.get_setting(app_module.DEVICE_API_KEY_SETTING, "") == key   # same device reconnects
+    assert client.get(URL, headers={"X-Api-Key": key}).status_code == 200
+
+
+def test_regenerating_the_key_kills_the_old_one_and_leaves_the_notification_key_alone(client):
+    _login(client)
+    client.post("/admin/device", data={"device_api_enabled": "on"})
+    first = db.get_setting(app_module.DEVICE_API_KEY_SETTING, "")
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "n" * 48)
+
+    client.post("/admin/device/key/regenerate")
+    second = db.get_setting(app_module.DEVICE_API_KEY_SETTING, "")
+    assert second and second != first
+    assert client.get(URL, headers={"X-Api-Key": first}).status_code == 401
+    assert client.get(URL, headers={"X-Api-Key": second}).status_code == 200
+    assert db.get_setting(app_module.NOTIFY_API_KEY_SETTING, "") == "n" * 48
+
+
+def test_the_two_keys_are_generated_independently(client):
+    _login(client)
+    client.post("/admin/notifications/api-key/regenerate")
+    client.post("/admin/device", data={"device_api_enabled": "on"})
+    assert (db.get_setting(app_module.NOTIFY_API_KEY_SETTING, "")
+            != db.get_setting(app_module.DEVICE_API_KEY_SETTING, ""))
+
+
+def test_the_regenerate_confirm_is_a_constant_not_an_interpolated_value(client):
+    """The inline-handler convention: nothing from outside goes inside an on*= attribute.
+    The confirm text here is fixed, and only present once there is a key to lose."""
+    _login(client)
+    assert "onsubmit" not in client.get("/admin/device").get_data(as_text=True)
+    client.post("/admin/device", data={"device_api_enabled": "on"})
+    assert "onsubmit=\"return confirm(" in client.get("/admin/device").get_data(as_text=True)
+
+
+def test_the_admin_search_finds_the_page_and_its_controls():
+    assert any(r["endpoint"] == "admin_device" for r in admin_search.search("display device"))
+    assert any(r["endpoint"] == "admin_device" and r["jump"] == "device_api_enabled"
+               for r in admin_search.search("enable display device api"))
