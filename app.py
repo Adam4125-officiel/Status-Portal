@@ -34,6 +34,7 @@ import requests
 import admin_search
 import config
 import db
+import device_api
 import discord_bot
 import integrations
 import jellyfin_auth
@@ -1721,14 +1722,20 @@ NOTIFY_API_SUBJECT_MAX_LENGTH = 200
 NOTIFY_API_BODY_MAX_LENGTH = 2000
 
 
-def _check_notify_api_key():
-    """None when the request's X-Api-Key header matches the stored key, otherwise a
-    ready-to-return 401 response - same call pattern as _require_totp()."""
-    stored = db.get_setting(NOTIFY_API_KEY_SETTING, "")
+def _check_api_key(setting_name):
+    """None when the request's X-Api-Key header matches the key stored under
+    `setting_name`, otherwise a ready-to-return 401 response - same call pattern as
+    _require_totp(). One implementation for every machine-to-machine key, so a second
+    key can't quietly end up with a weaker comparison than the first."""
+    stored = db.get_setting(setting_name, "")
     submitted = request.headers.get("X-Api-Key", "")
     if not stored or not submitted or not secrets.compare_digest(stored, submitted):
         return jsonify({"error": "Missing or invalid API key"}), 401
     return None
+
+
+def _check_notify_api_key():
+    return _check_api_key(NOTIFY_API_KEY_SETTING)
 
 
 @app.route("/api/notify/admin", methods=["POST"])
@@ -1777,6 +1784,79 @@ def api_notify_user():
                         "reason": "Per-user notifications are switched off on this portal"}), 200
     notification_id = user_notify.notify_user(jellyfin_user_id, event, subject, body)
     return jsonify({"status": "queued", "notification_id": notification_id}), 200
+
+
+# ---------------------------------------------------------------------------
+# Display-device API - a compact, versioned, key-authenticated JSON summary for small
+# wall/desk displays (Status-ESP, an ESP8266 with ~35 KB of free RAM). See CLAUDE.md's
+# "Display device API" section and device_api.py for the shape and its size bounds.
+#
+# Deliberately NOT /api/status: that one is public, large, and published for external
+# dashboards (a pinned key set), while this one has to stay under 4 KB and is allowed to
+# carry data the public pages hide (server resources) - which is exactly why it needs a
+# key. The key is its own secret, separate from the notification key above: this one
+# can only read, that one can make the portal post to Discord and send email, and a
+# display sitting on a shelf shouldn't hold the stronger credential.
+#
+# A GET, so the session-cookie CSRF mechanism has nothing to say about it (and
+# tests/test_conventions.py only audits POST routes); there is no session either way,
+# the X-Api-Key header is the whole credential.
+# ---------------------------------------------------------------------------
+DEVICE_API_KEY_SETTING = "device_api_key"
+DEVICE_API_ENABLED_SETTING = "device_api_enabled"
+
+
+def device_api_enabled():
+    """On only when the admin switched it on *and* a key exists. A switch with no key
+    behind it would be an endpoint that answers 401 to everybody, which still tells a
+    stranger the feature is there; 404 is what an install that never had it says."""
+    return (db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1"
+            and bool(db.get_setting(DEVICE_API_KEY_SETTING, "")))
+
+
+@app.route("/api/device/summary")
+def api_device_summary():
+    """Everything here comes from the database or an existing background-refreshed
+    cache; nothing waits on the network. `?sections=` limits it to some of
+    device_api.SECTIONS, and the work for a section nobody asked for is not done - the
+    resource snapshot is the most expensive thing the public pages do."""
+    if not device_api_enabled():
+        abort(404)
+    blocked = _check_api_key(DEVICE_API_KEY_SETTING)
+    if blocked:
+        return blocked
+    sections = device_api.parse_sections(request.args.get("sections"))
+    if sections is None:
+        return jsonify({"error": "Unknown sections", "valid": list(device_api.SECTIONS)}), 400
+
+    services = db.list_services()
+    data = {}
+    if "incidents" in sections:
+        data["open_incident_count"] = db.count_open_incidents()
+        data["incidents"] = db.list_incidents(limit=device_api.INCIDENT_ITEMS, open_only=True)
+    if "maintenance" in sections:
+        data["maintenance"] = db.list_public_maintenance_windows()
+    if "announcements" in sections:
+        data["announcements"] = db.list_active_announcements()
+    if "resources" in sections:
+        try:
+            # Not gated by the show_public_* switches: this is a keyed endpoint, and the
+            # holder of the key is the admin's own display. The public pages' switches
+            # decide what *visitors* see; the key decides what this sees.
+            data["resources"] = _request_snapshot()
+        except Exception:
+            # One failing section must not take the rest of the summary down with it;
+            # the response says "unavailable" (null) rather than leaving it out.
+            _logger.exception("Could not read the resource snapshot for the device API")
+
+    summary = device_api.build_summary(
+        sections, now=datetime.now(timezone.utc), site=db.get_setting("site_name", "Server"),
+        overall=compute_overall_status(services), services=services, **data)
+    response = Response(device_api.dumps(summary), mimetype="application/json")
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    # A display polls this to learn what is true *now*.
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def compute_overall_status(services):
@@ -4397,6 +4477,47 @@ def admin_notifications_regenerate_api_key():
     flash("New API key generated. The old key stopped working immediately - update "
           "anything using it.", "success")
     return redirect(url_for("admin_notifications"))
+
+
+@app.route("/admin/device", methods=["GET", "POST"])
+@login_required
+def admin_device():
+    """The switch, the key and the setup hints for the display-device API. Its own
+    page rather than a panel on Channels or Settings: it is neither a notification nor
+    one more checkbox in the big settings form (whose nested-<form> trap a key
+    regeneration button would walk straight into), and "where do I configure the
+    display" deserves one answer."""
+    if request.method == "POST":
+        enable = bool(request.form.get("device_api_enabled"))
+        db.set_setting(DEVICE_API_ENABLED_SETTING, "1" if enable else "0")
+        if enable and not db.get_setting(DEVICE_API_KEY_SETTING, ""):
+            # Turning it on with nothing to authenticate against would be an endpoint
+            # that 404s while the page says it is on.
+            db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
+            flash("Display device API enabled, and a key generated.", "success")
+        else:
+            flash("Display device API enabled." if enable else "Display device API disabled.",
+                  "success")
+        return redirect(url_for("admin_device"))
+    example, example_bytes = device_api.example_json()
+    return render_template("admin_device.html",
+                            device_api_enabled=db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1",
+                            device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
+                            port=config.PORT, example=example, example_bytes=example_bytes,
+                            max_bytes=device_api.MAX_BYTES, active="device")
+
+
+@app.route("/admin/device/key/regenerate", methods=["POST"])
+@login_required
+def admin_device_regenerate_key():
+    """A fresh key, and the old one is dead immediately - no grace period, for the same
+    reason as the notification key: the display has to be handed the new value by hand
+    before it can use it again. Independent of notify_api_key; rotating one never
+    touches the other."""
+    db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
+    flash("New display device key generated. The old key stopped working immediately - "
+          "enter the new one on the display.", "success")
+    return redirect(url_for("admin_device"))
 
 
 @app.route("/admin/settings/backup-db")

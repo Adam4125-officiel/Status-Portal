@@ -28,6 +28,9 @@ the full feature list and integrations at a glance.
   these same channels instead of building its own
 - **Kiosk mode** — a full-screen display at `/kiosk` for a wall-mounted TV or a spare
   tablet, rotating through services, incidents, VMs and resources on a timer
+- A compact, key-protected **display device API** (`/api/device/summary`) for small
+  status screens such as a Status-ESP: overall status, problem services, open
+  incidents, maintenance, announcements and server load in under 4 KB
 - **Log viewer** in the admin panel — recent entries with a level filter, and the
   full log downloadable as a `.log` file
 - Optional **two-factor authentication** (TOTP) for the admin login

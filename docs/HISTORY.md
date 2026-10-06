@@ -1947,6 +1947,69 @@ and throughput rates are computed once per loop tick rather than by every caller
   files accepted, version read as `1.9.1-rc.1`), and `updater.fetch_releases()` saw it
   as the newest on the unstable channel while stable stayed on 1.9.0.
 
+## The display-device API (2026-10-06)
+
+### What was asked, and the decisions that were not obvious
+
+Status-ESP, a sibling firmware for a 240x240 ESP8266 display (~35 KB of free RAM, plain
+HTTP only), had to show the kind of thing the kiosk shows: overall status and the services
+that are down, open incidents and maintenance, server resources, active announcements. The
+portal side is `GET /api/device/summary`. Rules are in `CLAUDE.md` -> *Display device API*;
+what follows is why the choices went the way they did.
+
+- **A new endpoint, not a diet `/api/status`.** `/api/status` is a published contract for
+  external dashboards (a test pins its key set) and runs to tens of KB. Shrinking it would
+  break them; extending it would not fit the device.
+- **A key, and a key of its own.** The existing `/api/notify/*` mechanism (`X-Api-Key`,
+  `compare_digest`, a settings row) was reused rather than inventing a scheme, but with a
+  second secret: the notification key can make the portal post to Discord and send email, the
+  display key can only read, and the device stores its key in flash and sends it in clear
+  over the LAN. The key is header-only; a key in a URL ends up in logs.
+- **Resources ignore the `show_public_*` switches.** This is the opposite of the kiosk rule
+  and it was the one place a rule could have been applied by reflex. The kiosk is
+  unauthenticated, so it must show nothing a visitor couldn't; this is keyed, so the key is the
+  authorisation. What has to hold is that the numbers are unreachable without it, which is
+  tested with every switch off.
+- **Size is bounded by construction, not by hope.** Caps are on list lengths and on string
+  *bytes*, and the worst-case test uses quotes and backslashes (each doubles in JSON), emoji
+  (four bytes) and control characters. First estimate by arithmetic put the adversarial worst
+  case at ~4.7 KB, over the 4 KB hard cap, so the caps were tightened until it measured 3.5 KB;
+  a typical answer is 1.2-2 KB.
+- **Open incidents are queried as open incidents.** The first thought, `list_incidents(limit)`
+  then filter, would drop an old still-open incident behind newer resolved ones, which is the
+  one a status display most needs. `list_incidents(open_only=True)` exists for that.
+- **A switch on with no key is a 404, and the page generates a key on first enable.** An
+  endpoint answering 401 to everyone still tells a stranger the feature exists.
+
+### Verification record - sandbox, 2026-10-06
+
+- Full suite 1350 passing before, 1428 after (78 new, mostly `tests/test_device_api.py`), plus
+  the two new convention tests (GET-only and gate-first; `STATUS_RANK` in the `slow` check). The
+  gate-first check was proven able to fail by swapping the statements and watching it go red.
+- **Live, against the real waitress server** (`serve_waitress.py`, run from a throwaway copy of
+  the tree so it had its own `instance/`; the real `instance/portal.db` was never opened):
+  first-run setup, the real CSRF hook (enable without a token is a 400, with one a 302), key
+  generation, then curl as the device would call it. No key, wrong key and a key in the query
+  string were all 401; the full answer (6 services, 2 open incidents, 1 active and 1 upcoming
+  window, an announcement, resources) was 1355 bytes with `Content-Length` and `no-store`;
+  `?sections=` narrowed it; unknown-only sections was a 400; POST was a 405; a hand-written
+  `HTTP/1.1` request with `Connection: close` and an ESP-style User-Agent worked; 30 sequential
+  requests took 0.33 s. A scheduled announcement did not appear. Regenerating killed the old key
+  at once, disabling gave a 404 and kept the key, re-enabling reconnected with it, and the
+  notification key and the display key each got a 401 from the other's endpoint. The public
+  `/resources` page was a 404 while the keyed endpoint returned resources.
+- **Chromium**: `/admin/device` in light and dark at 320-1024 px with no horizontal overflow,
+  the regenerate confirm dialog's text, the admin search finding the page and its controls, zero
+  console errors, page errors or failed requests.
+- **Seen live and worth knowing**: the throwaway portal's own health checker opened an
+  auto-incident for the seeded default service before the test data replaced it, and the answer
+  carried it correctly - an open incident the test had not created itself.
+- **Not verified**: anything on a real device (how Status-ESP parses this in 35 KB of RAM is that
+  repository's to check); the disk `name` on real Windows (a label wins over `D:\`; only Linux
+  was exercised); behaviour through a reverse proxy or tunnel (the page says use the LAN address
+  and port); the ~560 bytes of response headers, including a ~250-byte CSP line, against the ESP's
+  header parser.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

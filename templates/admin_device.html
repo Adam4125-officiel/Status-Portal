@@ -1,0 +1,110 @@
+{% extends "admin_base.html" %}
+{% block title %}Display device — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Display device</h1>
+</div>
+<p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
+  A small, read-only summary of this portal for a dedicated status display — such as a
+  Status-ESP on a GeekMagic SmallTV — that asks for it over your home network every
+  so often. It is a separate, much smaller answer than the public status page, and it is
+  protected by a key because it can include things the public pages hide.
+</p>
+
+<div class="form-panel">
+  <h2 style="margin-top: 0;">Display device API</h2>
+  <form method="POST" action="{{ url_for('admin_device') }}">
+    <div class="checkbox-list">
+      <label class="field-check"><input type="checkbox" name="device_api_enabled" {{ 'checked' if device_api_enabled }}> Enable the display device API</label>
+    </div>
+    <div class="field-hint" style="margin-bottom: 12px;">
+      Off by default. While it is off, or before a key exists, the address answers
+      “not found” to everyone — exactly like a portal that never had this feature.
+      Switching it on for the first time generates a key for you.
+    </div>
+    <button type="submit" class="btn">Save</button>
+  </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Key</h2>
+  {% if device_api_key %}
+    <div class="field">
+      <label for="device_api_key">Current key</label>
+      <input type="text" id="device_api_key" name="device_api_key" value="{{ device_api_key }}" readonly onclick="this.select()">
+      <div class="field-hint">
+        Enter this on the display. Treat it like a password: the display keeps it in its
+        own memory and sends it unencrypted across your network, so only use it on a
+        network you trust. It is a different key from the one for the notification API,
+        and it can only <em>read</em> this summary.
+      </div>
+    </div>
+  {% else %}
+    <p class="field-hint">No key generated yet — the display API refuses every request until one exists.</p>
+  {% endif %}
+  <form method="POST" action="{{ url_for('admin_device_regenerate_key') }}" {% if device_api_key %}onsubmit="return confirm('Generate a new key? The current one will stop working immediately, and the display will need the new one.')"{% endif %}>
+    <button type="submit" class="btn secondary">{{ 'Regenerate key' if device_api_key else 'Generate key' }}</button>
+  </form>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Setting up Status-ESP</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    In the display's web interface, on its Status-Portal tab:
+  </p>
+  <ol style="color: var(--text-dim); font-size: 13px; padding-left: 20px; margin-top: 0;">
+    <li style="margin-bottom: 8px;">
+      <strong>Portal address</strong>: this server's address on your home network and the
+      port the portal listens on, for example
+      <code>http://192.168.1.10:{{ port }}</code>. It has to be plain <code>http://</code>
+      — the display cannot do HTTPS, so a public <code>https://</code> hostname in front of the
+      portal will not work for it. Use the address you would type on a phone at home.
+    </li>
+    <li style="margin-bottom: 8px;"><strong>API key</strong>: the key above.</li>
+    <li><strong>What to show</strong>: tick the parts you want on the display. It asks the
+      portal only for those, which keeps each answer small.</li>
+  </ol>
+  <p style="color: var(--text-dim); font-size: 13px; margin-bottom: 8px;">
+    To check it from a computer on the same network:
+  </p>
+  <pre class="code-block">curl -H "X-Api-Key: YOUR_KEY" \
+  "http://192.168.1.10:{{ port }}/api/device/summary?sections=services,incidents"</pre>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">What the display can see</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    <code>/api/device/summary</code> takes an optional <code>sections</code> list; leave it
+    out for everything. Every list is short, and every name and message is cut to fit.
+  </p>
+  <div class="admin-table" style="font-size: 13px;">
+    <table>
+      <thead><tr><th style="width: 130px;">Section</th><th>Carries</th></tr></thead>
+      <tbody>
+        <tr><td><code>services</code></td><td>How many services are in each state, and the worst few that are not operational. A service you excluded from the overall status is excluded here too.</td></tr>
+        <tr><td><code>incidents</code></td><td>How many incidents are open, and the newest few.</td></tr>
+        <tr><td><code>maintenance</code></td><td>Maintenance in progress, then the soonest upcoming.</td></tr>
+        <tr><td><code>announcements</code></td><td>Announcements showing right now — never a scheduled or expired one.</td></tr>
+        <tr><td><code>resources</code></td><td>CPU, memory, network and the fullest few disks.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="field-hint" style="margin-top: 10px;">
+    <strong>Resources are included even where the public pages hide them.</strong> The
+    “Public page: also show…” switches decide what visitors see; the key decides what
+    your own display sees. Nothing is reachable without the key.
+  </div>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Example response</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    A full response is {{ example_bytes }} bytes here (shown indented for reading; the
+    portal sends it compact), and can never exceed {{ max_bytes }}. It is built by the
+    same code that answers the display, so it cannot drift from the real thing.
+    Timestamps are UTC; <code>now</code> is the portal's clock, so the display can work
+    out how long ago something started without trusting its own.
+  </p>
+  <pre class="code-block">{{ example }}</pre>
+</div>
+{% endblock %}

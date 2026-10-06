@@ -979,6 +979,22 @@ footer.foot {
   resize: vertical;
 }
 .reply-box:disabled { color: var(--text-faint); background: var(--bg-panel); }
+/* A block of literal text to copy, like an example API response. It scrolls inside
+   itself rather than widening the page, the same rule the admin log box follows. */
+.code-block {
+  margin: 0;
+  max-width: 100%;
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
 .field-check {
   display: flex;
   align-items: center;
