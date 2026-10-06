@@ -656,3 +656,38 @@ def test_the_admin_search_finds_the_page_and_its_controls():
     assert any(r["endpoint"] == "admin_device" for r in admin_search.search("display device"))
     assert any(r["endpoint"] == "admin_device" and r["jump"] == "device_api_enabled"
                for r in admin_search.search("enable display device api"))
+
+
+def test_services_all_lists_every_service_worst_first(enabled):
+    for name, status in [("Fine", "operational"), ("Dead", "down"), ("Sluggish", "slow"),
+                         ("Also fine", "operational")]:
+        db.create_service({"name": name, "url": "", "status": status})
+    items = _summary(enabled, "?sections=services&services=all")["services"]["items"]
+    assert [(i["name"], i["status"]) for i in items] == [
+        ("Dead", "down"), ("Sluggish", "slow"), ("Fine", "operational"), ("Also fine", "operational")]
+    # Without it the list is still the unhealthy ones only.
+    assert len(_summary(enabled, "?sections=services")["services"]["items"]) == 2
+
+
+def test_services_all_is_capped_and_the_worst_case_fits_its_ceiling(enabled, monkeypatch):
+    nasty = _worst_case_text()
+    for i in range(60):
+        db.create_service({"name": nasty, "url": "", "status": "operational"})
+    sid = db.create_service({"name": nasty, "url": "", "status": "down"})
+    for i in range(10):
+        db.create_incident({"title": nasty}, service_ids=[sid])
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+        db.create_maintenance_window({"title": nasty, "starts_at": f"2099-01-{i + 10}T00:00",
+                                      "ends_at": f"2099-02-{i + 10}T00:00"}, service_ids=[sid])
+    db.set_setting("site_name", nasty)
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit",
+              "free_gb": 99999.9} for _ in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    raw = _get(enabled, "?services=all").data
+    assert len(raw) < device_api.MAX_BYTES_ALL_SERVICES, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
+    assert body["services"]["items"][0]["status"] == "down"

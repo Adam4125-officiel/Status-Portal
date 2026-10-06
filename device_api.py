@@ -28,6 +28,10 @@ SCHEMA_VERSION = 1
 # device's own budget is "under 3 KB, never over 4 KB".
 MAX_BYTES = 4096
 
+# With ``services=all`` the list also names every operational service, so the ceiling for
+# that request is higher; the device asks for it only when it pages through the list.
+MAX_BYTES_ALL_SERVICES = 7168
+
 # The request's `sections` values, in the order they appear in the response.
 SECTIONS = ("services", "incidents", "maintenance", "resources", "announcements")
 
@@ -42,6 +46,7 @@ COUNT_ORDER = ("operational", "slow", "degraded", "maintenance", "down")
 # List caps. The counts next to each list say how many exist in total, so a device can
 # render "+N more" without the portal sending N rows it has no room to draw.
 SERVICE_ITEMS = 6
+ALL_SERVICE_ITEMS = 40
 INCIDENT_ITEMS = 3
 MAINTENANCE_ITEMS = 3
 ANNOUNCEMENT_ITEMS = 3
@@ -125,8 +130,9 @@ def _number(value):
     return value if math.isfinite(value) else None
 
 
-def services_section(services):
-    """Counts for every status, plus the worst few services that aren't operational.
+def services_section(services, include_ok=False):
+    """Counts for every status, plus the worst few services that aren't operational
+    (or, with ``include_ok``, every service, worst first, up to ALL_SERVICE_ITEMS).
 
     A service flagged ``ignore_in_overall_status`` is left out of both, exactly as
     ``compute_overall_status()`` leaves it out of the headline: this is the headline's
@@ -138,12 +144,13 @@ def services_section(services):
         if s.get("status") in counts:
             counts[s["status"]] += 1
     listed = sorted((s for s in counted if s.get("status") in STATUS_RANK
-                     and s["status"] != "operational"),
+                     and (include_ok or s["status"] != "operational")),
                     key=lambda s: STATUS_RANK[s["status"]])  # stable: keeps sort_order
     section = {"total": len(counted)}
     section.update(counts)
+    cap = ALL_SERVICE_ITEMS if include_ok else SERVICE_ITEMS
     section["items"] = [{"name": text(s.get("name"), SERVICE_NAME_BYTES), "status": s["status"]}
-                        for s in listed[:SERVICE_ITEMS]]
+                        for s in listed[:cap]]
     return section
 
 
@@ -225,7 +232,8 @@ def resources_section(snapshot):
 
 
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
-                  incidents=(), maintenance=(), announcements=(), resources=None):
+                  incidents=(), maintenance=(), announcements=(), resources=None,
+                  all_services=False):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
@@ -237,7 +245,7 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
         "overall": overall,
     }
     if "services" in sections:
-        summary["services"] = services_section(services)
+        summary["services"] = services_section(services, include_ok=all_services)
     if "incidents" in sections:
         summary["incidents"] = incidents_section(open_incident_count, incidents)
     if "maintenance" in sections:

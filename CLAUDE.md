@@ -3093,6 +3093,12 @@ change the shape and the example changes with it.
 - **Verified against stand-ins and a real server, not a real device** — see
   `docs/HISTORY.md` → "The display-device API". Status-ESP's firmware side (how it parses
   this on 35 KB of RAM) is that repository's to verify.
+- **`services=all` (added in 1.11.0) also lists the operational services**, worst first
+  then the admin's order, capped at `ALL_SERVICE_ITEMS` (40), with its own ceiling
+  `MAX_BYTES_ALL_SERVICES` (7 KB) — Status-ESP pages through the full list on its screen.
+  Without the parameter the response is byte-for-byte what 1.10.0 sent (unhealthy only, 6
+  items, 4 KB), so an older firmware is unaffected. Both ceilings are asserted against the
+  adversarial worst case in `tests/test_device_api.py`.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
