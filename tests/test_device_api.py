@@ -785,13 +785,13 @@ def test_the_largest_possible_answer_fits_its_ceiling(enabled, monkeypatch):
             db.update_service_status_from_check(service["id"], "operational", 99999)
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
                         lambda: {"transcoding": 99, "running_tasks": [nasty] * 10})
-    raw = _get(enabled, "?services=all&resources=all").data
+    raw = _get(enabled, "?services=all&resources=all&jellyfin=1").data
     print("LARGEST", len(raw))
     assert len(raw) < device_api.MAX_BYTES_ALL, f"{len(raw)} bytes"
     body = json.loads(raw)
     assert len(body["resources"]["disks"]) == device_api.ALL_DISK_ITEMS
     assert len(body["resources"]["gpus"]) == device_api.GPU_ITEMS
-    assert len(body["resources"]["jellyfin"]["tasks"]) == device_api.JELLYFIN_TASK_ITEMS
+    assert len(body["jellyfin"]["tasks"]) == device_api.JELLYFIN_TASK_ITEMS
     assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
     assert body["services"]["items"][-1]["ms"] == 99999
     # Asking for only one of the two stays under the smaller ceiling it had before.
@@ -832,28 +832,30 @@ def test_services_all_carry_the_last_latency_of_the_healthy_ones(enabled):
     assert all(set(i) == {"name", "status"} for i in plain)
 
 
-def test_jellyfin_activity_comes_with_resources_all_only(enabled, monkeypatch):
-    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
+def test_jellyfin_activity_is_in_the_header_and_only_when_asked_for(enabled, monkeypatch):
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
                         lambda: {"transcoding": 2, "running_tasks": ["Generate Trickplay Images", "Scan Media Library"]})
-    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
-    assert res["jellyfin"] == {"transcodes": 2, "tasks": ["Generate Trickplay Images", "Scan Media Library"]}
-    assert "jellyfin" not in _summary(enabled, "?sections=resources")["resources"]
+    # With any sections, even ones that have nothing to do with resources.
+    body = _summary(enabled, "?sections=services&jellyfin=1")
+    assert body["jellyfin"] == {"transcodes": 2, "tasks": ["Generate Trickplay Images", "Scan Media Library"]}
+    assert "resources" not in body
+    # Not asked for: the response is what 1.10.0 sent.
+    assert "jellyfin" not in _summary(enabled, "?sections=services")
+    assert "jellyfin" not in _summary(enabled, "?sections=resources&resources=all&services=all")
+    assert list(body)[:5] == ["v", "now", "site", "overall", "jellyfin"]
 
 
 def test_idle_jellyfin_says_so_and_a_portal_without_one_does_not_fail(enabled, monkeypatch):
-    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
                         lambda: {"transcoding": 0, "running_tasks": []})
-    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"] == {"transcodes": 0, "tasks": []}
+    assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity", lambda: {})
-    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"] == {"transcodes": 0, "tasks": []}
+    assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
 
 
 def test_jellyfin_tasks_are_capped_and_cut(enabled, monkeypatch):
-    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
                         lambda: {"transcoding": 0, "running_tasks": [f"Task {i} " + "x" * 60 for i in range(9)]})
-    tasks = _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"]["tasks"]
+    tasks = _summary(enabled, "?jellyfin=1")["jellyfin"]["tasks"]
     assert len(tasks) == device_api.JELLYFIN_TASK_ITEMS
     assert all(len(t.encode()) <= device_api.JELLYFIN_TASK_BYTES and t.endswith("...") for t in tasks)

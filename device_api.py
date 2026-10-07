@@ -231,7 +231,7 @@ def announcements_section(announcements):
     }
 
 
-def resources_section(snapshot, include_all=False, jellyfin=None):
+def resources_section(snapshot, include_all=False):
     """The fields of ``monitoring.get_resource_snapshot()`` a small screen can use.
 
     ``*_sev`` is the portal's own ok/warn/crit judgement (``monitoring._severity``),
@@ -240,9 +240,8 @@ def resources_section(snapshot, include_all=False, jellyfin=None):
     four fit, those are the four worth seeing. Returns None when there is no snapshot.
 
     With ``include_all`` (``resources=all``) the list holds up to ALL_DISK_ITEMS disks and
-    the section gains ``gpu_count``, ``gpus`` and ``jellyfin`` (how many transcodes are
-    running and the names of the scheduled tasks running, from the cache the public page
-    reads), so a device that pages through its resources can show them all. Without it the section is exactly what 1.10.0 sent: a
+    the section gains ``gpu_count`` and ``gpus``, so a device that pages through its
+    resources can show them all. Without it the section is exactly what 1.10.0 sent: a
     firmware that never asked for more is not handed a body bigger than it sized for."""
     if not snapshot:
         return None
@@ -277,18 +276,25 @@ def resources_section(snapshot, include_all=False, jellyfin=None):
             "mem_total_gb": _number(g.get("mem_total_gb")),
             "temp_c": _number(g.get("temp_c")),
         } for g in gpus[:GPU_ITEMS]]
-        activity = jellyfin or {}
-        section["jellyfin"] = {
-            "transcodes": int(_number(activity.get("transcoding")) or 0),
-            "tasks": [text(t, JELLYFIN_TASK_BYTES) for t in (activity.get("running_tasks") or [])
-                      [:JELLYFIN_TASK_ITEMS]],
-        }
     return section
+
+
+def jellyfin_section(activity):
+    """What Jellyfin is doing right now, from the cache the public page reads: how many
+    transcodes are running and the names of the scheduled tasks (trickplay generation, a
+    library scan). Names only: the cache holds no progress, so a device cannot draw a bar."""
+    activity = activity or {}
+    return {
+        "transcodes": int(_number(activity.get("transcoding")) or 0),
+        "tasks": [text(t, JELLYFIN_TASK_BYTES)
+                  for t in (activity.get("running_tasks") or [])[:JELLYFIN_TASK_ITEMS]],
+    }
 
 
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
                   incidents=(), maintenance=(), announcements=(), resources=None,
-                  all_services=False, all_resources=False, jellyfin=None):
+                  all_services=False, all_resources=False, jellyfin=None,
+                  with_jellyfin=False):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
@@ -299,6 +305,10 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
         "site": text(site, SITE_BYTES),
         "overall": overall,
     }
+    if with_jellyfin:
+        # In the header, not in a section: a display that shows it above everything must get it
+        # whichever sections it switched on.
+        summary["jellyfin"] = jellyfin_section(jellyfin)
     if "services" in sections:
         summary["services"] = services_section(services, include_ok=all_services)
     if "incidents" in sections:
@@ -306,7 +316,7 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
     if "maintenance" in sections:
         summary["maintenance"] = maintenance_section(maintenance)
     if "resources" in sections:
-        summary["resources"] = resources_section(resources, include_all=all_resources, jellyfin=jellyfin)
+        summary["resources"] = resources_section(resources, include_all=all_resources)
     if "announcements" in sections:
         summary["announcements"] = announcements_section(announcements)
     return summary
