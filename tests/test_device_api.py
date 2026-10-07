@@ -15,6 +15,7 @@ import admin_search
 import app as app_module
 import db
 import device_api
+import integrations
 import monitoring
 
 KEY = "d" * 48
@@ -656,3 +657,205 @@ def test_the_admin_search_finds_the_page_and_its_controls():
     assert any(r["endpoint"] == "admin_device" for r in admin_search.search("display device"))
     assert any(r["endpoint"] == "admin_device" and r["jump"] == "device_api_enabled"
                for r in admin_search.search("enable display device api"))
+
+
+def test_services_all_lists_every_service_worst_first(enabled):
+    for name, status in [("Fine", "operational"), ("Dead", "down"), ("Sluggish", "slow"),
+                         ("Also fine", "operational")]:
+        db.create_service({"name": name, "url": "", "status": status})
+    items = _summary(enabled, "?sections=services&services=all")["services"]["items"]
+    assert [(i["name"], i["status"]) for i in items] == [
+        ("Dead", "down"), ("Sluggish", "slow"), ("Fine", "operational"), ("Also fine", "operational")]
+    # Without it the list is still the unhealthy ones only.
+    assert len(_summary(enabled, "?sections=services")["services"]["items"]) == 2
+
+
+def test_services_all_is_capped_and_the_worst_case_fits_its_ceiling(enabled, monkeypatch):
+    nasty = _worst_case_text()
+    for i in range(60):
+        db.create_service({"name": nasty, "url": "", "status": "operational"})
+    sid = db.create_service({"name": nasty, "url": "", "status": "down"})
+    for i in range(10):
+        db.create_incident({"title": nasty}, service_ids=[sid])
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+        db.create_maintenance_window({"title": nasty, "starts_at": f"2099-01-{i + 10}T00:00",
+                                      "ends_at": f"2099-02-{i + 10}T00:00"}, service_ids=[sid])
+    db.set_setting("site_name", nasty)
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit",
+              "free_gb": 99999.9} for _ in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    raw = _get(enabled, "?services=all").data
+    assert len(raw) < device_api.MAX_BYTES_ALL_SERVICES, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
+    assert body["services"]["items"][0]["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# resources=all: every disk and the GPUs, for a device that pages through them
+# ---------------------------------------------------------------------------
+def _gpu(i=0, **overrides):
+    gpu = {"name": f"NVIDIA GeForce RTX {3000 + i}", "util_percent": 37, "severity": "ok",
+           "mem_used_gb": 4.2, "mem_total_gb": 10.0, "temp_c": 61}
+    gpu.update(overrides)
+    return gpu
+
+
+def test_resources_without_all_are_what_1_10_sent(enabled, monkeypatch):
+    """No `resources=all`, no GPUs and no extra disks: a firmware that never asked is not
+    handed a bigger body than it sized its buffer for."""
+    disks = [{"path": f"/m{i}", "label": "", "percent": float(i), "severity": "ok", "free_gb": 1.0}
+             for i in range(12)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=[_gpu()]))
+    res = _summary(enabled, "?sections=resources")["resources"]
+    assert "gpus" not in res and "gpu_count" not in res
+    assert res["disk_count"] == 12 and len(res["disks"]) == device_api.DISK_ITEMS
+
+
+def test_resources_all_lists_more_disks_and_the_gpus(enabled, monkeypatch):
+    disks = [{"path": f"/m{i}", "label": "", "percent": float(i), "severity": "ok", "free_gb": 1.0}
+             for i in range(12)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=[_gpu(0, severity="crit", util_percent=91),
+                                                             _gpu(1, temp_c=None)]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["disk_count"] == 12 and len(res["disks"]) == device_api.ALL_DISK_ITEMS
+    assert res["disks"][0]["pct"] == 11.0   # still the fullest first
+    assert res["gpu_count"] == 2
+    assert res["gpus"][0]["name"] == "RTX 3000"   # the vendor words are dropped to fit a 240px screen
+    assert (res["gpus"][0]["mem_used_gb"], res["gpus"][0]["mem_total_gb"], res["gpus"][0]["temp_c"]) == (4.2, 10.0, 61)
+    assert (res["gpus"][0]["pct"], res["gpus"][0]["sev"]) == (91, "crit")
+    assert res["gpus"][1]["temp_c"] is None   # a card that exposes no temperature
+
+
+def test_resources_all_with_no_gpu_says_so(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["gpu_count"] == 0 and res["gpus"] == []
+
+
+def test_resources_all_is_capped_in_gpus(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(gpus=[_gpu(i) for i in range(9)]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["gpu_count"] == 9 and len(res["gpus"]) == device_api.GPU_ITEMS
+
+
+def test_an_unknown_resources_value_is_ignored(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[_gpu()]))
+    assert "gpus" not in _summary(enabled, "?sections=resources&resources=everything")["resources"]
+
+
+def test_a_gpu_without_a_severity_reads_null_rather_than_failing(enabled, monkeypatch):
+    """A GPU snapshot cached by an older portal build carries no `severity`."""
+    gpu = _gpu()
+    del gpu["severity"]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[gpu]))
+    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["gpus"][0]["sev"] is None
+
+
+def test_the_largest_possible_answer_fits_its_ceiling(enabled, monkeypatch):
+    """Every list full, `services=all` and `resources=all` together, and every string made
+    of what costs most once serialised: the answer a device with the biggest request can
+    receive, and the number it sizes its buffer by."""
+    nasty = _worst_case_text()
+    for i in range(60):
+        db.create_service({"name": nasty, "url": "", "status": "operational"})
+    sid = db.create_service({"name": nasty, "url": "", "status": "down"})
+    for i in range(10):
+        db.create_incident({"title": nasty}, service_ids=[sid])
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+        db.create_maintenance_window({"title": nasty, "starts_at": f"2099-01-{i + 10}T00:00",
+                                      "ends_at": f"2099-02-{i + 10}T00:00"}, service_ids=[sid])
+    db.set_setting("site_name", nasty)
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit",
+              "free_gb": 99999.9} for _ in range(20)]
+    gpus = [_gpu(i, name=nasty, util_percent=99.9, mem_used_gb=9999.9, mem_total_gb=9999.9,
+                 temp_c=99.9) for i in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=gpus, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    for service in db.list_services():
+        if service["status"] == "operational":
+            db.update_service_status_from_check(service["id"], "operational", 99999)
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 99, "running_tasks": [nasty] * 10})
+    raw = _get(enabled, "?services=all&resources=all&jellyfin=1").data
+    print("LARGEST", len(raw))
+    assert len(raw) < device_api.MAX_BYTES_ALL, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["resources"]["disks"]) == device_api.ALL_DISK_ITEMS
+    assert len(body["resources"]["gpus"]) == device_api.GPU_ITEMS
+    assert len(body["jellyfin"]["tasks"]) == device_api.JELLYFIN_TASK_ITEMS
+    assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
+    assert body["services"]["items"][-1]["ms"] == 99999
+    # Asking for only one of the two stays under the smaller ceiling it had before.
+    assert len(_get(enabled, "?services=all").data) < device_api.MAX_BYTES_ALL_SERVICES
+    assert len(_get(enabled).data) < device_api.MAX_BYTES
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("NVIDIA GeForce RTX 3080 Ti", "RTX 3080 Ti"),
+    ("NVIDIA RTX A4000", "RTX A4000"),
+    ("Tesla T4", "Tesla T4"),
+    ("NVIDIA GeForce", "GeForce"),   # only a whole leading word is dropped
+    ("NVIDIA GeForce RTX 4090 Laptop GPU Founders", "RTX 4090 Laptop G..."),
+    ("", ""),
+])
+def test_gpu_names_drop_the_vendor_words_and_fit(raw, expected):
+    assert device_api.gpu_name(raw) == expected
+    assert len(device_api.gpu_name(raw).encode()) <= device_api.GPU_NAME_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Latency beside the services, and Jellyfin's activity (both only with =all)
+# ---------------------------------------------------------------------------
+def test_services_all_carry_the_last_latency_of_the_healthy_ones(enabled):
+    fine = db.create_service({"name": "Fine", "url": "", "status": "operational"})
+    slow = db.create_service({"name": "Sluggish", "url": "", "status": "slow"})
+    down = db.create_service({"name": "Dead", "url": "", "status": "down"})
+    unmeasured = db.create_service({"name": "Manual", "url": "", "status": "operational"})
+    db.update_service_status_from_check(fine, "operational", 45)
+    db.update_service_status_from_check(slow, "slow", 1850)
+    db.update_service_status_from_check(down, "down", 30000)
+    items = {i["name"]: i for i in _summary(enabled, "?sections=services&services=all")["services"]["items"]}
+    assert items["Fine"]["ms"] == 45 and items["Sluggish"]["ms"] == 1850
+    assert "ms" not in items["Dead"]         # a timeout is not a latency worth a line
+    assert "ms" not in items["Manual"]       # nothing was ever measured: no 0 that reads as instant
+    # Without services=all the items are exactly what 1.10.0 sent.
+    plain = _summary(enabled, "?sections=services")["services"]["items"]
+    assert all(set(i) == {"name", "status"} for i in plain)
+
+
+def test_jellyfin_activity_is_in_the_header_and_only_when_asked_for(enabled, monkeypatch):
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 2, "running_tasks": ["Generate Trickplay Images", "Scan Media Library"]})
+    # With any sections, even ones that have nothing to do with resources.
+    body = _summary(enabled, "?sections=services&jellyfin=1")
+    assert body["jellyfin"] == {"transcodes": 2, "tasks": ["Generate Trickplay Images", "Scan Media Library"]}
+    assert "resources" not in body
+    # Not asked for: the response is what 1.10.0 sent.
+    assert "jellyfin" not in _summary(enabled, "?sections=services")
+    assert "jellyfin" not in _summary(enabled, "?sections=resources&resources=all&services=all")
+    assert list(body)[:5] == ["v", "now", "site", "overall", "jellyfin"]
+
+
+def test_idle_jellyfin_says_so_and_a_portal_without_one_does_not_fail(enabled, monkeypatch):
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 0, "running_tasks": []})
+    assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity", lambda: {})
+    assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
+
+
+def test_jellyfin_tasks_are_capped_and_cut(enabled, monkeypatch):
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 0, "running_tasks": [f"Task {i} " + "x" * 60 for i in range(9)]})
+    tasks = _summary(enabled, "?jellyfin=1")["jellyfin"]["tasks"]
+    assert len(tasks) == device_api.JELLYFIN_TASK_ITEMS
+    assert all(len(t.encode()) <= device_api.JELLYFIN_TASK_BYTES and t.endswith("...") for t in tasks)

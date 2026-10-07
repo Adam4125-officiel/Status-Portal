@@ -2016,6 +2016,26 @@ The owner tested v1.10.0-rc.1 end to end on the production portal with a real Sm
 running Status-ESP 0.4.0-rc.1 (key from System -> Display device, portal LAN address on the
 device) and declared it stable; released as v1.10.0.
 
+### 1.11.0: what the display asked for next (2026-10-07)
+
+Status-ESP's Resources screen cut off what did not fit (CPU, RAM and four disks; the owner has six
+disks, and a GPU), so 1.11.0 gave the device API three opt-in parameters, each leaving the default
+answer byte-for-byte what 1.10.0 sent: `services=all` (every service, with `ms`, the last check's
+latency, for the healthy and slow ones), `resources=all` (up to 8 disks, up to 4 GPUs with a load
+severity added to the GPU snapshot) and `jellyfin=1` (transcodes and the names of the running
+scheduled tasks, at the top level of the answer). The last one started inside the resources section
+and moved to the header in rc.4: a display shows it above everything, so a device with only the
+services switched on must get it too. The adversarial worst case with all three measures about
+7.7 KB against an 8 KB ceiling (`test_the_largest_possible_answer_fits_its_ceiling`).
+
+Verified in the sandbox: the full suite, and a real server with a faked `pynvml` (two GPUs, one
+cut name) and a faked Jellyfin cache, queried with and without each parameter. Verified on the real
+device: Status-ESP 0.4.0-rc.5 boots, keeps its link to a portal that does not know the new
+parameters (it ignores them) and reads the old answer. **Not verified: the new data on a real
+screen**, because the owner's portal was still on 1.11.0-rc.1 when the rc.4 fields were written, so
+no real GPU, latency or Jellyfin activity ever reached the device. The owner declared 1.11.0 stable
+on 2026-10-07.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

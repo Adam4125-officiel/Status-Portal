@@ -1849,9 +1849,18 @@ def api_device_summary():
             # the response says "unavailable" (null) rather than leaving it out.
             _logger.exception("Could not read the resource snapshot for the device API")
 
+    with_jellyfin = request.args.get("jellyfin", "").strip() == "1"
     summary = device_api.build_summary(
         sections, now=datetime.now(timezone.utc), site=db.get_setting("site_name", "Server"),
-        overall=compute_overall_status(services), services=services, **data)
+        overall=compute_overall_status(services), services=services,
+        # `services=all` also lists the operational services (Status-ESP pages through them).
+        all_services=(request.args.get("services", "").strip().lower() == "all"),
+        # `resources=all` also sends every disk and the GPUs (Status-ESP pages through them).
+        all_resources=(request.args.get("resources", "").strip().lower() == "all"),
+        # `jellyfin=1` adds what Jellyfin is doing, read from the background-refreshed cache
+        # (no outbound call); it comes with any `sections`.
+        with_jellyfin=with_jellyfin,
+        jellyfin=integrations.get_cached_jellyfin_activity() if with_jellyfin else None, **data)
     response = Response(device_api.dumps(summary), mimetype="application/json")
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     # A display polls this to learn what is true *now*.

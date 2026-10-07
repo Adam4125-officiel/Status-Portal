@@ -3093,6 +3093,38 @@ change the shape and the example changes with it.
 - **Verified against stand-ins and a real server, not a real device** — see
   `docs/HISTORY.md` → "The display-device API". Status-ESP's firmware side (how it parses
   this on 35 KB of RAM) is that repository's to verify.
+- **`services=all` (added in 1.11.0) also lists the operational services**, worst first
+  then the admin's order, capped at `ALL_SERVICE_ITEMS` (40), with its own ceiling
+  `MAX_BYTES_ALL_SERVICES` (7 KB) — Status-ESP pages through the full list on its screen.
+  Without the parameter the response is byte-for-byte what 1.10.0 sent (unhealthy only, 6
+  items, 4 KB), so an older firmware is unaffected. Both ceilings are asserted against the
+  adversarial worst case in `tests/test_device_api.py`.
+- **`resources=all` (added in 1.11.0-rc.2) sends every disk and the GPUs**, the same
+  opt-in shape as `services=all`: up to `ALL_DISK_ITEMS` (8) disks, fullest first, plus
+  `gpu_count` and `gpus` (`GPU_ITEMS` = 4; `name`, `pct`, `sev`, `mem_used_gb`,
+  `mem_total_gb`, `temp_c`). Without the parameter the section is byte-for-byte what 1.10.0
+  sent, with no `gpus` key at all, so an older firmware is never handed more than it sized
+  for. Asked for together with `services=all` (which is what Status-ESP does) this is the
+  largest answer the endpoint can give; its ceiling is `MAX_BYTES_ALL` (8 KB) and the
+  adversarial worst case measures about 7.1 KB, asserted in
+  `test_the_largest_possible_answer_fits_its_ceiling`. **Raising a cap means re-running that
+  test.** A GPU's `sev` is `monitoring._severity()` of its load, added to the GPU snapshot in
+  the same release (a snapshot without it reads `null`, never an error).
+- **`services=all` items also carry `ms`, and `jellyfin=1` adds a `jellyfin` object (`ms`
+  in 1.11.0-rc.3, `jellyfin` moved in 1.11.0-rc.4).** `ms` is `services.response_ms` (time to
+  the response headers of the last check), sent only for `operational`/`slow` services that
+  were actually measured and only with `services=all`: a manual service has no number rather
+  than a `0` that reads as "instant", and a timeout is not a latency. `jellyfin` is
+  `{"transcodes": n, "tasks": [names]}` (3 tasks, 28 bytes each) read from
+  `integrations.get_cached_jellyfin_activity()`, the cache the public page already reads, so
+  there is still no outbound call in the request. It sits **in the header, next to
+  `overall`, not inside a section**: a display shows it above everything (a band over the
+  status banner), so it has to arrive whichever sections the device switched on. It is
+  opt-in (`jellyfin=1`), like the two `=all` parameters: without it the response is what
+  1.10.0 sent. It carries **names only**: the cache has no task progress, so a device cannot
+  draw a bar for one (extending the cache is the way, not a second `/ScheduledTasks` call
+  here). The largest possible answer (all three parameters) is about 7.7 KB against the 8 KB
+  ceiling.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
