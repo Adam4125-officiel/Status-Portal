@@ -1853,7 +1853,9 @@ def api_device_summary():
         sections, now=datetime.now(timezone.utc), site=db.get_setting("site_name", "Server"),
         overall=compute_overall_status(services), services=services,
         # `services=all` also lists the operational services (Status-ESP pages through them).
-        all_services=(request.args.get("services", "").strip().lower() == "all"), **data)
+        all_services=(request.args.get("services", "").strip().lower() == "all"),
+        # `resources=all` also sends every disk and the GPUs (Status-ESP pages through them).
+        all_resources=(request.args.get("resources", "").strip().lower() == "all"), **data)
     response = Response(device_api.dumps(summary), mimetype="application/json")
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     # A display polls this to learn what is true *now*.

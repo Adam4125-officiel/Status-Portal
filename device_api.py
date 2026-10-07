@@ -20,6 +20,7 @@ escapes would triple the size of every accented letter.
 """
 import json
 import math
+import re
 from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
@@ -31,6 +32,11 @@ MAX_BYTES = 4096
 # With ``services=all`` the list also names every operational service, so the ceiling for
 # that request is higher; the device asks for it only when it pages through the list.
 MAX_BYTES_ALL_SERVICES = 7168
+
+# With ``resources=all`` the section also carries the GPUs and more disks. Asked for together
+# with ``services=all`` (which is how Status-ESP asks) this is the largest answer the endpoint
+# can give, and the ceiling a device sizes its buffer for.
+MAX_BYTES_ALL = 8192
 
 # The request's `sections` values, in the order they appear in the response.
 SECTIONS = ("services", "incidents", "maintenance", "resources", "announcements")
@@ -51,6 +57,8 @@ INCIDENT_ITEMS = 3
 MAINTENANCE_ITEMS = 3
 ANNOUNCEMENT_ITEMS = 3
 DISK_ITEMS = 4
+ALL_DISK_ITEMS = 8
+GPU_ITEMS = 4
 
 # String caps, in UTF-8 bytes.
 SITE_BYTES = 24
@@ -62,6 +70,7 @@ MAINTENANCE_SERVICES_BYTES = 32
 ANNOUNCEMENT_TITLE_BYTES = 32
 ANNOUNCEMENT_TEXT_BYTES = 80
 DISK_NAME_BYTES = 16
+GPU_NAME_BYTES = 20
 
 _ANNOUNCEMENT_TYPES = ("info", "warning", "critical", "success")
 
@@ -99,6 +108,17 @@ def text(value, max_bytes):
         return cleaned
     cut = raw[:max_bytes - 3].decode("utf-8", errors="ignore").rstrip()
     return cut + "..."
+
+
+_GPU_VENDOR_PREFIX = re.compile(r"^(?:NVIDIA\s+)?(?:GeForce\s+)?", re.IGNORECASE)
+
+
+def gpu_name(value):
+    """A GPU's name as a small screen wants it: the vendor words every NVIDIA card starts
+    with ("NVIDIA GeForce RTX 3080" -> "RTX 3080") are what 20 bytes cannot afford."""
+    name = text(value, 80)
+    short = _GPU_VENDOR_PREFIX.sub("", name)
+    return text(short or name, GPU_NAME_BYTES)
 
 
 def iso_utc(value):
@@ -200,18 +220,23 @@ def announcements_section(announcements):
     }
 
 
-def resources_section(snapshot):
+def resources_section(snapshot, include_all=False):
     """The fields of ``monitoring.get_resource_snapshot()`` a small screen can use.
 
     ``*_sev`` is the portal's own ok/warn/crit judgement (``monitoring._severity``),
     passed through so the device colours its bars exactly as the web page does instead
     of carrying a second copy of the thresholds. Disks are the fullest first: when only
-    four fit, those are the four worth seeing. Returns None when there is no snapshot."""
+    four fit, those are the four worth seeing. Returns None when there is no snapshot.
+
+    With ``include_all`` (``resources=all``) the list holds up to ALL_DISK_ITEMS disks and
+    the section gains ``gpu_count`` and ``gpus``, so a device that pages through its
+    resources can show them all. Without it the section is exactly what 1.10.0 sent: a
+    firmware that never asked for more is not handed a body bigger than it sized for."""
     if not snapshot:
         return None
     network = snapshot.get("network") or {}
     disks = sorted(snapshot.get("disks") or [], key=lambda d: -(_number(d.get("percent")) or 0))
-    return {
+    section = {
         "cpu": _number(snapshot.get("cpu_percent")),
         "cpu_sev": snapshot.get("cpu_severity"),
         "cpu_temp_c": _number(snapshot.get("cpu_temp_c")),
@@ -227,13 +252,25 @@ def resources_section(snapshot):
             "pct": _number(d.get("percent")),
             "sev": d.get("severity"),
             "free_gb": _number(d.get("free_gb")),
-        } for d in disks[:DISK_ITEMS]],
+        } for d in disks[:ALL_DISK_ITEMS if include_all else DISK_ITEMS]],
     }
+    if include_all:
+        gpus = snapshot.get("gpus") or []
+        section["gpu_count"] = len(gpus)
+        section["gpus"] = [{
+            "name": gpu_name(g.get("name")),
+            "pct": _number(g.get("util_percent")),
+            "sev": g.get("severity"),
+            "mem_used_gb": _number(g.get("mem_used_gb")),
+            "mem_total_gb": _number(g.get("mem_total_gb")),
+            "temp_c": _number(g.get("temp_c")),
+        } for g in gpus[:GPU_ITEMS]]
+    return section
 
 
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
                   incidents=(), maintenance=(), announcements=(), resources=None,
-                  all_services=False):
+                  all_services=False, all_resources=False):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
@@ -251,7 +288,7 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
     if "maintenance" in sections:
         summary["maintenance"] = maintenance_section(maintenance)
     if "resources" in sections:
-        summary["resources"] = resources_section(resources)
+        summary["resources"] = resources_section(resources, include_all=all_resources)
     if "announcements" in sections:
         summary["announcements"] = announcements_section(announcements)
     return summary

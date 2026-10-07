@@ -391,6 +391,7 @@ def _get_gpu_snapshot():
             gpus.append({
                 "name": name,
                 "util_percent": util.gpu,
+                "severity": _severity(util.gpu),
                 "mem_used_gb": round(mem.used / (1024 ** 3), 1),
                 "mem_total_gb": round(mem.total / (1024 ** 3), 1),
                 "temp_c": temp_c,

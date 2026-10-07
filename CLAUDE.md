@@ -3099,6 +3099,17 @@ change the shape and the example changes with it.
   Without the parameter the response is byte-for-byte what 1.10.0 sent (unhealthy only, 6
   items, 4 KB), so an older firmware is unaffected. Both ceilings are asserted against the
   adversarial worst case in `tests/test_device_api.py`.
+- **`resources=all` (added in 1.11.0-rc.2) sends every disk and the GPUs**, the same
+  opt-in shape as `services=all`: up to `ALL_DISK_ITEMS` (8) disks, fullest first, plus
+  `gpu_count` and `gpus` (`GPU_ITEMS` = 4; `name`, `pct`, `sev`, `mem_used_gb`,
+  `mem_total_gb`, `temp_c`). Without the parameter the section is byte-for-byte what 1.10.0
+  sent, with no `gpus` key at all, so an older firmware is never handed more than it sized
+  for. Asked for together with `services=all` (which is what Status-ESP does) this is the
+  largest answer the endpoint can give; its ceiling is `MAX_BYTES_ALL` (8 KB) and the
+  adversarial worst case measures about 7.1 KB, asserted in
+  `test_the_largest_possible_answer_fits_its_ceiling`. **Raising a cap means re-running that
+  test.** A GPU's `sev` is `monitoring._severity()` of its load, added to the GPU snapshot in
+  the same release (a snapshot without it reads `null`, never an error).
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

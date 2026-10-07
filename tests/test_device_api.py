@@ -691,3 +691,114 @@ def test_services_all_is_capped_and_the_worst_case_fits_its_ceiling(enabled, mon
     body = json.loads(raw)
     assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
     assert body["services"]["items"][0]["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# resources=all: every disk and the GPUs, for a device that pages through them
+# ---------------------------------------------------------------------------
+def _gpu(i=0, **overrides):
+    gpu = {"name": f"NVIDIA GeForce RTX {3000 + i}", "util_percent": 37, "severity": "ok",
+           "mem_used_gb": 4.2, "mem_total_gb": 10.0, "temp_c": 61}
+    gpu.update(overrides)
+    return gpu
+
+
+def test_resources_without_all_are_what_1_10_sent(enabled, monkeypatch):
+    """No `resources=all`, no GPUs and no extra disks: a firmware that never asked is not
+    handed a bigger body than it sized its buffer for."""
+    disks = [{"path": f"/m{i}", "label": "", "percent": float(i), "severity": "ok", "free_gb": 1.0}
+             for i in range(12)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=[_gpu()]))
+    res = _summary(enabled, "?sections=resources")["resources"]
+    assert "gpus" not in res and "gpu_count" not in res
+    assert res["disk_count"] == 12 and len(res["disks"]) == device_api.DISK_ITEMS
+
+
+def test_resources_all_lists_more_disks_and_the_gpus(enabled, monkeypatch):
+    disks = [{"path": f"/m{i}", "label": "", "percent": float(i), "severity": "ok", "free_gb": 1.0}
+             for i in range(12)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=[_gpu(0, severity="crit", util_percent=91),
+                                                             _gpu(1, temp_c=None)]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["disk_count"] == 12 and len(res["disks"]) == device_api.ALL_DISK_ITEMS
+    assert res["disks"][0]["pct"] == 11.0   # still the fullest first
+    assert res["gpu_count"] == 2
+    assert res["gpus"][0]["name"] == "RTX 3000"   # the vendor words are dropped to fit a 240px screen
+    assert (res["gpus"][0]["mem_used_gb"], res["gpus"][0]["mem_total_gb"], res["gpus"][0]["temp_c"]) == (4.2, 10.0, 61)
+    assert (res["gpus"][0]["pct"], res["gpus"][0]["sev"]) == (91, "crit")
+    assert res["gpus"][1]["temp_c"] is None   # a card that exposes no temperature
+
+
+def test_resources_all_with_no_gpu_says_so(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["gpu_count"] == 0 and res["gpus"] == []
+
+
+def test_resources_all_is_capped_in_gpus(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(gpus=[_gpu(i) for i in range(9)]))
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["gpu_count"] == 9 and len(res["gpus"]) == device_api.GPU_ITEMS
+
+
+def test_an_unknown_resources_value_is_ignored(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[_gpu()]))
+    assert "gpus" not in _summary(enabled, "?sections=resources&resources=everything")["resources"]
+
+
+def test_a_gpu_without_a_severity_reads_null_rather_than_failing(enabled, monkeypatch):
+    """A GPU snapshot cached by an older portal build carries no `severity`."""
+    gpu = _gpu()
+    del gpu["severity"]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot(gpus=[gpu]))
+    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["gpus"][0]["sev"] is None
+
+
+def test_the_largest_possible_answer_fits_its_ceiling(enabled, monkeypatch):
+    """Every list full, `services=all` and `resources=all` together, and every string made
+    of what costs most once serialised: the answer a device with the biggest request can
+    receive, and the number it sizes its buffer by."""
+    nasty = _worst_case_text()
+    for i in range(60):
+        db.create_service({"name": nasty, "url": "", "status": "operational"})
+    sid = db.create_service({"name": nasty, "url": "", "status": "down"})
+    for i in range(10):
+        db.create_incident({"title": nasty}, service_ids=[sid])
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+        db.create_maintenance_window({"title": nasty, "starts_at": f"2099-01-{i + 10}T00:00",
+                                      "ends_at": f"2099-02-{i + 10}T00:00"}, service_ids=[sid])
+    db.set_setting("site_name", nasty)
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit",
+              "free_gb": 99999.9} for _ in range(20)]
+    gpus = [_gpu(i, name=nasty, util_percent=99.9, mem_used_gb=9999.9, mem_total_gb=9999.9,
+                 temp_c=99.9) for i in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=gpus, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    raw = _get(enabled, "?services=all&resources=all").data
+    print("LARGEST", len(raw))
+    assert len(raw) < device_api.MAX_BYTES_ALL, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["resources"]["disks"]) == device_api.ALL_DISK_ITEMS
+    assert len(body["resources"]["gpus"]) == device_api.GPU_ITEMS
+    assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
+    # Asking for only one of the two stays under the smaller ceiling it had before.
+    assert len(_get(enabled, "?services=all").data) < device_api.MAX_BYTES_ALL_SERVICES
+    assert len(_get(enabled).data) < device_api.MAX_BYTES
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("NVIDIA GeForce RTX 3080 Ti", "RTX 3080 Ti"),
+    ("NVIDIA RTX A4000", "RTX A4000"),
+    ("Tesla T4", "Tesla T4"),
+    ("NVIDIA GeForce", "GeForce"),   # only a whole leading word is dropped
+    ("NVIDIA GeForce RTX 4090 Laptop GPU Founders", "RTX 4090 Laptop G..."),
+    ("", ""),
+])
+def test_gpu_names_drop_the_vendor_words_and_fit(raw, expected):
+    assert device_api.gpu_name(raw) == expected
+    assert len(device_api.gpu_name(raw).encode()) <= device_api.GPU_NAME_BYTES
