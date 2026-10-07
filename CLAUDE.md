@@ -113,7 +113,7 @@ have bitten someone on exactly that change.
 | Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
 | Any call to Jellyfin | *Talking to Jellyfin* → one header builder, and never a `X-Emby-*` header |
 | The gamesportal integration, or `/api/notify/*` | *Cross-repo: gamesportal integration* → two different API keys, two different directions |
-| The display-device API (`/api/device/summary`, `device_api.py`, Status-ESP) | *Display device API* → bounded by construction, keyed, never a second key check |
+| The display-device API (`/api/device/summary`, `device_api.py`, Status-ESP) | *Display device API* → bounded by construction, keyed, never a second key check; a new field is an opt-in parameter, never a bigger default |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -3004,7 +3004,7 @@ The Discord half specifically (added after this round of cross-repo testing, see
 above) has only unit/route test coverage - not re-run against a live Games Portal
 instance the way the email path was.
 
-## Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0
+## Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0; extended in v1.11.0
 
 A compact JSON summary for **Status-ESP**, the sibling firmware for a 240x240 ESP8266
 display (GeekMagic SmallTV-Ultra, ~35 KB of free RAM, plain HTTP only, no TLS). The
@@ -3099,7 +3099,7 @@ change the shape and the example changes with it.
   Without the parameter the response is byte-for-byte what 1.10.0 sent (unhealthy only, 6
   items, 4 KB), so an older firmware is unaffected. Both ceilings are asserted against the
   adversarial worst case in `tests/test_device_api.py`.
-- **`resources=all` (added in 1.11.0-rc.2) sends every disk and the GPUs**, the same
+- **`resources=all` (1.11.0) sends every disk and the GPUs**, the same
   opt-in shape as `services=all`: up to `ALL_DISK_ITEMS` (8) disks, fullest first, plus
   `gpu_count` and `gpus` (`GPU_ITEMS` = 4; `name`, `pct`, `sev`, `mem_used_gb`,
   `mem_total_gb`, `temp_c`). Without the parameter the section is byte-for-byte what 1.10.0
@@ -3110,8 +3110,8 @@ change the shape and the example changes with it.
   `test_the_largest_possible_answer_fits_its_ceiling`. **Raising a cap means re-running that
   test.** A GPU's `sev` is `monitoring._severity()` of its load, added to the GPU snapshot in
   the same release (a snapshot without it reads `null`, never an error).
-- **`services=all` items also carry `ms`, and `jellyfin=1` adds a `jellyfin` object (`ms`
-  in 1.11.0-rc.3, `jellyfin` moved in 1.11.0-rc.4).** `ms` is `services.response_ms` (time to
+- **`services=all` items also carry `ms`, and `jellyfin=1` adds a `jellyfin` object
+  (1.11.0).** `ms` is `services.response_ms` (time to
   the response headers of the last check), sent only for `operational`/`slow` services that
   were actually measured and only with `services=all`: a manual service has no number rather
   than a `0` that reads as "instant", and a timeout is not a latency. `jellyfin` is
@@ -3125,6 +3125,23 @@ change the shape and the example changes with it.
   draw a bar for one (extending the cache is the way, not a second `/ScheduledTasks` call
   here). The largest possible answer (all three parameters) is about 7.7 KB against the 8 KB
   ceiling.
+- **Every extension of this endpoint is an opt-in parameter, and the default answer never
+  grows.** `services=all`, `resources=all` and `jellyfin=1` all follow it: a firmware that
+  does not send the parameter gets exactly what 1.10.0 sent, so an old Status-ESP is never
+  handed a body bigger than the buffer it was sized for. A new field means a new parameter
+  (or a new value of an existing one), a ceiling re-measured with the adversarial worst case,
+  and a test that the default response does not carry it - `tests/test_device_api.py` has that
+  test for each of the three. Only a change to what `device_api.example_summary()` shows needs
+  the admin page's description of it updated too (`admin_device.html`).
+- **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`, firmware 1.0.0
+  at the time of 1.11.0). It asks for all three parameters and degrades by itself against an
+  older portal (it just shows less: four disks, no GPU, no latency, no Jellyfin band), which is
+  why **a portal release goes out first and the firmware second**, never the other way round.
+  The firmware needs 1.10.0 for anything at all, 1.11.0 for everything. A change to the shape
+  of the answer is therefore a change in two repositories, and the firmware's parser is the
+  part this repository cannot test. **What has not been seen**: 1.11.0's new fields (GPUs, latency, the
+  Jellyfin band) were exercised against stand-ins and a real device on an older portal, never as real
+  data on a real screen (`docs/HISTORY.md` -> "1.11.0: what the display asked for next").
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
