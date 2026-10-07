@@ -59,6 +59,7 @@ ANNOUNCEMENT_ITEMS = 3
 DISK_ITEMS = 4
 ALL_DISK_ITEMS = 8
 GPU_ITEMS = 4
+JELLYFIN_TASK_ITEMS = 3
 
 # String caps, in UTF-8 bytes.
 SITE_BYTES = 24
@@ -71,6 +72,7 @@ ANNOUNCEMENT_TITLE_BYTES = 32
 ANNOUNCEMENT_TEXT_BYTES = 80
 DISK_NAME_BYTES = 16
 GPU_NAME_BYTES = 20
+JELLYFIN_TASK_BYTES = 28
 
 _ANNOUNCEMENT_TYPES = ("info", "warning", "critical", "success")
 
@@ -169,8 +171,17 @@ def services_section(services, include_ok=False):
     section = {"total": len(counted)}
     section.update(counts)
     cap = ALL_SERVICE_ITEMS if include_ok else SERVICE_ITEMS
-    section["items"] = [{"name": text(s.get("name"), SERVICE_NAME_BYTES), "status": s["status"]}
-                        for s in listed[:cap]]
+    items = []
+    for s in listed[:cap]:
+        item = {"name": text(s.get("name"), SERVICE_NAME_BYTES), "status": s["status"]}
+        # With include_ok, how long the last check took to answer, for the services whose tag a
+        # device writes a latency beside. Left out when nothing was measured (a manual service, a
+        # check that has not run yet) rather than sent as a 0 that reads as "instant".
+        ms = _number(s.get("response_ms"))
+        if include_ok and ms is not None and ms >= 0 and s["status"] in ("operational", "slow"):
+            item["ms"] = int(ms)
+        items.append(item)
+    section["items"] = items
     return section
 
 
@@ -220,7 +231,7 @@ def announcements_section(announcements):
     }
 
 
-def resources_section(snapshot, include_all=False):
+def resources_section(snapshot, include_all=False, jellyfin=None):
     """The fields of ``monitoring.get_resource_snapshot()`` a small screen can use.
 
     ``*_sev`` is the portal's own ok/warn/crit judgement (``monitoring._severity``),
@@ -229,8 +240,9 @@ def resources_section(snapshot, include_all=False):
     four fit, those are the four worth seeing. Returns None when there is no snapshot.
 
     With ``include_all`` (``resources=all``) the list holds up to ALL_DISK_ITEMS disks and
-    the section gains ``gpu_count`` and ``gpus``, so a device that pages through its
-    resources can show them all. Without it the section is exactly what 1.10.0 sent: a
+    the section gains ``gpu_count``, ``gpus`` and ``jellyfin`` (how many transcodes are
+    running and the names of the scheduled tasks running, from the cache the public page
+    reads), so a device that pages through its resources can show them all. Without it the section is exactly what 1.10.0 sent: a
     firmware that never asked for more is not handed a body bigger than it sized for."""
     if not snapshot:
         return None
@@ -265,12 +277,18 @@ def resources_section(snapshot, include_all=False):
             "mem_total_gb": _number(g.get("mem_total_gb")),
             "temp_c": _number(g.get("temp_c")),
         } for g in gpus[:GPU_ITEMS]]
+        activity = jellyfin or {}
+        section["jellyfin"] = {
+            "transcodes": int(_number(activity.get("transcoding")) or 0),
+            "tasks": [text(t, JELLYFIN_TASK_BYTES) for t in (activity.get("running_tasks") or [])
+                      [:JELLYFIN_TASK_ITEMS]],
+        }
     return section
 
 
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
                   incidents=(), maintenance=(), announcements=(), resources=None,
-                  all_services=False, all_resources=False):
+                  all_services=False, all_resources=False, jellyfin=None):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
@@ -288,7 +306,7 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
     if "maintenance" in sections:
         summary["maintenance"] = maintenance_section(maintenance)
     if "resources" in sections:
-        summary["resources"] = resources_section(resources, include_all=all_resources)
+        summary["resources"] = resources_section(resources, include_all=all_resources, jellyfin=jellyfin)
     if "announcements" in sections:
         summary["announcements"] = announcements_section(announcements)
     return summary

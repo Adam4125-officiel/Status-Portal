@@ -15,6 +15,7 @@ import admin_search
 import app as app_module
 import db
 import device_api
+import integrations
 import monitoring
 
 KEY = "d" * 48
@@ -779,13 +780,20 @@ def test_the_largest_possible_answer_fits_its_ceiling(enabled, monkeypatch):
                         lambda: _snapshot(disks=disks, gpus=gpus, cpu_temp_c=99.9, mem_used_gb=9999.9,
                                           mem_total_gb=9999.9,
                                           network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    for service in db.list_services():
+        if service["status"] == "operational":
+            db.update_service_status_from_check(service["id"], "operational", 99999)
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 99, "running_tasks": [nasty] * 10})
     raw = _get(enabled, "?services=all&resources=all").data
     print("LARGEST", len(raw))
     assert len(raw) < device_api.MAX_BYTES_ALL, f"{len(raw)} bytes"
     body = json.loads(raw)
     assert len(body["resources"]["disks"]) == device_api.ALL_DISK_ITEMS
     assert len(body["resources"]["gpus"]) == device_api.GPU_ITEMS
+    assert len(body["resources"]["jellyfin"]["tasks"]) == device_api.JELLYFIN_TASK_ITEMS
     assert len(body["services"]["items"]) == device_api.ALL_SERVICE_ITEMS
+    assert body["services"]["items"][-1]["ms"] == 99999
     # Asking for only one of the two stays under the smaller ceiling it had before.
     assert len(_get(enabled, "?services=all").data) < device_api.MAX_BYTES_ALL_SERVICES
     assert len(_get(enabled).data) < device_api.MAX_BYTES
@@ -802,3 +810,50 @@ def test_the_largest_possible_answer_fits_its_ceiling(enabled, monkeypatch):
 def test_gpu_names_drop_the_vendor_words_and_fit(raw, expected):
     assert device_api.gpu_name(raw) == expected
     assert len(device_api.gpu_name(raw).encode()) <= device_api.GPU_NAME_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Latency beside the services, and Jellyfin's activity (both only with =all)
+# ---------------------------------------------------------------------------
+def test_services_all_carry_the_last_latency_of_the_healthy_ones(enabled):
+    fine = db.create_service({"name": "Fine", "url": "", "status": "operational"})
+    slow = db.create_service({"name": "Sluggish", "url": "", "status": "slow"})
+    down = db.create_service({"name": "Dead", "url": "", "status": "down"})
+    unmeasured = db.create_service({"name": "Manual", "url": "", "status": "operational"})
+    db.update_service_status_from_check(fine, "operational", 45)
+    db.update_service_status_from_check(slow, "slow", 1850)
+    db.update_service_status_from_check(down, "down", 30000)
+    items = {i["name"]: i for i in _summary(enabled, "?sections=services&services=all")["services"]["items"]}
+    assert items["Fine"]["ms"] == 45 and items["Sluggish"]["ms"] == 1850
+    assert "ms" not in items["Dead"]         # a timeout is not a latency worth a line
+    assert "ms" not in items["Manual"]       # nothing was ever measured: no 0 that reads as instant
+    # Without services=all the items are exactly what 1.10.0 sent.
+    plain = _summary(enabled, "?sections=services")["services"]["items"]
+    assert all(set(i) == {"name", "status"} for i in plain)
+
+
+def test_jellyfin_activity_comes_with_resources_all_only(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 2, "running_tasks": ["Generate Trickplay Images", "Scan Media Library"]})
+    res = _summary(enabled, "?sections=resources&resources=all")["resources"]
+    assert res["jellyfin"] == {"transcodes": 2, "tasks": ["Generate Trickplay Images", "Scan Media Library"]}
+    assert "jellyfin" not in _summary(enabled, "?sections=resources")["resources"]
+
+
+def test_idle_jellyfin_says_so_and_a_portal_without_one_does_not_fail(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 0, "running_tasks": []})
+    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"] == {"transcodes": 0, "tasks": []}
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity", lambda: {})
+    assert _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"] == {"transcodes": 0, "tasks": []}
+
+
+def test_jellyfin_tasks_are_capped_and_cut(enabled, monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 0, "running_tasks": [f"Task {i} " + "x" * 60 for i in range(9)]})
+    tasks = _summary(enabled, "?sections=resources&resources=all")["resources"]["jellyfin"]["tasks"]
+    assert len(tasks) == device_api.JELLYFIN_TASK_ITEMS
+    assert all(len(t.encode()) <= device_api.JELLYFIN_TASK_BYTES and t.endswith("...") for t in tasks)

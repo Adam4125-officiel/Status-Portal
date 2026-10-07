@@ -81,11 +81,11 @@
     <table>
       <thead><tr><th style="width: 130px;">Section</th><th>Carries</th></tr></thead>
       <tbody>
-        <tr><td><code>services</code></td><td>How many services are in each state, and the worst few that are not operational. A service you excluded from the overall status is excluded here too.</td></tr>
+        <tr><td><code>services</code></td><td>How many services are in each state, and the worst few that are not operational. A service you excluded from the overall status is excluded here too. With <code>services=all</code>: every service, with the latency of its last check.</td></tr>
         <tr><td><code>incidents</code></td><td>How many incidents are open, and the newest few.</td></tr>
         <tr><td><code>maintenance</code></td><td>Maintenance in progress, then the soonest upcoming.</td></tr>
         <tr><td><code>announcements</code></td><td>Announcements showing right now — never a scheduled or expired one.</td></tr>
-        <tr><td><code>resources</code></td><td>CPU, memory, network and the fullest few disks. With <code>resources=all</code>: up to eight disks and the NVIDIA GPUs (load, memory, temperature), for a display that pages through them.</td></tr>
+        <tr><td><code>resources</code></td><td>CPU, memory, network and the fullest few disks. With <code>resources=all</code>: up to eight disks and the NVIDIA GPUs (load, memory, temperature) and Jellyfin's activity (transcodes and running tasks), for a display that pages through them.</td></tr>
       </tbody>
     </table>
   </div>

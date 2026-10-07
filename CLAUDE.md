@@ -3110,6 +3110,16 @@ change the shape and the example changes with it.
   `test_the_largest_possible_answer_fits_its_ceiling`. **Raising a cap means re-running that
   test.** A GPU's `sev` is `monitoring._severity()` of its load, added to the GPU snapshot in
   the same release (a snapshot without it reads `null`, never an error).
+- **`services=all` items also carry `ms`, and `resources=all` carries `jellyfin` (both
+  1.11.0-rc.3).** `ms` is `services.response_ms` (time to the response headers of the last
+  check), sent only for `operational`/`slow` services that were actually measured and only
+  with `services=all`: a manual service has no number rather than a `0` that reads as
+  "instant", and a timeout is not a latency. `jellyfin` is `{"transcodes": n, "tasks": [names]}`
+  (3 tasks, 28 bytes each) read from `integrations.get_cached_jellyfin_activity()`, the cache
+  the public page already reads, so there is still no outbound call in the request. It
+  carries **names only**: the cache has no task progress, so a device cannot draw a bar for
+  one (extending the cache is the way, not a second `/ScheduledTasks` call here). The
+  largest possible answer is now about 7.7 KB against the 8 KB ceiling.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 

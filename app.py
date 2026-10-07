@@ -1844,6 +1844,8 @@ def api_device_summary():
             # holder of the key is the admin's own display. The public pages' switches
             # decide what *visitors* see; the key decides what this sees.
             data["resources"] = _request_snapshot()
+            # Read from the background-refreshed cache; only `resources=all` sends it.
+            data["jellyfin"] = integrations.get_cached_jellyfin_activity()
         except Exception:
             # One failing section must not take the rest of the summary down with it;
             # the response says "unavailable" (null) rather than leaving it out.
