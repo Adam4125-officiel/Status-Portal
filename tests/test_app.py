@@ -4794,3 +4794,14 @@ def test_admin_pages_have_balanced_divs(client, isolated_db, path):
         f"<form> early, which moves every field after it out of the form in the DOM")
 
 
+
+
+def test_public_incidents_section_is_titled_incidents_and_keeps_its_maintenance_blocks(client):
+    """The block above the maintenance sub-blocks only ever lists incidents, so its heading says
+    so. The maintenance blocks keep their own headings underneath it, and the admin's
+    section-order list names the block the same way a visitor sees it."""
+    html = client.get("/").data.decode()
+    assert '<div class="section-title">Incidents</div>' in html
+    assert "Incidents &amp; maintenance" not in html
+    assert '<div class="section-title">Maintenance history</div>' in html
+    assert dict(app_module.PUBLIC_SECTIONS)["incidents"] == "Incidents"

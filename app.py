@@ -1043,7 +1043,7 @@ def _service_defaults():
 PUBLIC_SECTIONS = [
     ("announcements", "Announcements"),
     ("services", "Services"),
-    ("incidents", "Incidents & maintenance"),
+    ("incidents", "Incidents"),
 ]
 _DEFAULT_SECTION_ORDER = [key for key, _ in PUBLIC_SECTIONS]
 
