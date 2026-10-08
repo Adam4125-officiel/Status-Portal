@@ -38,8 +38,24 @@ MAX_BYTES_ALL_SERVICES = 7168
 # can give, and the ceiling a device sizes its buffer for.
 MAX_BYTES_ALL = 8192
 
-# The request's `sections` values, in the order they appear in the response.
+# With the opt-in ``vms`` section as well - every section, ``services=all``, ``resources=all``,
+# ``jellyfin=1`` and ten VMs - the answer grows by the VM list: the adversarial worst case
+# measures about 8.9 KB (tests/test_device_api.py asserts it), a realistic one 3-4 KB. A device
+# that asks for ``vms`` sizes its buffer by this; one that does not never receives more than
+# MAX_BYTES_ALL.
+MAX_BYTES_ALL_WITH_VMS = 9216
+
+# The request's `sections` values, in the order they appear in the response. An absent or
+# blank `sections` means exactly these.
 SECTIONS = ("services", "incidents", "maintenance", "resources", "announcements")
+
+# Sections a request only gets by naming them. Leaving `sections` out still means the five above,
+# so a device that has never heard of one is never handed a body bigger than it sized for: the same
+# opt-in rule as `services=all`, `resources=all` and `jellyfin=1`.
+OPT_IN_SECTIONS = ("vms",)
+
+# Every name `sections` accepts, in response order.
+ALL_SECTIONS = SECTIONS + OPT_IN_SECTIONS
 
 # Worst first. Every status enumeration in this app needs the fifth, cosmetic `slow`
 # tier (CLAUDE.md), and tests/test_conventions.py checks this map for it.
@@ -60,6 +76,7 @@ DISK_ITEMS = 4
 ALL_DISK_ITEMS = 8
 GPU_ITEMS = 4
 JELLYFIN_TASK_ITEMS = 3
+VM_ITEMS = 10
 
 # String caps, in UTF-8 bytes.
 SITE_BYTES = 24
@@ -73,6 +90,9 @@ ANNOUNCEMENT_TEXT_BYTES = 80
 DISK_NAME_BYTES = 16
 GPU_NAME_BYTES = 20
 JELLYFIN_TASK_BYTES = 28
+VM_NAME_BYTES = 24
+VM_STATE_BYTES = 12     # Hyper-V's longest state name is "Snapshotting"
+VM_UPTIME_BYTES = 10    # "123d 23h", "23h 59m", or the em dash the snapshot uses for "unknown"
 
 _ANNOUNCEMENT_TYPES = ("info", "warning", "critical", "success")
 
@@ -80,16 +100,17 @@ _ANNOUNCEMENT_TYPES = ("info", "warning", "critical", "success")
 def parse_sections(raw):
     """The sections a request asked for, in canonical order.
 
-    Absent or blank (or nothing but commas and spaces) means all of them. Names the portal doesn't know are ignored, so a
-    firmware newer than the portal keeps working; but a request naming *only* unknown
-    sections returns None, which the route turns into a 400 - an answer that is just a
-    header, for a typo, would look like a quiet portal."""
+    Absent or blank (or nothing but commas and spaces) means the default sections, which
+    leave out the opt-in ones (``vms``): those come only when named. Names the portal doesn't
+    know are ignored, so a firmware newer than the portal keeps working; but a request naming
+    *only* unknown sections returns None, which the route turns into a 400 - an answer that is
+    just a header, for a typo, would look like a quiet portal."""
     if raw is None or not raw.strip():
         return list(SECTIONS)
     asked = {part.strip().lower() for part in raw.split(",") if part.strip()}
     if not asked:
         return list(SECTIONS)
-    chosen = [name for name in SECTIONS if name in asked]
+    chosen = [name for name in ALL_SECTIONS if name in asked]
     return chosen or None
 
 
@@ -279,6 +300,29 @@ def resources_section(snapshot, include_all=False):
     return section
 
 
+def vms_section(vms):
+    """The Hyper-V virtual machines the portal has detected: how many, how many are running, and
+    the first few (by name) with their state and uptime, as the public VM page lists them. It
+    reads the background-refreshed cache, never PowerShell. ``state`` is Hyper-V's own word
+    (Running, Off, Paused, Saved, Starting...) so a device can colour by it; ``up`` is the portal's
+    short uptime text ("3d 4h"), and means nothing for a VM that is not running.
+
+    No VMs at all (not a Windows host, no Hyper-V) is an empty list, not a null: the portal read
+    its answer fine and it was "none". Only a list that could not be read is None."""
+    if vms is None:
+        return None
+    ordered = sorted(vms, key=lambda vm: str(vm.get("name") or "").casefold())
+    return {
+        "total": len(ordered),
+        "running": sum(1 for vm in ordered if vm.get("state") == "Running"),
+        "items": [{
+            "name": text(vm.get("name"), VM_NAME_BYTES),
+            "state": text(vm.get("state"), VM_STATE_BYTES),
+            "up": text(vm.get("uptime"), VM_UPTIME_BYTES),
+        } for vm in ordered[:VM_ITEMS]],
+    }
+
+
 def jellyfin_section(activity):
     """What Jellyfin is doing right now, from the cache the public page reads: how many
     transcodes are running and the names of the scheduled tasks (trickplay generation, a
@@ -294,7 +338,7 @@ def jellyfin_section(activity):
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
                   incidents=(), maintenance=(), announcements=(), resources=None,
                   all_services=False, all_resources=False, jellyfin=None,
-                  with_jellyfin=False):
+                  with_jellyfin=False, vms=None):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
@@ -319,6 +363,8 @@ def build_summary(sections, *, now, site, overall, services=(), open_incident_co
         summary["resources"] = resources_section(resources, include_all=all_resources)
     if "announcements" in sections:
         summary["announcements"] = announcements_section(announcements)
+    if "vms" in sections:
+        summary["vms"] = vms_section(vms)
     return summary
 
 
@@ -366,9 +412,26 @@ def example_summary():
     )
 
 
+def example_vms_summary():
+    """What ``sections=vms`` answers, built through ``build_summary()`` like the main example."""
+    now = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
+    return build_summary(
+        ["vms"], now=now, site="Home Server", overall="operational",
+        vms=[
+            {"name": "Docker-Host", "state": "Running", "uptime": "12d 4h"},
+            {"name": "Game-Server", "state": "Running", "uptime": "3h 20m"},
+            {"name": "Test-VM", "state": "Off", "uptime": "0m"},
+        ])
+
+
 def example_json():
     """(pretty text for a human, size in bytes of what is actually sent) - the admin page
     shows the first and quotes the second."""
     example = example_summary()
     return (json.dumps(example, ensure_ascii=False, indent=2),
             len(dumps(example).encode("utf-8")))
+
+
+def example_vms_json():
+    """The ``sections=vms`` example as pretty text, for the admin page."""
+    return json.dumps(example_vms_summary(), ensure_ascii=False, indent=2)

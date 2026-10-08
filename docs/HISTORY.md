@@ -2081,6 +2081,20 @@ host, system and restore panels were opened and cancelled but never submitted; t
 rendered in a git checkout, so it is covered by a route test only. **Not exercised for real: a host
 restart, an app restart, an update or a restore actually going through.**
 
+### The device API learns about VMs
+
+Status-ESP 1.1.0 gets a VM screen, so `GET /api/device/summary?sections=vms` returns the Hyper-V VMs
+the portal already lists on `/vms` (name, state, uptime) from the same background cache. It is the
+first *section* (not modifier) added the opt-in way: an absent `sections=` still means the original
+five, and only a request that names `vms` gets it, so firmware 1.0.0 is never handed a bigger body.
+The adversarial worst case with every section, all three modifiers and `vms` measures 8.9 KB, so the
+ceiling for that request is 9 KB (`MAX_BYTES_ALL_WITH_VMS`), and the firmware's body cap follows it.
+The owner asked for this to ship in a *patch* number (1.11.1) because it edits an API that already
+existed rather than adding one; the CLAUDE.md policy would have said 1.12.0, and that call was
+theirs. Checked here against a real server: the default answer has no `vms`, `sections=vms` returns
+the two VMs of a faked cache in 329 bytes, a wrong or missing key is a 401, a typo is a 400 that lists
+`vms`. **Not seen: real Hyper-V data** - this sandbox is Linux, so the VM list comes from a fake.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

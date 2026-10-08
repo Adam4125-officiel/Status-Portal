@@ -1831,7 +1831,7 @@ def api_device_summary():
         return blocked
     sections = device_api.parse_sections(request.args.get("sections"))
     if sections is None:
-        return jsonify({"error": "Unknown sections", "valid": list(device_api.SECTIONS)}), 400
+        return jsonify({"error": "Unknown sections", "valid": list(device_api.ALL_SECTIONS)}), 400
 
     services = db.list_services()
     data = {}
@@ -1852,6 +1852,13 @@ def api_device_summary():
             # One failing section must not take the rest of the summary down with it;
             # the response says "unavailable" (null) rather than leaving it out.
             _logger.exception("Could not read the resource snapshot for the device API")
+    if "vms" in sections:
+        try:
+            # The background-refreshed cache the public /vms page reads, no PowerShell here.
+            # Like the resources, not gated by show_public_vms: the key is the gate.
+            data["vms"] = monitoring.get_cached_vm_snapshot()
+        except Exception:
+            _logger.exception("Could not read the VM list for the device API")
 
     with_jellyfin = request.args.get("jellyfin", "").strip() == "1"
     summary = device_api.build_summary(
@@ -4514,7 +4521,7 @@ def admin_device():
                   "success")
         return redirect(url_for("admin_device"))
     example, example_bytes = device_api.example_json()
-    return render_template("admin_device.html",
+    return render_template("admin_device.html", example_vms=device_api.example_vms_json(),
                             device_api_enabled=db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1",
                             device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
                             port=config.PORT, example=example, example_bytes=example_bytes,

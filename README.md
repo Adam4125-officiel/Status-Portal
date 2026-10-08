@@ -30,7 +30,8 @@ the full feature list and integrations at a glance.
   tablet, rotating through services, incidents, VMs and resources on a timer
 - A compact, key-protected **display device API** (`/api/device/summary`) for small
   status screens such as a Status-ESP: overall status, problem services, open
-  incidents, maintenance, announcements and server load in under 4 KB
+  incidents, maintenance, announcements and server load in under 4 KB (and, on request,
+  the Hyper-V virtual machines)
 - **Log viewer** in the admin panel — recent entries with a level filter, and the
   full log downloadable as a `.log` file
 - Optional **two-factor authentication** (TOTP) for the admin login

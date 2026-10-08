@@ -3166,11 +3166,26 @@ change the shape and the example changes with it.
   and a test that the default response does not carry it - `tests/test_device_api.py` has that
   test for each of the three. Only a change to what `device_api.example_summary()` shows needs
   the admin page's description of it updated too (`admin_device.html`).
+- **`vms` (1.11.1) is the first *section* added the opt-in way**: `SECTIONS` stays the five
+  that an absent/blank `sections=` means, `OPT_IN_SECTIONS = ("vms",)` is accepted only when
+  named, and `ALL_SECTIONS` is what the 400 lists as valid. The answer is `{"total", "running",
+  "items": [{"name", "state", "up"}]}` (up to `VM_ITEMS` = 10, by name), read from
+  `monitoring.get_cached_vm_snapshot()` - the cache the public `/vms` page reads, no PowerShell
+  in the request - and, like the resources, **not gated by `show_public_vms`** (the key is the
+  gate). `state` is Hyper-V's own word and `up` the portal's short uptime text, meaningless for a
+  VM that is not running; no VMs is an empty list, an unreadable cache is `null`. The largest
+  possible answer (every section, all three modifiers, `vms`) measures 8.9 KB against
+  `MAX_BYTES_ALL_WITH_VMS` = 9 KB, asserted in
+  `test_the_largest_possible_answer_with_vms_fits_its_ceiling`; anything not naming `vms` keeps
+  the older 8 KB / 4 KB ceilings. **No CPU/RAM per VM**: the portal only knows name, state and
+  uptime, and getting more means changing the `Get-VM` query, which cannot be checked on Linux.
 - **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`, firmware 1.0.0
   at the time of 1.11.0). It asks for all three parameters and degrades by itself against an
   older portal (it just shows less: four disks, no GPU, no latency, no Jellyfin band), which is
   why **a portal release goes out first and the firmware second**, never the other way round.
-  The firmware needs 1.10.0 for anything at all, 1.11.0 for everything. A change to the shape
+  The firmware needs 1.10.0 for anything at all, 1.11.0 for everything the 1.0.x screens show,
+  and 1.11.1 for the VM screen of firmware 1.1.0 (`sections=...,vms`; an older portal ignores the
+  name, and a request naming only `vms` gets its 400, which the device shows). A change to the shape
   of the answer is therefore a change in two repositories, and the firmware's parser is the
   part this repository cannot test. **What has not been seen**: 1.11.0's new fields (GPUs, latency, the
   Jellyfin band) were exercised against stand-ins and a real device on an older portal, never as real

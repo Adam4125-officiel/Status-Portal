@@ -75,7 +75,8 @@
   <h2 style="margin-top: 0;">What the display can see</h2>
   <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
     <code>/api/device/summary</code> takes an optional <code>sections</code> list; leave it
-    out for everything. Every list is short, and every name and message is cut to fit.
+    out for the five sections below, <code>vms</code> excepted (it is only sent when named).
+    Every list is short, and every name and message is cut to fit.
   </p>
   <div class="admin-table" style="font-size: 13px;">
     <table>
@@ -86,11 +87,12 @@
         <tr><td><code>maintenance</code></td><td>Maintenance in progress, then the soonest upcoming.</td></tr>
         <tr><td><code>announcements</code></td><td>Announcements showing right now — never a scheduled or expired one.</td></tr>
         <tr><td><code>resources</code></td><td>CPU, memory, network and the fullest few disks. With <code>resources=all</code>: up to eight disks and the NVIDIA GPUs (load, memory, temperature) for a display that pages through them. With <code>jellyfin=1</code> the answer also says what Jellyfin is doing (transcodes and running tasks), whichever sections are asked for.</td></tr>
+        <tr><td><code>vms</code></td><td>The Hyper-V virtual machines the portal detects: how many, how many are running, and up to ten (by name) with their state and uptime. <strong>Only sent when you name it</strong> (<code>sections=vms</code>, alone or with others): leaving <code>sections</code> out still returns the five above, so a display that predates it is never handed more than it expected. An empty list when the portal is not on a Hyper-V host.</td></tr>
       </tbody>
     </table>
   </div>
   <div class="field-hint" style="margin-top: 10px;">
-    <strong>Resources are included even where the public pages hide them.</strong> The
+    <strong>Resources and VMs are included even where the public pages hide them.</strong> The
     “Public page: also show…” switches decide what visitors see; the key decides what
     your own display sees. Nothing is reachable without the key.
   </div>
@@ -106,5 +108,9 @@
     out how long ago something started without trusting its own.
   </p>
   <pre class="code-block">{{ example }}</pre>
+  <p style="color: var(--text-dim); font-size: 13px;">
+    And what <code>?sections=vms</code> adds (the header is the same):
+  </p>
+  <pre class="code-block">{{ example_vms }}</pre>
 </div>
 {% endblock %}
