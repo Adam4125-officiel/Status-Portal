@@ -2036,6 +2036,24 @@ screen**, because the owner's portal was still on 1.11.0-rc.1 when the rc.4 fiel
 no real GPU, latency or Jellyfin activity ever reached the device. The owner declared 1.11.0 stable
 on 2026-10-07.
 
+## 1.11.1: admin and display-device polish (2026-10-08)
+
+A batch the owner asked for in one go, worked on one branch (`1.11.1`), one commit per item.
+Pairs with Status-ESP 1.1.0 (the VM screen and the hourly forecast), which is why the device API
+gained a section in a patch-numbered release: the owner's call, since it edits an API that
+already existed rather than adding a feature of its own.
+
+### The confirmation panel that closed itself
+
+Typing a 2FA code to start, stop or restart a VM, the "Start VM ... - type START below" panel
+vanished mid-code. Cause: `main.js` reloads the page every `PORTAL_RESOURCE_REFRESH_SECONDS` and
+the panel is opened by a script, so a fresh page starts with it closed and the field empty. Nothing
+about the panel itself was wrong, which is why it passed every route test. Reproduced in a real
+Chromium against a scratch server with a 4 s refresh (the old script: panel closed and typed text
+gone within one period), then fixed by making the reload wait while a `data-holds-refresh` element
+is visible or a text field is focused; the new script keeps the panel and the half-typed text across
+more than two refresh periods, the countdown shows "paused", and the reload resumes after Cancel.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

@@ -91,6 +91,7 @@ have bitten someone on exactly that change.
 | Comparing a version of anything | *Version checks* → `updater.parse_version` is 3-component semver; Servarr is 4-component |
 | The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
 | The updater | *Self-update* — especially what rollback can and cannot do |
+| A page that auto-refreshes, or a panel a script opens |  *Component restart controls* → `data-holds-refresh`; a reload empties what is being typed |
 | Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`; `_restart_process()` has its own, narrower rule |
 | Anything that ends in a restart | *Testing/verification habits* → mocks can't tell you the process came back; exercise it live once |
 | The database restore | *Restoring the database* → the order is the safety machinery |
@@ -1453,6 +1454,17 @@ time, rotating on a timer, no nav and no footer. Off by default.
   to restart behaviour must also be exercised live at least once** against a
   throwaway portal in this sandbox, checking the PID is unchanged and the port answers
   again. Never against anything the user depends on, and never `control_host()`.
+
+- **A page that reloads itself must not reload a panel somebody is using.**
+  `static/js/main.js` (the admin Resources & VMs page and the public status pages) reloads
+  every `refresh_seconds`, and a reload closes any panel a script opened and empties what
+  was typed into it - which is how the VM confirmation panel kept vanishing under a
+  half-typed 2FA code. `main.js` now holds off, and restarts its countdown from the full
+  interval, while an element marked **`data-holds-refresh`** is on screen or a text field
+  has the focus. **Every `*-confirm` panel on a page that loads `main.js` must carry the
+  attribute** - `tests/test_conventions.py` enforces it. Don't "fix" this by lengthening
+  the interval or by making the panel survive a reload; the page is meant to stay live for
+  everything *except* what is being typed into (`docs/HISTORY.md` → "1.11.1").
 
 ## Restoring the database (`/admin/about/restore-db`, `db.py`)
 

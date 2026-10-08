@@ -20,7 +20,7 @@
 {% if vms %}
   {% include "_vm_table_admin.html" %}
 
-<div id="vm-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
+<div id="vm-control-confirm" class="form-panel" data-holds-refresh style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
   <p id="vm-control-confirm-text" style="font-size: 13px;"></p>
   <form id="vm-control-form" method="POST" action="{{ url_for('admin_vm_control') }}">
     <input type="hidden" name="name" id="vm-control-name">
@@ -62,7 +62,7 @@
   </div>
 </div>
 
-<div id="host-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
+<div id="host-control-confirm" class="form-panel" data-holds-refresh style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
   <p id="host-control-confirm-text" style="font-size: 13px;"></p>
   <form id="host-control-form" method="POST" action="{{ url_for('admin_host_control') }}">
     <input type="hidden" name="action" id="host-control-action">
