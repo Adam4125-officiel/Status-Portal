@@ -2054,6 +2054,18 @@ gone within one period), then fixed by making the reload wait while a `data-hold
 is visible or a text field is focused; the new script keeps the panel and the half-typed text across
 more than two refresh periods, the countdown shows "paused", and the reload resumes after Cancel.
 
+### Groups you had to retype
+
+`services.group_name` was a free-text box, and the public page groups services by exact string
+comparison, so "Media" and "media" (or one stray trailing space) made two headings and the owner had
+to remember the exact spelling every time. The form now offers the existing groups in a list with a
+"New group..." entry, in the service form and the wizard from one partial; and the server maps a typed
+name onto an existing group's spelling ignoring case, so the old box (no-JS, or a pasted name) cannot
+recreate the problem. Driven in a real Chromium against a scratch server: choosing a group fills the
+field, "New group..." shows a focused required box (an empty one blocks the submit instead of saving
+the service ungrouped), a new group appears in the list afterwards, "NETWORK" joins "Network", the edit
+form pre-selects the service's own group, and with JavaScript off only the text box shows.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

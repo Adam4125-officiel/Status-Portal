@@ -418,6 +418,18 @@ DB-backed Settings pages, not a code edit.
   and the integration's *different* `auto_incident` concept can't share one HTML
   name on one form, so the integration's is deliberately `check_auto_incident` in
   the template and mapped explicitly in the route.
+- **A service's group is picked from the groups that exist, not retyped.** The control is the
+  shared partial `templates/_group_picker.html` (service form *and* combined wizard include it,
+  so the two cannot drift): a list of the existing groups plus "New group...", with the text box
+  `name="group_name"` still the field that is submitted - so the route and `create_service()` saw
+  no change, and without JavaScript the box is simply always visible. The list comes from the
+  Jinja global `service_groups()` (= `db.list_service_groups()`), which the partial calls itself;
+  don't thread a `groups=` argument through the routes, that is the forgotten-render-site bug.
+  A group is not a table: it exists while a service is in it. **`db._canonical_group_name()`**
+  (used by `create_service()` and `update_service()`) makes a typed name that matches an existing
+  group ignoring case and stray spaces take that group's spelling, because the public page
+  groups by exact string and "media" next to "Media" was two headings. The edited service is
+  left out of that lookup on purpose, or a group's capitals could never be corrected.
 - **Numeric settings, query parameters and form fields go through `db.parse_int()`,
   never `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
   Unicode digits that `int()` then rejects, and any length at all, which overflows

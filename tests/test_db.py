@@ -1274,3 +1274,66 @@ def test_parse_int_never_overflows_sqlite_or_int():
     conn = db.get_db()
     conn.execute("SELECT ? + 0", (db.parse_int("9" * 23),)).fetchone()
     conn.close()
+
+
+def _group_of(service_id):
+    return db.get_service(service_id)["group_name"]
+
+
+def test_service_groups_are_listed_once_each_alphabetically_ignoring_case(isolated_db):
+    # Written straight to the table: through create_service() "Media" would now join "media".
+    conn = db.get_db()
+    for name, group in [("a", "Network"), ("b", "media"), ("c", "Media"), ("d", "Network"),
+                        ("e", ""), ("f", "  ")]:
+        conn.execute("INSERT INTO services (name, url, group_name) VALUES (?, '', ?)", (name, group))
+    conn.commit()
+    conn.close()
+    # "media" and "Media" are two different groups on disk (legacy data), both offered;
+    # blanks are not groups; a group shows once however many services are in it.
+    assert db.list_service_groups() == ["Media", "media", "Network"]
+
+
+def test_a_group_typed_with_other_capitals_joins_the_existing_group(isolated_db):
+    db.create_service({"name": "first", "url": "", "group_name": "Media"})
+    second = db.create_service({"name": "second", "url": "", "group_name": "  media "})
+    third = db.create_service({"name": "third", "url": "", "group_name": "MEDIA"})
+    assert [_group_of(i) for i in (second, third)] == ["Media", "Media"]
+    assert db.list_service_groups() == ["Media"]
+
+
+def test_whitespace_inside_a_group_name_is_collapsed(isolated_db):
+    first = db.create_service({"name": "first", "url": "", "group_name": "Home   Lab"})
+    second = db.create_service({"name": "second", "url": "", "group_name": "home lab"})
+    assert _group_of(first) == _group_of(second) == "Home Lab"
+
+
+def test_the_most_used_spelling_wins_when_legacy_data_has_several(isolated_db):
+    conn = db.get_db()
+    for name, group in [("a", "media"), ("b", "Media"), ("c", "Media")]:
+        conn.execute("INSERT INTO services (name, url, group_name) VALUES (?, '', ?)", (name, group))
+    conn.commit()
+    conn.close()
+    new = db.create_service({"name": "d", "url": "", "group_name": "MEDIA"})
+    assert _group_of(new) == "Media"
+
+
+def test_a_groups_capitals_can_be_corrected_when_it_has_only_that_one_member(isolated_db):
+    only = db.create_service({"name": "only", "url": "", "group_name": "media"})
+    db.update_service(only, {"name": "only", "url": "", "group_name": "Media"})
+    # Without leaving the edited service out of the lookup it would match itself, and the
+    # correction would silently be undone.
+    assert _group_of(only) == "Media"
+
+
+def test_editing_a_service_into_another_group_uses_that_groups_spelling(isolated_db):
+    db.create_service({"name": "anchor", "url": "", "group_name": "Network"})
+    moved = db.create_service({"name": "moved", "url": "", "group_name": "Media"})
+    db.update_service(moved, {"name": "moved", "url": "", "group_name": "network"})
+    assert _group_of(moved) == "Network"
+
+
+def test_clearing_a_group_stores_no_group(isolated_db):
+    sid = db.create_service({"name": "x", "url": "", "group_name": "Media"})
+    db.update_service(sid, {"name": "x", "url": "", "group_name": ""})
+    assert _group_of(sid) == ""
+    assert db.list_service_groups() == []

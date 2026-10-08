@@ -4805,3 +4805,36 @@ def test_public_incidents_section_is_titled_incidents_and_keeps_its_maintenance_
     assert "Incidents &amp; maintenance" not in html
     assert '<div class="section-title">Maintenance history</div>' in html
     assert dict(app_module.PUBLIC_SECTIONS)["incidents"] == "Incidents"
+
+
+def test_the_service_forms_offer_the_existing_groups_and_a_way_to_make_a_new_one(client):
+    _login(client)
+    db.create_service({"name": "Jellyfin", "url": "", "group_name": "Media"})
+    db.create_service({"name": "Router", "url": "", "group_name": "Network"})
+    editing = db.create_service({"name": "Sonarr", "url": "", "group_name": "Media"})
+    pages = {
+        "new service": client.get("/admin/services/new").data.decode(),
+        "edit service": client.get(f"/admin/services/{editing}/edit").data.decode(),
+        "wizard": client.get("/admin/new/combined").data.decode(),
+    }
+    for page, html in pages.items():
+        assert 'data-group-picker' in html, page
+        assert '<option value="Media"' in html and '<option value="Network"' in html, page
+        assert 'value="__new__"' in html, page
+        assert 'js/admin_group_picker.js' in html, page
+        assert 'name="group_name"' in html, page   # the field that is actually submitted
+    # Editing keeps the service's own group selected, and its text box carries the value.
+    assert '<option value="Media" selected>' in pages["edit service"]
+    assert 'name="group_name" value="Media"' in pages["edit service"]
+    assert 'name="group_name" value=""' in pages["new service"]
+
+
+def test_a_new_service_typed_into_an_existing_group_with_other_capitals_joins_it(client):
+    _login(client)
+    db.create_service({"name": "Jellyfin", "url": "", "group_name": "Media"})
+    client.post("/admin/services/new", data={"name": "Sonarr", "url": "", "group_name": "media"})
+    client.post("/admin/new/combined", data={"name": "Radarr", "url": "", "kind": "arr",
+                                             "group_name": "MEDIA"})
+    groups = {s["name"]: s["group_name"] for s in db.list_services()}
+    assert groups["Sonarr"] == groups["Radarr"] == "Media"
+    assert db.list_service_groups() == ["Media"]

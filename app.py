@@ -208,6 +208,10 @@ def _get_csrf_token():
 
 
 app.jinja_env.globals["csrf_token"] = _get_csrf_token
+# The existing groups for the service forms' picker. A global the partial calls itself, so the
+# three places that render it (new, edit, wizard) cannot forget to pass the list - and no other
+# page pays for the query.
+app.jinja_env.globals["service_groups"] = db.list_service_groups
 
 
 # ---------------------------------------------------------------------------
