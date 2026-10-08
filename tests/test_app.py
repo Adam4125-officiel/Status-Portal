@@ -4838,3 +4838,31 @@ def test_a_new_service_typed_into_an_existing_group_with_other_capitals_joins_it
     groups = {s["name"]: s["group_name"] for s in db.list_services()}
     assert groups["Sonarr"] == groups["Radarr"] == "Media"
     assert db.list_service_groups() == ["Media"]
+
+
+def test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type(client, monkeypatch):
+    """Starting a VM, restarting the host or the portal, updating and restoring the database
+    each used to ask for a word (START, RESTART, UPDATE, REPLACE) on top of the 2FA code, which
+    had to be typed before the thirty-second code expired. The word was only ever checked in
+    the browser, so it protected nothing the code does not. What stays: the trigger button that
+    opens the panel, the 2FA field when 2FA is on, and an explicit Confirm click."""
+    _login(client)
+    monkeypatch.setattr(app_module.monitoring, "get_cached_vm_snapshot",
+                        lambda: [{"name": "VM-1", "state": "Running", "uptime": "1h 2m"}])
+    _fake_update_available()
+    pages = {path: client.get(path).data.decode()
+             for path in ("/admin/resources", "/admin/system", "/admin/about")}
+    for panel in ("vm-control", "host-control"):
+        assert f'id="{panel}-confirm"' in pages["/admin/resources"]
+    assert 'id="system-control-confirm"' in pages["/admin/system"]
+    for panel in ("restore", "update"):
+        assert f'id="{panel}-confirm"' in pages["/admin/about"]
+    for path, html in pages.items():
+        assert "Type to confirm" not in html, path
+        assert "-confirm-input" not in html, path
+    static_js = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "js")
+    for script in ("admin_vm_control", "admin_host_control", "admin_system_control",
+                   "admin_update_control", "admin_db_restore"):
+        with open(os.path.join(static_js, f"{script}.js"), encoding="utf-8") as f:
+            source = f.read()
+        assert "EXPECTED_WORD" not in source and "expectedWord" not in source, script

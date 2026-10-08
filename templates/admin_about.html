@@ -185,9 +185,6 @@
     <div id="update-confirm" class="form-panel" style="display:none; border-color: var(--crit); margin-top: 12px;">
       <p id="update-confirm-text" style="font-size: 13px;"></p>
       <form method="POST" action="{{ url_for('admin_update') }}">
-        <div class="field">
-          <input type="text" id="update-confirm-input" placeholder="Type to confirm" autocomplete="off">
-        </div>
         {% if totp_enabled %}
         <div class="field">
           <label for="update-totp">2FA code</label>
@@ -259,9 +256,6 @@
 
     <div id="restore-confirm" class="form-panel" style="display:none; border-color: var(--crit); margin-top: 12px;">
       <p id="restore-confirm-text" style="font-size: 13px;"></p>
-      <div class="field">
-        <input type="text" id="restore-confirm-input" placeholder="Type to confirm" autocomplete="off">
-      </div>
       {% if totp_enabled %}
       <div class="field">
         <label for="restore-totp">2FA code</label>

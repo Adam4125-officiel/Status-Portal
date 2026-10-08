@@ -1451,9 +1451,18 @@ time, rotating on a timer, no nav and no footer. Off by default.
   out from under it.
 - **Both targets go through `app._require_totp()`** — a full-app restart briefly takes
   the whole portal offline and a bot restart interrupts anyone mid-conversation with
-  it. Same typed-confirmation UI pattern too (`static/js/admin_system_control.js`,
+  it. Same confirmation-panel UI pattern too (`static/js/admin_system_control.js`,
   mirroring `admin_host_control.js` — one confirm panel driving both trigger buttons
   via a `data-component` attribute instead of `data-action`).
+- **A step-up panel is: trigger button → panel → 2FA code (when on) → Confirm. There is no
+  word to type, and it must not come back.** All five actions behind `_require_totp()` (VM
+  control, host restart/shutdown, app/bot restart, update, database restore) used to also ask for
+  START / RESTART / UPDATE / REPLACE. The word was only ever checked in the browser - the
+  server never saw it - so it added a second thing to type inside a thirty-second code and
+  protected nothing the code does not. With 2FA off the panel is just trigger + Confirm, which is
+  as much friction as the portal's other destructive buttons have. Opening the panel focuses the
+  2FA field so the whole action is: click, type six digits, Enter
+  (`test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type`; `docs/HISTORY.md` → "1.11.1").
 - **`_restart_process()` and `control_host()` are not the same risk, and the rule
   distinguishing them was learned the hard way.** `control_host()` reboots or shuts
   down the *machine* and must never be live-invoked anywhere, full stop.

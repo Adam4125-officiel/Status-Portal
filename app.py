@@ -3261,8 +3261,9 @@ def admin_host_control():
     for why this is safe from an injection standpoint (zero user-controlled input:
     exactly two fixed actions). The blast radius comes entirely from what the
     action *does*, not from anything an attacker could smuggle into it - login +
-    CSRF (already required on every admin POST) plus the typed client-side
-    confirmation in admin_resources.html are the mitigations for that.
+    CSRF (already required on every admin POST) plus the confirmation panel in
+    admin_resources.html (a click on Confirm, and the 2FA code when it is on) are the
+    mitigations for that.
 
     Step-up authentication: if 2FA is enabled, a fresh code is required here even
     though the session is already logged in - a stolen/replayed session cookie
@@ -3751,7 +3752,7 @@ def admin_update():
 
     This is the most powerful button in the app - it installs and then executes new
     code - so it is gated at least as heavily as the host restart/shutdown control:
-    login + CSRF (both automatic for any POST under /admin/), a typed confirmation
+    login + CSRF (both automatic for any POST under /admin/), a confirmation panel
     client-side, and step-up 2FA requiring a fresh code even on an already
     authenticated session. It additionally honours config.ENABLE_INAPP_UPDATE, which
     lives in an env var rather than a DB setting precisely so an attacker who owns

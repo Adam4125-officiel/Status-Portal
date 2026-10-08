@@ -2066,6 +2066,21 @@ field, "New group..." shows a focused required box (an empty one blocks the subm
 the service ungrouped), a new group appears in the list afterwards, "NETWORK" joins "Network", the edit
 form pre-selects the service's own group, and with JavaScript off only the text box shows.
 
+### The word typed on top of the 2FA code
+
+Every step-up panel asked for a word (START, STOP, RESTART, SHUTDOWN, UPDATE, REPLACE) as well as the
+six-digit code, and the owner had to be quick: type the word, then the code, inside the code's thirty
+seconds - and the panel itself used to vanish on the page's auto-refresh (above). The word was never
+sent to the server; `_require_totp()` is the only check, so removing it loses nothing the server
+enforced. All five panels (VM control, host, app/bot restart, update, database restore) now open with
+the 2FA field focused and enable Confirm at six digits; with 2FA off, Confirm is enabled immediately.
+Driven in a real Chromium against two scratch servers, 2FA on and off: VM start with a wrong code is
+refused by the server ("Incorrect or missing 2FA code"), with a right code it reaches the action (which
+is Windows-only, so on this Linux sandbox it answers "only available on Windows" - the safe stop). The
+host, system and restore panels were opened and cancelled but never submitted; the update panel is not
+rendered in a git checkout, so it is covered by a route test only. **Not exercised for real: a host
+restart, an app restart, an update or a restore actually going through.**
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

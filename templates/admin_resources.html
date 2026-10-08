@@ -25,9 +25,6 @@
   <form id="vm-control-form" method="POST" action="{{ url_for('admin_vm_control') }}">
     <input type="hidden" name="name" id="vm-control-name">
     <input type="hidden" name="action" id="vm-control-action">
-    <div class="field">
-      <input type="text" id="vm-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-    </div>
     {% if totp_enabled %}
     <div class="field">
       <label for="vm-control-totp">2FA code</label>
@@ -66,9 +63,6 @@
   <p id="host-control-confirm-text" style="font-size: 13px;"></p>
   <form id="host-control-form" method="POST" action="{{ url_for('admin_host_control') }}">
     <input type="hidden" name="action" id="host-control-action">
-    <div class="field">
-      <input type="text" id="host-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-    </div>
     {% if totp_enabled %}
     <div class="field">
       <label for="host-control-totp">2FA code</label>
