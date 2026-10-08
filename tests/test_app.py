@@ -4794,3 +4794,75 @@ def test_admin_pages_have_balanced_divs(client, isolated_db, path):
         f"<form> early, which moves every field after it out of the form in the DOM")
 
 
+
+
+def test_public_incidents_section_is_titled_incidents_and_keeps_its_maintenance_blocks(client):
+    """The block above the maintenance sub-blocks only ever lists incidents, so its heading says
+    so. The maintenance blocks keep their own headings underneath it, and the admin's
+    section-order list names the block the same way a visitor sees it."""
+    html = client.get("/").data.decode()
+    assert '<div class="section-title">Incidents</div>' in html
+    assert "Incidents &amp; maintenance" not in html
+    assert '<div class="section-title">Maintenance history</div>' in html
+    assert dict(app_module.PUBLIC_SECTIONS)["incidents"] == "Incidents"
+
+
+def test_the_service_forms_offer_the_existing_groups_and_a_way_to_make_a_new_one(client):
+    _login(client)
+    db.create_service({"name": "Jellyfin", "url": "", "group_name": "Media"})
+    db.create_service({"name": "Router", "url": "", "group_name": "Network"})
+    editing = db.create_service({"name": "Sonarr", "url": "", "group_name": "Media"})
+    pages = {
+        "new service": client.get("/admin/services/new").data.decode(),
+        "edit service": client.get(f"/admin/services/{editing}/edit").data.decode(),
+        "wizard": client.get("/admin/new/combined").data.decode(),
+    }
+    for page, html in pages.items():
+        assert 'data-group-picker' in html, page
+        assert '<option value="Media"' in html and '<option value="Network"' in html, page
+        assert 'value="__new__"' in html, page
+        assert 'js/admin_group_picker.js' in html, page
+        assert 'name="group_name"' in html, page   # the field that is actually submitted
+    # Editing keeps the service's own group selected, and its text box carries the value.
+    assert '<option value="Media" selected>' in pages["edit service"]
+    assert 'name="group_name" value="Media"' in pages["edit service"]
+    assert 'name="group_name" value=""' in pages["new service"]
+
+
+def test_a_new_service_typed_into_an_existing_group_with_other_capitals_joins_it(client):
+    _login(client)
+    db.create_service({"name": "Jellyfin", "url": "", "group_name": "Media"})
+    client.post("/admin/services/new", data={"name": "Sonarr", "url": "", "group_name": "media"})
+    client.post("/admin/new/combined", data={"name": "Radarr", "url": "", "kind": "arr",
+                                             "group_name": "MEDIA"})
+    groups = {s["name"]: s["group_name"] for s in db.list_services()}
+    assert groups["Sonarr"] == groups["Radarr"] == "Media"
+    assert db.list_service_groups() == ["Media"]
+
+
+def test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type(client, monkeypatch):
+    """Starting a VM, restarting the host or the portal, updating and restoring the database
+    each used to ask for a word (START, RESTART, UPDATE, REPLACE) on top of the 2FA code, which
+    had to be typed before the thirty-second code expired. The word was only ever checked in
+    the browser, so it protected nothing the code does not. What stays: the trigger button that
+    opens the panel, the 2FA field when 2FA is on, and an explicit Confirm click."""
+    _login(client)
+    monkeypatch.setattr(app_module.monitoring, "get_cached_vm_snapshot",
+                        lambda: [{"name": "VM-1", "state": "Running", "uptime": "1h 2m"}])
+    _fake_update_available()
+    pages = {path: client.get(path).data.decode()
+             for path in ("/admin/resources", "/admin/system", "/admin/about")}
+    for panel in ("vm-control", "host-control"):
+        assert f'id="{panel}-confirm"' in pages["/admin/resources"]
+    assert 'id="system-control-confirm"' in pages["/admin/system"]
+    for panel in ("restore", "update"):
+        assert f'id="{panel}-confirm"' in pages["/admin/about"]
+    for path, html in pages.items():
+        assert "Type to confirm" not in html, path
+        assert "-confirm-input" not in html, path
+    static_js = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "js")
+    for script in ("admin_vm_control", "admin_host_control", "admin_system_control",
+                   "admin_update_control", "admin_db_restore"):
+        with open(os.path.join(static_js, f"{script}.js"), encoding="utf-8") as f:
+            source = f.read()
+        assert "EXPECTED_WORD" not in source and "expectedWord" not in source, script

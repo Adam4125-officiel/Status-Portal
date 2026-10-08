@@ -692,3 +692,27 @@ def test_admin_table_is_always_a_wrapper_never_the_table_itself():
         '  <div class="admin-table"><table>...</table></div>\n'
         "The class is the scroll container - on the <table> itself the overflow rule "
         "does nothing and a wide table pushes the page sideways.")
+
+
+def test_a_confirmation_panel_on_an_auto_refreshing_page_holds_the_refresh():
+    """CLAUDE.md: `static/js/main.js` reloads the page every `refresh_seconds`, and a reload
+    closes any panel a script opened and empties what was typed in it.
+
+    That is exactly how the VM confirmation panel kept vanishing while the owner typed a 2FA
+    code: the panel is shown by a script (`style.display = 'block'`), so the fresh page
+    starts with it closed. `main.js` waits while an element marked `data-holds-refresh` is on
+    screen, so every `*-confirm` panel on a page that loads `main.js` has to carry it."""
+    offenders = []
+    checked = 0
+    for path, src in _template_files():
+        if "js/main.js" not in src:
+            continue
+        for match in re.finditer(r"<div\b[^>]*\bid=\"[a-z-]+-confirm\"[^>]*>", src):
+            checked += 1
+            if "data-holds-refresh" not in match.group(0):
+                offenders.append(f"{path}:{src[:match.start()].count(chr(10)) + 1}")
+    assert checked, "no confirmation panel found on a page loading main.js - has the rule gone stale?"
+    assert not offenders, (
+        f"Confirmation panel without data-holds-refresh at {offenders}. Add the attribute to the "
+        "panel's <div> (e.g. <div id=\"x-confirm\" data-holds-refresh ...>): without it the page's "
+        "auto-refresh reloads it away while somebody is typing a 2FA code into it.")

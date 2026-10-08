@@ -1,8 +1,8 @@
 {% extends "admin_base.html" %}
-{% block title %}Resources — Admin{% endblock %}
+{% block title %}Resources &amp; VMs — Admin{% endblock %}
 {% block admin_content %}
 <div class="admin-header">
-  <h1>Server resources</h1>
+  <h1>Resources &amp; VMs</h1>
   <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
     next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
   </div>
@@ -20,14 +20,11 @@
 {% if vms %}
   {% include "_vm_table_admin.html" %}
 
-<div id="vm-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
+<div id="vm-control-confirm" class="form-panel" data-holds-refresh style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
   <p id="vm-control-confirm-text" style="font-size: 13px;"></p>
   <form id="vm-control-form" method="POST" action="{{ url_for('admin_vm_control') }}">
     <input type="hidden" name="name" id="vm-control-name">
     <input type="hidden" name="action" id="vm-control-action">
-    <div class="field">
-      <input type="text" id="vm-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-    </div>
     {% if totp_enabled %}
     <div class="field">
       <label for="vm-control-totp">2FA code</label>
@@ -62,13 +59,10 @@
   </div>
 </div>
 
-<div id="host-control-confirm" class="form-panel" style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
+<div id="host-control-confirm" class="form-panel" data-holds-refresh style="display:none; max-width: 520px; border-color: var(--crit); margin-top: 12px;">
   <p id="host-control-confirm-text" style="font-size: 13px;"></p>
   <form id="host-control-form" method="POST" action="{{ url_for('admin_host_control') }}">
     <input type="hidden" name="action" id="host-control-action">
-    <div class="field">
-      <input type="text" id="host-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-    </div>
     {% if totp_enabled %}
     <div class="field">
       <label for="host-control-totp">2FA code</label>

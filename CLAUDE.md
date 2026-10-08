@@ -91,6 +91,7 @@ have bitten someone on exactly that change.
 | Comparing a version of anything | *Version checks* → `updater.parse_version` is 3-component semver; Servarr is 4-component |
 | The Discord bot | *Discord bot* — the whole section, it is all load-bearing |
 | The updater | *Self-update* — especially what rollback can and cannot do |
+| A page that auto-refreshes, or a panel a script opens |  *Component restart controls* → `data-holds-refresh`; a reload empties what is being typed |
 | Anything that shells out to the OS | *Conventions* → never live-invoke `control_host()`; `_restart_process()` has its own, narrower rule |
 | Anything that ends in a restart | *Testing/verification habits* → mocks can't tell you the process came back; exercise it live once |
 | The database restore | *Restoring the database* → the order is the safety machinery |
@@ -417,6 +418,18 @@ DB-backed Settings pages, not a code edit.
   and the integration's *different* `auto_incident` concept can't share one HTML
   name on one form, so the integration's is deliberately `check_auto_incident` in
   the template and mapped explicitly in the route.
+- **A service's group is picked from the groups that exist, not retyped.** The control is the
+  shared partial `templates/_group_picker.html` (service form *and* combined wizard include it,
+  so the two cannot drift): a list of the existing groups plus "New group...", with the text box
+  `name="group_name"` still the field that is submitted - so the route and `create_service()` saw
+  no change, and without JavaScript the box is simply always visible. The list comes from the
+  Jinja global `service_groups()` (= `db.list_service_groups()`), which the partial calls itself;
+  don't thread a `groups=` argument through the routes, that is the forgotten-render-site bug.
+  A group is not a table: it exists while a service is in it. **`db._canonical_group_name()`**
+  (used by `create_service()` and `update_service()`) makes a typed name that matches an existing
+  group ignoring case and stray spaces take that group's spelling, because the public page
+  groups by exact string and "media" next to "Media" was two headings. The edited service is
+  left out of that lookup on purpose, or a group's capitals could never be corrected.
 - **Numeric settings, query parameters and form fields go through `db.parse_int()`,
   never `int(raw) if raw.isdigit() else ...`.** `str.isdigit()` accepts "²" and other
   Unicode digits that `int()` then rejects, and any length at all, which overflows
@@ -1438,9 +1451,18 @@ time, rotating on a timer, no nav and no footer. Off by default.
   out from under it.
 - **Both targets go through `app._require_totp()`** — a full-app restart briefly takes
   the whole portal offline and a bot restart interrupts anyone mid-conversation with
-  it. Same typed-confirmation UI pattern too (`static/js/admin_system_control.js`,
+  it. Same confirmation-panel UI pattern too (`static/js/admin_system_control.js`,
   mirroring `admin_host_control.js` — one confirm panel driving both trigger buttons
   via a `data-component` attribute instead of `data-action`).
+- **A step-up panel is: trigger button → panel → 2FA code (when on) → Confirm. There is no
+  word to type, and it must not come back.** All five actions behind `_require_totp()` (VM
+  control, host restart/shutdown, app/bot restart, update, database restore) used to also ask for
+  START / RESTART / UPDATE / REPLACE. The word was only ever checked in the browser - the
+  server never saw it - so it added a second thing to type inside a thirty-second code and
+  protected nothing the code does not. With 2FA off the panel is just trigger + Confirm, which is
+  as much friction as the portal's other destructive buttons have. Opening the panel focuses the
+  2FA field so the whole action is: click, type six digits, Enter
+  (`test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type`; `docs/HISTORY.md` → "1.11.1").
 - **`_restart_process()` and `control_host()` are not the same risk, and the rule
   distinguishing them was learned the hard way.** `control_host()` reboots or shuts
   down the *machine* and must never be live-invoked anywhere, full stop.
@@ -1453,6 +1475,17 @@ time, rotating on a timer, no nav and no footer. Off by default.
   to restart behaviour must also be exercised live at least once** against a
   throwaway portal in this sandbox, checking the PID is unchanged and the port answers
   again. Never against anything the user depends on, and never `control_host()`.
+
+- **A page that reloads itself must not reload a panel somebody is using.**
+  `static/js/main.js` (the admin Resources & VMs page and the public status pages) reloads
+  every `refresh_seconds`, and a reload closes any panel a script opened and empties what
+  was typed into it - which is how the VM confirmation panel kept vanishing under a
+  half-typed 2FA code. `main.js` now holds off, and restarts its countdown from the full
+  interval, while an element marked **`data-holds-refresh`** is on screen or a text field
+  has the focus. **Every `*-confirm` panel on a page that loads `main.js` must carry the
+  attribute** - `tests/test_conventions.py` enforces it. Don't "fix" this by lengthening
+  the interval or by making the panel survive a reload; the page is meant to stay live for
+  everything *except* what is being typed into (`docs/HISTORY.md` → "1.11.1").
 
 ## Restoring the database (`/admin/about/restore-db`, `db.py`)
 
@@ -3133,11 +3166,26 @@ change the shape and the example changes with it.
   and a test that the default response does not carry it - `tests/test_device_api.py` has that
   test for each of the three. Only a change to what `device_api.example_summary()` shows needs
   the admin page's description of it updated too (`admin_device.html`).
+- **`vms` (1.11.1) is the first *section* added the opt-in way**: `SECTIONS` stays the five
+  that an absent/blank `sections=` means, `OPT_IN_SECTIONS = ("vms",)` is accepted only when
+  named, and `ALL_SECTIONS` is what the 400 lists as valid. The answer is `{"total", "running",
+  "items": [{"name", "state", "up"}]}` (up to `VM_ITEMS` = 10, by name), read from
+  `monitoring.get_cached_vm_snapshot()` - the cache the public `/vms` page reads, no PowerShell
+  in the request - and, like the resources, **not gated by `show_public_vms`** (the key is the
+  gate). `state` is Hyper-V's own word and `up` the portal's short uptime text, meaningless for a
+  VM that is not running; no VMs is an empty list, an unreadable cache is `null`. The largest
+  possible answer (every section, all three modifiers, `vms`) measures 8.9 KB against
+  `MAX_BYTES_ALL_WITH_VMS` = 9 KB, asserted in
+  `test_the_largest_possible_answer_with_vms_fits_its_ceiling`; anything not naming `vms` keeps
+  the older 8 KB / 4 KB ceilings. **No CPU/RAM per VM**: the portal only knows name, state and
+  uptime, and getting more means changing the `Get-VM` query, which cannot be checked on Linux.
 - **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`, firmware 1.0.0
   at the time of 1.11.0). It asks for all three parameters and degrades by itself against an
   older portal (it just shows less: four disks, no GPU, no latency, no Jellyfin band), which is
   why **a portal release goes out first and the firmware second**, never the other way round.
-  The firmware needs 1.10.0 for anything at all, 1.11.0 for everything. A change to the shape
+  The firmware needs 1.10.0 for anything at all, 1.11.0 for everything the 1.0.x screens show,
+  and 1.11.1 for the VM screen of firmware 1.1.0 (`sections=...,vms`; an older portal ignores the
+  name, and a request naming only `vms` gets its 400, which the device shows). A change to the shape
   of the answer is therefore a change in two repositories, and the firmware's parser is the
   part this repository cannot test. **What has not been seen**: 1.11.0's new fields (GPUs, latency, the
   Jellyfin band) were exercised against stand-ins and a real device on an older portal, never as real

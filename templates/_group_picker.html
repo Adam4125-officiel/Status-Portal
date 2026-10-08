@@ -1,0 +1,19 @@
+{# The "Group / category" control, shared by the service form and the combined wizard so the
+   two cannot drift. The caller sets `current` (the service's group, '' for a new one) with
+   {% with %}. Without JavaScript only the text box exists, exactly as before; the script
+   reveals the list of existing groups and hides the box until "New group..." is chosen.
+   The text box is the field that is submitted either way (name="group_name"), so the server
+   sees the same form it always did. #}
+<div class="field group-picker" data-group-picker>
+  <label for="group_name">Group / category (optional)</label>
+  <select id="group_select" class="group-picker__select" aria-label="Existing groups" hidden>
+    <option value="">— No group —</option>
+    {% for group in service_groups() %}
+    <option value="{{ group }}"{{ ' selected' if group == current }}>{{ group }}</option>
+    {% endfor %}
+    <option value="__new__">＋ New group…</option>
+  </select>
+  <input type="text" id="group_name" name="group_name" value="{{ current }}"
+         placeholder="Name of the group, e.g. Media" autocomplete="off">
+  <div class="field-hint">Services in the same group are shown together under a heading on the public page. Pick an existing group or create a new one; names are matched ignoring capital letters, so “media” joins “Media”. Leave it empty to show the service ungrouped.</div>
+</div>

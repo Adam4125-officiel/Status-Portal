@@ -180,7 +180,7 @@ def test_a_request_naming_only_unknown_sections_is_a_400(enabled):
     """An answer that is just a header, for a typo, would look like a quiet portal."""
     resp = _get(enabled, "?sections=nope,nothing")
     assert resp.status_code == 400
-    assert resp.get_json()["valid"] == list(device_api.SECTIONS)
+    assert resp.get_json()["valid"] == list(device_api.ALL_SECTIONS)
 
 
 def test_a_section_nobody_asked_for_costs_nothing(enabled, monkeypatch):
@@ -859,3 +859,158 @@ def test_jellyfin_tasks_are_capped_and_cut(enabled, monkeypatch):
     tasks = _summary(enabled, "?jellyfin=1")["jellyfin"]["tasks"]
     assert len(tasks) == device_api.JELLYFIN_TASK_ITEMS
     assert all(len(t.encode()) <= device_api.JELLYFIN_TASK_BYTES and t.endswith("...") for t in tasks)
+
+
+# ---------------------------------------------------------------------------
+# sections=vms: the Hyper-V virtual machines, only for a request that names them
+# ---------------------------------------------------------------------------
+def _vm(name="Docker-Host", state="Running", uptime="3d 4h"):
+    return {"name": name, "state": state, "uptime": uptime}
+
+
+def _fake_vms(monkeypatch, vms):
+    monkeypatch.setattr(monitoring, "get_cached_vm_snapshot", lambda: vms)
+
+
+def test_vms_are_opt_in_the_default_answer_never_carries_them(enabled, monkeypatch):
+    """The rule for every extension of this endpoint: a firmware that does not ask is handed
+    exactly what it was before, so an old Status-ESP never receives a body bigger than the
+    buffer it was sized for."""
+    _fake_vms(monkeypatch, [_vm()])
+    assert "vms" not in _summary(enabled)
+    for query in ("", "?sections=", "?sections=services,incidents,maintenance,resources,announcements",
+                  "?services=all&resources=all&jellyfin=1"):
+        assert "vms" not in _summary(enabled, query), query
+    assert device_api.parse_sections(None) == list(device_api.SECTIONS)
+    assert "vms" not in device_api.SECTIONS and "vms" in device_api.OPT_IN_SECTIONS
+
+
+def test_a_section_nobody_asked_for_never_reads_the_vm_list(enabled, monkeypatch):
+    def boom():
+        raise AssertionError("the VM list was read for a request that did not ask for it")
+    monkeypatch.setattr(monitoring, "get_cached_vm_snapshot", boom)
+    assert _get(enabled).status_code == 200
+    assert _get(enabled, "?sections=services,resources").status_code == 200
+
+
+def test_sections_vms_carries_the_count_the_running_ones_and_each_vm(enabled, monkeypatch):
+    _fake_vms(monkeypatch, [_vm("Game-Server", "Running", "3h 20m"), _vm("Test-VM", "Off", "0m"),
+                            _vm("Docker-Host", "Running", "12d 4h"), _vm("Old-VM", "Saved", "0m")])
+    body = _summary(enabled, "?sections=vms")
+    assert set(body) == {"v", "now", "site", "overall", "vms"}
+    assert body["vms"]["total"] == 4 and body["vms"]["running"] == 2
+    assert body["vms"]["items"] == [   # by name, whatever order Hyper-V listed them in
+        {"name": "Docker-Host", "state": "Running", "up": "12d 4h"},
+        {"name": "Game-Server", "state": "Running", "up": "3h 20m"},
+        {"name": "Old-VM", "state": "Saved", "up": "0m"},
+        {"name": "Test-VM", "state": "Off", "up": "0m"},
+    ]
+
+
+def test_vms_can_be_asked_for_together_with_other_sections(enabled, monkeypatch):
+    _fake_vms(monkeypatch, [_vm()])
+    body = _summary(enabled, "?sections=services,vms")
+    assert list(body)[-2:] == ["services", "vms"]   # canonical order, opt-in sections last
+
+
+def test_no_vms_is_an_empty_list_not_a_null(enabled, monkeypatch):
+    """A portal that is not on a Hyper-V host answers fine and it was "none"; the device says
+    so, rather than treating it as a failure to read."""
+    _fake_vms(monkeypatch, [])
+    assert _summary(enabled, "?sections=vms")["vms"] == {"total": 0, "running": 0, "items": []}
+
+
+def test_a_failing_vm_read_degrades_to_null_not_a_500(enabled, monkeypatch):
+    def boom():
+        raise OSError("cache gone")
+    monkeypatch.setattr(monitoring, "get_cached_vm_snapshot", boom)
+    body = _summary(enabled, "?sections=services,vms")
+    assert body["vms"] is None and "services" in body
+
+
+def test_vms_are_returned_even_where_the_public_page_hides_them(enabled, monkeypatch):
+    """Same rule as the resources: the public switch decides what visitors see, the key decides
+    what the admin's own display sees."""
+    db.set_setting("show_public_vms", "0")
+    _fake_vms(monkeypatch, [_vm()])
+    assert _summary(enabled, "?sections=vms")["vms"]["total"] == 1
+    assert _get(enabled, "?sections=vms", headers={}).status_code == 401
+
+
+def test_the_vm_list_is_capped_and_the_total_still_tells_the_truth(enabled, monkeypatch):
+    _fake_vms(monkeypatch, [_vm(f"VM-{i:02d}") for i in range(30)])
+    vms = _summary(enabled, "?sections=vms")["vms"]
+    assert vms["total"] == 30 and vms["running"] == 30
+    assert len(vms["items"]) == device_api.VM_ITEMS
+    assert vms["items"][0]["name"] == "VM-00"
+
+
+def test_a_vm_with_odd_fields_is_still_one_clean_line_each(enabled, monkeypatch):
+    _fake_vms(monkeypatch, [{"name": "  A\nVM \t with   space ", "state": None, "uptime": "—"},
+                            {"name": "x" * 200, "state": "Snapshotting-and-more-than-12", "uptime": 5}])
+    items = _summary(enabled, "?sections=vms")["vms"]["items"]
+    assert items[0] == {"name": "A VM with space", "state": "", "up": "—"}
+    assert len(items[1]["name"].encode()) <= device_api.VM_NAME_BYTES
+    assert len(items[1]["state"].encode()) <= device_api.VM_STATE_BYTES
+    assert items[1]["up"] == "5"
+
+
+def test_the_largest_possible_answer_with_vms_fits_its_ceiling(enabled, monkeypatch):
+    """The largest request the display can make - every section, all three modifiers, and the
+    VMs - against the same adversarial data as the test above, plus VMs whose every string is
+    made of what costs most once serialised. This is the number the device sizes its buffer by."""
+    nasty = _worst_case_text()
+    for i in range(60):
+        db.create_service({"name": nasty, "url": "", "status": "operational"})
+    sid = db.create_service({"name": nasty, "url": "", "status": "down"})
+    for i in range(10):
+        db.create_incident({"title": nasty}, service_ids=[sid])
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+        db.create_maintenance_window({"title": nasty, "starts_at": f"2099-01-{i + 10}T00:00",
+                                      "ends_at": f"2099-02-{i + 10}T00:00"}, service_ids=[sid])
+    db.set_setting("site_name", nasty)
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit",
+              "free_gb": 99999.9} for _ in range(20)]
+    gpus = [_gpu(i, name=nasty, util_percent=99.9, mem_used_gb=9999.9, mem_total_gb=9999.9,
+                 temp_c=99.9) for i in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=gpus, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    for service in db.list_services():
+        if service["status"] == "operational":
+            db.update_service_status_from_check(service["id"], "operational", 99999)
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 99, "running_tasks": [nasty] * 10})
+    _fake_vms(monkeypatch, [{"name": '"' * 40 + str(i), "state": '"' * 40, "uptime": '"' * 40}
+                            for i in range(40)])
+    query = ("?sections=" + ",".join(device_api.ALL_SECTIONS)
+             + "&services=all&resources=all&jellyfin=1")
+    raw = _get(enabled, query).data
+    print("LARGEST WITH VMS", len(raw))
+    assert len(raw) < device_api.MAX_BYTES_ALL_WITH_VMS, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["vms"]["items"]) == device_api.VM_ITEMS and body["vms"]["total"] == 40
+    # The ceilings every older request keeps are untouched by the new section.
+    assert len(_get(enabled, "?services=all&resources=all&jellyfin=1").data) < device_api.MAX_BYTES_ALL
+    assert len(_get(enabled).data) < device_api.MAX_BYTES
+
+
+def test_a_typical_vm_answer_is_small(enabled, monkeypatch):
+    _fake_vms(monkeypatch, [_vm(f"Virtual-Machine-{i}", "Running" if i % 2 else "Off", "12d 23h")
+                            for i in range(10)])
+    assert len(_get(enabled, "?sections=vms").data) < 1100
+
+
+def test_the_vm_example_is_a_real_answer(enabled):
+    example = device_api.example_vms_summary()
+    assert set(example) == {"v", "now", "site", "overall", "vms"}
+    assert example["vms"]["running"] == 2 and example["vms"]["total"] == 3
+
+
+def test_the_admin_page_documents_the_opt_in_vms_section_with_a_real_example(client):
+    _login(client)
+    html = client.get("/admin/device").data.decode()
+    assert "<code>vms</code>" in html and "Only sent when you name it" in html
+    assert "sections=vms" in html
+    assert "Docker-Host" in html   # the example comes from example_vms_summary(), not hand-typed

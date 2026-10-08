@@ -938,6 +938,41 @@ def _api_health_mode(data):
     return mode if mode in API_HEALTH_MODES else "off"
 
 
+def list_service_groups():
+    """Every group name some service uses, alphabetical ignoring case - what the service
+    forms offer as the existing groups. Derived from the services themselves rather than
+    kept in a table of its own: a group exists exactly as long as a service is in it, so
+    there is nothing to create, rename or clean up separately."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT group_name FROM services WHERE TRIM(group_name) != '' GROUP BY group_name").fetchall()
+    conn.close()
+    return sorted((r["group_name"] for r in rows), key=lambda name: (name.casefold(), name))
+
+
+def _canonical_group_name(conn, raw, exclude_service_id=None):
+    """The group name to store for what somebody typed or picked.
+
+    Grouping on the public page is an exact string comparison, so "media" and "Media" used to
+    be two different headings. A name that matches an existing group ignoring case (and
+    stray spaces) therefore takes that group's spelling - the most used one if there are
+    several. The service being edited is left out of the lookup, otherwise a group could
+    never have its capitals corrected: its only member would always match itself."""
+    name = " ".join(str(raw or "").split())
+    if not name:
+        return ""
+    query = "SELECT group_name, COUNT(*) AS members FROM services WHERE group_name != ''"
+    params = []
+    if exclude_service_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_service_id)
+    rows = conn.execute(query + " GROUP BY group_name", params).fetchall()
+    same = [r for r in rows if r["group_name"].casefold() == name.casefold()]
+    if not same:
+        return name
+    return sorted(same, key=lambda r: (-r["members"], r["group_name"]))[0]["group_name"]
+
+
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
@@ -946,7 +981,7 @@ def create_service(data):
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
-          data.get("group_name", "").strip(), int(data.get("auto_incident", 1)),
+          _canonical_group_name(conn, data.get("group_name")), int(data.get("auto_incident", 1)),
           _slow_threshold_ms(data), int(data.get("startup_grace_seconds") or 0),
           int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
           int(data.get("ignore_in_overall_status", 0)), _api_health_mode(data),
@@ -969,7 +1004,7 @@ def update_service(service_id, data):
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
-          int(data.get("sort_order", 0)), data.get("group_name", "").strip(),
+          int(data.get("sort_order", 0)), _canonical_group_name(conn, data.get("group_name"), service_id),
           int(data.get("auto_incident", 1)), _slow_threshold_ms(data),
           int(data.get("startup_grace_seconds") or 0), int(data.get("retry_count") or 0),
           int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),

@@ -26,10 +26,7 @@
     <input type="url" id="url" name="url" placeholder="http://192.168.1.x:8989">
     <div class="field-hint">Used both as the service's "Open" link and the status check's API base URL. Leave blank to hide the "Open" button and skip API polling.</div>
   </div>
-  <div class="field">
-    <label for="group_name">Group / category (optional)</label>
-    <input type="text" id="group_name" name="group_name" placeholder="e.g. Media">
-  </div>
+  {% with current = '' %}{% include '_group_picker.html' %}{% endwith %}
   <div class="field">
     <label for="kind">Status check type</label>
     <select id="kind" name="kind">
@@ -187,4 +184,5 @@
     <a href="{{ url_for('admin_new_picker') }}" class="btn secondary">Cancel</a>
   </div>
 </form>
+<script src="{{ asset_url('js/admin_group_picker.js') }}"></script>
 {% endblock %}

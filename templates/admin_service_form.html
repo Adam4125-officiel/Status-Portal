@@ -107,11 +107,7 @@
     <label for="sort_order">Sort order</label>
     <input type="number" id="sort_order" name="sort_order" value="{{ service.sort_order if service else 0 }}">
   </div>
-  <div class="field">
-    <label for="group_name">Group / category (optional)</label>
-    <input type="text" id="group_name" name="group_name" value="{{ service.group_name if service else '' }}" placeholder="e.g. Media, Network, Infrastructure">
-    <div class="field-hint">Services sharing the same group are shown together under a heading on the public page. Leave blank to show it ungrouped.</div>
-  </div>
+  {% with current = service.group_name if service else '' %}{% include '_group_picker.html' %}{% endwith %}
   <div class="field">
     <label for="run_target">Runs on</label>
     {% set current_target = service.run_target if service else (defaults.run_target if defaults else '') %}
@@ -175,4 +171,5 @@
   </div>
 </form>
 {% if service %}<script src="{{ asset_url('js/admin_service_links.js') }}"></script>{% endif %}
+<script src="{{ asset_url('js/admin_group_picker.js') }}"></script>
 {% endblock %}

@@ -2036,6 +2036,65 @@ screen**, because the owner's portal was still on 1.11.0-rc.1 when the rc.4 fiel
 no real GPU, latency or Jellyfin activity ever reached the device. The owner declared 1.11.0 stable
 on 2026-10-07.
 
+## 1.11.1: admin and display-device polish (2026-10-08)
+
+A batch the owner asked for in one go, worked on one branch (`1.11.1`), one commit per item.
+Pairs with Status-ESP 1.1.0 (the VM screen and the hourly forecast), which is why the device API
+gained a section in a patch-numbered release: the owner's call, since it edits an API that
+already existed rather than adding a feature of its own.
+
+### The confirmation panel that closed itself
+
+Typing a 2FA code to start, stop or restart a VM, the "Start VM ... - type START below" panel
+vanished mid-code. Cause: `main.js` reloads the page every `PORTAL_RESOURCE_REFRESH_SECONDS` and
+the panel is opened by a script, so a fresh page starts with it closed and the field empty. Nothing
+about the panel itself was wrong, which is why it passed every route test. Reproduced in a real
+Chromium against a scratch server with a 4 s refresh (the old script: panel closed and typed text
+gone within one period), then fixed by making the reload wait while a `data-holds-refresh` element
+is visible or a text field is focused; the new script keeps the panel and the half-typed text across
+more than two refresh periods, the countdown shows "paused", and the reload resumes after Cancel.
+
+### Groups you had to retype
+
+`services.group_name` was a free-text box, and the public page groups services by exact string
+comparison, so "Media" and "media" (or one stray trailing space) made two headings and the owner had
+to remember the exact spelling every time. The form now offers the existing groups in a list with a
+"New group..." entry, in the service form and the wizard from one partial; and the server maps a typed
+name onto an existing group's spelling ignoring case, so the old box (no-JS, or a pasted name) cannot
+recreate the problem. Driven in a real Chromium against a scratch server: choosing a group fills the
+field, "New group..." shows a focused required box (an empty one blocks the submit instead of saving
+the service ungrouped), a new group appears in the list afterwards, "NETWORK" joins "Network", the edit
+form pre-selects the service's own group, and with JavaScript off only the text box shows.
+
+### The word typed on top of the 2FA code
+
+Every step-up panel asked for a word (START, STOP, RESTART, SHUTDOWN, UPDATE, REPLACE) as well as the
+six-digit code, and the owner had to be quick: type the word, then the code, inside the code's thirty
+seconds - and the panel itself used to vanish on the page's auto-refresh (above). The word was never
+sent to the server; `_require_totp()` is the only check, so removing it loses nothing the server
+enforced. All five panels (VM control, host, app/bot restart, update, database restore) now open with
+the 2FA field focused and enable Confirm at six digits; with 2FA off, Confirm is enabled immediately.
+Driven in a real Chromium against two scratch servers, 2FA on and off: VM start with a wrong code is
+refused by the server ("Incorrect or missing 2FA code"), with a right code it reaches the action (which
+is Windows-only, so on this Linux sandbox it answers "only available on Windows" - the safe stop). The
+host, system and restore panels were opened and cancelled but never submitted; the update panel is not
+rendered in a git checkout, so it is covered by a route test only. **Not exercised for real: a host
+restart, an app restart, an update or a restore actually going through.**
+
+### The device API learns about VMs
+
+Status-ESP 1.1.0 gets a VM screen, so `GET /api/device/summary?sections=vms` returns the Hyper-V VMs
+the portal already lists on `/vms` (name, state, uptime) from the same background cache. It is the
+first *section* (not modifier) added the opt-in way: an absent `sections=` still means the original
+five, and only a request that names `vms` gets it, so firmware 1.0.0 is never handed a bigger body.
+The adversarial worst case with every section, all three modifiers and `vms` measures 8.9 KB, so the
+ceiling for that request is 9 KB (`MAX_BYTES_ALL_WITH_VMS`), and the firmware's body cap follows it.
+The owner asked for this to ship in a *patch* number (1.11.1) because it edits an API that already
+existed rather than adding one; the CLAUDE.md policy would have said 1.12.0, and that call was
+theirs. Checked here against a real server: the default answer has no `vms`, `sections=vms` returns
+the two VMs of a faked cache in 329 bytes, a wrong or missing key is a 401, a typo is a 400 that lists
+`vms`. **Not seen: real Hyper-V data** - this sandbox is Linux, so the VM list comes from a fake.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

@@ -6,7 +6,7 @@
 </div>
 <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
   Restart this app's own process or its Discord bot connection — separate from the
-  Resources page's host machine restart/shutdown controls.
+  Resources &amp; VMs page's host machine restart/shutdown controls.
 </p>
 
 <div class="form-panel" style="max-width: 520px;">
@@ -107,9 +107,6 @@
   <p id="system-control-confirm-text" style="font-size: 13px;"></p>
   <form id="system-control-form" method="POST" action="{{ url_for('admin_system_restart') }}">
     <input type="hidden" name="component" id="system-control-component">
-    <div class="field">
-      <input type="text" id="system-control-confirm-input" placeholder="Type to confirm" autocomplete="off">
-    </div>
     {% if totp_enabled %}
     <div class="field">
       <label for="system-control-totp">2FA code</label>

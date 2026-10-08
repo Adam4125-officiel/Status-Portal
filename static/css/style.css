@@ -960,6 +960,8 @@ footer.foot {
   font-size: 13.5px;
   font-family: var(--font-body);
 }
+/* The group picker: the list, then the box for a new name underneath it. */
+.group-picker__select + input { margin-top: 8px; }
 .field textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); font-size: 13px; }
 
 /* The admin reply box on the reports table. The shared input styling above is scoped
