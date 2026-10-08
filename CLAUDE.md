@@ -3179,8 +3179,8 @@ change the shape and the example changes with it.
   `test_the_largest_possible_answer_with_vms_fits_its_ceiling`; anything not naming `vms` keeps
   the older 8 KB / 4 KB ceilings. **No CPU/RAM per VM**: the portal only knows name, state and
   uptime, and getting more means changing the `Get-VM` query, which cannot be checked on Linux.
-- **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`, firmware 1.0.0
-  at the time of 1.11.0). It asks for all three parameters and degrades by itself against an
+- **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`; firmware 1.0.0
+  paired with portal 1.11.0, and **firmware 1.1.0 - stable 2026-10-08 - with portal 1.11.1**). It asks for all three parameters and degrades by itself against an
   older portal (it just shows less: four disks, no GPU, no latency, no Jellyfin band), which is
   why **a portal release goes out first and the firmware second**, never the other way round.
   The firmware needs 1.10.0 for anything at all, 1.11.0 for everything the 1.0.x screens show,
@@ -3190,6 +3190,10 @@ change the shape and the example changes with it.
   part this repository cannot test. **What has not been seen**: 1.11.0's new fields (GPUs, latency, the
   Jellyfin band) were exercised against stand-ins and a real device on an older portal, never as real
   data on a real screen (`docs/HISTORY.md` -> "1.11.0: what the display asked for next").
+  1.11.1's `vms` section has the same caveat in a different place: it was only ever answered from
+  a faked VM cache here (this sandbox has no Hyper-V). Firmware 1.1.0 draws it, and keeps its text
+  clear of the plastic over the glass (the last ~16 px at the bottom are hidden on the owner's
+  SmallTV-Ultra) - that is the firmware's rule, in its CLAUDE.md, not this repository's.
 
 ## Keeping rules enforceable (`tests/test_conventions.py`)
 
@@ -3280,6 +3284,24 @@ change the shape and the example changes with it.
 - Clean up after smoke testing: remove any `instance/portal.db` created during a test
   run, and any cookie jars, before finishing — don't leave a test admin password or
   fake data sitting in what could become the user's real database.
+- **Check whether `instance/portal.db` is somebody's real data before a smoke test, and
+  if it might be, never point the server at it.** On the owner's machine it can be (a
+  dated, 200 KB file next to `secret_key` is not a leftover). Run the real app from a
+  small launcher script outside the repo instead: set `db.DB_PATH` to a scratch file
+  *before* anything opens it (what `tests/conftest.py` does), call `db.init_db()`, set an
+  admin password and any settings you need (2FA: `admin_totp_secret` +
+  `admin_totp_enabled`; device API: `device_api_enabled` + `device_api_key`), monkeypatch
+  `monitoring.get_cached_vm_snapshot` for fake VMs (this is Linux), set
+  `PORTAL_RESOURCE_REFRESH_SECONDS` low to watch an auto-refresh, then
+  `app.app.run(port=..., use_reloader=False)`. Two servers on two ports with two scratch
+  databases is how the 2FA-on and 2FA-off flows were both driven in one session.
+- **Driving a browser here: a scratch virtualenv is enough.** `python3 -m venv <scratch>`,
+  `pip install playwright pyotp`, and launch with
+  `executable_path=~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` when the
+  browser is already cached and the pip version's own build isn't (the pinned
+  `playwright install` is then unnecessary, and the project's `.venv` stays untouched).
+  Prove a browser test can fail by running it against the *previous* script/template
+  before trusting it - the refresh and group-picker tests were checked that way.
 - **Never live-invoke anything that shells out to actually restart/shut down a machine
   (`monitoring.control_host()`), even in this sandbox, even just to "see what
   happens."** Verify exclusively via a mocked `subprocess.run` in pytest.
@@ -3413,7 +3435,8 @@ the whole batch). The stable-release trigger above still governs promoting a
 pre-release or cutting a fresh full release.
 
 **Promoting a feature branch to stable means merging its PR with a regular merge
-commit (`gh pr merge N --merge`), never squash or rebase.** Every past PR on this
+commit (`gh pr merge N --merge`; the PR is opened as a draft, so `gh pr ready N` comes
+first), never squash or rebase.** Every past PR on this
 repo merged this way (`git log main --merges` shows it), and it's not a style preference —
 squashing would collapse a branch's carefully separated per-fix commits into one,
 which defeats the entire point of the commit-cadence convention above (`git bisect`/

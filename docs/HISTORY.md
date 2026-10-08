@@ -2095,6 +2095,24 @@ theirs. Checked here against a real server: the default answer has no `vms`, `se
 the two VMs of a faked cache in 329 bytes, a wrong or missing key is a 401, a typo is a 400 that lists
 `vms`. **Not seen: real Hyper-V data** - this sandbox is Linux, so the VM list comes from a fake.
 
+### How 1.11.1 shipped, and what was and was not verified
+
+Published as `v1.11.1-rc.1` the day it was written, installed and tried by the owner, and promoted to
+`v1.11.1` the same day with **no change to the code** (PR #28 merged with a merge commit, a `VERSION` bump on
+`main`, the branch deleted). Status-ESP 1.1.0 followed it, stable, on its own branch and its own CI.
+
+Verified here: the full suite (1,472 tests); the auto-refresh, the group picker and the five confirmation panels
+in a real Chromium against scratch servers with 2FA on and off; the device API on a real server (default answer
+unchanged, `sections=vms`, 401/400/405) plus a trace of every SQL statement of a full call (15, none a write) to
+answer "is it read-only". **Never exercised**: Hyper-V data from a real Windows host; a host restart, an app
+restart, an update or a database restore actually going through the new panels (the host, system and restore
+panels were opened and cancelled, never submitted - `control_host()` stays mocked-only by rule); the update panel
+in a browser (it is not rendered in a git checkout, so it has a route test only).
+
+The Stop hook's script (`.claude/check_conventions.sh`) was found with an uncommitted edit of the owner's that
+contains a typo (`"$py" -"$output"` for `"$py" - "$output"`). It was reported twice and deliberately left alone: it
+is their working-tree change, not part of any release.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
