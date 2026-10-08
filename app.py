@@ -5456,7 +5456,7 @@ scheduler.register_loop(
 scheduler.register_loop(
     "resource_polling",
     "Resource polling",
-    "Samples CPU, memory, disks and network into the cache the Resources page reads, "
+    "Samples CPU, memory, disks and network into the cache the Resources & VMs page reads, "
     "plus the Windows-only queries (Hyper-V VMs, temperatures). Runs far faster than "
     "the scheduler's tick, so the scheduler could not drive it even if it were "
     "listed as a task.",

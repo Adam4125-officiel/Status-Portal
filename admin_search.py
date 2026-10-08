@@ -74,7 +74,7 @@ PAGES = [
     ("admin_info.html", "admin_info", "Info page"),
     ("admin_integrations.html", "admin_integrations", "Integrations"),
     ("admin_integration_form.html", "admin_integration_new", "Integrations · New"),
-    ("admin_resources.html", "admin_resources", "Resources"),
+    ("admin_resources.html", "admin_resources", "Resources & VMs"),
     ("admin_tasks.html", "admin_tasks", "Scheduled tasks"),
     ("admin_notifications.html", "admin_notifications", "Notification channels"),
     ("admin_discord_bot.html", "admin_discord_bot", "Discord bot"),
