@@ -1646,3 +1646,21 @@ def test_the_full_example_is_a_real_answer_built_through_the_same_code():
     pretty, size = device_api.example_full_json()
     assert json.loads(pretty) == example
     assert size == len(device_api.dumps(example).encode("utf-8")) < 3000
+
+
+def test_the_admin_page_documents_detail_full_with_a_real_example(client):
+    _login(client)
+    html = client.get("/admin/device").data.decode()
+    assert "detail=full" in html and "Only sent when you ask for it" in html
+    assert "An older portal does not know the parameter and ignores it" in html
+    pretty, size = device_api.example_full_json()
+    assert str(escape(pretty.splitlines()[5].strip())) in html          # the "detail" line
+    assert "service_names" in html and "description" in html
+    assert "Nextcloud (family photos and documents)" in html            # from example_full_summary()
+    assert f"{size} bytes" in html
+    assert "<h1>Display device</h1>" in html and "<title>Display device" in html
+    assert str(escape(PLUGIN_QUERY.lstrip("?"))) in html
+
+
+def test_the_admin_search_still_finds_the_page_for_detail_full():
+    assert any(r["endpoint"] == "admin_device" for r in admin_search.search("detail full"))

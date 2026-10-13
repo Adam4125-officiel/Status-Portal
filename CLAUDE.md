@@ -3227,7 +3227,8 @@ change the shape and the example changes with it.
   escape). A realistic answer (30 services, 3 incidents, 5 windows, 3 announcements) is about 4 KB.
   **Raising a `FULL_*` cap means re-running those two tests and moving the ceilings in whole 4 KB
   steps**, not trusting arithmetic. The compact ceilings are untouched. `device_api.example_full_summary()`
-  is built through `build_summary()` from canned rows like the other examples.
+  is built through `build_summary()` from canned rows like the other examples and is shown, with the
+  plugin's request, on `/admin/device`.
 - **Two consumers, one endpoint, two repositories each.** Status-ESP uses the compact answer and never
   sends `detail`; the plugin is the only caller of `detail=full`. A change to the full shape is a change
   in the plugin's repository too, and what that parser does with it is that repository's to verify.

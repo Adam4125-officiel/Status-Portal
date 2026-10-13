@@ -4526,7 +4526,13 @@ def admin_device():
                   "success")
         return redirect(url_for("admin_device"))
     example, example_bytes = device_api.example_json()
+    example_full, example_full_bytes = device_api.example_full_json()
     return render_template("admin_device.html", example_vms=device_api.example_vms_json(),
+                            example_full=example_full, example_full_bytes=example_full_bytes,
+                            example_full_query=device_api.FULL_EXAMPLE_QUERY,
+                            full=device_api.FULL, compact=device_api.COMPACT,
+                            max_bytes_full=device_api.MAX_BYTES_FULL,
+                            max_bytes_full_sections=device_api.MAX_BYTES_FULL_SECTIONS,
                             device_api_enabled=db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1",
                             device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
                             port=config.PORT, example=example, example_bytes=example_bytes,

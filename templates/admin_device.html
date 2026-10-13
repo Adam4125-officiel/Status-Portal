@@ -99,6 +99,45 @@
 </div>
 
 <div class="form-panel" style="margin-top: 16px;">
+  <h2 style="margin-top: 0;">Fuller answers for a server (<code>detail=full</code>)</h2>
+  <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
+    A display needs short strings and short lists; a server that shows this status to people
+    (the Jelly Portal plugin for Jellyfin) has room for more. It asks the same address with
+    <code>detail=full</code> added. <strong>Only sent when you ask for it</strong>: without it the answer
+    is exactly what a display gets, byte for byte, and any other value (<code>detail=</code>,
+    <code>detail=compact</code>, a typo) is treated as if the parameter were not there.
+  </p>
+  <div class="admin-table" style="font-size: 13px;">
+    <table>
+      <thead><tr><th style="width: 130px;">Where</th><th>What changes with <code>detail=full</code></th></tr></thead>
+      <tbody>
+        <tr><td>Header</td><td>The site name is cut at {{ full.site_bytes }} bytes instead of {{ compact.site_bytes }}, and the answer says <code>"detail": "full"</code> right after <code>overall</code>. That is how a caller tells a portal that honoured the parameter from an older one that ignored it.</td></tr>
+        <tr><td><code>services</code></td><td>Up to {{ full.service_items }} services listed (with or without <code>services=all</code>) instead of {{ compact.service_items }} or {{ compact.all_service_items }}; names cut at {{ full.service_name_bytes }} bytes instead of {{ compact.service_name_bytes }}. Same keys, and the same rule about services you excluded from the overall status.</td></tr>
+        <tr><td><code>incidents</code></td><td>Up to {{ full.incident_items }} open incidents instead of {{ compact.incident_items }}, titles cut at {{ full.incident_title_bytes }} bytes. Each incident also carries <code>service_names</code>: the full names of the services it covers, as a list (empty when it covers none), so a name containing a comma stays one name.</td></tr>
+        <tr><td><code>maintenance</code></td><td>Up to {{ full.maintenance_items }} windows instead of {{ compact.maintenance_items }}, titles cut at {{ full.maintenance_title_bytes }} bytes. Each window also carries <code>service_names</code> (as above) and <code>description</code>: its description as one line, up to {{ full.maintenance_description_bytes }} bytes.</td></tr>
+        <tr><td><code>announcements</code></td><td>Up to {{ full.announcement_items }} announcements instead of {{ compact.announcement_items }}, titles cut at {{ full.announcement_title_bytes }} bytes and text at {{ full.announcement_text_bytes }}, still one plain line. A scheduled or expired announcement is never sent.</td></tr>
+        <tr><td>Everything else</td><td><code>resources</code>, <code>vms</code> and <code>jellyfin</code> are not affected, and a plugin that shows this to Jellyfin users should never ask for them: they describe the machine, and the key is what lets a display see them.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="field-hint" style="margin-top: 10px;">
+    An older portal does not know the parameter and ignores it, answering the compact way without
+    the <code>detail</code> key. The name lists hold at most {{ full.service_list_items }} names each, cut like the names
+    in <code>services</code>, so a name in a list compares equal to the same service's name there.
+    Nothing here costs an extra database query. A typical full answer is a few kilobytes; for the
+    plugin's request it can never exceed {{ max_bytes_full_sections }} bytes, and the largest answer the endpoint can
+    ever give (every section, every option and <code>detail=full</code>) is {{ max_bytes_full }}.
+  </div>
+  <p style="color: var(--text-dim); font-size: 13px; margin-bottom: 8px;">
+    The request the plugin makes, and what it answers here ({{ example_full_bytes }} bytes, built by
+    the same code as the real answer):
+  </p>
+  <pre class="code-block">curl -H "X-Api-Key: YOUR_KEY" \
+  "http://192.168.1.10:{{ port }}/api/device/summary?{{ example_full_query }}"</pre>
+  <pre class="code-block">{{ example_full }}</pre>
+</div>
+
+<div class="form-panel" style="margin-top: 16px;">
   <h2 style="margin-top: 0;">Example response</h2>
   <p style="color: var(--text-dim); font-size: 13px; margin-top: 0;">
     A full response is {{ example_bytes }} bytes here (shown indented for reading; the
