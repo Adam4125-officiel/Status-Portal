@@ -114,7 +114,7 @@ have bitten someone on exactly that change.
 | Anything that asks Seerr for something | *Requesting through Seerr* → `is4k` is not optional, and a 2xx is not a success |
 | Any call to Jellyfin | *Talking to Jellyfin* → one header builder, and never a `X-Emby-*` header |
 | The gamesportal integration, or `/api/notify/*` | *Cross-repo: gamesportal integration* → two different API keys, two different directions |
-| The display-device API (`/api/device/summary`, `device_api.py`, Status-ESP) | *Display device API* → bounded by construction, keyed, never a second key check; a new field is an opt-in parameter, never a bigger default |
+| The display-device API (`/api/device/summary`, `device_api.py`, Status-ESP, the Jelly Portal plugin) | *Display device API* → bounded by construction, keyed, never a second key check; a new field is an opt-in parameter, never a bigger default; `detail=full` is the one mode for a server, with its own ceilings |
 | Starting a multi-part batch of work | *Commit cadence* — one commit per completed fix, never one at the end |
 | The user saying the session is over | *Ending a session — and only then* — docs, release-if-stable, then delete every merged branch |
 
@@ -3037,7 +3037,7 @@ The Discord half specifically (added after this round of cross-repo testing, see
 above) has only unit/route test coverage - not re-run against a live Games Portal
 instance the way the email path was.
 
-## Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0; extended in v1.11.0
+## Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0; extended in v1.11.0, v1.11.1 and v1.12.0
 
 A compact JSON summary for **Status-ESP**, the sibling firmware for a 240x240 ESP8266
 display (GeekMagic SmallTV-Ultra, ~35 KB of free RAM, plain HTTP only, no TLS). The
@@ -3159,7 +3159,7 @@ change the shape and the example changes with it.
   here). The largest possible answer (all three parameters) is about 7.7 KB against the 8 KB
   ceiling.
 - **Every extension of this endpoint is an opt-in parameter, and the default answer never
-  grows.** `services=all`, `resources=all` and `jellyfin=1` all follow it: a firmware that
+  grows.** `services=all`, `resources=all`, `jellyfin=1` and `detail=full` all follow it: a firmware that
   does not send the parameter gets exactly what 1.10.0 sent, so an old Status-ESP is never
   handed a body bigger than the buffer it was sized for. A new field means a new parameter
   (or a new value of an existing one), a ceiling re-measured with the adversarial worst case,
@@ -3179,6 +3179,58 @@ change the shape and the example changes with it.
   `test_the_largest_possible_answer_with_vms_fits_its_ceiling`; anything not naming `vms` keeps
   the older 8 KB / 4 KB ceilings. **No CPU/RAM per VM**: the portal only knows name, state and
   uptime, and getting more means changing the `Get-VM` query, which cannot be checked on Linux.
+- **`detail=full` (1.12.0) is the opt-in answer for a consumer that is a server, not a display.**
+  The Jelly Portal Jellyfin plugin (its own repository) shows the portal's status to Jellyfin users
+  and always asks exactly `?sections=services,incidents,maintenance,announcements&services=all&detail=full`
+  with the `X-Api-Key` header. `device_api.parse_detail()` opts in only for the exact value `full`
+  (`strip().lower()`); `detail=`, `detail=bogus`, `detail=ful` and every other value are the default
+  answer, like `services=`/`resources=` treat anything but `all`. **Without it the response is byte for
+  byte what 1.11.1 sent**: `tests/test_device_api_golden.py` pins the shaping against a golden file
+  generated from the unmodified 1.11.1 code (never regenerate it to make a diff go away - a changed
+  default is a decision about every installed display), and
+  `test_any_detail_value_but_full_is_byte_for_byte_the_default_answer` pins it through the route on a
+  seeded database. The route's first two statements are still the gate and the key check; a wrong key
+  with `detail=full` gets the same 401 with no data, a disabled API the same 404.
+- **`detail=full` changes the site name and four sections, and nothing else.** `device_api.Limits` (a
+  `NamedTuple`; `COMPACT` is built from the original constants, `FULL` from the `FULL_*` ones) is the
+  one argument the shaping functions take, so the compact path calls `text()` with the very values it
+  always did. `FULL`: site name 64 bytes; up to 100 services (with *and* without `services=all`), names
+  64 bytes; up to 10 open incidents, title and service string 120 bytes; up to 20 maintenance windows,
+  title and service string 120 bytes, description 400 bytes; up to 10 announcements, title 100 bytes,
+  text 500 bytes (still one plain line, `**` stripped); 16 names per name list. `resources`, `vms` and
+  `jellyfin` are **not** shaped by it and a plugin must never ask for them (they describe the machine,
+  and the key is what lets a display see them, not every Jellyfin user); a test asserts they are
+  identical with and without the parameter. The ignore rule (`ignore_in_overall_status`) and the
+  active-only announcements apply in full mode exactly as before; incidents and windows are, as
+  before, not filtered by it.
+- **The marker and the new keys.** A full answer carries `"detail":"full"` right after `overall` (before
+  `jellyfin`, so the first four keys are what they always were). It exists because an older portal
+  ignores an unknown parameter and answers compact, without it: the marker is how a caller tells which
+  portal it is talking to. New keys, appended after the existing ones of an item: `incidents.items[]
+  .service_names` and `maintenance.items[].service_names` (JSON arrays of full names, `[]` when a row
+  covers none) and `maintenance.items[].description` (one line, `""` when empty). The existing
+  `services` string stays, with the larger cap. **The arrays come from the `services` lists `db.py`
+  already attaches** (`_attach_incident_services`, `_attach_window_services`: grouped queries), so
+  full mode runs exactly the statements the default runs
+  (`test_detail_full_runs_the_same_statements_as_the_default_and_none_of_them_writes`). Each name is cut
+  with the same `text()` and `FULL_SERVICE_NAME_BYTES` as `services.items[].name`, so a name in an
+  array compares equal to the same service's name there; the array is the only way to get a name that
+  contains a comma or that the old string cut, which is why it exists at all. Empty names are skipped
+  before the 16-name cap counts.
+- **`detail=full` has its own ceilings, in tens of kilobytes, and they are asserted like the others.**
+  `MAX_BYTES_FULL_SECTIONS` (112 KB) is for the plugin's exact request and `MAX_BYTES_FULL` (116 KB)
+  for the largest answer the endpoint can ever give (every section, every modifier, `vms` and
+  `detail=full`); the adversarial worst cases measure 112,785 and 115,576 bytes
+  (`test_the_plugins_worst_possible_request_fits_its_ceiling`,
+  `test_the_largest_possible_full_answer_fits_its_ceiling`), where most of it is the maintenance list
+  (20 windows x title, string, description and a 16-name array, all made of characters JSON has to
+  escape). A realistic answer (30 services, 3 incidents, 5 windows, 3 announcements) is about 4 KB.
+  **Raising a `FULL_*` cap means re-running those two tests and moving the ceilings in whole 4 KB
+  steps**, not trusting arithmetic. The compact ceilings are untouched. `device_api.example_full_summary()`
+  is built through `build_summary()` from canned rows like the other examples.
+- **Two consumers, one endpoint, two repositories each.** Status-ESP uses the compact answer and never
+  sends `detail`; the plugin is the only caller of `detail=full`. A change to the full shape is a change
+  in the plugin's repository too, and what that parser does with it is that repository's to verify.
 - **Status-ESP lives in its own repository** (`Adam4125-officiel/Status-ESP`; firmware 1.0.0
   paired with portal 1.11.0, and **firmware 1.1.0 - stable 2026-10-08 - with portal 1.11.1**). It asks for all three parameters and degrades by itself against an
   older portal (it just shows less: four disks, no GPU, no latency, no Jellyfin band), which is

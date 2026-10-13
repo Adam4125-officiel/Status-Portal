@@ -6,7 +6,9 @@ microcontroller with ~35 KB of free RAM whatever is in the database. The firmwar
 is the sibling Status-ESP repository.
 """
 import json
+import re
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 from markupsafe import escape
@@ -1014,3 +1016,633 @@ def test_the_admin_page_documents_the_opt_in_vms_section_with_a_real_example(cli
     assert "<code>vms</code>" in html and "Only sent when you name it" in html
     assert "sections=vms" in html
     assert "Docker-Host" in html   # the example comes from example_vms_summary(), not hand-typed
+
+
+# ---------------------------------------------------------------------------
+# detail=full: the same answer with room to breathe, for a server (the Jelly Portal plugin)
+# ---------------------------------------------------------------------------
+# The query the plugin makes, spelled out here rather than imported: this is the contract.
+PLUGIN_QUERY = "?sections=services,incidents,maintenance,announcements&services=all&detail=full"
+PLUGIN_SECTIONS = ["services", "incidents", "maintenance", "announcements"]
+# Keys only a detail=full answer may carry.
+FULL_ONLY_KEYS = (b'"detail":', b'"service_names":', b'"description":')
+
+
+def _without_now(raw):
+    """An answer with the server clock cut out, so two requests a second apart compare."""
+    return re.sub(rb'"now":"[^"]*",', b"", raw)
+
+
+def _typical_snapshot(monkeypatch):
+    monkeypatch.setattr(monitoring, "get_resource_snapshot", lambda: _snapshot())
+
+
+def _seed_scenario():
+    """A little of everything, with names long enough to tell the compact answer from the full one."""
+    long_name = "Nextcloud family photos and documents archive"   # 45 bytes: cut at 24 when compact
+    ids = {
+        "jelly": db.create_service({"name": "Jellyfin", "url": "", "status": "operational"}),
+        "cloud": db.create_service({"name": long_name, "url": "", "status": "down"}),
+        "sonarr": db.create_service({"name": "Sonarr", "url": "", "status": "degraded"}),
+        "muted": db.create_service({"name": "Muted box", "url": "", "status": "down",
+                                    "ignore_in_overall_status": 1}),
+    }
+    db.update_service_status_from_check(ids["jelly"], "operational", 41)
+    db.create_incident({"title": "Nextcloud is unreachable after the overnight update"},
+                       service_ids=[ids["cloud"], ids["sonarr"]])
+    db.create_incident({"title": "Wi-Fi is slow in the living room"})
+    db.create_maintenance_window({"title": "Disk replacement", "description": "Streaming stops\nfor about three hours.",
+                                  "starts_at": "2099-01-01T22:00", "ends_at": "2099-01-02T01:00"},
+                                 service_ids=[ids["jelly"], ids["cloud"], ids["sonarr"]])
+    db.create_maintenance_window({"title": "Router firmware", "description": "",
+                                  "starts_at": "2000-01-01T00:00", "ends_at": "2099-06-01T00:00"},
+                                 service_ids=[ids["sonarr"]])
+    db.process_maintenance_windows()
+    db.create_announcement({"title": "Movie night", "message": "Friday at **8pm**"})
+    db.create_announcement({"title": "Scheduled", "message": "not yet", "starts_at": "2099-01-01T00:00"})
+    return ids
+
+
+# --- parse_detail, and the limits ------------------------------------------------------------
+@pytest.mark.parametrize("raw, expected", [
+    ("full", True), ("FULL", True), ("Full", True), ("  full ", True), ("\tfull\n", True),
+    (None, False), ("", False), ("   ", False), ("ful", False), ("fullx", False), ("full full", False),
+    ("full,compact", False), ("compact", False), ("1", False), ("true", False), ("all", False),
+])
+def test_parse_detail(raw, expected):
+    assert device_api.parse_detail(raw) is expected
+
+
+def test_the_compact_limits_are_the_original_constants():
+    """COMPACT is what every request got before detail=full existed; if one of its numbers is
+    ever not the constant it is named after, the default answer has changed."""
+    c = device_api.COMPACT
+    assert (c.site_bytes, c.service_items, c.all_service_items, c.service_name_bytes) == (
+        device_api.SITE_BYTES, device_api.SERVICE_ITEMS, device_api.ALL_SERVICE_ITEMS,
+        device_api.SERVICE_NAME_BYTES)
+    assert (c.incident_items, c.incident_title_bytes, c.incident_services_bytes) == (
+        device_api.INCIDENT_ITEMS, device_api.INCIDENT_TITLE_BYTES, device_api.INCIDENT_SERVICES_BYTES)
+    assert (c.maintenance_items, c.maintenance_title_bytes, c.maintenance_services_bytes) == (
+        device_api.MAINTENANCE_ITEMS, device_api.MAINTENANCE_TITLE_BYTES,
+        device_api.MAINTENANCE_SERVICES_BYTES)
+    assert (c.announcement_items, c.announcement_title_bytes, c.announcement_text_bytes) == (
+        device_api.ANNOUNCEMENT_ITEMS, device_api.ANNOUNCEMENT_TITLE_BYTES,
+        device_api.ANNOUNCEMENT_TEXT_BYTES)
+    assert c.full is False and device_api.limits_for(False) is c
+    assert device_api.incident_limit() == device_api.INCIDENT_ITEMS == 3
+
+
+def test_the_full_limits_are_the_documented_contract():
+    """The numbers a consumer of detail=full relies on. Changing one is a decision (and means
+    re-running the worst-case size tests below), so it has to be a decision in this test too."""
+    f = device_api.FULL
+    assert f.full is True and device_api.limits_for(True) is f
+    assert (f.site_bytes, f.service_items, f.all_service_items, f.service_name_bytes) == (64, 100, 100, 64)
+    assert (f.incident_items, f.incident_title_bytes, f.incident_services_bytes) == (10, 120, 120)
+    assert (f.maintenance_items, f.maintenance_title_bytes, f.maintenance_services_bytes,
+            f.maintenance_description_bytes) == (20, 120, 120, 400)
+    assert (f.announcement_items, f.announcement_title_bytes, f.announcement_text_bytes) == (10, 100, 500)
+    assert f.service_list_items == 16
+    assert device_api.incident_limit(True) == 10
+    assert device_api.DETAIL_FULL == "full"
+    assert device_api.FULL_EXAMPLE_QUERY == PLUGIN_QUERY.lstrip("?")
+
+
+def test_the_two_full_ceilings_are_whole_multiples_of_four_kilobytes():
+    for ceiling in (device_api.MAX_BYTES_FULL_SECTIONS, device_api.MAX_BYTES_FULL):
+        assert ceiling > 0 and ceiling % 4096 == 0
+    assert device_api.MAX_BYTES_FULL_SECTIONS <= device_api.MAX_BYTES_FULL
+    assert device_api.MAX_BYTES_FULL > device_api.MAX_BYTES_ALL_WITH_VMS
+
+
+# --- the service name list ---------------------------------------------------------------------
+def test_service_name_list_cuts_like_the_services_section_and_skips_empty_names():
+    long_name = "n" * 100
+    rows = [{"id": 1, "name": "Plain"}, {"id": 2, "name": ""}, {"id": 3, "name": None},
+            {"id": 4, "name": "  \t "}, {"id": 5, "name": long_name}, {"id": 6, "name": "a, b"}]
+    names = device_api.service_name_list(rows, device_api.FULL)
+    assert names == ["Plain", device_api.text(long_name, device_api.FULL_SERVICE_NAME_BYTES), "a, b"]
+    assert names[1] == "n" * 61 + "..." and len(names[1].encode()) == 64
+
+
+def test_service_name_list_is_capped_and_tolerates_missing_or_odd_rows():
+    rows = [{"id": i, "name": f"S{i}"} for i in range(40)]
+    assert device_api.service_name_list(rows, device_api.FULL) == [f"S{i}" for i in range(16)]
+    assert device_api.service_name_list(None, device_api.FULL) == []
+    assert device_api.service_name_list([], device_api.FULL) == []
+    assert device_api.service_name_list(["not a dict", 5, {"id": 1}], device_api.FULL) == []
+
+
+def test_empty_names_do_not_use_up_the_list_cap():
+    rows = [{"name": ""}] * 5 + [{"name": f"S{i}"} for i in range(20)]
+    assert device_api.service_name_list(rows, device_api.FULL) == [f"S{i}" for i in range(16)]
+
+
+# --- the default answer is not touched ----------------------------------------------------------
+def test_without_detail_full_the_new_keys_never_appear_even_for_rows_that_carry_the_data():
+    """The rows the route passes in always carry `services` and `description`; only the mode decides
+    whether they are used. (The golden file proves the bytes for rows that don't have them.)"""
+    now = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+    rows = {
+        "incidents": [{"title": "T", "service_names": "A, B",
+                       "services": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]}],
+        "maintenance": [{"title": "W", "service_names": "A", "services": [{"id": 1, "name": "A"}],
+                         "description": "details", "starts_at": "2099-01-01T00:00",
+                         "ends_at": "2099-01-02T00:00"}],
+    }
+    plain = device_api.dumps(device_api.build_summary(PLUGIN_SECTIONS, now=now, site="s", overall="operational", **rows))
+    for key in FULL_ONLY_KEYS:
+        assert key not in plain.encode()
+    full = device_api.dumps(device_api.build_summary(PLUGIN_SECTIONS, now=now, site="s", overall="operational",
+                                                    detail_full=True, **rows))
+    assert '"service_names":["A","B"]' in full and '"description":"details"' in full
+    assert '"detail":"full"' in full
+
+
+def test_the_marker_sits_right_after_overall_and_before_jellyfin():
+    now = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+    full = device_api.build_summary(["services"], now=now, site="s", overall="operational",
+                                    detail_full=True, with_jellyfin=True, jellyfin={})
+    assert list(full)[:6] == ["v", "now", "site", "overall", "detail", "jellyfin"]
+    plain = device_api.build_summary(["services"], now=now, site="s", overall="operational",
+                                     with_jellyfin=True, jellyfin={})
+    assert list(plain)[:5] == ["v", "now", "site", "overall", "jellyfin"]
+    assert list(full)[:4] == list(plain)[:4]
+
+
+@pytest.mark.parametrize("base", [
+    "",
+    "?sections=services,incidents,maintenance,announcements&services=all",
+    "?sections=services&services=all&resources=all&jellyfin=1",
+    "?sections=" + ",".join(device_api.ALL_SECTIONS) + "&services=all&resources=all&jellyfin=1",
+])
+@pytest.mark.parametrize("detail", ["", "bogus", "ful", "fullx", "compact", "1", "true", "all",
+                                    "full%2Ccompact", "%20", "none"])
+def test_any_detail_value_but_full_is_byte_for_byte_the_default_answer(enabled, monkeypatch, base, detail):
+    """Through the route, on a seeded database: `detail=` with anything else is no `detail=` at all."""
+    _seed_scenario()
+    _typical_snapshot(monkeypatch)
+    _fake_vms(monkeypatch, [_vm()])
+    default = _get(enabled, base).data
+    other = _get(enabled, f"{base}{'&' if base else '?'}detail={detail}").data
+    assert _without_now(other) == _without_now(default)
+    for key in FULL_ONLY_KEYS:
+        assert key not in default
+
+
+# --- what detail=full changes ---------------------------------------------------------------------
+@pytest.mark.parametrize("value", ["full", "FULL", "Full", "%20full%20", "+Full+", "full%09"])
+def test_detail_full_is_case_and_space_tolerant(enabled, value):
+    assert _summary(enabled, f"?sections=services&detail={value}")["detail"] == "full"
+
+
+def test_detail_full_adds_the_marker_the_name_arrays_and_the_description(enabled):
+    ids = _seed_scenario()
+    body = _summary(enabled, PLUGIN_QUERY)
+    assert list(body)[:5] == ["v", "now", "site", "overall", "detail"]
+    assert body["detail"] == "full"
+    assert list(body)[5:] == PLUGIN_SECTIONS
+    assert body["overall"] == "down"
+
+    for item in body["services"]["items"]:
+        assert set(item) <= {"name", "status", "ms"}
+    cloud = next(i for i in body["services"]["items"] if i["status"] == "down")
+    assert cloud["name"] == "Nextcloud family photos and documents archive"   # whole: 45 bytes
+
+    newest, older = body["incidents"]["items"]
+    assert list(newest) == ["title", "status", "since", "services", "service_names"]
+    assert newest["title"] == "Wi-Fi is slow in the living room" and newest["service_names"] == []
+    assert older["title"] == "Nextcloud is unreachable after the overnight update"   # 51 bytes: whole
+    assert older["service_names"] == ["Nextcloud family photos and documents archive", "Sonarr"]
+    # The existing string key keeps its meaning (the names joined), just with the larger cap.
+    assert older["services"] == "Nextcloud family photos and documents archive, Sonarr"
+
+    active, upcoming = body["maintenance"]["items"]
+    assert list(active) == ["title", "state", "services", "starts", "ends", "service_names", "description"]
+    assert (active["state"], active["service_names"], active["description"]) == ("active", ["Sonarr"], "")
+    assert upcoming["service_names"] == ["Jellyfin", "Nextcloud family photos and documents archive", "Sonarr"]
+    assert upcoming["description"] == "Streaming stops for about three hours."   # one line, like every string
+
+    (announcement,) = body["announcements"]["items"]
+    assert list(announcement) == ["title", "text", "type", "pinned"]
+    assert announcement["text"] == "Friday at 8pm"
+    assert ids  # seeded
+
+
+def test_the_compact_answer_for_the_same_data_cuts_what_the_full_one_keeps(enabled):
+    _seed_scenario()
+    body = _summary(enabled, "?" + PLUGIN_QUERY.split("&detail=")[0].lstrip("?"))
+    assert "detail" not in body
+    cloud = next(i for i in body["services"]["items"] if i["status"] == "down")
+    assert cloud["name"] == "Nextcloud family phot..."
+    assert all("service_names" not in i for i in body["incidents"]["items"])
+    assert all("service_names" not in i and "description" not in i for i in body["maintenance"]["items"])
+
+
+# --- the caps, one section at a time -------------------------------------------------------------
+def test_full_cuts_a_service_name_at_64_bytes_and_the_site_name_at_64(enabled):
+    db.create_service({"name": "x" * 100, "url": "", "status": "down"})
+    db.set_setting("site_name", "s" * 100)
+    body = _summary(enabled, "?sections=services&detail=full")
+    assert body["services"]["items"][0]["name"] == "x" * 61 + "..."
+    assert body["site"] == "s" * 61 + "..."
+    compact = _summary(enabled, "?sections=services")
+    assert compact["services"]["items"][0]["name"] == "x" * 21 + "..."
+    assert compact["site"] == "s" * 21 + "..."
+
+
+@pytest.mark.parametrize("query", ["?sections=services&detail=full", "?sections=services&services=all&detail=full"])
+def test_full_lists_up_to_100_services_with_and_without_services_all(enabled, query):
+    for i in range(105):
+        db.create_service({"name": f"Down {i:03d}", "url": "", "status": "down"})
+    db.create_service({"name": "Fine", "url": "", "status": "operational"})
+    section = _summary(enabled, query)["services"]
+    assert len(section["items"]) == device_api.FULL_SERVICE_ITEMS == 100
+    assert section["total"] == 106 and section["down"] == 105 and section["operational"] == 1
+    assert section["items"][0]["name"] == "Down 000"   # still the admin's order within a status
+
+
+def test_full_without_services_all_still_lists_only_the_unhealthy(enabled):
+    db.create_service({"name": "Fine", "url": "", "status": "operational"})
+    db.create_service({"name": "Dead", "url": "", "status": "down"})
+    items = _summary(enabled, "?sections=services&detail=full")["services"]["items"]
+    assert [i["name"] for i in items] == ["Dead"]
+    items = _summary(enabled, "?sections=services&services=all&detail=full")["services"]["items"]
+    assert [i["name"] for i in items] == ["Dead", "Fine"]
+
+
+def test_full_services_keep_ms_only_for_the_measured_healthy_ones_with_services_all(enabled):
+    fine = db.create_service({"name": "Fine", "url": "", "status": "operational"})
+    down = db.create_service({"name": "Dead", "url": "", "status": "down"})
+    db.create_service({"name": "Manual", "url": "", "status": "operational"})
+    db.update_service_status_from_check(fine, "operational", 45)
+    db.update_service_status_from_check(down, "down", 30000)
+    items = {i["name"]: i for i in _summary(enabled, "?sections=services&services=all&detail=full")["services"]["items"]}
+    assert items["Fine"] == {"name": "Fine", "status": "operational", "ms": 45}
+    assert items["Dead"] == {"name": "Dead", "status": "down"}
+    assert items["Manual"] == {"name": "Manual", "status": "operational"}
+    plain = _summary(enabled, "?sections=services&detail=full")["services"]["items"]
+    assert all("ms" not in i for i in plain)
+
+
+def test_full_lists_10_incidents_and_open_is_still_the_total(enabled):
+    for i in range(12):
+        db.create_incident({"title": f"Incident {i}"})
+    long = db.create_incident({"title": "t" * 130})
+    section = _summary(enabled, "?sections=incidents&detail=full")["incidents"]
+    assert section["open"] == 13
+    assert len(section["items"]) == device_api.FULL_INCIDENT_ITEMS == 10
+    assert section["items"][0]["title"] == "t" * 117 + "..."          # 120 bytes
+    assert [i["title"] for i in section["items"][1:4]] == ["Incident 11", "Incident 10", "Incident 9"]
+    compact = _summary(enabled, "?sections=incidents")["incidents"]
+    assert len(compact["items"]) == 3 and compact["items"][0]["title"] == "t" * 37 + "..."
+    assert long
+
+
+def test_full_cuts_the_incident_service_string_at_120_bytes(enabled):
+    ids = [db.create_service({"name": f"{i}" * 60, "url": "", "status": "operational"}) for i in range(3)]
+    db.create_incident({"title": "I"}, service_ids=ids)
+    item = _summary(enabled, "?sections=incidents&detail=full")["incidents"]["items"][0]
+    assert len(item["services"].encode()) == 120 and item["services"].endswith("...")
+    assert item["service_names"] == ["0" * 60, "1" * 60, "2" * 60]   # the array is not cut by it
+    assert len(_summary(enabled, "?sections=incidents")["incidents"]["items"][0]["services"].encode()) == 32
+
+
+def test_full_lists_20_windows_and_the_counts_are_still_the_totals(enabled):
+    sid = db.create_service({"name": "A", "url": ""})
+    for i in range(3):
+        db.create_maintenance_window({"title": f"Now {i}", "starts_at": "2000-01-01T00:00",
+                                      "ends_at": "2099-06-01T00:00"}, service_ids=[sid])
+    db.process_maintenance_windows()
+    for i in range(22):
+        db.create_maintenance_window({"title": f"Later {i:02d}", "description": "d" * 500,
+                                      "starts_at": f"2099-01-{i + 1:02d}T00:00",
+                                      "ends_at": f"2099-02-{i + 1:02d}T00:00"}, service_ids=[sid])
+    section = _summary(enabled, "?sections=maintenance&detail=full")["maintenance"]
+    assert (section["active"], section["upcoming"]) == (3, 22)
+    assert len(section["items"]) == device_api.FULL_MAINTENANCE_ITEMS == 20
+    assert [i["state"] for i in section["items"]] == ["active"] * 3 + ["upcoming"] * 17   # active first
+    assert section["items"][-1]["title"] == "Later 16"                                      # soonest first
+    assert section["items"][3]["description"] == "d" * 397 + "..."                          # 400 bytes
+    assert len(_summary(enabled, "?sections=maintenance")["maintenance"]["items"]) == 3
+
+
+def test_full_cuts_a_window_title_and_service_string_at_120_bytes(enabled):
+    ids = [db.create_service({"name": f"{i}" * 60, "url": ""}) for i in range(3)]
+    db.create_maintenance_window({"title": "T" * 130, "starts_at": "2099-01-01T00:00",
+                                  "ends_at": "2099-01-02T00:00"}, service_ids=ids)
+    item = _summary(enabled, "?sections=maintenance&detail=full")["maintenance"]["items"][0]
+    assert item["title"] == "T" * 117 + "..."
+    assert len(item["services"].encode()) == 120 and item["services"].endswith("...")
+    assert item["service_names"] == ["0" * 60, "1" * 60, "2" * 60]
+
+
+def test_full_lists_10_announcements_with_longer_title_and_text(enabled):
+    for i in range(12):
+        db.create_announcement({"title": f"N{i}", "message": "m", "pinned": 1 if i == 0 else 0})
+    db.create_announcement({"title": "q" * 150, "message": "w" * 600, "pinned": 1})
+    section = _summary(enabled, "?sections=announcements&detail=full")["announcements"]
+    assert section["count"] == 13 and len(section["items"]) == device_api.FULL_ANNOUNCEMENT_ITEMS == 10
+    long = next(a for a in section["items"] if a["title"].startswith("q"))
+    assert long["title"] == "q" * 97 + "..." and long["text"] == "w" * 497 + "..."
+    compact = _summary(enabled, "?sections=announcements")["announcements"]
+    assert len(compact["items"]) == 3
+
+
+def test_full_announcement_text_is_still_one_plain_line(enabled):
+    db.create_announcement({"title": "Notice", "message": "Server **restarts**\n\ntonight   at 23:00\n\n- and again **later**"})
+    item = _summary(enabled, "?sections=announcements&detail=full")["announcements"]["items"][0]
+    assert item["text"] == "Server restarts tonight at 23:00 - and again later"
+
+
+# --- the name arrays ----------------------------------------------------------------------------
+def test_a_window_lists_the_exact_names_of_its_services_even_when_the_compact_string_cuts_them(enabled):
+    plain = db.create_service({"name": "Plain", "url": ""})
+    comma = db.create_service({"name": "Photos, documents and backups", "url": ""})
+    wordy = db.create_service({"name": "W" * 50, "url": ""})
+    db.create_maintenance_window({"title": "W", "starts_at": "2099-01-01T00:00",
+                                  "ends_at": "2099-01-02T00:00"}, service_ids=[plain, comma, wordy])
+    item = _summary(enabled, "?sections=maintenance&detail=full")["maintenance"]["items"][0]
+    assert item["service_names"] == ["Plain", "Photos, documents and backups", "W" * 50]
+    # The compact string cannot do this: it is cut, and a comma inside a name is ambiguous.
+    compact = _summary(enabled, "?sections=maintenance")["maintenance"]["items"][0]
+    assert compact["services"] == "Plain, Photos, documents and..."
+    assert "service_names" not in compact
+
+
+def test_an_incident_without_services_has_an_empty_name_array(enabled):
+    db.create_incident({"title": "Manual, no service attached"})
+    item = _summary(enabled, "?sections=incidents&detail=full")["incidents"]["items"][0]
+    assert item["service_names"] == [] and item["services"] == ""
+
+
+def test_a_name_in_an_array_equals_the_same_services_name_in_the_services_section_even_past_64_bytes(enabled):
+    sid = db.create_service({"name": "L" * 100, "url": "", "status": "down"})
+    db.create_incident({"title": "I"}, service_ids=[sid])
+    db.create_maintenance_window({"title": "W", "starts_at": "2099-01-01T00:00",
+                                  "ends_at": "2099-01-02T00:00"}, service_ids=[sid])
+    body = _summary(enabled, PLUGIN_QUERY)
+    listed = body["services"]["items"][0]["name"]
+    assert listed == "L" * 61 + "..."
+    assert body["incidents"]["items"][0]["service_names"] == [listed]
+    assert body["maintenance"]["items"][0]["service_names"] == [listed]
+
+
+def test_a_name_array_holds_at_most_16_names_and_the_string_still_names_them_all_it_can(enabled):
+    ids = [db.create_service({"name": f"Svc{i:02d}", "url": ""}) for i in range(20)]
+    db.create_incident({"title": "I"}, service_ids=ids)
+    db.create_maintenance_window({"title": "W", "starts_at": "2099-01-01T00:00",
+                                  "ends_at": "2099-01-02T00:00"}, service_ids=ids)
+    body = _summary(enabled, "?sections=incidents,maintenance&detail=full")
+    expected = [f"Svc{i:02d}" for i in range(16)]
+    assert body["incidents"]["items"][0]["service_names"] == expected
+    assert body["maintenance"]["items"][0]["service_names"] == expected
+    assert device_api.FULL_SERVICE_LIST_ITEMS == 16
+
+
+# --- what is and is not filtered, unchanged ---------------------------------------------------
+def test_a_muted_service_stays_out_of_the_services_section_in_full_mode_but_incidents_and_windows_keep_it(enabled):
+    muted = db.create_service({"name": "Flaky box", "url": "", "status": "down", "ignore_in_overall_status": 1})
+    real = db.create_service({"name": "Real", "url": "", "status": "operational"})
+    db.create_incident({"title": "On the muted one"}, service_ids=[muted])
+    db.create_maintenance_window({"title": "Both", "starts_at": "2099-01-01T00:00",
+                                  "ends_at": "2099-01-02T00:00"}, service_ids=[muted, real])
+    body = _summary(enabled, PLUGIN_QUERY)
+    assert body["overall"] == "operational"
+    assert body["services"]["total"] == 1 and body["services"]["down"] == 0
+    assert [i["name"] for i in body["services"]["items"]] == ["Real"]
+    assert body["incidents"]["items"][0]["service_names"] == ["Flaky box"]       # not filtered, as before
+    assert body["maintenance"]["items"][0]["service_names"] == ["Flaky box", "Real"]
+
+
+def test_a_scheduled_or_expired_announcement_never_appears_in_full_mode(enabled):
+    db.create_announcement({"title": "Live", "message": "visible"})
+    db.create_announcement({"title": "Later", "message": "secret", "starts_at": "2099-01-01T00:00"})
+    db.create_announcement({"title": "Gone", "message": "old", "ends_at": "2000-01-01T00:00"})
+    raw = _get(enabled, PLUGIN_QUERY).data
+    section = json.loads(raw)["announcements"]
+    assert section["count"] == 1 and [a["title"] for a in section["items"]] == ["Live"]
+    assert b"secret" not in raw and b"Later" not in raw and b"Gone" not in raw
+
+
+def test_an_old_open_incident_is_still_found_behind_newer_resolved_ones_in_full_mode(enabled):
+    old_open = db.create_incident({"title": "Open since forever"})
+    for i in range(12):
+        rid = db.create_incident({"title": f"Resolved {i}"})
+        db.update_incident(rid, {"title": f"Resolved {i}", "status": "resolved"})
+    section = _summary(enabled, "?sections=incidents&detail=full")["incidents"]
+    assert section["open"] == 1 and [i["title"] for i in section["items"]] == ["Open since forever"]
+    assert old_open
+
+
+# --- resources, vms and jellyfin are not touched by detail=full -----------------------------------
+def test_detail_full_leaves_resources_vms_and_jellyfin_exactly_as_they_were(enabled, monkeypatch):
+    """A plugin must never ask for these, and if it does it must not get a different answer from a
+    display: the mode only changes the site name and the four sections."""
+    disks = [{"path": f"/m{i}", "label": f"Disk {i} with a long label", "percent": float(i), "severity": "ok",
+              "free_gb": 1.0} for i in range(12)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=[_gpu(0), _gpu(1, name="N" * 60)]))
+    _fake_vms(monkeypatch, [_vm(f"Virtual-Machine-with-a-long-name-{i}") for i in range(14)])
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 2, "running_tasks": [f"Task {i} " + "x" * 60 for i in range(5)]})
+    for query in ("?sections=resources", "?sections=resources&resources=all", "?sections=vms",
+                  "?sections=vms,resources&resources=all&jellyfin=1", "?sections=services&jellyfin=1"):
+        default = _summary(enabled, query)
+        full = _summary(enabled, query + "&detail=full")
+        assert full.pop("detail") == "full"
+        assert list(full) == list(default) and full["overall"] == default["overall"]
+        for section in ("resources", "vms", "jellyfin"):
+            assert full.get(section) == default.get(section), (query, section)
+
+
+# --- the route's rules, with the parameter ------------------------------------------------------
+def test_a_wrong_or_missing_key_with_detail_full_gets_the_401_and_no_data(enabled):
+    _seed_scenario()
+    for headers in ({}, {"X-Api-Key": "wrong"}):
+        resp = enabled.get(URL + PLUGIN_QUERY, headers=headers)
+        assert resp.status_code == 401
+        assert resp.get_json() == {"error": "Missing or invalid API key"}
+        assert b"Jellyfin" not in resp.data and b"detail" not in resp.data
+    assert enabled.get(f"{URL}{PLUGIN_QUERY}&key={KEY}").status_code == 401   # header only, never the URL
+
+
+def test_a_disabled_api_is_a_404_with_detail_full_too(client):
+    assert client.get(URL + PLUGIN_QUERY, headers=HEADERS).status_code == 404
+    db.set_setting(app_module.DEVICE_API_KEY_SETTING, KEY)
+    db.set_setting(app_module.DEVICE_API_ENABLED_SETTING, "0")
+    assert client.get(URL + PLUGIN_QUERY, headers=HEADERS).status_code == 404
+
+
+def test_detail_full_is_utf8_no_store_and_get_only(enabled):
+    db.create_service({"name": "Café serveur", "url": "", "status": "down"})
+    resp = _get(enabled, PLUGIN_QUERY)
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["Content-Type"] == "application/json; charset=utf-8"
+    assert "Café serveur".encode() in resp.data and b"\\u" not in resp.data
+    assert enabled.post(URL + PLUGIN_QUERY, headers=HEADERS).status_code == 405
+
+
+def test_detail_full_does_not_make_an_unknown_sections_request_valid(enabled):
+    assert _get(enabled, "?sections=nope&detail=full").status_code == 400
+
+
+def test_detail_full_alone_still_means_every_default_section(enabled):
+    body = _summary(enabled, "?detail=full")
+    assert [k for k in body if k not in ("v", "now", "site", "overall", "detail")] == list(device_api.SECTIONS)
+
+
+# --- no new SQL --------------------------------------------------------------------------------
+def _statements(client, monkeypatch, query):
+    real_connect = sqlite3.connect
+    seen = []
+
+    def tracing(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(seen.append)
+        return conn
+
+    with monkeypatch.context() as m:
+        m.setattr(sqlite3, "connect", tracing)
+        assert client.get(URL + query, headers=HEADERS).status_code == 200
+    return seen
+
+
+def _shape(statement):
+    """A statement with its numbers (ids, LIMIT) folded away: the shape the database was asked."""
+    return re.sub(r"\d+(?:\s*,\s*\d+)*", "N", " ".join(statement.split()))
+
+
+def test_detail_full_runs_the_same_statements_as_the_default_and_none_of_them_writes(enabled, monkeypatch):
+    """The name arrays come from the `services` lists db.py already attaches with its grouped
+    queries; a new lookup would show here as a statement the default request does not make."""
+    _seed_scenario()
+    default = _statements(enabled, monkeypatch, PLUGIN_QUERY.replace("&detail=full", ""))
+    full = _statements(enabled, monkeypatch, PLUGIN_QUERY)
+    assert [_shape(s) for s in full] == [_shape(s) for s in default]
+    assert not [s for s in full if s.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))]
+
+
+def test_the_query_count_does_not_grow_with_the_data_in_full_mode(enabled, monkeypatch):
+    def add(n, start):
+        ids = [db.create_service({"name": f"S{start + i}", "url": "", "status": "down"}) for i in range(n)]
+        for i in range(n):
+            db.create_incident({"title": f"I{start + i}"}, service_ids=ids[:5])
+            db.create_maintenance_window({"title": f"W{start + i}", "description": "d",
+                                          "starts_at": "2099-01-01T00:00", "ends_at": "2099-01-02T00:00"},
+                                         service_ids=ids[:5])
+            db.create_announcement({"title": f"A{start + i}", "message": "m"})
+
+    add(5, 0)
+    few = len(_statements(enabled, monkeypatch, PLUGIN_QUERY))
+    add(12, 100)
+    assert len(_statements(enabled, monkeypatch, PLUGIN_QUERY)) == few
+
+
+# --- size: bounded by construction, proven against the worst case -----------------------------------
+def _seed_worst_case_full():
+    """The adversarial data for the plugin's request: every list past its cap, every string made of
+    the characters that cost most once serialised, and every incident and window covering more
+    services than a name array holds, all of them with such names."""
+    nasty = _worst_case_text()
+    ids = [db.create_service({"name": nasty, "url": "", "status": "operational"}) for _ in range(110)]
+    for sid in ids:
+        db.update_service_status_from_check(sid, "operational", 99999)
+    covered = ids[:device_api.FULL_SERVICE_LIST_ITEMS + 4]
+    for i in range(12):
+        db.create_incident({"title": nasty}, service_ids=covered)
+    for i in range(25):
+        db.create_maintenance_window({"title": nasty, "description": nasty,
+                                      "starts_at": f"2099-01-{i + 1:02d}T00:00",
+                                      "ends_at": f"2099-02-{i + 1:02d}T00:00"}, service_ids=covered)
+    for i in range(12):
+        db.create_announcement({"title": nasty, "message": nasty, "type": "critical", "pinned": 1})
+    db.set_setting("site_name", nasty)
+
+
+def test_the_plugins_worst_possible_request_fits_its_ceiling(enabled):
+    _seed_worst_case_full()
+    raw = _get(enabled, PLUGIN_QUERY).data
+    print("PLUGIN WORST CASE", len(raw))
+    assert len(raw) < device_api.MAX_BYTES_FULL_SECTIONS, f"{len(raw)} bytes"
+    body = json.loads(raw)   # still valid JSON after all of that
+    assert len(body["services"]["items"]) == device_api.FULL_SERVICE_ITEMS
+    assert body["services"]["items"][-1]["ms"] == 99999
+    assert len(body["incidents"]["items"]) == device_api.FULL_INCIDENT_ITEMS and body["incidents"]["open"] == 12
+    assert len(body["maintenance"]["items"]) == device_api.FULL_MAINTENANCE_ITEMS
+    assert body["maintenance"]["upcoming"] == 25
+    assert len(body["announcements"]["items"]) == device_api.FULL_ANNOUNCEMENT_ITEMS
+    for item in body["incidents"]["items"] + body["maintenance"]["items"]:
+        assert len(item["service_names"]) == device_api.FULL_SERVICE_LIST_ITEMS   # the arrays are full
+    # The same data, asked the way a display asks, stays under the ceilings it always had.
+    assert len(_get(enabled, "").data) < device_api.MAX_BYTES
+    assert len(_get(enabled, "?services=all").data) < device_api.MAX_BYTES_ALL_SERVICES
+
+
+def test_the_largest_possible_full_answer_fits_its_ceiling(enabled, monkeypatch):
+    """Everything at once: every section including resources and vms, every modifier, and
+    detail=full, against adversarial data in every field. The biggest answer the endpoint can give."""
+    _seed_worst_case_full()
+    nasty = _worst_case_text()
+    disks = [{"path": nasty, "label": nasty, "percent": 99.9, "severity": "crit", "free_gb": 99999.9}
+             for _ in range(20)]
+    gpus = [_gpu(i, name=nasty, util_percent=99.9, mem_used_gb=9999.9, mem_total_gb=9999.9, temp_c=99.9)
+            for i in range(10)]
+    monkeypatch.setattr(monitoring, "get_resource_snapshot",
+                        lambda: _snapshot(disks=disks, gpus=gpus, cpu_temp_c=99.9, mem_used_gb=9999.9,
+                                          mem_total_gb=9999.9,
+                                          network={"up_mb_s": 99999.99, "down_mb_s": 99999.99}))
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
+                        lambda: {"transcoding": 99, "running_tasks": [nasty] * 10})
+    _fake_vms(monkeypatch, [{"name": '"' * 40 + str(i), "state": '"' * 40, "uptime": '"' * 40}
+                            for i in range(40)])
+    query = ("?sections=" + ",".join(device_api.ALL_SECTIONS)
+             + "&services=all&resources=all&jellyfin=1&detail=full")
+    raw = _get(enabled, query).data
+    print("LARGEST FULL", len(raw))
+    assert len(raw) < device_api.MAX_BYTES_FULL, f"{len(raw)} bytes"
+    body = json.loads(raw)
+    assert len(body["resources"]["disks"]) == device_api.ALL_DISK_ITEMS
+    assert len(body["resources"]["gpus"]) == device_api.GPU_ITEMS
+    assert len(body["vms"]["items"]) == device_api.VM_ITEMS
+    assert len(body["jellyfin"]["tasks"]) == device_api.JELLYFIN_TASK_ITEMS
+    assert len(body["services"]["items"]) == device_api.FULL_SERVICE_ITEMS
+    # Without the parameter the same request keeps the ceiling it had before.
+    assert len(_get(enabled, query.replace("&detail=full", "")).data) < device_api.MAX_BYTES_ALL_WITH_VMS
+
+
+def test_a_typical_full_answer_is_a_few_kilobytes(enabled):
+    """About 30 services, 3 incidents, 5 windows, 3 announcements: what a real install sends."""
+    ids = [db.create_service({"name": f"Service number {i}", "url": "",
+                              "status": ("down", "degraded", "slow", "operational", "operational")[i % 5]})
+           for i in range(30)]
+    for sid in ids:
+        db.update_service_status_from_check(sid, db.get_service(sid)["status"], 80)
+    for i in range(3):
+        db.create_incident({"title": f"Something is wrong with thing {i}"}, service_ids=ids[i:i + 2])
+        db.create_announcement({"title": f"Announcement {i}", "message": "A sentence of ordinary length."})
+    for i in range(5):
+        db.create_maintenance_window({"title": f"Window {i}", "description": "A sentence about what happens.",
+                                      "starts_at": f"2099-01-0{i + 1}T00:00", "ends_at": f"2099-01-0{i + 1}T04:00"},
+                                     service_ids=ids[i:i + 3])
+    size = len(_get(enabled, PLUGIN_QUERY).data)
+    print("TYPICAL FULL", size)
+    assert size < 6144
+
+
+# --- the example and the admin page ---------------------------------------------------------------
+def test_the_full_example_is_a_real_answer_built_through_the_same_code():
+    example = device_api.example_full_summary()
+    assert list(example)[:5] == ["v", "now", "site", "overall", "detail"] and example["detail"] == "full"
+    assert list(example)[5:] == PLUGIN_SECTIONS
+    incidents = example["incidents"]["items"]
+    assert incidents[0]["service_names"] and incidents[1]["service_names"] == []   # one without services
+    assert all("service_names" in w and "description" in w for w in example["maintenance"]["items"])
+    # The string and the array of one row cannot disagree: the array is what the string is made from.
+    assert incidents[0]["services"] == ", ".join(incidents[0]["service_names"])
+    # A name the compact answer would have cut is whole here, and the example shows latency.
+    assert any(len(i["name"].encode()) > device_api.SERVICE_NAME_BYTES for i in example["services"]["items"])
+    assert any("ms" in i for i in example["services"]["items"])
+    pretty, size = device_api.example_full_json()
+    assert json.loads(pretty) == example
+    assert size == len(device_api.dumps(example).encode("utf-8")) < 3000
