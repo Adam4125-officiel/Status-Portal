@@ -2186,6 +2186,30 @@ for layout, not read by a human, and one console 404 seen during the four-width 
 reproduce in a single re-run (no failing URL was captured, so it is unexplained). Prepared as
 `1.12.0-rc.1` for the owner to tag; nothing was tagged or released from the sandbox.
 
+### What happened next: the plugin read the real portal, and 1.12.0 went stable (2026-10-14)
+
+The owner then asked for the RC to be cut: `v1.12.0-rc.1` was tagged on `725e87a` and published as a
+pre-release with its zip, and he installed it on his own portal through the updater (unstable channel). The Jelly
+Portal plugin (`0.1.0-rc.1`, its own repository) was pointed at that real portal, which closes the "not verified:
+the consumer" item above for the plugin's own request: its "Test connection" button answered "success, 9
+services", the summary was `ok` with the services in the portal's own order, and the bubble matched the portal's
+public page in the four layouts (Modern and Legacy, desktop and phone). The key reached no response body the page
+received. The real answer also carried what the scratch databases had not shown together: `ms` on the measured
+services and none on one that was not, a service that was `slow` at that moment (the plugin treats `slow` as
+fine, by design, while the portal's headline said "responding slowly"), and **two services the owner had excluded
+from the overall status absent from the list** (one of them down at the time, so the plugin said everything was
+fine while the portal's page showed it red). That absence is the documented `ignore_in_overall_status` rule and not
+a defect, but it is worth knowing: a consumer of this endpoint cannot show a muted service, because it never
+receives it.
+
+The owner reported the portal stable and asked for `v1.12.0`. Nothing was changed in the code between the RC and
+the stable tag but `VERSION`: the merge of PR #29 was a plain merge commit of `725e87a` onto an unmoved `main`,
+checked as an empty diff against the RC tag apart from `VERSION` and this note. The full suite and the
+convention tests were run again on that tree before it was tagged. **Still not verified**: the Status-ESP firmware
+against this build (the default answer is pinned byte for byte and was compared with real 1.11.1 code, but no
+display was pointed at it), anything on Windows or Hyper-V from the sandbox, and the one unexplained console 404
+noted above.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
