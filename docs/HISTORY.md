@@ -2113,6 +2113,79 @@ The Stop hook's script (`.claude/check_conventions.sh`) was found with an uncomm
 contains a typo (`"$py" -"$output"` for `"$py" - "$output"`). It was reported twice and deliberately left alone: it
 is their working-tree change, not part of any release.
 
+## 1.12.0: detail=full for the Jelly Portal plugin (2026-10-13)
+
+A second kind of consumer for the display-device endpoint: the Jelly Portal Jellyfin plugin (its own
+repository), which shows the portal's status to Jellyfin users from a server, not a 240x240 screen. The
+compact answer is wrong for it in three ways: strings cut to 24-80 bytes, lists of 3-6 items, and the
+services of an incident or window as one 32-byte string in which a service name containing a comma is
+ambiguous and a long one is simply cut. `?detail=full` is the answer to that, built the way every earlier
+extension was: opt-in, with the default untouched.
+
+What it does: the site name and the services, incidents, maintenance and announcements sections are
+shaped with a second set of limits (`device_api.FULL`; the numbers are in CLAUDE.md's "Display device
+API"), the header gains `"detail":"full"` right after `overall` so a caller can tell a portal that honoured
+the parameter from an older one that ignored it, and incidents and windows gain `service_names` (a JSON
+array of exact names) while windows also gain `description`. `resources`, `vms` and `jellyfin` are not
+shaped by it - the plugin must never ask for them, since they describe the machine. The caps travel as a
+`NamedTuple` (`device_api.Limits`, `COMPACT` built from the original constants) so the shaping functions
+gained one argument instead of a dozen, and the compact path calls `text()` with the very values it always
+did. The name arrays come from the `services` lists `db.py` already attaches to every incident and window
+with its grouped queries: no new statement (the test compares the shape of every statement of a full
+request with the default's), and a name in an array is cut like `services.items[].name`, so the two compare
+equal.
+
+**The golden test came first.** `tests/test_device_api_golden.py` was committed before any code changed:
+it holds the compact answer for a deliberately hostile set of rows (long and non-ASCII names, quotes,
+every list past its cap, every modifier), generated from the unmodified 1.11.1 `device_api.py`, so the one
+requirement that matters - no byte changes for a request that does not opt in - had something to be
+measured against from the start. It stayed green throughout and was never regenerated. A second test pins
+the same thing through the route on a seeded database for 44 combinations of base query and `detail` value
+(`bogus`, `ful`, `fullx`, empty, `1`, `true`, ...).
+
+Size: this consumer is a server, so the ceilings are in tens of kilobytes - but they are ceilings, asserted
+against the adversarial worst case like every other. The plugin's exact request, with 110 services, 12
+incidents and 25 windows (each covering more services than a name array holds) and every string made of
+quotes and backslashes, measures **112,785 bytes** (`MAX_BYTES_FULL_SECTIONS` = 112 KB); the largest answer
+the endpoint can give (every section, every modifier, `vms` and `detail=full`) measures **115,576**
+(`MAX_BYTES_FULL` = 116 KB). That is bigger than the first estimate of "tens of KB": the maintenance list
+alone is 62 KB of it (20 windows x title, string, 400-byte description and a 16-name array), incidents 26,
+services 17, announcements 7. A realistic answer (30 services, 3 incidents, 5 windows, 3 announcements) is
+about 4 KB. The caps are the ones proposed for the plugin and were kept; if the worst case is ever judged
+too large, windows are the lever.
+
+Verified here: the full suite (1,589 tests; the 1.11.1 record says 1,472), the convention tests, `ruff` (nothing new).
+Mutation checks - each temporarily breaking the code and watching a test go red, then restoring: every
+`FULL_*` cap by one (also with the literal contract test deselected, so the behaviour tests are shown to
+catch it on their own), a compact limit by one (golden and the compact-limits test), `parse_detail`
+accepting everything / a prefix / only lower case / no trimming, the marker always present or after
+`jellyfin`, the new keys leaking into the compact answer, name arrays built by splitting the joined string
+or cut at 32 bytes or with the cap off by one or keeping empty names, `incident_limit` ignoring the mode,
+the ignore rule dropped in full mode only, all announcements instead of active ones, an extra SQL
+statement in the full path, `detail=full` widening `resources`, a lookup placed above the key check, a cap
+raised past a ceiling (the ceiling tests fail), a ceiling shrunk or not a multiple of 4 KB. All 31 went red.
+A real server was run from a launcher outside the repository against scratch databases: the realistic
+scenario (12 services in 3 groups, a muted one, an in-progress window really applied by
+`process_maintenance_windows()`, a window in two hours covering a comma-named service, one in three days, a
+scheduled announcement that must not appear) answered the plugin's query as expected; the same database,
+backed up with SQLite's own API, served by the real 1.11.1 code (`git archive 39566d9`) returned **the same
+bytes** as the new code for the query without `detail` and with `detail=bogus`, `detail=` and `detail=ful`
+(apart from `now`; a request with no parameters differs only by the live resource readings) - which is also
+what an older portal answers to the plugin's own query. Wrong key and no key are the JSON 401 (also with
+the key only in the query string), a disabled API is a 404, a POST is a 405, a typo in `sections` is a 400,
+and the live worst case measured 112,785 bytes, the same number the test asserts. The Display device page
+was opened in a real Chromium at 320, 390, 768 and 1280 px with no horizontal overflow.
+
+**Not verified**: the consumer. The plugin lives in another repository and has never parsed these bytes; the
+samples handed to its author (a realistic answer, what an older portal returns, the worst case) were
+produced here from a scratch database. The Status-ESP firmware was not re-run on the device against this
+build: its answer is pinned byte for byte by the golden test and was compared against the real 1.11.1 code
+on a live server, but no display was pointed at it. No real Jellyfin, no Windows host and no real Hyper-V
+data were involved; everything above ran on a Linux sandbox with stand-in data. The admin page was checked
+for layout, not read by a human, and one console 404 seen during the four-width Chromium run did not
+reproduce in a single re-run (no failing URL was captured, so it is unexplained). Prepared as
+`1.12.0-rc.1` for the owner to tag; nothing was tagged or released from the sandbox.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

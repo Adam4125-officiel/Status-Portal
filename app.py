@@ -1832,12 +1832,16 @@ def api_device_summary():
     sections = device_api.parse_sections(request.args.get("sections"))
     if sections is None:
         return jsonify({"error": "Unknown sections", "valid": list(device_api.ALL_SECTIONS)}), 400
+    # `detail=full` (the Jelly Portal plugin) gives the site name and the services, incidents,
+    # maintenance and announcements sections room to breathe; anything but the exact value `full`
+    # is the compact answer a display gets. See device_api.FULL.
+    detail_full = device_api.parse_detail(request.args.get("detail"))
 
     services = db.list_services()
     data = {}
     if "incidents" in sections:
         data["open_incident_count"] = db.count_open_incidents()
-        data["incidents"] = db.list_incidents(limit=device_api.INCIDENT_ITEMS, open_only=True)
+        data["incidents"] = db.list_incidents(limit=device_api.incident_limit(detail_full), open_only=True)
     if "maintenance" in sections:
         data["maintenance"] = db.list_public_maintenance_windows()
     if "announcements" in sections:
@@ -1871,7 +1875,8 @@ def api_device_summary():
         # `jellyfin=1` adds what Jellyfin is doing, read from the background-refreshed cache
         # (no outbound call); it comes with any `sections`.
         with_jellyfin=with_jellyfin,
-        jellyfin=integrations.get_cached_jellyfin_activity() if with_jellyfin else None, **data)
+        jellyfin=integrations.get_cached_jellyfin_activity() if with_jellyfin else None,
+        detail_full=detail_full, **data)
     response = Response(device_api.dumps(summary), mimetype="application/json")
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     # A display polls this to learn what is true *now*.
@@ -4521,7 +4526,13 @@ def admin_device():
                   "success")
         return redirect(url_for("admin_device"))
     example, example_bytes = device_api.example_json()
+    example_full, example_full_bytes = device_api.example_full_json()
     return render_template("admin_device.html", example_vms=device_api.example_vms_json(),
+                            example_full=example_full, example_full_bytes=example_full_bytes,
+                            example_full_query=device_api.FULL_EXAMPLE_QUERY,
+                            full=device_api.FULL, compact=device_api.COMPACT,
+                            max_bytes_full=device_api.MAX_BYTES_FULL,
+                            max_bytes_full_sections=device_api.MAX_BYTES_FULL_SECTIONS,
                             device_api_enabled=db.get_setting(DEVICE_API_ENABLED_SETTING, "0") == "1",
                             device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
                             port=config.PORT, example=example, example_bytes=example_bytes,

@@ -17,11 +17,19 @@ here is bounded by construction rather than by hope:
 
 Strings are left as UTF-8: the device folds them to ASCII itself, and ``\\uXXXX``
 escapes would triple the size of every accented letter.
+
+A second kind of consumer, a server rather than a microcontroller (the Jelly Portal Jellyfin
+plugin), wants the same data with room to breathe. It asks for ``detail=full``: the same
+header and the same sections, shaped with the ``FULL`` limits below (longer strings, longer
+lists) plus a few extra keys. Without the parameter nothing changes by a single byte
+(tests/test_device_api_golden.py pins that), and the full answer is bounded just as hard,
+against its own, much larger ceilings.
 """
 import json
 import math
 import re
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 SCHEMA_VERSION = 1
 
@@ -44,6 +52,19 @@ MAX_BYTES_ALL = 8192
 # that asks for ``vms`` sizes its buffer by this; one that does not never receives more than
 # MAX_BYTES_ALL.
 MAX_BYTES_ALL_WITH_VMS = 9216
+
+# ``detail=full`` is for a server, so its ceilings are in tens of kilobytes, but they are ceilings
+# all the same: tests/test_device_api.py builds the adversarial worst case for each and asserts it.
+# MAX_BYTES_FULL_SECTIONS is for the request the Jelly Portal plugin makes (``sections=services,
+# incidents,maintenance,announcements&services=all&detail=full``); MAX_BYTES_FULL is the largest
+# answer the endpoint can ever give: every section, every modifier, ``vms`` and ``detail=full``.
+# A realistic full answer is a few kilobytes (about 4 KB for 30 services, 3 incidents, 5 windows and
+# 3 announcements). Most of the worst case is the maintenance list: 20 windows, each with a title, a
+# service string, a 400-byte description and a name array of 16 names, all made of characters that
+# JSON has to escape. Raising any FULL_* cap means re-running the worst-case tests in
+# tests/test_device_api.py and moving these two numbers, not trusting arithmetic.
+MAX_BYTES_FULL_SECTIONS = 114688   # 112 KB; the adversarial worst case measures 112,785 bytes
+MAX_BYTES_FULL = 118784            # 116 KB; the adversarial worst case measures 115,576 bytes
 
 # The request's `sections` values, in the order they appear in the response. An absent or
 # blank `sections` means exactly these.
@@ -94,7 +115,82 @@ VM_NAME_BYTES = 24
 VM_STATE_BYTES = 12     # Hyper-V's longest state name is "Snapshotting"
 VM_UPTIME_BYTES = 10    # "123d 23h", "23h 59m", or the em dash the snapshot uses for "unknown"
 
+# ``detail=full``: the caps for a consumer that is a server. Only the site name and the services,
+# incidents, maintenance and announcements sections are shaped by them; resources, vms and jellyfin
+# are the same under either mode (they carry server internals, and a plugin must not ask for them).
+DETAIL_FULL = "full"
+
+FULL_SITE_BYTES = 64
+FULL_SERVICE_ITEMS = 100          # with and without services=all
+FULL_SERVICE_NAME_BYTES = 64
+FULL_INCIDENT_ITEMS = 10
+FULL_INCIDENT_TITLE_BYTES = 120
+FULL_INCIDENT_SERVICES_BYTES = 120
+FULL_MAINTENANCE_ITEMS = 20
+FULL_MAINTENANCE_TITLE_BYTES = 120
+FULL_MAINTENANCE_SERVICES_BYTES = 120
+FULL_MAINTENANCE_DESCRIPTION_BYTES = 400
+FULL_ANNOUNCEMENT_ITEMS = 10
+FULL_ANNOUNCEMENT_TITLE_BYTES = 100
+FULL_ANNOUNCEMENT_TEXT_BYTES = 500
+FULL_SERVICE_LIST_ITEMS = 16      # names in one incident's / window's ``service_names`` array
+
 _ANNOUNCEMENT_TYPES = ("info", "warning", "critical", "success")
+
+
+class Limits(NamedTuple):
+    """The caps one request is shaped with, so the shaping functions take one argument instead of a
+    dozen. ``COMPACT`` is built from the constants above and is what every request got before
+    ``detail=full`` existed - the shaping calls ``text()`` with exactly the values it always did,
+    which is what keeps the default answer byte for byte the same. ``full`` is what switches on the
+    keys only the full answer carries."""
+    full: bool
+    site_bytes: int
+    service_items: int              # services listed without services=all
+    all_service_items: int          # services listed with services=all
+    service_name_bytes: int
+    incident_items: int
+    incident_title_bytes: int
+    incident_services_bytes: int
+    maintenance_items: int
+    maintenance_title_bytes: int
+    maintenance_services_bytes: int
+    maintenance_description_bytes: int   # full only
+    announcement_items: int
+    announcement_title_bytes: int
+    announcement_text_bytes: int
+    service_list_items: int              # full only
+
+
+COMPACT = Limits(
+    full=False, site_bytes=SITE_BYTES, service_items=SERVICE_ITEMS, all_service_items=ALL_SERVICE_ITEMS,
+    service_name_bytes=SERVICE_NAME_BYTES, incident_items=INCIDENT_ITEMS,
+    incident_title_bytes=INCIDENT_TITLE_BYTES, incident_services_bytes=INCIDENT_SERVICES_BYTES,
+    maintenance_items=MAINTENANCE_ITEMS, maintenance_title_bytes=MAINTENANCE_TITLE_BYTES,
+    maintenance_services_bytes=MAINTENANCE_SERVICES_BYTES, maintenance_description_bytes=0,
+    announcement_items=ANNOUNCEMENT_ITEMS, announcement_title_bytes=ANNOUNCEMENT_TITLE_BYTES,
+    announcement_text_bytes=ANNOUNCEMENT_TEXT_BYTES, service_list_items=0)
+
+FULL = Limits(
+    full=True, site_bytes=FULL_SITE_BYTES, service_items=FULL_SERVICE_ITEMS,
+    all_service_items=FULL_SERVICE_ITEMS, service_name_bytes=FULL_SERVICE_NAME_BYTES,
+    incident_items=FULL_INCIDENT_ITEMS, incident_title_bytes=FULL_INCIDENT_TITLE_BYTES,
+    incident_services_bytes=FULL_INCIDENT_SERVICES_BYTES, maintenance_items=FULL_MAINTENANCE_ITEMS,
+    maintenance_title_bytes=FULL_MAINTENANCE_TITLE_BYTES,
+    maintenance_services_bytes=FULL_MAINTENANCE_SERVICES_BYTES,
+    maintenance_description_bytes=FULL_MAINTENANCE_DESCRIPTION_BYTES,
+    announcement_items=FULL_ANNOUNCEMENT_ITEMS, announcement_title_bytes=FULL_ANNOUNCEMENT_TITLE_BYTES,
+    announcement_text_bytes=FULL_ANNOUNCEMENT_TEXT_BYTES, service_list_items=FULL_SERVICE_LIST_ITEMS)
+
+
+def limits_for(full):
+    return FULL if full else COMPACT
+
+
+def incident_limit(full=False):
+    """How many open incidents the route asks the database for: the same number the section will
+    list, so a full answer is not capped by a query that fetched only the compact three."""
+    return limits_for(full).incident_items
 
 
 def parse_sections(raw):
@@ -112,6 +208,16 @@ def parse_sections(raw):
         return list(SECTIONS)
     chosen = [name for name in ALL_SECTIONS if name in asked]
     return chosen or None
+
+
+def parse_detail(raw):
+    """True when the request asked for ``detail=full``, False for anything else.
+
+    Only the exact value ``full`` (case and surrounding spaces ignored) opts in; a typo, an empty
+    value or a value from a future portal is the default answer, like ``services=`` and
+    ``resources=`` treat anything but ``all``. An older portal ignores the parameter entirely,
+    which is why the full answer says ``"detail":"full"`` in its header: the caller can tell."""
+    return raw is not None and raw.strip().lower() == DETAIL_FULL
 
 
 def text(value, max_bytes):
@@ -173,9 +279,10 @@ def _number(value):
     return value if math.isfinite(value) else None
 
 
-def services_section(services, include_ok=False):
+def services_section(services, include_ok=False, limits=COMPACT):
     """Counts for every status, plus the worst few services that aren't operational
-    (or, with ``include_ok``, every service, worst first, up to ALL_SERVICE_ITEMS).
+    (or, with ``include_ok``, every service, worst first, up to ALL_SERVICE_ITEMS). ``limits``
+    (``FULL`` for ``detail=full``) sets those caps and the length of a name.
 
     A service flagged ``ignore_in_overall_status`` is left out of both, exactly as
     ``compute_overall_status()`` leaves it out of the headline: this is the headline's
@@ -191,10 +298,10 @@ def services_section(services, include_ok=False):
                     key=lambda s: STATUS_RANK[s["status"]])  # stable: keeps sort_order
     section = {"total": len(counted)}
     section.update(counts)
-    cap = ALL_SERVICE_ITEMS if include_ok else SERVICE_ITEMS
+    cap = limits.all_service_items if include_ok else limits.service_items
     items = []
     for s in listed[:cap]:
-        item = {"name": text(s.get("name"), SERVICE_NAME_BYTES), "status": s["status"]}
+        item = {"name": text(s.get("name"), limits.service_name_bytes), "status": s["status"]}
         # With include_ok, how long the last check took to answer, for the services whose tag a
         # device writes a latency beside. Left out when nothing was measured (a manual service, a
         # check that has not run yet) rather than sent as a 0 that reads as "instant".
@@ -206,49 +313,73 @@ def services_section(services, include_ok=False):
     return section
 
 
-def incidents_section(open_count, incidents):
-    return {
-        "open": open_count,
-        "items": [{
-            "title": text(i.get("title"), INCIDENT_TITLE_BYTES),
+def service_name_list(rows, limits):
+    """The full names of the services a row covers, as a list, for ``detail=full``.
+
+    ``rows`` is the ``services`` list of ``{"id", "name"}`` dicts that ``db.py`` already attaches to
+    every incident and maintenance window (one grouped query for all of them), so this adds no
+    query. Each name is cut with the same ``text()`` and the same cap as a name in the services
+    section, so a name here compares equal to the same service's name there. Empty names are
+    skipped, and the list stops at ``limits.service_list_items``."""
+    names = []
+    for row in rows or ():
+        name = text(row.get("name") if isinstance(row, dict) else None, limits.service_name_bytes)
+        if name:
+            names.append(name)
+            if len(names) >= limits.service_list_items:
+                break
+    return names
+
+
+def incidents_section(open_count, incidents, limits=COMPACT):
+    items = []
+    for i in incidents[:limits.incident_items]:
+        item = {
+            "title": text(i.get("title"), limits.incident_title_bytes),
             "status": i.get("status") or "investigating",
             "since": iso_utc(i.get("started_at")),
-            "services": text(i.get("service_names"), INCIDENT_SERVICES_BYTES),
-        } for i in incidents[:INCIDENT_ITEMS]],
-    }
+            "services": text(i.get("service_names"), limits.incident_services_bytes),
+        }
+        if limits.full:
+            item["service_names"] = service_name_list(i.get("services"), limits)
+        items.append(item)
+    return {"open": open_count, "items": items}
 
 
-def maintenance_section(windows):
+def maintenance_section(windows, limits=COMPACT):
     """Windows in progress first, then the soonest upcoming. "In progress" is the same
     decision the public page makes (``applied``, set by the health-check loop once a
     window has started), so the two can't disagree about what is happening."""
     active = [w for w in windows if w.get("applied")]
     upcoming = [w for w in windows if not w.get("applied")]
-    return {
-        "active": len(active),
-        "upcoming": len(upcoming),
-        "items": [{
-            "title": text(w.get("title"), MAINTENANCE_TITLE_BYTES),
+    items = []
+    for w in (active + upcoming)[:limits.maintenance_items]:
+        item = {
+            "title": text(w.get("title"), limits.maintenance_title_bytes),
             "state": "active" if w.get("applied") else "upcoming",
-            "services": text(w.get("service_names"), MAINTENANCE_SERVICES_BYTES),
+            "services": text(w.get("service_names"), limits.maintenance_services_bytes),
             "starts": iso_utc(w.get("starts_at")),
             "ends": iso_utc(w.get("ends_at")),
-        } for w in (active + upcoming)[:MAINTENANCE_ITEMS]],
-    }
+        }
+        if limits.full:
+            item["service_names"] = service_name_list(w.get("services"), limits)
+            item["description"] = text(w.get("description"), limits.maintenance_description_bytes)
+        items.append(item)
+    return {"active": len(active), "upcoming": len(upcoming), "items": items}
 
 
-def announcements_section(announcements):
+def announcements_section(announcements, limits=COMPACT):
     """Only ever fed ``db.list_active_announcements()``: a scheduled or expired
     announcement is unpublished content, and this endpoint is no place to leak one."""
     return {
         "count": len(announcements),
         "items": [{
-            "title": text(a.get("title"), ANNOUNCEMENT_TITLE_BYTES),
+            "title": text(a.get("title"), limits.announcement_title_bytes),
             # The portal's own markup (**bold**) means nothing on a device.
-            "text": text((a.get("message") or "").replace("**", ""), ANNOUNCEMENT_TEXT_BYTES),
+            "text": text((a.get("message") or "").replace("**", ""), limits.announcement_text_bytes),
             "type": a.get("type") if a.get("type") in _ANNOUNCEMENT_TYPES else "info",
             "pinned": bool(a.get("pinned")),
-        } for a in announcements[:ANNOUNCEMENT_ITEMS]],
+        } for a in announcements[:limits.announcement_items]],
     }
 
 
@@ -338,31 +469,40 @@ def jellyfin_section(activity):
 def build_summary(sections, *, now, site, overall, services=(), open_incident_count=0,
                   incidents=(), maintenance=(), announcements=(), resources=None,
                   all_services=False, all_resources=False, jellyfin=None,
-                  with_jellyfin=False, vms=None):
+                  with_jellyfin=False, vms=None, detail_full=False):
     """The response body as a dict. Only the requested sections are present; the
     header (version, server time, site name, overall status) always is - it costs
     nothing and a device needs the server's clock to age the timestamps it is given
-    without trusting its own."""
+    without trusting its own.
+
+    ``detail_full`` (``detail=full``) shapes the site name and the services, incidents,
+    maintenance and announcements sections with the ``FULL`` limits and adds ``service_names`` and
+    ``description``; resources, vms and jellyfin are untouched by it. It also puts
+    ``"detail":"full"`` in the header, right after ``overall``, so a caller can tell a portal that
+    honoured the parameter from an older one that ignored it."""
+    limits = limits_for(detail_full)
     summary = {
         "v": SCHEMA_VERSION,
         "now": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "site": text(site, SITE_BYTES),
+        "site": text(site, limits.site_bytes),
         "overall": overall,
     }
+    if detail_full:
+        summary["detail"] = DETAIL_FULL
     if with_jellyfin:
         # In the header, not in a section: a display that shows it above everything must get it
         # whichever sections it switched on.
         summary["jellyfin"] = jellyfin_section(jellyfin)
     if "services" in sections:
-        summary["services"] = services_section(services, include_ok=all_services)
+        summary["services"] = services_section(services, include_ok=all_services, limits=limits)
     if "incidents" in sections:
-        summary["incidents"] = incidents_section(open_incident_count, incidents)
+        summary["incidents"] = incidents_section(open_incident_count, incidents, limits)
     if "maintenance" in sections:
-        summary["maintenance"] = maintenance_section(maintenance)
+        summary["maintenance"] = maintenance_section(maintenance, limits)
     if "resources" in sections:
         summary["resources"] = resources_section(resources, include_all=all_resources)
     if "announcements" in sections:
-        summary["announcements"] = announcements_section(announcements)
+        summary["announcements"] = announcements_section(announcements, limits)
     if "vms" in sections:
         summary["vms"] = vms_section(vms)
     return summary
@@ -424,6 +564,57 @@ def example_vms_summary():
         ])
 
 
+# The query the Jelly Portal plugin makes, and the one example_full_summary() answers.
+FULL_EXAMPLE_QUERY = "sections=services,incidents,maintenance,announcements&services=all&detail=full"
+
+
+def example_full_summary():
+    """What the plugin's request (``FULL_EXAMPLE_QUERY``) answers, built through ``build_summary()``
+    from canned rows like the other examples, never typed. The rows carry the ``services`` lists
+    ``db.py`` attaches to incidents and windows; ``service_names`` is derived from them here the
+    way ``db.py`` derives it, so the string and the array in the example cannot disagree."""
+    now = datetime(2026, 10, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+    def covering(row, *names):
+        row["services"] = [{"id": n, "name": name} for n, name in enumerate(names, 1)]
+        row["service_names"] = ", ".join(names)
+        return row
+
+    return build_summary(
+        ["services", "incidents", "maintenance", "announcements"], now=now, site="Home Server",
+        overall="down", all_services=True, detail_full=True,
+        services=[
+            {"name": "Jellyfin", "status": "operational", "response_ms": 41},
+            {"name": "Radarr", "status": "slow", "response_ms": 1850},
+            {"name": "Sonarr", "status": "degraded"},
+            {"name": "Nextcloud (family photos and documents)", "status": "down"},
+            {"name": "Seerr", "status": "operational", "response_ms": 87},
+        ],
+        open_incident_count=2,
+        incidents=[
+            covering({"title": "Nextcloud and Seerr are unreachable after the overnight update",
+                      "status": "investigating", "started_at": "2026-10-06T11:40:12.345678+00:00"},
+                     "Nextcloud (family photos and documents)", "Seerr"),
+            covering({"title": "Slow Wi-Fi in the living room", "status": "monitoring",
+                      "started_at": "2026-10-05T18:02:44.000000+00:00"}),
+        ],
+        maintenance=[
+            covering({"title": "Disk replacement", "applied": 0,
+                      "description": "The media disk is swapped for a larger one. Streaming stops "
+                                     "for about three hours.",
+                      "starts_at": "2026-10-08T22:00", "ends_at": "2026-10-09T01:00"},
+                     "Jellyfin", "Radarr", "Sonarr"),
+            covering({"title": "Router firmware", "applied": 1,
+                      "description": "Updating to the latest firmware; the network may drop for a "
+                                     "few minutes.",
+                      "starts_at": "2026-10-06T11:30", "ends_at": "2026-10-06T12:30"}, "Seerr"),
+        ],
+        announcements=[{"title": "Movie night",
+                        "message": "Friday at **8pm**, bring snacks. We are watching the film "
+                                   "that won the vote.", "type": "info", "pinned": 1}],
+    )
+
+
 def example_json():
     """(pretty text for a human, size in bytes of what is actually sent) - the admin page
     shows the first and quotes the second."""
@@ -435,3 +626,10 @@ def example_json():
 def example_vms_json():
     """The ``sections=vms`` example as pretty text, for the admin page."""
     return json.dumps(example_vms_summary(), ensure_ascii=False, indent=2)
+
+
+def example_full_json():
+    """(pretty text, size in bytes of what is actually sent) for the ``detail=full`` example."""
+    example = example_full_summary()
+    return (json.dumps(example, ensure_ascii=False, indent=2),
+            len(dumps(example).encode("utf-8")))
