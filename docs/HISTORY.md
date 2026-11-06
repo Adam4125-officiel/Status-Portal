@@ -2210,6 +2210,41 @@ against this build (the default answer is pinned byte for byte and was compared 
 display was pointed at it), anything on Windows or Hyper-V from the sandbox, and the one unexplained console 404
 noted above.
 
+## 1.12.2: the NVRM kernel-pool leak (2026-11-06)
+
+### `nvmlInit()`/`nvmlShutdown()` on every GPU poll leaked kernel memory
+
+**What was observed on the production host** (Windows, GTX 1660 SUPER, driver 621.01,
+Python 3.14, nvidia-ml-py): the nonpaged pool tag `NVRM` (NVIDIA resource manager) grew
+linearly at ~2.6 MB/h for 2+ days and never came back. A kernel pool ETW trace attributed
+100% of the net NVRM growth to the portal process (`python serve_waitress.py`, port 5000):
+every ~9-10 s an identical set of about 6.7 KB of NVRM allocations that were never freed.
+FanControl and other GPU pollers were balanced (everything freed).
+
+**Cause:** `monitoring._get_gpu_snapshot()` called `pynvml.nvmlInit()` and
+`nvmlShutdown()` on every call. The background refresh runs it every
+`PORTAL_RESOURCE_REFRESH_SECONDS` (10 s), and request paths can reach it through
+`get_resource_snapshot()`. On this driver each init/shutdown cycle leaks ~7 KB of NVRM,
+reclaimed only when the process exits.
+
+**Repro** (one long-lived process, 300 iterations of the portal's exact calls: GetCount,
+GetHandleByIndex, GetName, GetUtilizationRates, GetMemoryInfo, GetTemperature):
+init/shutdown per iteration gave NVRM +2.1 MB while the process was alive, back to
+baseline after exit; init once and query 300 times gave +0.0 MB. An earlier "ruled out"
+test missed it because it measured *after* its process had exited.
+
+**Fix:** NVML is initialised once, lazily, under a lock, and never shut down per call. An
+NVML error drops the "initialised" flag (best-effort `nvmlShutdown`) so the next call
+re-inits instead of returning `[]` forever. `clear_caches()` deliberately leaves it alone.
+Tests mock `pynvml` via `sys.modules` and assert exactly one init and zero shutdowns over
+many calls, recovery after an error, and `[]` without pynvml; the new tests were run
+against the old code and fail there.
+
+**Verification record:** the fix was **NOT verified on real Windows/NVIDIA hardware**.
+It was written and unit-tested in a sandbox with no NVIDIA driver, against a mocked
+`pynvml`. The numbers above come from the owner's host and the pre-fix code. To confirm:
+run 1.12.2-rc.1 for a few hours and watch the `NVRM` tag (poolmon) stay flat.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

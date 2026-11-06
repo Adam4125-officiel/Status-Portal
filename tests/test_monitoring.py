@@ -766,3 +766,90 @@ def test_every_tick_publishes_fresh_rates(running_loop, monkeypatch):
     monitoring._RATES_CACHE["updated_at"] = None
     monitoring._background_tick()
     assert monitoring._RATES_CACHE["updated_at"] is not None
+
+# ---------------------------------------------------------------------------
+# NVML session: initialised once, never shut down per call (NVRM pool leak)
+# ---------------------------------------------------------------------------
+def _fake_pynvml(monkeypatch, fail_on=None):
+    """A pynvml stand-in that counts init/shutdown. fail_on: name of a call that raises."""
+    import sys
+    calls = {"init": 0, "shutdown": 0, "fail": fail_on}
+
+    def maybe_fail(name):
+        if calls["fail"] == name:
+            raise RuntimeError("NVML_ERROR_GPU_IS_LOST")
+
+    def init():
+        calls["init"] += 1
+
+    def shutdown():
+        calls["shutdown"] += 1
+
+    def util(handle):
+        maybe_fail("util")
+        return SimpleNamespace(gpu=42)
+
+    mod = SimpleNamespace(
+        nvmlInit=init, nvmlShutdown=shutdown,
+        nvmlDeviceGetCount=lambda: 1,
+        nvmlDeviceGetHandleByIndex=lambda i: object(),
+        nvmlDeviceGetName=lambda h: b"Fake GPU",
+        nvmlDeviceGetUtilizationRates=util,
+        nvmlDeviceGetMemoryInfo=lambda h: SimpleNamespace(used=1024 ** 3, total=6 * 1024 ** 3),
+        nvmlDeviceGetTemperature=lambda h, kind: 50,
+        NVML_TEMPERATURE_GPU=0,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", mod)
+    monitoring._nvml_state["initialised"] = False
+    return calls
+
+
+def test_gpu_snapshot_initialises_nvml_once_and_never_shuts_it_down(monkeypatch):
+    calls = _fake_pynvml(monkeypatch)
+    for _ in range(25):
+        gpus = monitoring._get_gpu_snapshot()
+    assert gpus and gpus[0]["name"] == "Fake GPU" and gpus[0]["util_percent"] == 42
+    assert calls["init"] == 1
+    assert calls["shutdown"] == 0
+
+
+def test_gpu_snapshot_reinitialises_after_an_nvml_error(monkeypatch):
+    calls = _fake_pynvml(monkeypatch, fail_on="util")
+    assert monitoring._get_gpu_snapshot() == []
+    assert calls["init"] == 1 and calls["shutdown"] == 1  # best-effort drop of the dead session
+    assert monitoring._nvml_state["initialised"] is False
+    calls["fail"] = None  # driver recovered
+    assert monitoring._get_gpu_snapshot()[0]["name"] == "Fake GPU"
+    assert calls["init"] == 2
+
+
+def test_gpu_snapshot_survives_a_failing_shutdown_during_recovery(monkeypatch):
+    import sys
+    calls = _fake_pynvml(monkeypatch, fail_on="util")
+    sys.modules["pynvml"].nvmlShutdown = lambda: (_ for _ in ()).throw(RuntimeError("uninitialised"))
+    assert monitoring._get_gpu_snapshot() == []
+    assert monitoring._nvml_state["initialised"] is False
+
+
+def test_gpu_snapshot_keeps_the_gpu_when_only_temperature_fails(monkeypatch):
+    import sys
+    calls = _fake_pynvml(monkeypatch)
+    def boom(h, kind):
+        raise RuntimeError("not supported")
+    sys.modules["pynvml"].nvmlDeviceGetTemperature = boom
+    gpus = monitoring._get_gpu_snapshot()
+    assert gpus[0]["temp_c"] is None and calls["init"] == 1 and calls["shutdown"] == 0
+
+
+def test_gpu_snapshot_is_empty_without_pynvml(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # makes `import pynvml` raise ImportError
+    assert monitoring._get_gpu_snapshot() == []
+
+
+def test_clear_caches_does_not_drop_the_nvml_session(monkeypatch):
+    calls = _fake_pynvml(monkeypatch)
+    monitoring._get_gpu_snapshot()
+    monitoring.clear_caches()
+    monitoring._get_gpu_snapshot()
+    assert calls["init"] == 1 and calls["shutdown"] == 0

@@ -39,6 +39,9 @@ def _reset_module_state():
     # Modules that own their own clearing.
     integrations_module.clear_caches()
     monitoring_module.clear_caches()
+    # Not part of clear_caches() on purpose (a re-init leaks driver memory), so tests
+    # reset the NVML "initialised" flag themselves.
+    monitoring_module._nvml_state["initialised"] = False
     scheduler_module.clear_caches()
     updater_module.clear_update_cache()
     user_notify_module.clear_caches()
