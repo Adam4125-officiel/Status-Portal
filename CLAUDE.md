@@ -686,8 +686,8 @@ DB-backed Settings pages, not a code edit.
   shutdown) so the next call re-inits. `clear_caches()` must **not** touch it (it is a
   driver session, not a reading; re-initialising there would leak again) - `conftest`
   resets the flag for tests instead. Any new NVML caller goes through this function.
-  Story and numbers: `docs/HISTORY.md` -> "The NVRM pool leak". **Not yet verified on
-  real Windows/NVIDIA hardware.**
+  Story and numbers: `docs/HISTORY.md` -> "1.12.2: the NVRM kernel-pool leak". Verified
+  on the real host (2026-11-06): `NVRM` flat after the fix.
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,

@@ -2245,6 +2245,14 @@ It was written and unit-tested in a sandbox with no NVIDIA driver, against a moc
 `pynvml`. The numbers above come from the owner's host and the pre-fix code. To confirm:
 run 1.12.2-rc.1 for a few hours and watch the `NVRM` tag (poolmon) stay flat.
 
+**Verified on the real host, 2026-11-06** (the production machine above, running
+1.12.2-rc.1): restarting the portal on the patched build dropped `NVRM` from ~170 MB to
+52.5 MB, and it stayed flat at 52.5 MB for 6+ minutes, where before the fix it had risen
+about 0.1 MB every 2 minutes. The GPU card on the resources page still shows, so the
+long-lived NVML session reads correctly. Promoted to stable as `v1.12.2` the same day.
+Still unexercised for real: the error-recovery path (an NVML error dropping the session
+and the next poll re-initialising), which only the mocked tests cover.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)
