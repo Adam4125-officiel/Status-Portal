@@ -369,37 +369,67 @@ def _get_network_rate():
     return result
 
 
+# NVML is initialised once, on first use, and left initialised for the life of the process.
+# nvmlInit()/nvmlShutdown() on every call leaks about 7 KB of the kernel's non-paged "NVRM"
+# pool per cycle on real drivers (observed on Windows, driver 621.01), reclaimed only when
+# the process exits - at the 10s refresh that is ~2.6 MB/h. Deliberately NOT cleared by
+# clear_caches(): it holds a driver session, not a reading, and re-initialising on every
+# admin "clear caches" click would just leak again. Only an NVML error resets it.
+_nvml_state = {"initialised": False}
+_nvml_lock = threading.Lock()
+
+
+def _nvml_drop(pynvml):
+    """Forget the NVML session after an error so the next call re-initialises it
+    (driver reset, GPU lost, NVML uninitialised). Best-effort shutdown; caller holds the lock."""
+    _nvml_state["initialised"] = False
+    try:
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+
+
 def _get_gpu_snapshot():
     """Best-effort NVIDIA GPU stats via the optional nvidia-ml-py package.
     Returns [] (never raises) if it's not installed or there's no NVIDIA GPU -
-    this section simply doesn't render rather than breaking the page."""
+    this section simply doesn't render rather than breaking the page.
+
+    Never call nvmlInit()/nvmlShutdown() per call - see _nvml_state. The lock is held for
+    the whole query: the background loop, request threads and the Discord bot can all
+    arrive here, and a failure in one must not drop the session under another's feet."""
     try:
         import pynvml
-        pynvml.nvmlInit()
-        gpus = []
-        for i in range(pynvml.nvmlDeviceGetCount()):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            name = pynvml.nvmlDeviceGetName(handle)
-            if isinstance(name, bytes):
-                name = name.decode()
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            try:
-                temp_c = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            except Exception:
-                temp_c = None  # a specific card/driver not exposing this shouldn't drop the rest
-            gpus.append({
-                "name": name,
-                "util_percent": util.gpu,
-                "severity": _severity(util.gpu),
-                "mem_used_gb": round(mem.used / (1024 ** 3), 1),
-                "mem_total_gb": round(mem.total / (1024 ** 3), 1),
-                "temp_c": temp_c,
-            })
-        pynvml.nvmlShutdown()
-        return gpus
     except Exception:
         return []
+    with _nvml_lock:
+        try:
+            if not _nvml_state["initialised"]:
+                pynvml.nvmlInit()
+                _nvml_state["initialised"] = True
+            gpus = []
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                try:
+                    temp_c = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                except Exception:
+                    temp_c = None  # a specific card/driver not exposing this shouldn't drop the rest
+                gpus.append({
+                    "name": name,
+                    "util_percent": util.gpu,
+                    "severity": _severity(util.gpu),
+                    "mem_used_gb": round(mem.used / (1024 ** 3), 1),
+                    "mem_total_gb": round(mem.total / (1024 ** 3), 1),
+                    "temp_c": temp_c,
+                })
+            return gpus
+        except Exception:
+            _nvml_drop(pynvml)
+            return []
 
 
 # Hyper-V's VMState enum, as a fallback in case ConvertTo-Json ever serializes it as
@@ -772,6 +802,10 @@ def clear_caches():
     along with everything else, which means the very next reading reports no rate at
     all rather than a wrong one - they re-establish themselves on the following
     sample, exactly as they do at startup.
+
+    The NVML session (_nvml_state) is deliberately NOT dropped: it is a driver session,
+    not a reading, and shutting it down here would force a re-init - which leaks kernel
+    memory on real drivers. conftest resets it for tests instead.
 
     The Windows jobs are made due again at the next tick. On their own cadence the
     disk mapping would otherwise stay empty for up to twelve minutes, taking every

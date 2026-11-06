@@ -678,6 +678,16 @@ DB-backed Settings pages, not a code edit.
   and "not published yet" is no reading rather than a caller's own. With no loop
   (tests, an entry point that never started it) or a dead one, callers fall back to
   the old per-call delta.
+- **Never `nvmlInit()`/`nvmlShutdown()` per call.** `_get_gpu_snapshot()` initialises
+  NVML once, lazily, under `_nvml_lock`, and keeps it initialised for the life of the
+  process (`_nvml_state`). On real drivers every init/shutdown cycle leaks ~7 KB of the
+  kernel's non-paged `NVRM` pool until the process exits - ~2.6 MB/h at the 10s refresh,
+  invisible to Task Manager's per-process view. An NVML error drops the flag (best-effort
+  shutdown) so the next call re-inits. `clear_caches()` must **not** touch it (it is a
+  driver session, not a reading; re-initialising there would leak again) - `conftest`
+  resets the flag for tests instead. Any new NVML caller goes through this function.
+  Story and numbers: `docs/HISTORY.md` -> "The NVRM pool leak". **Not yet verified on
+  real Windows/NVIDIA hardware.**
 - Per-disk temperature and I/O are **Windows-only** — correlating a mountpoint to a
   physical disk (needed for `psutil.disk_io_counters(perdisk=True)`'s
   `PhysicalDriveN` keys) uses `Get-Partition`'s drive-letter-to-disk-number mapping,
