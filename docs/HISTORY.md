@@ -2253,6 +2253,18 @@ long-lived NVML session reads correctly. Promoted to stable as `v1.12.2` the sam
 Still unexercised for real: the error-recovery path (an NVML error dropping the session
 and the next poll re-initialising), which only the mocked tests cover.
 
+### The 2-second localhost (2026-11-06)
+
+The Games Portal service always showed ~2000 ms and "slow" on the status page while
+everything else checked on the same host answered in milliseconds. Nothing was wrong in
+Status Portal: Games Portal listened on IPv4 only, and on Windows a request to
+`localhost` tries `::1` first and waits about 2 seconds before falling back to IPv4, so
+the portal was measuring a real delay. Found by a separate session working only in the
+Games Portal repo; fixed there in Games Portal `v1.3.1-rc.1` (its PR #11, which makes
+it listen on IPv6 too). No Status Portal change. The rule this left is in `CLAUDE.md`
+next to the health-check reachability bullet: any other IPv4-only service on a
+`localhost` check URL will show the same 2 s, and `127.0.0.1` sidesteps it.
+
 ## Release history notes
 
 ### `v1.1.0` shipped as a full release despite unverified pieces (2026-07-23)

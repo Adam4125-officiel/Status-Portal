@@ -203,6 +203,13 @@ DB-backed Settings pages, not a code edit.
   time to the response headers, not to the last byte (before 1.9.1 it was the full
   download). A server that sends headers and then stalls its body is "reachable",
   consistent with the rule above.
+- **A service stuck at ~2000 ms on a `localhost` check URL is almost always IPv4-only,
+  not slow.** On Windows, `localhost` resolves to `::1` first, and a service listening
+  only on `0.0.0.0` makes the connection wait ~2 s before falling back to `127.0.0.1`.
+  The portal's measurement is correct - the delay is real - so don't "fix" it in the
+  check code. The fix is in the service (listen on IPv6 too) or the check URL
+  (`127.0.0.1` instead of `localhost`). Ask which before touching `_run_single_check()`
+  (`docs/HISTORY.md` -> "The 2-second localhost").
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
   `app._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —
