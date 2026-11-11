@@ -3495,18 +3495,17 @@ def test_service_without_url_hides_open_button(client):
 
 
 def test_public_page_shows_jellyfin_tasks_when_enabled(client):
-    """Jellyfin activity has its own page now; the main page links to it and summarises
-    it rather than carrying the whole block."""
+    """Jellyfin activity is a section of the Server tab; the main page doesn't carry it."""
     import integrations as integrations_module
     db.set_setting("show_public_jellyfin_tasks", "1")
     integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
 
-    page = client.get("/activity")
+    page = client.get("/server")
+    assert b'id="activity"' in page.data
     assert b"Trickplay Image Extraction" in page.data
 
     main = client.get("/")
-    assert b"Jellyfin activity" in main.data          # linked and summarised
-    assert b"1 task(s) running" in main.data
+    assert b'href="/server"' in main.data
     assert b"Trickplay Image Extraction" not in main.data
 
 
@@ -3524,11 +3523,10 @@ def test_the_activity_page_says_so_when_nothing_is_running(client):
     and says nothing is running - a link that 404s half the time would be worse."""
     db.set_setting("show_public_jellyfin_tasks", "1")
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
-    page = client.get("/activity")
+    page = client.get("/server")
     assert page.status_code == 200
-    # The page has to *say* it's idle - rendering nothing reads as broken.
+    # The section has to *say* it's idle - rendering nothing reads as broken.
     assert b"idling at the moment" in page.data
-    assert b"Idle right now" in client.get("/").data
 
 
 # ---------------------------------------------------------------------------
@@ -3544,7 +3542,7 @@ def test_the_main_page_keeps_the_is_it_working_content(client, isolated_db):
     assert b"service(s) tracked" in body
 
 
-@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+@pytest.mark.parametrize("path", ["/server", "/resources", "/vms", "/activity", "/media"])
 def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
     """The important half of the split. Moving a block to its own route must not become
     a way around the setting that hides it - so a page whose content is switched off
@@ -3553,7 +3551,7 @@ def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
     assert client.get(path).status_code == 404
 
 
-@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+@pytest.mark.parametrize("path", ["/server", "/media"])
 def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
     """And it isn't advertised either: the nav is built from the same context builders
     the pages use, so a link can never point at something that would 404."""
@@ -3562,8 +3560,44 @@ def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
 
 def test_switching_a_section_on_makes_its_page_reachable_and_linked(client, isolated_db):
     db.set_setting("show_public_cpu", "1")
-    assert client.get("/resources").status_code == 200
-    assert b"/resources" in client.get("/").data
+    assert client.get("/server").status_code == 200
+    assert b'href="/server"' in client.get("/").data
+
+
+def test_the_old_server_addresses_redirect_to_their_section(client, isolated_db):
+    """/resources, /vms and /activity became sections of /server; bookmarks keep working,
+    and only for a section that is switched on."""
+    db.set_setting("show_public_cpu", "1")
+    db.set_setting("show_public_vms", "1")
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    for old, anchor in (("/resources", "resources"), ("/vms", "vms"), ("/activity", "activity")):
+        resp = client.get(old)
+        assert resp.status_code in (301, 302), old
+        assert resp.headers["Location"].endswith("/server#" + anchor), old
+    db.set_setting("show_public_vms", "0")
+    assert client.get("/vms").status_code == 404
+
+
+def test_each_server_section_follows_its_own_visibility_rule(client, isolated_db):
+    """The Server tab exists for any one of its sections, but shows only those switched on."""
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    body = client.get("/server").data
+    assert b'id="activity"' in body
+    assert b'id="resources"' not in body and b'id="vms"' not in body
+    db.set_setting("show_public_cpu", "1")
+    body = client.get("/server").data
+    assert b'id="resources"' in body and b'id="activity"' in body
+
+
+def test_the_nav_has_one_tab_for_the_whole_server(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    db.set_setting("show_public_vms", "1")
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    body = client.get("/").data
+    assert body.count(b'href="/server"') == 1
+    for old in (b'href="/resources"', b'href="/vms"', b'href="/activity"'):
+        assert old not in body
+    assert b"summary-card" not in body  # the "More" block is gone
 
 
 def test_the_info_page_disappears_when_emptied(client, isolated_db):
@@ -3588,7 +3622,7 @@ def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_d
     with client.session_transaction() as sess:
         sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
                                "authenticated_at": 0}
-    for path in ("/", "/resources", "/info"):
+    for path in ("/", "/server", "/info"):
         assert b'href="/search"' in client.get(path).data, path
 
 
@@ -3596,10 +3630,10 @@ def test_every_public_page_shares_one_shell(client, isolated_db):
     """The tab bar and footer come from public_base.html on every public page - the
     login page, the report form, the 404 - not only on the status page and sub-pages."""
     db.set_setting("show_public_cpu", "1")
-    for path in ("/", "/resources", "/report", "/login", "/no-such-page"):
+    for path in ("/", "/server", "/report", "/login", "/no-such-page"):
         body = client.get(path).data
         assert b'class="page-nav"' in body, path
-        assert b'href="/resources"' in body, path  # nav_links from the context processor
+        assert b'href="/server"' in body, path  # nav_links from the context processor
         assert b'class="foot"' in body, path
         assert b'class="brand__link"' in body, path
 
@@ -3630,7 +3664,7 @@ def test_pages_with_forms_do_not_auto_reload_but_status_does(client, isolated_db
 
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):
     db.set_setting("show_public_cpu", "1")
-    body = client.get("/resources").data
+    body = client.get("/server").data
     assert b'class="page-nav"' in body
     assert b">Status<" in body
 

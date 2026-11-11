@@ -39,24 +39,6 @@
     {% include 'sections/' ~ key ~ '.html' %}
   {% endfor %}
 
-  {# Everything that used to be a block on this page, now one line each linking to its
-     own page. The summaries come from the same builders those pages use, so they can't
-     advertise something the page wouldn't show. #}
-  {% if page_summaries %}
-  <section class="section">
-    <h2 class="section__title">More</h2>
-    <div class="summary-grid">
-      {% for entry in page_summaries %}
-      <a class="summary-card" href="{{ entry.url }}">
-        <span class="summary-card__label">{{ entry.label }}</span>
-        {% if entry.summary %}<span class="summary-card__value">{{ entry.summary }}</span>{% endif %}
-        <span class="summary-card__go">View details →</span>
-      </a>
-      {% endfor %}
-    </div>
-  </section>
-  {% endif %}
-
 {% endblock %}
 {% block page_scripts %}
 {# Only the main page has the incidents/maintenance "load more" buttons. #}

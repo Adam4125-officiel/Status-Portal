@@ -365,7 +365,7 @@ def test_the_media_page_is_off_by_default(client):
 def test_the_media_page_renders_once_switched_on(client):
     _enable_media()
     assert b"Visible Film" in client.get("/media").data
-    # The main page links to it and summarises it, rather than carrying the block.
+    # The main page links to it rather than carrying the block.
     main = client.get("/").data
     assert b"Media activity" in main and b"/media" in main
     assert b"Visible Film" not in main
@@ -418,7 +418,7 @@ def test_the_section_can_be_made_public_while_sign_in_is_enabled(client, monkeyp
 
 def test_media_is_a_registered_public_page(isolated_db):
     """It moved off the main page into one of its own, so it belongs in PUBLIC_PAGES -
-    which is what drives the route, the nav link and the summary alike."""
+    which is what drives the route and the nav link alike."""
     assert "media" in [entry[0] for entry in app_module.PUBLIC_PAGES]
     assert "media" not in [key for key, _ in app_module.PUBLIC_SECTIONS]
 
