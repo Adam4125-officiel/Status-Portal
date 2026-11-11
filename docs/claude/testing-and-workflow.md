@@ -178,6 +178,37 @@ And when the ask is "why does X break", the single most useful thing to ask for 
 `instance/logs/app.log` around the failure, not more description — nearly every path
 in this app logs a real error now.
 
+## Dependency lock files
+
+- `requirements.in`, `requirements-dev.in` and `requirements-discord.in` hold the
+  direct dependencies. The `.txt` files are generated from them and carry hashes; do
+  not edit a `.txt` by hand. `requirements.txt` keeps its name (the updater, the
+  Dockerfile and the README use it).
+- Once one requirement has a hash, pip demands hashes for everything. That is why dev
+  and Discord have their own locked files rather than `-r requirements.txt` plus a loose
+  `pytest`. The dev file includes the runtime dependencies (`-r requirements.in`,
+  constrained by `-c requirements.txt`); the Discord file is an add-on to the runtime.
+- Regenerate as a **universal** lock, so one file serves every platform and Python the
+  README supports (3.10+). A plain `pip-compile` run on Linux drops everything behind a
+  marker: `colorama` on Windows, `typing-extensions`/`async-timeout` on older Pythons,
+  `audioop-lts` on 3.13+. With hashes in the file pip then refuses the install on those
+  machines, and a self-update fails. Use uv:
+
+  ```
+  pip install uv
+  for n in requirements requirements-dev requirements-discord; do
+    uv pip compile --universal --generate-hashes --python-version 3.10 --no-header $n.in -o $n.txt
+  done
+  ```
+
+  Add `--upgrade` to move versions. Regenerate before every release and commit the
+  `.txt` files together with the `.in` change that caused them. Check that
+  `requirements.txt` still has `colorama==... ; sys_platform == 'win32'`.
+- Verify in a throwaway venv: `pip install -r requirements-dev.txt -r
+  requirements-discord.txt`, then `python -c "import updater;
+  updater._install_dependencies(print)"` (the updater runs a plain `pip install -r
+  requirements.txt`, which enforces the hashes by itself).
+
 ## Release process
 
 **Never commit straight to `main`, for anything — always a branch + PR.** Explicitly
@@ -290,3 +321,17 @@ after the merge, not on the feature branch.
    (via `SendUserFile`). A locally-run session usually has full `git`/`gh` access and
    can complete every step directly — this fallback is for when it can't, not a
    replacement for trying the real steps first.
+
+## Continuous integration (`.github/workflows/ci.yml`)
+
+- Push and pull requests run `python -m pytest -q` on Python 3.12. The job installs
+  `requirements-discord.txt` as well as `requirements-dev.txt`: several test modules
+  import discord.py and fail without it. A clean venv with only `requirements-dev.txt`
+  gives 28 failures in `tests/test_discord_bot.py` and similar, so do not drop it.
+- A separate `docker` job builds the image, starts it and expects `/` to answer 200
+  within about a minute. It is blocking, unlike ruff and pip-audit. If it fails, the
+  container logs are printed in the job.
+- Ruff and pip-audit are advisory (`continue-on-error`) until their findings are
+  cleared. Ruff's default rule set changes between versions, so its count moves too.
+- Dependabot checks pip and GitHub Actions weekly. Security reports go through
+  GitHub's private reporting, described in `SECURITY.md`.

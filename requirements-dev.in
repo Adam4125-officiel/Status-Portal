@@ -1,0 +1,7 @@
+# Test tooling. Compiled into requirements-dev.txt (see "Dependency lock files" in
+# docs/claude/testing-and-workflow.md). Constrained by requirements.txt so the
+# runtime versions are identical to production.
+-c requirements.txt
+-r requirements.in
+pytest>=8.0
+pytest-xdist

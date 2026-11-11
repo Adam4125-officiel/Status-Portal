@@ -65,11 +65,11 @@ def test_notify_swallows_exceptions(monkeypatch):
 # ---------------------------------------------------------------------------
 # Email - the third channel
 # ---------------------------------------------------------------------------
-import email as email_mod  # noqa: E402
-import socket           # noqa: E402
-import threading        # noqa: E402
+import email as email_mod
+import socket
+import threading
 
-import pytest           # noqa: E402
+import pytest
 
 
 def _configure_email(monkeypatch, **overrides):
@@ -324,7 +324,7 @@ def test_a_real_smtp_conversation_delivers_the_message(monkeypatch):
 # ---------------------------------------------------------------------------
 # Recipients are a database setting, not an env var
 # ---------------------------------------------------------------------------
-import db as db_module  # noqa: E402
+import db as db_module
 
 
 def test_the_stored_recipient_list_wins_over_the_env_var(isolated_db, monkeypatch):

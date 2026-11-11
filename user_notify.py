@@ -111,7 +111,7 @@ def _already_on_admin_alert_list(email):
         return False
     try:
         return email.strip().lower() in {r.strip().lower() for r in notifications.email_recipients()}
-    except Exception:                     # noqa: BLE001 - never block a send over this
+    except Exception:
         _logger.exception("Could not read the admin alert recipient list")
         return False
 
@@ -535,7 +535,7 @@ def run_delivery_task():
     for row in pending:
         try:
             ok, detail = deliver(row)
-        except Exception as e:            # noqa: BLE001 - one bad row must not stop the drain
+        except Exception as e:
             _logger.exception("Delivering notification %s failed", row["id"])
             ok, detail = False, str(e)
         if ok:

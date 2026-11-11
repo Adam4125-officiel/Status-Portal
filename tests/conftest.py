@@ -2,9 +2,9 @@ import threading
 
 import pytest
 
-import db
-import app as app_module
 import admin_search as admin_search_module
+import app as app_module
+import db
 import integrations as integrations_module
 import media_search as media_search_module
 import monitoring as monitoring_module

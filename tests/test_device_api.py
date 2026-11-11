@@ -851,7 +851,7 @@ def test_idle_jellyfin_says_so_and_a_portal_without_one_does_not_fail(enabled, m
     monkeypatch.setattr(integrations, "get_cached_jellyfin_activity",
                         lambda: {"transcoding": 0, "running_tasks": []})
     assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
-    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity", lambda: {})
+    monkeypatch.setattr(integrations, "get_cached_jellyfin_activity", dict)
     assert _summary(enabled, "?jellyfin=1")["jellyfin"] == {"transcodes": 0, "tasks": []}
 
 
