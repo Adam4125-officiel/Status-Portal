@@ -5102,6 +5102,39 @@ def test_admin_tasks_shows_last_health_cycle(client, demo_task):
     assert "2026-11-11 10:20" in client.get("/admin/tasks").data.decode()
 
 
+def test_sign_in_is_refused_without_a_failure_when_every_slot_is_taken(client, user_auth, monkeypatch):
+    """A burst of slow Jellyfin sign-ins must not hold every server thread: past the
+    cap, the visitor is told to retry, Jellyfin isn't called, and it isn't a failure."""
+    calls = []
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate",
+                        lambda u, p: calls.append(u) or {"ok": False, "reason": "invalid"})
+    slots = app_module._user_login_slots
+    taken = 0
+    while slots.acquire(blocking=False):
+        taken += 1
+    try:
+        resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                           follow_redirects=True)
+    finally:
+        for _ in range(taken):
+            slots.release()
+    assert "try again in a moment" in resp.data.decode()
+    assert calls == []
+    assert app_module._user_login_state["failures"] == 0
+
+
+def test_the_sign_in_slot_is_released_even_when_authenticate_raises(client, user_auth, monkeypatch):
+    def boom(u, p):
+        raise RuntimeError("x")
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate", boom)
+    for _ in range(app_module.USER_LOGIN_MAX_CONCURRENT + 2):
+        try:
+            client.post("/login", data={"username": "adam", "password": "pw"})
+        except RuntimeError:
+            pass
+    assert _sign_in(client, monkeypatch).status_code == 302
+
+
 def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch):
     import importlib
     import config as config_module

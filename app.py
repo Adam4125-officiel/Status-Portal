@@ -781,6 +781,14 @@ USER_LOGIN_LOCKOUT_THRESHOLD = 10
 USER_LOGIN_LOCKOUT_SECONDS = 300
 
 
+# Caps how many Jellyfin sign-ins may be in flight at once, so a burst of slow ones
+# can't hold every waitress thread (same third-of-the-pool reasoning as
+# media_search._outbound_slots). The lockout counter only moves after Jellyfin
+# answers, so it can't stop a simultaneous burst by itself.
+USER_LOGIN_MAX_CONCURRENT = max(1, config.WAITRESS_THREADS // 3)
+_user_login_slots = threading.BoundedSemaphore(USER_LOGIN_MAX_CONCURRENT)
+
+
 def _user_login_locked():
     return time.time() < _user_login_state["locked_until"]
 
@@ -2282,7 +2290,15 @@ def user_login():
             flash("Enter your Jellyfin username and password.", "error")
             return render_template("user_login.html", next_url=next_url)
 
-        result = jellyfin_auth.authenticate(username, password)
+        slots = _user_login_slots
+        if not slots.acquire(blocking=False):
+            # Busy, not a wrong guess: never counted towards the lockout.
+            flash("Sign-in is busy right now - please try again in a moment.", "error")
+            return render_template("user_login.html", next_url=next_url)
+        try:
+            result = jellyfin_auth.authenticate(username, password)
+        finally:
+            slots.release()
         if result["ok"]:
             _register_user_login_success()
             _start_user_session(result["user"])
