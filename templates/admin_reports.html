@@ -21,7 +21,7 @@
         <td>{{ r.contact or '—' }}</td>
         <td>
           <form action="{{ url_for('admin_report_status', rid=r.id) }}" method="POST" style="display:inline">
-            <select name="status" onchange="this.form.submit()">
+            <select name="status" data-autosubmit>
               <option value="new" {{ 'selected' if r.status == 'new' }}>New</option>
               <option value="reviewed" {{ 'selected' if r.status == 'reviewed' }}>Reviewed</option>
               <option value="resolved" {{ 'selected' if r.status == 'resolved' }}>Resolved</option>

@@ -38,3 +38,14 @@ def test_services_table_marks_secondary_and_short_columns(client):
     css = (ROOT / "static/css/style.css").read_text()
     assert ".admin-table .col-secondary { display: none; }" in css
     assert ".admin-table .col-short { white-space: nowrap;" in css
+
+
+def test_reports_status_select_has_no_inline_handler(client):
+    db.create_problem_report("Broken")
+    _login(client)
+    html = client.get("/admin/reports").get_data(as_text=True)
+    assert "onchange" not in html
+    assert "data-autosubmit" in html
+    assert "js/admin_autosubmit.js" in html
+    js = (ROOT / "static/js/admin_autosubmit.js").read_text()
+    assert "requestSubmit" in js
