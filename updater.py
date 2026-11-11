@@ -102,6 +102,10 @@ PROTECTED_FILES = (".env",)
 INSTANCE_DIR = os.path.join(config.APP_ROOT, "instance")
 BACKUP_ROOT = os.path.join(INSTANCE_DIR, "update_backups")
 PENDING_MARKER_PATH = os.path.join(INSTANCE_DIR, "update_pending.json")
+# Every file the last update wrote, so the next one can tell which files a release
+# has since dropped (see `_stale_files`). Lives in instance/, which updates never
+# touch, and is written only after an update fully succeeded.
+INSTALLED_FILES_PATH = os.path.join(INSTANCE_DIR, "installed_files.json")
 KEEP_BACKUPS = 5
 
 # Windows can refuse a rename while another process still has the destination open
@@ -656,6 +660,127 @@ def _archive_members(zf):
     return members
 
 
+def _path_key(name):
+    """How two relative paths are compared when deciding what to delete. Always
+    case-insensitive and slash-normalised, whatever the platform: on Windows (and a
+    default macOS volume) `Foo.py` and `foo.py` are the *same file*, so a release that
+    only changed a file name's case must not make the next update delete the file it
+    just wrote. Erring this way can only ever keep a file, never remove one."""
+    return name.replace("\\", "/").lower()
+
+
+def _is_protected(name):
+    key = _path_key(name)
+    return (key in tuple(p.lower() for p in PROTECTED_FILES)
+            or key.startswith(tuple(p.lower() for p in PROTECTED_PREFIXES)))
+
+
+def read_installed_files():
+    """The file list the last successful update recorded, or None when there is none
+    (a fresh extraction, or a portal last updated by a version without this list) or
+    it can't be read. None means "delete nothing" - never "everything is stale"."""
+    try:
+        with open(INSTALLED_FILES_PATH, "r", encoding="utf-8") as f:
+            files = json.load(f).get("files")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, AttributeError):
+        _logger.warning("Could not read %s - no removed files will be deleted this time.",
+                        INSTALLED_FILES_PATH)
+        return None
+    if not isinstance(files, list) or not all(isinstance(n, str) for n in files):
+        _logger.warning("%s is malformed - no removed files will be deleted this time.",
+                        INSTALLED_FILES_PATH)
+        return None
+    return files
+
+
+def _write_installed_files(files, version):
+    try:
+        os.makedirs(INSTANCE_DIR, exist_ok=True)
+        _atomic_write(INSTALLED_FILES_PATH, json.dumps(
+            {"version": version, "written_at": db.now_iso(), "files": sorted(files)},
+            indent=2).encode("utf-8"))
+    except (OSError, UpdateError):
+        # Losing the list only means the next update deletes nothing - the safe side.
+        _logger.exception("Could not record the installed file list")
+
+
+def _restore_installed_files(files):
+    """Puts back the list a backup recorded, so a rolled-back tree is described by the
+    list of the version it now runs. None (no list existed then) removes it."""
+    if files is None:
+        try:
+            os.remove(INSTALLED_FILES_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _logger.exception("Could not remove the installed file list")
+        return
+    _write_installed_files(files, None)
+
+
+def _stale_files(previous, members):
+    """Files the previous update installed that the incoming archive no longer has,
+    and that are still on disk. Without a previous list, nothing: the files on disk
+    then can't be told apart from ones the admin added, so none is deleted.
+
+    The list lives in instance/ and is our own, but it's still re-validated with the
+    same rules as an archive member - and an entry that fails them is skipped, never
+    deleted: the worst a bad entry may cause is a stale file left behind."""
+    if not previous:
+        return []
+    incoming = {_path_key(name) for _info, name in members}
+    stale, seen = [], set()
+    for raw in previous:
+        name = raw.replace("\\", "/").lstrip("/")
+        key = _path_key(name)
+        if not name or key in incoming or key in seen:
+            continue
+        seen.add(key)
+        if (os.path.isabs(name) or ":" in name.split("/")[0] or ".." in name.split("/")
+                or _is_protected(name)):
+            _logger.warning("Ignoring unsafe entry in the installed file list: %r", raw)
+            continue
+        path = os.path.normpath(os.path.join(config.APP_ROOT, name))
+        if not path.startswith(config.APP_ROOT + os.sep):
+            _logger.warning("Ignoring unsafe entry in the installed file list: %r", raw)
+            continue
+        if os.path.isfile(path):
+            stale.append(name)
+    return sorted(stale)
+
+
+def _remove_file(name, progress):
+    """Deletes one stale file, with the same Windows lock retry as a replace. Returns
+    False rather than raising: a dropped file that stays on disk is exactly how every
+    update before this one behaved, so it is not worth undoing the update for. The
+    caller keeps it in the installed list so the next update tries again."""
+    path = os.path.join(config.APP_ROOT, name)
+    last_error = None
+    for attempt in range(REPLACE_RETRY_ATTEMPTS):
+        try:
+            os.remove(path)
+            break
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            last_error = e
+            time.sleep(REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
+    else:
+        progress(f"  ! could not remove {name}: {last_error} (will retry on the next update)")
+        return False
+    # Tidy up directories the removal left empty, never going above the app root.
+    parent = os.path.dirname(path)
+    while parent.startswith(config.APP_ROOT + os.sep):
+        try:
+            os.rmdir(parent)
+        except OSError:
+            break
+        parent = os.path.dirname(parent)
+    return True
+
+
 def _version_from_archive(zf, members):
     """Reads the VERSION file out of the archive - the incoming release's own idea of
     what it is, without importing any of its code."""
@@ -707,11 +832,12 @@ def _atomic_write(destination, data, mode=None):
         "On Windows this usually means another program has the file open.")
 
 
-def _make_backup(members, from_version, to_version, channel):
-    """Copies every file that is about to be overwritten into a timestamped folder
-    under instance/ (which updates never touch, so a backup can't be clobbered by
-    the next one), plus a manifest recording which files were *added* so a rollback
-    can remove them again rather than leaving them behind."""
+def _make_backup(members, from_version, to_version, channel, stale=(), installed_before=None):
+    """Copies every file that is about to be overwritten or removed into a timestamped
+    folder under instance/ (which updates never touch, so a backup can't be clobbered
+    by the next one), plus a manifest recording which files were *added* so a rollback
+    can remove them again rather than leaving them behind, which were *removed* so it
+    can put them back, and the installed file list as it stood before."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup_dir = os.path.join(BACKUP_ROOT, f"{stamp}-{from_version}-to-{to_version}")
     os.makedirs(backup_dir, exist_ok=True)
@@ -725,6 +851,10 @@ def _make_backup(members, from_version, to_version, channel):
             replaced.append(name)
         else:
             added.append(name)
+    for name in stale:
+        target = os.path.join(backup_dir, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(os.path.join(config.APP_ROOT, name), target)
     manifest = {
         "created_at": db.now_iso(),
         "from_version": from_version,
@@ -732,6 +862,8 @@ def _make_backup(members, from_version, to_version, channel):
         "channel": channel,
         "replaced": replaced,
         "added": added,
+        "removed": list(stale),
+        "installed_before": installed_before,
     }
     with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -772,8 +904,8 @@ def list_backups():
 
 
 def rollback(backup_name=None, progress=None):
-    """Restores a backup over the app directory: replaced files copied back, added
-    files deleted. Defaults to the most recent backup.
+    """Restores a backup over the app directory: replaced and removed files copied
+    back, added files deleted. Defaults to the most recent backup.
 
     This is the recovery path for the one failure mode nothing inside the app can
     handle on its own - see `write_pending_marker()` for why."""
@@ -791,7 +923,7 @@ def rollback(backup_name=None, progress=None):
 
     progress(f"Rolling back to {chosen['from_version']} (backup {chosen['name']})...")
     restored = removed = 0
-    for name in chosen.get("replaced", []):
+    for name in chosen.get("replaced", []) + chosen.get("removed", []):
         source = os.path.join(chosen["path"], name)
         if not os.path.isfile(source):
             progress(f"  ! missing from backup, skipping: {name}")
@@ -807,6 +939,9 @@ def rollback(backup_name=None, progress=None):
                 removed += 1
         except OSError as e:
             progress(f"  ! could not remove {name}: {e}")
+    if "installed_before" in chosen:
+        # Absent from a backup made before the list existed: leave the list alone.
+        _restore_installed_files(chosen["installed_before"])
     _clear_pending_marker()
     progress(f"Rolled back: {restored} file(s) restored, {removed} added file(s) removed.")
     progress("Restart the portal for the rolled-back code to take effect.")
@@ -965,8 +1100,11 @@ def perform_update(channel=None, force=False, install_deps=True, allow_dev_check
 
         old_requirements = _read_file_bytes(os.path.join(config.APP_ROOT, "requirements.txt"))
 
-        backup_dir, manifest = _make_backup(members, current_version(), archive_version, channel)
-        progress(f"Backed up {len(manifest['replaced'])} existing file(s) to "
+        installed_before = read_installed_files()
+        stale = _stale_files(installed_before, members)
+        backup_dir, manifest = _make_backup(members, current_version(), archive_version, channel,
+                                            stale, installed_before)
+        progress(f"Backed up {len(manifest['replaced']) + len(stale)} existing file(s) to "
                  f"instance/update_backups/{os.path.basename(backup_dir)}")
 
         written = 0
@@ -991,6 +1129,12 @@ def perform_update(channel=None, force=False, install_deps=True, allow_dev_check
 
     progress(f"Replaced {written} file(s).")
 
+    # Only once every new file is in place: a failure above rolls back a tree that
+    # still has all of its old files.
+    kept = [name for name in stale if not _remove_file(name, progress)]
+    if stale:
+        progress(f"Removed {len(stale) - len(kept)} file(s) the new release no longer ships.")
+
     new_requirements = _read_file_bytes(os.path.join(config.APP_ROOT, "requirements.txt"))
     deps_changed = old_requirements != new_requirements
     if deps_changed and install_deps:
@@ -1006,6 +1150,7 @@ def perform_update(channel=None, force=False, install_deps=True, allow_dev_check
         progress("NOTE: requirements.txt changed - run `pip install -r requirements.txt` "
                  "before restarting.")
 
+    _write_installed_files([name for _info, name in members] + kept, archive_version)
     _prune_backups()
     progress(f"Updated {current_version()} -> {archive_version}. Restart the portal to run it.")
     return {
@@ -1014,6 +1159,7 @@ def perform_update(channel=None, force=False, install_deps=True, allow_dev_check
         "latest": archive_version,
         "channel": channel,
         "files_written": written,
+        "files_removed": len(stale) - len(kept),
         "backup": os.path.basename(backup_dir),
         "deps_changed": deps_changed,
         "sha256": digest,

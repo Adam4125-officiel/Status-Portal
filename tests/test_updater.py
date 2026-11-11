@@ -7,8 +7,10 @@ so no test can ever write into the real repository. Nothing here makes a network
 call (requests is always mocked) and nothing here ever restarts anything.
 """
 import io
+import json
 import os
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +46,7 @@ def fake_app_dir(tmp_path, monkeypatch, isolated_db):
     monkeypatch.setattr(updater, "INSTANCE_DIR", str(root / "instance"))
     monkeypatch.setattr(updater, "BACKUP_ROOT", str(root / "instance" / "update_backups"))
     monkeypatch.setattr(updater, "PENDING_MARKER_PATH", str(root / "instance" / "update_pending.json"))
+    monkeypatch.setattr(updater, "INSTALLED_FILES_PATH", str(root / "instance" / "installed_files.json"))
     updater._update_cache["result"] = None
     updater._update_cache["refreshed_monotonic"] = None
     return root
@@ -523,6 +526,192 @@ def test_old_backups_are_pruned(monkeypatch, fake_app_dir):
                                              "requirements.txt": "Flask>=3.0\n"})
         updater.perform_update(progress=lambda m: None)
     assert len(updater.list_backups()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Files a later release dropped
+# ---------------------------------------------------------------------------
+# Real file names: the ones the "Clear this browser's cache" page and the old public
+# templates left behind, which is the case this exists for.
+RETIRED = ("templates/admin_clear_browser_cache.html", "static/js/admin_clear_browser_cache.js",
+           "templates/public/vms.html")
+
+
+def _release_files(version, *extra):
+    files = {"app.py": f"app {version}\n", "VERSION": version + "\n",
+             "requirements.txt": "Flask>=3.0\n", "templates/index.html": "<p>new</p>"}
+    files.update({name: f"{name} {version}" for name in extra})
+    return files
+
+
+def _update_to(monkeypatch, version, files):
+    """Applies an update, then makes the "running" version the new one, as a real
+    restart would."""
+    _wire_release(monkeypatch, version, files)
+    result = updater.perform_update(progress=lambda m: None)
+    monkeypatch.setattr(config, "VERSION", version)
+    return result
+
+
+def test_an_update_records_the_files_it_installed(monkeypatch, fake_app_dir):
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    assert sorted(updater.read_installed_files()) == sorted(_release_files("1.5.0", *RETIRED))
+
+
+def test_files_a_release_dropped_are_backed_up_then_deleted(monkeypatch, fake_app_dir):
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    (fake_app_dir / "my_own_notes.txt").write_text("the admin's, never shipped")
+
+    result = _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
+
+    assert result["files_removed"] == len(RETIRED)
+    for name in RETIRED:
+        assert not (fake_app_dir / name).exists()
+    # A directory the removal emptied goes too; one still in use stays.
+    assert not (fake_app_dir / "static" / "js").exists()
+    assert (fake_app_dir / "templates" / "index.html").exists()
+    # A file no release ever listed is not the updater's to delete.
+    assert (fake_app_dir / "my_own_notes.txt").exists()
+    manifest = updater.list_backups()[-1]
+    assert sorted(manifest["removed"]) == sorted(RETIRED)
+    for name in RETIRED:
+        assert (Path(manifest["path"]) / name).read_text() == f"{name} 1.5.0"
+    # The new list no longer names them, so they're not "removed" a second time.
+    assert not set(RETIRED) & set(updater.read_installed_files())
+
+
+def test_rollback_puts_removed_files_back_and_restores_the_previous_list(monkeypatch, fake_app_dir):
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    list_before = updater.read_installed_files()
+    _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
+
+    updater.rollback(progress=lambda m: None)
+
+    for name in RETIRED:
+        assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
+    assert (fake_app_dir / "app.py").read_text() == "app 1.5.0\n"
+    # The restored tree is described by its own list again, so updating once more
+    # removes the same files again rather than forgetting them.
+    assert updater.read_installed_files() == list_before
+
+
+def test_emergency_rollback_puts_removed_files_back(monkeypatch, fake_app_dir):
+    import update
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    list_before = updater.read_installed_files()
+    _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
+
+    monkeypatch.setattr(update, "APP_ROOT", str(fake_app_dir))
+    assert update._emergency_rollback() == 0
+
+    for name in RETIRED:
+        assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
+    assert updater.read_installed_files() == list_before
+
+
+def test_rolling_back_the_first_listed_update_removes_the_list(monkeypatch, fake_app_dir):
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0"))
+    updater.rollback(progress=lambda m: None)
+    assert not os.path.exists(updater.INSTALLED_FILES_PATH)
+
+
+def test_a_failed_update_puts_removed_files_back(monkeypatch, fake_app_dir):
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    list_before = updater.read_installed_files()
+
+    def boom(progress):
+        raise updater.UpdateError("pip install failed")
+    monkeypatch.setattr(updater, "_install_dependencies", boom)
+    files = _release_files("1.6.0")
+    files["requirements.txt"] = "Flask>=3.0\nnewdep>=1.0\n"
+    _wire_release(monkeypatch, "1.6.0", files)
+    with pytest.raises(updater.UpdateError, match="rolled back"):
+        updater.perform_update(progress=lambda m: None)
+
+    for name in RETIRED:
+        assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
+    assert updater.read_installed_files() == list_before
+
+
+def test_without_a_previous_list_nothing_is_deleted(monkeypatch, fake_app_dir):
+    """The first update from a version that kept no list: what's on disk can't be
+    told apart from the admin's own files, so everything stays - and the list starts
+    from here."""
+    for name in RETIRED:
+        (fake_app_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (fake_app_dir / name).write_text("left by an old version")
+
+    result = _update_to(monkeypatch, "1.5.0", _release_files("1.5.0"))
+
+    assert result["files_removed"] == 0
+    assert updater.list_backups()[-1]["removed"] == []
+    for name in RETIRED:
+        assert (fake_app_dir / name).exists()
+    assert sorted(updater.read_installed_files()) == sorted(_release_files("1.5.0"))
+
+
+@pytest.mark.parametrize("content", ["not json", "{}", '{"files": "app.py"}', '{"files": [1]}'])
+def test_an_unreadable_list_deletes_nothing(monkeypatch, fake_app_dir, content):
+    (fake_app_dir / "old.py").write_text("x")
+    (fake_app_dir / "instance" / "installed_files.json").write_text(content)
+    result = _update_to(monkeypatch, "1.5.0", _release_files("1.5.0"))
+    assert result["files_removed"] == 0
+    assert (fake_app_dir / "old.py").exists()
+
+
+@pytest.mark.parametrize("entry", ["instance/portal.db", "INSTANCE/portal.db", ".env", ".ENV",
+                                   "static/uploads/logo.png", "static\\uploads\\logo.png",
+                                   "../outside.txt", "/etc/passwd", "C:/Windows/win.ini"])
+def test_protected_or_unsafe_entries_in_the_list_are_never_deleted(monkeypatch, fake_app_dir, entry):
+    """The list is our own, but an entry naming the database, the secrets or an
+    upload - however it is spelled - is skipped, never acted on."""
+    outside = fake_app_dir.parent / "outside.txt"
+    outside.write_text("not ours")
+    (fake_app_dir / "instance" / "installed_files.json").write_text(
+        json.dumps({"files": ["app.py", entry]}))
+
+    result = _update_to(monkeypatch, "1.5.0", _release_files("1.5.0"))
+
+    assert result["files_removed"] == 0
+    assert (fake_app_dir / "instance" / "portal.db").read_text() == "PRECIOUS DATABASE"
+    assert (fake_app_dir / ".env").read_text() == "PORTAL_SECRET_KEY=secret"
+    assert (fake_app_dir / "static" / "uploads" / "logo.png").read_text() == "PRECIOUS LOGO"
+    assert outside.read_text() == "not ours"
+
+
+def test_a_file_renamed_only_by_case_is_not_deleted(monkeypatch, fake_app_dir):
+    """On Windows `Helper.py` and `helper.py` are one file: deleting the old name
+    would delete the file the update just wrote."""
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", "Helper.py"))
+    _update_to(monkeypatch, "1.6.0", _release_files("1.6.0", "helper.py"))
+    assert updater.list_backups()[-1]["removed"] == []
+
+
+def test_a_locked_stale_file_is_kept_and_retried_next_time(monkeypatch, fake_app_dir):
+    """Windows: a file held open can't be deleted. Leaving it is how every update
+    behaved before, so it doesn't undo the update - it stays listed and the next one
+    tries again."""
+    monkeypatch.setattr(updater, "REPLACE_RETRY_DELAY_SECONDS", 0)
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    locked = RETIRED[0]
+    real_remove = os.remove
+
+    def remove(path, *a, **k):
+        if path.replace(os.sep, "/").endswith(locked):
+            raise PermissionError(13, "The process cannot access the file")
+        return real_remove(path, *a, **k)
+    monkeypatch.setattr(updater.os, "remove", remove)
+    result = _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
+
+    assert result["applied"] is True and result["files_removed"] == len(RETIRED) - 1
+    assert (fake_app_dir / locked).exists()
+    assert (fake_app_dir / "app.py").read_text() == "app 1.6.0\n"
+    assert locked in updater.read_installed_files()
+
+    monkeypatch.setattr(updater.os, "remove", real_remove)
+    result = _update_to(monkeypatch, "1.7.0", _release_files("1.7.0"))
+    assert result["files_removed"] == 1
+    assert not (fake_app_dir / locked).exists()
 
 
 # ---------------------------------------------------------------------------

@@ -63,7 +63,8 @@ def _emergency_rollback(backup_name=None):
     and the one failure mode a rollback tool most needs to survive is "the update
     broke this app's code". Everything it does could equally be done by hand with
     `cp -r instance/update_backups/<name>/* .` - it just does it correctly,
-    including removing files the update added."""
+    including removing files the update added (files it removed are in the backup
+    folder like the replaced ones, so they come back with the same copy)."""
     backup_root = os.path.join(APP_ROOT, "instance", "update_backups")
     if not os.path.isdir(backup_root):
         print(f"No backups directory at {backup_root}.", file=sys.stderr)
@@ -89,7 +90,7 @@ def _emergency_rollback(backup_name=None):
 
     print(f"EMERGENCY ROLLBACK to {manifest.get('from_version')} (backup {backup_name})")
     restored = removed = 0
-    for name in manifest.get("replaced", []):
+    for name in manifest.get("replaced", []) + manifest.get("removed", []):
         source = os.path.join(backup_dir, name)
         if not os.path.isfile(source):
             print(f"  ! missing from backup, skipping: {name}")
@@ -104,6 +105,19 @@ def _emergency_rollback(backup_name=None):
             removed += 1
         except OSError:
             pass
+    if "installed_before" in manifest:
+        # Same file updater.py keeps: the list describing the version now restored.
+        installed = os.path.join(APP_ROOT, "instance", "installed_files.json")
+        try:
+            if manifest["installed_before"] is None:
+                if os.path.isfile(installed):
+                    os.remove(installed)
+            else:
+                with open(installed, "w", encoding="utf-8") as f:
+                    json.dump({"version": manifest.get("from_version"),
+                               "files": manifest["installed_before"]}, f, indent=2)
+        except OSError as e:
+            print(f"  ! could not restore the installed file list: {e}")
     for leftover in ("update_pending.json",):
         try:
             os.remove(os.path.join(APP_ROOT, "instance", leftover))
