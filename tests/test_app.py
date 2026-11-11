@@ -15,6 +15,7 @@ import admin_search
 import app as app_module
 import db
 import health as health_module
+import notifications
 import routes.api as routes_api
 import scheduler
 import twofactor
@@ -1591,7 +1592,7 @@ def test_report_problem_page_shows_site_name(client):
 
 def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     notified = []
-    monkeypatch.setattr(app_module.notifications, "notify",
+    monkeypatch.setattr(notifications, "notify",
                         lambda title, msg, **kw: notified.append((title, msg, kw)))
     sid = db.list_services()[0]["id"]
 
@@ -2015,7 +2016,7 @@ def test_admin_maintenance_window_with_past_start_applies_immediately(client):
 
 def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     service = db.list_services()[0]
 
     health_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
@@ -2027,7 +2028,7 @@ def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
 
 def test_incident_update_fires_notification(client, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     db.create_incident({"title": "Test outage", "status": "investigating"})
     iid = db.list_incidents()[0]["id"]
@@ -2041,7 +2042,7 @@ def test_incident_update_fires_notification(client, monkeypatch):
 
 def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({
         "service_id": sid, "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
@@ -2062,7 +2063,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
     emails and five DMs in a row - reported 2026-09-05."""
     admin_calls = []
     subscriber_calls = []
-    monkeypatch.setattr(app_module.notifications, "notify_async",
+    monkeypatch.setattr(notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
@@ -2094,7 +2095,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
 def test_single_service_maintenance_wording_is_unchanged(isolated_db, monkeypatch):
     """The grouping above must not turn a one-service window's message into a plural."""
     subscriber_calls = []
-    monkeypatch.setattr(app_module.notifications, "notify_async", lambda title, msg: None)
+    monkeypatch.setattr(notifications, "notify_async", lambda title, msg: None)
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
                             subscriber_calls.append((event, subject, body)))
@@ -2116,7 +2117,7 @@ def test_two_separate_windows_still_notify_separately(isolated_db, monkeypatch):
     """Grouping is per window, not per run - two unrelated windows starting in the
     same cycle are two different things and must stay two notifications."""
     admin_calls = []
-    monkeypatch.setattr(app_module.notifications, "notify_async",
+    monkeypatch.setattr(notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda *a, **kw: None)
@@ -2150,7 +2151,7 @@ def test_lowdisk_threshold_blank_means_disabled(isolated_db):
 def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_db, monkeypatch):
     db.set_setting("lowdisk_percent_threshold", "90")
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
 
     low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
     health_module._check_low_disk_space(low)
@@ -2167,7 +2168,7 @@ def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_
 
 def test_check_low_disk_space_noop_when_threshold_unset(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     health_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
     assert calls == []
 
@@ -2181,7 +2182,7 @@ def test_low_disk_alert_state_survives_restart_no_duplicate_notification(isolate
     db.set_setting("lowdisk_percent_threshold", "90")
     db.set_low_disk_alert_state("/", True)
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
 
     still_low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
     health_module._check_low_disk_space(still_low)
@@ -3338,7 +3339,7 @@ def test_public_history_days_blank_means_unlimited(client):
 def test_notifications_test_button_sends_via_shared_dispatch(client, monkeypatch):
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/notifications/test", follow_redirects=True)
     assert resp.status_code == 200
@@ -5203,7 +5204,7 @@ def test_report_problem_post_without_opening_form_is_refused(client):
 
 
 def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
-    monkeypatch.setattr(app_module.notifications, "notify", lambda *a, **kw: None)
+    monkeypatch.setattr(notifications, "notify", lambda *a, **kw: None)
     app_module._report_state["window_start"] = 0.0
     app_module._report_state["count"] = 0
     with client.session_transaction() as sess:
