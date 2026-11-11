@@ -40,8 +40,9 @@
   again. Never against anything the user depends on, and never `control_host()`.
 
 - **A page that reloads itself must not reload a panel somebody is using.**
-  `static/js/main.js` (the admin Resources & VMs page and the public status pages) reloads
-  every `refresh_seconds`, and a reload closes any panel a script opened and empties what
+  `static/js/main.js` (the admin Resources & VMs page) reloads
+  every `refresh_seconds`; the public pages swap a fragment instead (`public_refresh.js`, same
+  `data-holds-refresh` and focus rules), and a reload closes any panel a script opened and empties what
   was typed into it - which is how the VM confirmation panel kept vanishing under a
   half-typed 2FA code. `main.js` now holds off, and restarts its countdown from the full
   interval, while an element marked **`data-holds-refresh`** is on screen or a text field

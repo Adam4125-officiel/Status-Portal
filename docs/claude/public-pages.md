@@ -118,9 +118,25 @@
   the error pages extend it too). Its nav data comes from `_inject_public_chrome()`, not
   from routes. Pages with forms opt out of the auto-reload with
   `{% set auto_refresh = false %}`.
-- **Auto-refresh lives in `public_base.html`, not `index.html`.** The public page used
-  to be one page that reloaded itself; after the split, putting the refresh script only
-  on the main page would silently freeze the resources and VM pages.
+- **Auto-refresh lives in `public_base.html`, not `index.html`**, and it no longer
+  reloads. `static/js/public_refresh.js` re-fetches the `#live-region` from
+  `<same path>?fragment=1` every `refresh_seconds` and swaps its contents, so scroll
+  position and what "Load more" unfolded survive. With `public_fragment` set (the
+  `_is_public_fragment()` context value) `public_base.html` extends the bare
+  `_fragment.html` and renders only `{% block live %}`: the stale banner plus
+  `{% block content %}`. Anything that must update on refresh goes **inside** that block;
+  the topbar and footer are not refreshed.
+- **The fragment has an ETag and answers 304.** `_etag_public_fragment` is registered
+  *after* `_compress_response` so that it runs before it: the tag is over the plain HTML,
+  because gzip's header carries a timestamp and a tag over the compressed bytes would
+  change every second. An unchanged tag makes the script skip the swap. Anything
+  per-request in the live region (a timestamp, a token) would defeat this.
+- **"Load more" batches are wrapped in `.load-more-batch[data-for=<button id>]`** so a
+  swap can put them back in front of their button (minus items the first page now shows).
+  A new load-more button needs an `id`, and `wireLoadMore()` re-wires fresh buttons.
+- **`data_stale`**: the banner appears once `last_health_cycle_at` is older than
+  `STALE_AFTER_INTERVALS` (3) check intervals; no recorded cycle is not stale.
+- `main.js` (a reload, with a countdown) is now used only by the admin Resources page.
 - Each content block is its own partial under `templates/sections/<key>.html`, each
   owning its own "is there anything to show" guard, and the sub-page templates under
   `templates/public/` just include the matching partial(s) — one copy of the markup, and
@@ -173,8 +189,7 @@ deliberately does not advertise it.
   still polling it after the admin switched kiosk off. 404 rather than a redirect or an
   empty page, same as a switched-off public sub-page.
 - **It refreshes by polling for a server-rendered HTML fragment, not by reloading.**
-  `main.js`'s `window.location.reload()` is right for the public page and wrong here:
-  it flashes the screen and throws the rotation back to the first view every cycle, so
+  a full reload would be wrong here: it flashes the screen and throws the rotation back to the first view every cycle, so
   at a 60s refresh and a 20s rotation the later views are never reached at all.
   `/kiosk/views` is the same convention as `/api/incidents/more` and `/admin/logs/tail`
   - server-rendered HTML, never JSON, and the fragment the page includes on first load

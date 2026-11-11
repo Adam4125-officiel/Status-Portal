@@ -2428,3 +2428,11 @@ The public nav had seven tabs (Status, resources, VMs, Jellyfin activity, media,
 Search), wrapping to three lines on a phone, and the main page repeated five of them as
 "More" cards. It is now Status, Server, Media and Info; the old addresses redirect to
 their section of `/server`, and search sits at the head of Media for signed-in visitors.
+
+## Silent refresh of public pages (2026-11)
+
+Every open public tab reloaded itself each minute, losing its scroll position and whatever
+"Load more" had unfolded, and the header counted down ("next refresh in 57s") instead of saying
+how fresh the data was. The pages now re-fetch their live region as a fragment with an ETag
+(a 304 when nothing changed), show "Updated 12 s ago", and warn when the last health-check cycle
+is more than three intervals old.
