@@ -1364,3 +1364,89 @@ def test_record_check_result_writes_state_and_history_atomically(isolated_db):
     with pytest.raises(sqlite3.OperationalError):
         db.record_check_result(sid, "operational", 10)
     assert db.get_service(sid)["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# Daily aggregates (status_daily)
+# ---------------------------------------------------------------------------
+def _daily_rows(sid=None):
+    conn = db.get_db()
+    sql = ("SELECT service_id, day, checks, down_checks, maintenance_checks, avg_response_ms, "
+           "response_samples FROM status_daily")
+    rows = conn.execute(sql + (" WHERE service_id=?" if sid else "") + " ORDER BY service_id, day",
+                        (sid,) if sid else ()).fetchall()
+    conn.close()
+    return [tuple(r) for r in rows]
+
+
+def _insert_history(rows):
+    conn = db.get_db()
+    conn.executemany(
+        "INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def _rerun_backfill():
+    """What the first start of an upgraded install does: no marker yet."""
+    conn = db.get_db()
+    conn.execute("DELETE FROM settings WHERE key=?", (db.STATUS_DAILY_BACKFILLED_SETTING,))
+    conn.commit()
+    conn.close()
+    db.init_db()
+
+
+def test_every_check_is_counted_into_its_day(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    db.record_check_result(sid, "operational", 10)
+    db.record_check_result(sid, "operational", 30)
+    db.record_status_history(sid, "down", None)
+    db.record_status_history(sid, "maintenance", None)
+    today = db.now_iso()[:10]
+    assert _daily_rows(sid) == [(sid, today, 4, 1, 1, 20.0, 2)]
+
+
+def test_the_daily_row_is_written_with_the_history_row_or_not_at_all(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    conn = db.get_db()
+    conn.execute("DROP TABLE status_history")
+    conn.commit()
+    conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        db.record_status_history(sid, "down", None)
+    assert _daily_rows(sid) == []
+
+
+def test_backfill_builds_the_same_rows_as_live_checks(isolated_db):
+    """An upgraded install's existing history is summed per UTC day once, at start,
+    to exactly what counting each check as it happened would have given."""
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    for status, ms in (("operational", 10), ("operational", 20), ("down", None), ("maintenance", 5)):
+        db.record_status_history(sid, status, ms)
+    live = _daily_rows(sid)
+    _insert_history([(sid, "down", None, "2026-01-02T23:59:59+00:00"),
+                     (sid, "operational", 7, "2026-01-02T00:00:00+00:00"),
+                     (sid, "operational", 9, "2026-01-03T00:00:00+00:00")])
+    conn = db.get_db()
+    conn.execute("DELETE FROM status_daily")
+    conn.commit()
+    conn.close()
+
+    _rerun_backfill()
+
+    assert _daily_rows(sid) == [(sid, "2026-01-02", 2, 1, 0, 7.0, 1),
+                                (sid, "2026-01-03", 1, 0, 0, 9.0, 1)] + live
+
+
+def test_backfill_runs_once_and_never_counts_a_check_twice(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    _insert_history([(sid, "operational", 10, "2026-01-02T12:00:00+00:00")])
+    _rerun_backfill()
+    db.record_status_history(sid, "down", None)
+    before = _daily_rows(sid)
+    assert before[0] == (sid, "2026-01-02", 1, 0, 0, 10.0, 1)
+
+    db.init_db()  # a normal restart: marker present, nothing recounted
+    assert _daily_rows(sid) == before
+    _rerun_backfill()  # even without the marker, existing days are left alone
+    assert _daily_rows(sid) == before

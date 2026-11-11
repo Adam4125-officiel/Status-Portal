@@ -249,6 +249,39 @@ def _ensure_column(conn, table, column, ddl):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
+STATUS_DAILY_BACKFILLED_SETTING = "status_daily_backfilled"
+
+
+def _backfill_status_daily(conn):
+    """Fills status_daily from status_history, once: on the first start of a version
+    that has the table, so an upgraded install keeps the uptime it already had.
+
+    Runs before the health-check loop starts, so the history it reads is complete, and
+    the rows it writes plus the marker setting are one transaction: a crash leaves
+    neither. From then on every check adds to its day directly, which is why this must
+    not run again - pruned history would recount a day as fewer checks than it had.
+    ON CONFLICT DO NOTHING keeps an existing day as it is if it ever does (a restored
+    file whose marker went missing)."""
+    if conn.execute("SELECT 1 FROM settings WHERE key=?",
+                    (STATUS_DAILY_BACKFILLED_SETTING,)).fetchone():
+        return
+    with conn:
+        conn.execute("""
+            INSERT INTO status_daily (service_id, day, checks, down_checks, maintenance_checks,
+                                      avg_response_ms, response_samples)
+            SELECT service_id, substr(checked_at, 1, 10), COUNT(*),
+                   SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 'maintenance' THEN 1 ELSE 0 END),
+                   AVG(response_ms), COUNT(response_ms)
+            FROM status_history
+            WHERE service_id IN (SELECT id FROM services)
+            GROUP BY service_id, substr(checked_at, 1, 10)
+            ON CONFLICT (service_id, day) DO NOTHING
+        """)
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, '1') "
+                     "ON CONFLICT(key) DO NOTHING", (STATUS_DAILY_BACKFILLED_SETTING,))
+
+
 def _clean_non_email_contacts(conn):
     """Blanks any stored "email" that isn't one, in both places one can be held.
 
@@ -393,6 +426,25 @@ def init_db():
             status TEXT NOT NULL,
             response_ms INTEGER DEFAULT NULL,
             checked_at TEXT NOT NULL,
+            FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
+        )
+    """)
+
+    # One row per service per UTC day, added to by every check (see _add_to_daily()).
+    # This is what the uptime figures read, so status_history only has to keep a
+    # couple of weeks of individual results. response_samples is how many checks
+    # avg_response_ms averages (checks with no response time are not in it), which is
+    # what lets the average be updated one check at a time.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS status_daily (
+            service_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            checks INTEGER NOT NULL DEFAULT 0,
+            down_checks INTEGER NOT NULL DEFAULT 0,
+            maintenance_checks INTEGER NOT NULL DEFAULT 0,
+            avg_response_ms REAL DEFAULT NULL,
+            response_samples INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (service_id, day),
             FOREIGN KEY (service_id) REFERENCES services (id) ON DELETE CASCADE
         )
     """)
@@ -838,6 +890,7 @@ def init_db():
     """)
     conn.commit()
 
+    _backfill_status_daily(conn)
     _clean_non_email_contacts(conn)
 
     # Seed defaults if empty
@@ -1050,6 +1103,7 @@ def record_check_result(service_id, status, response_ms):
         conn.execute("""
             INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?, ?, ?, ?)
         """, (service_id, status, response_ms, now))
+        _add_to_daily(conn, service_id, status, response_ms, now)
     conn.close()
 
 
@@ -1560,12 +1614,37 @@ def set_service_dependencies(service_id, depends_on_ids):
 
 
 # ---------- Status history (append-only; powers the uptime %) ----------
+def _add_to_daily(conn, service_id, status, response_ms, checked_at):
+    """Counts one check into its service's status_daily row for the UTC day of
+    `checked_at`, in the caller's transaction - the same one that writes the
+    status_history row, so the two never disagree. In the UPDATE branch every bare
+    column name is the row's value before this check, which is what the running
+    average needs."""
+    has_ms = response_ms is not None
+    conn.execute("""
+        INSERT INTO status_daily (service_id, day, checks, down_checks, maintenance_checks,
+                                  avg_response_ms, response_samples)
+        VALUES (?, ?, 1, ?, ?, ?, ?)
+        ON CONFLICT (service_id, day) DO UPDATE SET
+            checks = checks + 1,
+            down_checks = down_checks + excluded.down_checks,
+            maintenance_checks = maintenance_checks + excluded.maintenance_checks,
+            avg_response_ms = CASE WHEN excluded.response_samples = 0 THEN avg_response_ms
+                ELSE (COALESCE(avg_response_ms, 0) * response_samples + excluded.avg_response_ms)
+                     / (response_samples + 1) END,
+            response_samples = response_samples + excluded.response_samples
+    """, (service_id, checked_at[:10], int(status == "down"), int(status == "maintenance"),
+          response_ms if has_ms else None, int(has_ms)))
+
+
 def record_status_history(service_id, status, response_ms):
     conn = get_db()
-    conn.execute("""
-        INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?, ?, ?, ?)
-    """, (service_id, status, response_ms, now_iso()))
-    conn.commit()
+    now = now_iso()
+    with conn:
+        conn.execute("""
+            INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?, ?, ?, ?)
+        """, (service_id, status, response_ms, now))
+        _add_to_daily(conn, service_id, status, response_ms, now)
     conn.close()
 
 
