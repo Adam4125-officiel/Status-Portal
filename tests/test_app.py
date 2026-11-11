@@ -5194,3 +5194,45 @@ def test_each_settings_form_writes_only_its_own_keys(client):
         assert client.post(f"/admin/settings/{route}", data={}).status_code == 302
         for key in set(seeded) - own:
             assert db.get_setting(key) == seeded[key], f"{route} form changed {key}"
+
+
+def test_security_page_has_the_password_timeout_and_sign_out_controls(client):
+    _login_admin(client)
+    resp = client.get("/admin/security")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "<h1>Security</h1>" in body
+    for needle in ("current_password", "admin_session_timeout_hours",
+                   "Sign out all other sessions", "/admin/2fa"):
+        assert needle in body
+    # They left Settings.
+    settings = client.get("/admin/settings").get_data(as_text=True)
+    assert "current_password" not in settings and "admin_session_timeout_hours" not in settings
+
+
+def test_the_security_page_changes_the_password(client):
+    _login_admin(client)
+    resp = client.post("/admin/security", data={"current_password": "testpass123",
+                                                 "new_password": "changed456",
+                                                 "confirm_password": "changed456"})
+    assert resp.status_code == 302
+    assert check_password_hash(db.get_setting("admin_password_hash"), "changed456")
+
+
+def test_sign_out_all_other_sessions_keeps_only_this_one(client):
+    _login_admin(client)
+    thief = _copy_of_session_cookie(client)
+    assert thief.get("/admin/services").status_code == 200
+    assert client.post("/admin/security/sign-out-others").status_code == 302
+    assert thief.get("/admin/services").status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
+def test_sign_out_all_other_sessions_needs_a_2fa_code_when_enabled(client):
+    _login_admin(client)
+    secret = _enable_totp_directly()
+    thief = _copy_of_session_cookie(client)
+    client.post("/admin/security/sign-out-others", data={"totp_code": "000000"})
+    assert thief.get("/admin/services").status_code == 200
+    client.post("/admin/security/sign-out-others", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert thief.get("/admin/services").status_code == 302

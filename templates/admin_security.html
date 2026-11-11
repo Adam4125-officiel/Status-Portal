@@ -1,0 +1,77 @@
+{% extends "admin_base.html" %}
+{% block title %}Security — Admin{% endblock %}
+{% block admin_content %}
+<div class="admin-header">
+  <h1>Security</h1>
+</div>
+
+<nav class="settings-section-nav" aria-label="Security sections">
+  <a href="#two-factor">Two-factor</a>
+  <a href="#session">Sessions</a>
+  <a href="#password">Password</a>
+</nav>
+
+<h2 id="two-factor" class="settings-section-title">Two-factor authentication</h2>
+<div class="form-panel" style="margin-bottom: 20px;">
+  {% if totp_enabled %}
+    <div class="service-card__status ok"><span class="led ok"></span>Enabled</div>
+  {% else %}
+    <div class="service-card__status crit"><span class="led crit"></span>Disabled</div>
+  {% endif %}
+  <p style="font-size: 13px; color: var(--text-dim); margin: 10px 0 0;">
+    <a href="{{ url_for('admin_2fa') }}">{{ 'Manage two-factor authentication' if totp_enabled else 'Set up two-factor authentication' }}</a>
+  </p>
+</div>
+
+<h2 id="session" class="settings-section-title">Sessions</h2>
+<form method="POST" action="{{ url_for('admin_settings_security') }}" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label for="admin_session_timeout_hours">Admin session timeout (hours of inactivity)</label>
+    <input type="number" id="admin_session_timeout_hours" name="admin_session_timeout_hours" min="0" max="{{ max_session_timeout_hours }}" value="{{ admin_session_timeout_hours }}" placeholder="0 = no idle timeout">
+    <div class="field-hint">Signs you out of /admin after this long without any activity — applied server-side, so it behaves identically on every device and browser. Any page you load resets the clock. Set to 0 for no idle timeout, in which case the sign-in still expires after {{ session_cookie_max_age_days }} days. Changing this takes effect immediately, without a restart.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save session timeout</button>
+  </div>
+</form>
+
+<form method="POST" action="{{ url_for('admin_security_sign_out_others') }}" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field-hint" style="margin-bottom: 10px;">Ends every admin sign-in except this browser's. Use it if you left yourself signed in somewhere or suspect a copied cookie.</div>
+  {% if totp_enabled %}
+  <div class="field">
+    <label for="signout_totp_code">2FA code</label>
+    <input type="text" id="signout_totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+           autocomplete="one-time-code" required>
+  </div>
+  {% endif %}
+  <div class="form-actions">
+    <button type="submit" class="btn secondary">Sign out all other sessions</button>
+  </div>
+</form>
+
+<h2 id="password" class="settings-section-title">Password</h2>
+<form method="POST" action="{{ url_for('admin_security') }}" class="form-panel">
+  <div class="field">
+    <label for="current_password">Current password</label>
+    <input type="password" id="current_password" name="current_password" required>
+  </div>
+  <div class="field">
+    <label for="new_password">New password</label>
+    <input type="password" id="new_password" name="new_password" required>
+  </div>
+  <div class="field">
+    <label for="confirm_password">Confirm new password</label>
+    <input type="password" id="confirm_password" name="confirm_password" required>
+  </div>
+  {% if totp_enabled %}
+  <div class="field">
+    <label for="totp_code">2FA code</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+           autocomplete="one-time-code" required>
+  </div>
+  {% endif %}
+  <div class="form-actions">
+    <button type="submit" class="btn">Change password</button>
+  </div>
+</form>
+{% endblock %}

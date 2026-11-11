@@ -27,7 +27,7 @@
     {# Under 720px the menu is a <details> showing only the current page and the badge
        total (admin_nav.js collapses it there). It is rendered open, and the summary is
        hidden above 720px, so without JavaScript the menu is simply always visible. #}
-    {% set nav_labels = {"services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "about": "About"} %}
+    {% set nav_labels = {"services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "security": "Security", "about": "About"} %}
     {% set nav_badge_total = (unread_reports_count or 0) + (arr_updates_count or 0) + (seerr_pending_count or 0) + (1 if update_available else 0) %}
     <details class="admin-nav__menu" id="admin_nav_menu" open>
     <summary class="admin-nav__summary">
@@ -67,6 +67,7 @@
     <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
     <a href="{{ url_for('admin_device') }}" class="{{ 'active' if active == 'device' }}">Display device</a>
     <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
+    <a href="{{ url_for('admin_security') }}" class="{{ 'active' if active == 'security' }}">Security</a>
     <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
     <a href="{{ url_for('admin_about') }}" class="{{ 'active' if active == 'about' }}">About{% if update_available %} <span class="nav-badge">1</span>{% endif %}</a>
 

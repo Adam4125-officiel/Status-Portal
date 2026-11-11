@@ -4346,43 +4346,52 @@ def admin_integration_delete(iid):
 
 
 # ---- Settings ----
+def _change_admin_password(redirect_endpoint):
+    """The password-change form, shared by /admin/security and the older POST to
+    /admin/settings (kept so existing bookmarks and scripts still work). Returns a
+    redirect when it must not proceed (2FA gate), otherwise None; either way the
+    outcome has been flashed."""
+    current = request.form.get("current_password", "")
+    new = request.form.get("new_password", "")
+    confirm = request.form.get("confirm_password", "")
+    stored = db.get_setting("admin_password_hash")
+    # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
+    # a stolen session cookie this form was an unthrottled password-guessing loop.
+    if _login_locked():
+        flash("Too many incorrect attempts - try again in a few minutes.", "error")
+    elif not check_password_hash(stored, current):
+        _register_login_failure()
+        flash("Current password is incorrect.", "error")
+    elif len(new) < 6:
+        flash("New password must be at least 6 characters.", "error")
+    elif new != confirm:
+        flash("Passwords do not match.", "error")
+    else:
+        # With 2FA on, changing the password also needs a current code: it is the
+        # action that signs the real admin out and leaves a cookie thief in.
+        blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
+                                redirect_endpoint)
+        if blocked:
+            return blocked
+        if not twofactor.is_enabled():
+            _register_login_success()
+        db.set_setting("admin_password_hash", generate_password_hash(new))
+        # The natural reaction to a suspected compromise, so it has to actually
+        # lock out a copied cookie - every other admin session ends here.
+        _rotate_admin_session_epoch()
+        flash("Password changed.", "success")
+    return None
+
+
 @app.route("/admin/settings", methods=["GET", "POST"])
 @login_required
 def admin_settings():
     if request.method == "POST":
-        current = request.form.get("current_password", "")
-        new = request.form.get("new_password", "")
-        confirm = request.form.get("confirm_password", "")
-        stored = db.get_setting("admin_password_hash")
-        # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
-        # a stolen session cookie this form was an unthrottled password-guessing loop.
-        if _login_locked():
-            flash("Too many incorrect attempts - try again in a few minutes.", "error")
-        elif not check_password_hash(stored, current):
-            _register_login_failure()
-            flash("Current password is incorrect.", "error")
-        elif len(new) < 6:
-            flash("New password must be at least 6 characters.", "error")
-        elif new != confirm:
-            flash("Passwords do not match.", "error")
-        else:
-            # With 2FA on, changing the password also needs a current code: it is the
-            # action that signs the real admin out and leaves a cookie thief in.
-            blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
-                                    "admin_settings")
-            if blocked:
-                return blocked
-            if not twofactor.is_enabled():
-                _register_login_success()
-            db.set_setting("admin_password_hash", generate_password_hash(new))
-            # The natural reaction to a suspected compromise, so it has to actually
-            # lock out a copied cookie - every other admin session ends here.
-            _rotate_admin_session_epoch()
-            flash("Password changed.", "success")
+        # The password form moved to /admin/security; this POST is kept for old callers.
+        return _change_admin_password("admin_security") or redirect(url_for("admin_security"))
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
-                            totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
                             show_public_version=_show_public_version(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
@@ -4401,10 +4410,6 @@ def admin_settings():
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
                             lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
-                            admin_session_timeout_hours=db.get_setting(
-                                "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
-                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
-                            session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
                             status_history_retention_days=db.get_setting(
                                 "status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS)),
                             vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
@@ -4487,7 +4492,39 @@ def admin_settings_security():
     db.set_setting("admin_session_timeout_hours", _setting_digits(
         request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
     flash("Security settings saved.", "success")
-    return redirect(url_for("admin_settings") + "#security")
+    return redirect(url_for("admin_security") + "#session")
+
+
+@app.route("/admin/security", methods=["GET", "POST"])
+@login_required
+def admin_security():
+    """Everything about who can get into /admin, on one page. The pieces already
+    existed but were scattered (password and session timeout in Settings, 2FA in its
+    own menu entry, the two API keys on Channels and Display device); the handlers
+    they post to are unchanged."""
+    if request.method == "POST":
+        return _change_admin_password("admin_security") or redirect(url_for("admin_security"))
+    return render_template("admin_security.html", totp_enabled=twofactor.is_enabled(),
+                            admin_session_timeout_hours=db.get_setting(
+                                "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
+                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
+                            session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
+                            active="security")
+
+
+@app.route("/admin/security/sign-out-others", methods=["POST"])
+@login_required
+def admin_security_sign_out_others():
+    """Ends every admin session except this one. The epoch rotation used to happen only
+    as a side effect of a password or 2FA change. Behind the 2FA code for the same
+    reason the password change is: a copied cookie must not be able to do it."""
+    blocked = _require_totp("Incorrect or missing 2FA code - nobody was signed out.",
+                            "admin_security")
+    if blocked:
+        return blocked
+    _rotate_admin_session_epoch()
+    flash("Every other admin session has been signed out.", "success")
+    return redirect(url_for("admin_security"))
 
 
 # ---- Notifications ----
