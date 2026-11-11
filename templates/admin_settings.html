@@ -140,6 +140,25 @@
   </div>
 </form>
 
+<form method="POST" action="{{ url_for('admin_settings_logo') }}" enctype="multipart/form-data" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label>{{ 'Logo' if site_logo_filename else 'Logo (none set — showing the default dot)' }}</label>
+    {% if site_logo_filename %}
+    <div style="margin-bottom: 10px;">
+      <img src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="Current logo" style="height: 36px; width: auto; max-width: 200px; object-fit: contain;">
+    </div>
+    {% endif %}
+    <input type="file" id="logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.ico">
+    <div class="field-hint">PNG, JPG, SVG, WEBP, or ICO — max 2 MB. Replaces the dot next to the site name in the topbar, and the browser-tab favicon.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Upload</button>
+    {% if site_logo_filename %}
+    <button type="submit" formaction="{{ url_for('admin_settings_logo_remove') }}" class="btn secondary">Remove logo</button>
+    {% endif %}
+  </div>
+</form>
+
 <h2 id="monitoring" class="settings-section-title">Monitoring</h2>
 <form method="POST" action="{{ url_for('admin_settings_monitoring') }}" class="form-panel" style="margin-bottom: 20px;">
   <div class="field">
@@ -226,25 +245,6 @@
   </div>
   <div class="form-actions">
     <button type="submit" class="btn">Save monitoring settings</button>
-  </div>
-</form>
-
-<form method="POST" action="{{ url_for('admin_settings_logo') }}" enctype="multipart/form-data" class="form-panel" style="margin-bottom: 20px;">
-  <div class="field">
-    <label>{{ 'Logo' if site_logo_filename else 'Logo (none set — showing the default dot)' }}</label>
-    {% if site_logo_filename %}
-    <div style="margin-bottom: 10px;">
-      <img src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="Current logo" style="height: 36px; width: auto; max-width: 200px; object-fit: contain;">
-    </div>
-    {% endif %}
-    <input type="file" id="logo" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp,.ico">
-    <div class="field-hint">PNG, JPG, SVG, WEBP, or ICO — max 2 MB. Replaces the dot next to the site name in the topbar, and the browser-tab favicon.</div>
-  </div>
-  <div class="form-actions">
-    <button type="submit" class="btn">Upload</button>
-    {% if site_logo_filename %}
-    <button type="submit" formaction="{{ url_for('admin_settings_logo_remove') }}" class="btn secondary">Remove logo</button>
-    {% endif %}
   </div>
 </form>
 
