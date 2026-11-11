@@ -2083,8 +2083,9 @@ def report_problem():
         if request.form.get("website"):
             flash("Thanks — your report has been submitted.", "success")
             return redirect(url_for("report_problem"))
-        rendered_at = session.get("report_form_rendered_at", 0)
-        if time.time() - rendered_at < REPORT_MIN_SECONDS_TO_FILL:
+        # Absent means the form was never opened (a script posting directly): refuse.
+        rendered_at = session.get("report_form_rendered_at")
+        if rendered_at is None or time.time() - rendered_at < REPORT_MIN_SECONDS_TO_FILL:
             flash("That was fast — please wait a moment and try again.", "error")
             return redirect(url_for("report_problem"))
         if _report_rate_limited():
@@ -2104,6 +2105,7 @@ def report_problem():
                                   reporter_user=(user or {}).get("name", "")[:100],
                                   reporter_user_id=(user or {}).get("id", ""))
         _register_report_submission()
+        session.pop("report_form_rendered_at", None)  # one GET authorises one POST
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
         # Anonymous visitor text going into the admin's Discord channel: no pings.

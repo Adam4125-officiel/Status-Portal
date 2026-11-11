@@ -4915,3 +4915,20 @@ def test_reset_password_flag_erases_hash_and_is_self_cleaning(client, monkeypatc
     assert not flag.exists()
     assert twofactor.is_enabled() is True and db.get_setting("admin_totp_secret") == secret
     assert thief.get("/admin/services").status_code == 302  # sessions rotated out
+
+
+def test_report_problem_post_without_opening_form_is_refused(client):
+    resp = client.post("/report", data={"message": "direct post, no cookie"})
+    assert resp.status_code == 302
+    assert db.list_problem_reports() == []
+
+
+def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
+    monkeypatch.setattr(app_module.notifications, "notify", lambda *a, **kw: None)
+    app_module._report_state["window_start"] = 0.0
+    app_module._report_state["count"] = 0
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    client.post("/report", data={"message": "first"})
+    client.post("/report", data={"message": "second"})
+    assert [r["message"] for r in db.list_problem_reports()] == ["first"]
