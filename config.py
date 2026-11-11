@@ -217,6 +217,12 @@ SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"
 SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "40"))
 SEARCH_RATE_WINDOW_SECONDS = int(os.environ.get("PORTAL_SEARCH_RATE_WINDOW_SECONDS", "60"))
 
+# Outbound heartbeat: when set, a GET is sent to this URL at the end of every
+# health-check cycle (healthchecks.io, a hosted Uptime Kuma push monitor...), so
+# something outside this machine notices when the portal or its host goes quiet.
+# Blank = off. Env-only: such URLs usually carry a secret token in the path.
+HEARTBEAT_URL = os.environ.get("PORTAL_HEARTBEAT_URL", "").strip()
+
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
 # Blank = disabled entirely, no bot thread started. A bot token is a full login
 # credential (not just a one-way webhook URL), so like the webhook URLs it's env-only,

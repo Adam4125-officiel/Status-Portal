@@ -5147,6 +5147,8 @@ def admin_discord_bot_guilds():
 def admin_tasks():
     return render_template("admin_tasks.html", tasks=scheduler.list_task_views(),
                             loops=scheduler.list_loop_views(),
+                            last_health_cycle_at=db.get_setting(LAST_HEALTH_CYCLE_SETTING),
+                            heartbeat_enabled=bool(config.HEARTBEAT_URL),
                             tick_seconds=config.SCHEDULER_TICK_SECONDS, active="tasks")
 
 
@@ -5480,6 +5482,28 @@ def _check_and_record_service(s, status_by_id):
         _logger.exception("health check failed for service '%s'", s.get("name", "?"))
 
 
+HEARTBEAT_TIMEOUT_SECONDS = 5
+LAST_HEALTH_CYCLE_SETTING = "last_health_cycle_at"
+
+
+def _finish_health_cycle():
+    """End-of-cycle bookkeeping: record when the cycle finished (shown on
+    /admin/tasks) and ping PORTAL_HEARTBEAT_URL if one is set. Never raises - a dead
+    heartbeat endpoint or a locked database must not stop the next cycle."""
+    try:
+        db.set_setting(LAST_HEALTH_CYCLE_SETTING, datetime.now(timezone.utc).isoformat())
+    except Exception:
+        _logger.exception("could not record the end of the health-check cycle")
+    url = config.HEARTBEAT_URL
+    if not url:
+        return
+    try:
+        requests.get(url, timeout=HEARTBEAT_TIMEOUT_SECONDS).raise_for_status()
+    except Exception as e:
+        # Not the URL itself: heartbeat URLs usually carry a secret token.
+        _logger.warning("heartbeat ping failed: %s", type(e).__name__)
+
+
 def run_health_checks():
     while True:
         try:
@@ -5518,6 +5542,7 @@ def run_health_checks():
             # the things that genuinely have to happen on the health-check cycle:
             # maintenance windows first, then every service's status, then the
             # integration cache that _merge_api_health() reads from.
+            _finish_health_cycle()
         except Exception:
             _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)

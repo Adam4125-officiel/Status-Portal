@@ -5052,3 +5052,51 @@ def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
     client.post("/report", data={"message": "first"})
     client.post("/report", data={"message": "second"})
     assert [r["message"] for r in db.list_problem_reports()] == ["first"]
+
+
+# ---------------------------------------------------------------------------
+# End of a health-check cycle: heartbeat ping and last-cycle timestamp
+# ---------------------------------------------------------------------------
+
+def test_finish_health_cycle_records_time_and_pings_heartbeat(monkeypatch):
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/abc")
+    monkeypatch.setattr(app_module.requests, "get",
+                        lambda url, timeout: calls.append((url, timeout)) or _Resp())
+    app_module._finish_health_cycle()
+    assert calls == [("https://ping.example/abc", 5)]
+    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+
+
+def test_finish_health_cycle_without_url_makes_no_request(monkeypatch):
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "")
+
+    def boom(*a, **k):
+        raise AssertionError("no request expected")
+
+    monkeypatch.setattr(app_module.requests, "get", boom)
+    app_module._finish_health_cycle()
+    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+
+
+def test_finish_health_cycle_never_raises_and_does_not_log_the_url(monkeypatch, caplog):
+    def boom(url, timeout):
+        raise app_module.requests.ConnectionError("https://ping.example/SECRET refused")
+
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/SECRET")
+    monkeypatch.setattr(app_module.requests, "get", boom)
+    app_module._finish_health_cycle()
+    assert "heartbeat ping failed" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+def test_admin_tasks_shows_last_health_cycle(client, demo_task):
+    _login(client)
+    assert "not yet" in client.get("/admin/tasks").data.decode()
+    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2026-11-11T10:20:30+00:00")
+    assert "2026-11-11 10:20" in client.get("/admin/tasks").data.decode()
