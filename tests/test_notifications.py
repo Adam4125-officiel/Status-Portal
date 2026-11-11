@@ -459,3 +459,8 @@ def test_verify_tls_false_disables_verification_explicitly(monkeypatch):
     assert ctx.verify_mode == notifications.ssl.CERT_NONE
     assert ctx.check_hostname is False
 
+
+def test_build_email_flattens_line_breaks_in_subject():
+    msg = notifications.build_email("line one\r\nBcc: x@evil.example\nline two", "m", ["a@example.com"])
+    assert "\n" not in msg["Subject"] and "\r" not in msg["Subject"]
+    assert msg["Subject"] == "line one Bcc: x@evil.example line two"

@@ -143,6 +143,9 @@ def build_email(subject, message, recipients):
     Plain text is set first because in multipart/alternative the *last* part is the
     preferred one, so this offers HTML to clients that want it and text to those that
     don't, which is the right way round."""
+    # A header can't contain a line break (EmailMessage raises ValueError), and callers
+    # such as /api/notify/* pass free text; flatten it rather than let notify() raise.
+    subject = " ".join(str(subject).splitlines())
     email = EmailMessage()
     email["Subject"] = subject
     email["From"] = config.SMTP_FROM
