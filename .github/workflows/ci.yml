@@ -39,3 +39,33 @@ jobs:
         run: |
           pip install pip-audit
           pip-audit -r requirements-dev.txt -r requirements-discord.txt
+
+  docker:
+    name: Docker image starts and serves /
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t status-portal:ci .
+
+      - name: Start container
+        run: docker run -d --name portal -p 127.0.0.1:5000:5000 status-portal:ci
+
+      - name: Wait for / to answer 200
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5000/ || true)
+            if [ "$code" = "200" ]; then echo "/ answered 200 after $i tries"; exit 0; fi
+            sleep 2
+          done
+          echo "last status: $code"
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs portal
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f portal
