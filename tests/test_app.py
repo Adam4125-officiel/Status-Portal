@@ -3592,6 +3592,42 @@ def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_d
         assert b'href="/search"' in client.get(path).data, path
 
 
+def test_every_public_page_shares_one_shell(client, isolated_db):
+    """The tab bar and footer come from public_base.html on every public page - the
+    login page, the report form, the 404 - not only on the status page and sub-pages."""
+    db.set_setting("show_public_cpu", "1")
+    for path in ("/", "/resources", "/report", "/login", "/no-such-page"):
+        body = client.get(path).data
+        assert b'class="page-nav"' in body, path
+        assert b'href="/resources"' in body, path  # nav_links from the context processor
+        assert b'class="foot"' in body, path
+        assert b'class="brand__link"' in body, path
+
+
+def test_the_search_tab_is_active_on_search_pages(client, isolated_db):
+    db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
+                            "api_key": "k", "enabled": 1})
+    db.set_setting("jellyfin_auth_enabled", "1")
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    with client.session_transaction() as sess:
+        sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
+                               "authenticated_at": 0}
+    body = client.get("/search").data.decode()
+    assert '<a href="/search" class="active">Search</a>' in body
+
+
+def test_pages_with_forms_do_not_auto_reload_but_status_does(client, isolated_db):
+    """A reload would wipe a half-written report, so form and error pages opt out
+    (refresh interval 0, no countdown); the status page keeps its refresh."""
+    for path in ("/report", "/login", "/no-such-page"):
+        body = client.get(path).data.decode()
+        assert "window.PORTAL_REFRESH_SECONDS = 0;" in body, path
+        assert "refresh-countdown" not in body, path
+    body = client.get("/").data.decode()
+    assert "window.PORTAL_REFRESH_SECONDS = 0;" not in body
+    assert 'id="refresh-countdown"' in body
+
+
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):
     db.set_setting("show_public_cpu", "1")
     body = client.get("/resources").data

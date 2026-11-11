@@ -1,6 +1,7 @@
 {# Shared shell for every public page: the brand bar, the page nav, and the footer.
-   index.html and the sub-pages under public/ all extend this, so a change to the
-   chrome happens once rather than six times. #}
+   index.html, the sub-pages under public/, search, report, account, sign-in and the
+   error pages all extend this. A page with a form or a result the visitor is working
+   in sets `{% set auto_refresh = false %}` at its top level to opt out of the reload. #}
 {% extends "base.html" %}
 {% block body %}
 <div class="wrap">
@@ -16,9 +17,11 @@
     </div>
     <div class="topbar__right">
       <a class="btn secondary topbar__report" href="{{ url_for('report_problem') }}" title="{{ 'Sign in with your Jellyfin account to report a problem' if report_needs_login and not portal_user else 'Tell the admin about a problem' }}">Report a problem</a>
+      {% if auto_refresh is not defined or auto_refresh %}
       <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">
         next refresh in <span id="refresh-countdown">{{ refresh_seconds }}s</span>
       </div>
+      {% endif %}
     </div>
   </div>
 
@@ -45,7 +48,7 @@
 
   <footer class="foot">{% if show_public_version %}status-portal v{{ portal_version_display }} · {% endif %}<a href="{{ url_for('feed') }}">RSS feed</a> · <a href="{{ url_for('report_problem') }}">Report a problem</a>{% if show_public_version %} · <a href="{{ repo_url }}" target="_blank" rel="noopener">Like this page? ⭐ Check it out on GitHub</a>{% endif %}</footer>
 </div>
-<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds }};</script>
+<script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds if auto_refresh is not defined or auto_refresh else 0 }};</script>
 <script src="{{ asset_url('js/main.js') }}"></script>
 <script src="{{ asset_url('js/local_time.js') }}"></script>
 <script src="{{ asset_url('js/page_loading.js') }}"></script>

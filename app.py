@@ -362,6 +362,28 @@ def _inject_portal_user():
 
 
 @app.context_processor
+def _inject_public_chrome():
+    """What public_base.html renders around every public page - the nav tabs, the
+    Search tab, the refresh interval, the footer's repo link - so no route has to
+    thread it through by hand (the bug class CLAUDE.md used to warn about: a page that
+    forgot one of them simply lacked the tab). Values a route passes explicitly win.
+    Skipped on admin and kiosk pages, which never render it; the nav itself is only
+    settings-level predicates, no I/O."""
+    chrome = {"site_name": db.get_setting("site_name", "Server"),
+              "refresh_seconds": config.PUBLIC_REFRESH_SECONDS,
+              "repo_url": updater.REPO_URL, "active_page": None}
+    if request.path == "/admin" or request.path.startswith(("/admin/", "/kiosk")):
+        return chrome
+    try:
+        chrome["nav_links"] = _public_page_links()
+        chrome["search_enabled"] = bool(current_user()) and media_search.is_available()
+    except Exception:
+        # An error page must still render when the nav can't be built.
+        _logger.exception("Could not build the public nav")
+    return chrome
+
+
+@app.context_processor
 def _inject_admin_badges():
     """Unread problem-report count for the admin nav's "Reports" badge - scoped to
     admin pages only (not computed on every public page load) since it's only ever
@@ -1431,13 +1453,7 @@ def _render_public_page(key):
         abort(404)
     return render_template(f"public/{key}.html", page_label=label, active_page=key,
                             site_name=db.get_setting("site_name", "Server"),
-                            nav_links=_public_page_links(),
-                            # The nav is shared, so everything it renders has to be
-                            # passed everywhere it appears - without this the Search tab
-                            # existed only on the page that happened to compute it.
-                            search_enabled=bool(current_user()) and media_search.is_available(),
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            repo_url=updater.REPO_URL, **context)
+                            **context)
 
 
 @app.route("/resources")
@@ -1667,23 +1683,18 @@ def index():
         s for s in services
         if s["status"] != "operational" and not s.get("ignore_in_overall_status")]
     site_name = db.get_setting("site_name", "Server")
-    # Signed-in visitors only, and only when there's something to search. Both halves
-    # matter: without sign-in the box would expose the whole library to anyone who can
-    # load the page, and without an integration it would be a box that does nothing.
-    search_enabled = bool(current_user()) and media_search.is_available()
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, overall=overall,
                             affected_services=affected_services,
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=site_name,
                             high_load=_high_load(),
-                            # Both the nav and the one-line summaries come from the same
-                            # builders the pages themselves use.
-                            nav_links=_public_page_links(),
+                            # The one-line summaries come from the same builders the
+                            # pages themselves use (the nav comes from the context
+                            # processor).
                             page_summaries=_public_page_links(include_summaries=True),
-                            search_enabled=search_enabled, active_page="status",
-                            section_order=_public_section_order(), repo_url=updater.REPO_URL)
+                            active_page="status",
+                            section_order=_public_section_order())
 
 
 @app.route("/api/status")
@@ -2503,10 +2514,7 @@ def user_contact_prompt():
         return redirect(url_for("user_account"))
     return render_template("contact_prompt.html",
                             site_name=db.get_setting("site_name", "Server"),
-                            user=user, nav_links=_public_page_links(),
-                            search_enabled=bool(current_user()) and media_search.is_available(),
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            repo_url=updater.REPO_URL, active_page=None)
+                            user=user)
 
 
 @app.route("/account/seerr/import", methods=["POST"])

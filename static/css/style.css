@@ -2014,3 +2014,9 @@ body.kiosk {
   white-space: nowrap;
   border: 0;
 }
+
+/* "← Back to ..." line at the top of a public sub-page that has no topbar of its own. */
+.back-link { margin: 0 0 14px; font-family: var(--font-mono); font-size: 11px; }
+.back-link a { color: var(--text-faint); }
+/* Inside the public shell the card sits under the nav, not centred on the viewport. */
+.wrap .login-shell { min-height: 0; padding: 24px 0; }

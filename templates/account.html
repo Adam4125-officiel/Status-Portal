@@ -1,22 +1,12 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
+{# A form or a result the visitor is working in: never reload it under them. #}
+{% set auto_refresh = false %}
 {% block title %}{{ 'Viewing ' ~ target_user.name if admin_viewing else 'Your account' }} — {{ site_name }}{% endblock %}
-{% block body %}
-<div class="wrap" style="max-width: 760px;">
-  <div class="topbar">
-    <div class="brand">
-      {% if site_logo_filename %}
-        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
-      {% else %}
-        <span class="dot-server"></span>
-      {% endif %}
-      {{ site_name }}
-    </div>
-    {% if admin_viewing %}
-      <a href="{{ url_for('admin_users') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to User accounts</a>
-    {% else %}
-      <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
-    {% endif %}
-  </div>
+{% block content %}
+<div style="max-width: 760px;">
+  {% if admin_viewing %}
+    <p class="back-link"><a href="{{ url_for('admin_users') }}">← Back to User accounts</a></p>
+  {% endif %}
 
   {% if admin_viewing %}
     <div class="admin-header">
@@ -37,12 +27,6 @@
       anything in Jellyfin.
     </p>
   {% endif %}
-
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, msg in messages %}
-      <div class="flash {{ category }}">{{ msg }}</div>
-    {% endfor %}
-  {% endwith %}
 
   {% if not admin_viewing %}
   <h2 class="section-title">Your reports</h2>
@@ -355,7 +339,8 @@
   </div>
   {% endif %}
 </div>
-<script src="{{ asset_url('js/local_time.js') }}"></script>
+{% endblock %}
+{% block page_scripts %}
 <script src="{{ asset_url('js/confirm.js') }}"></script>
 <script src="{{ asset_url('js/account.js') }}"></script>
 {% endblock %}

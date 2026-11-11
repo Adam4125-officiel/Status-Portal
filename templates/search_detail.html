@@ -1,20 +1,10 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
+{# A form or a result the visitor is working in: never reload it under them. #}
+{% set auto_refresh = false %}
+{% set active_page = 'search' %}
 {% block title %}{{ item.title }} — {{ site_name }}{% endblock %}
-{% block body %}
-<div class="wrap">
-  <div class="topbar">
-    <div>
-      <div class="topbar__brand">{{ site_name }}</div>
-      <div class="topbar__sub">{{ 'Series' if item.media_type == 'tv' else 'Film' }} detail</div>
-    </div>
-    <a class="btn secondary" href="{{ url_for('search', q=query) }}">← Back to search</a>
-  </div>
-
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, msg in messages %}
-      <div class="flash {{ category }}">{{ msg }}</div>
-    {% endfor %}
-  {% endwith %}
+{% block content %}
+  <p class="back-link"><a href="{{ url_for('search', q=query) }}">← Back to search</a></p>
 
   <div class="search-result search-result--detail">
     {% if item.poster_path %}
@@ -44,5 +34,4 @@
       </div>
     </div>
   </div>
-</div>
 {% endblock %}
