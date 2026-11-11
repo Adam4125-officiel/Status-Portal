@@ -1998,3 +1998,6 @@ body.kiosk {
 .back-link a { color: var(--text-faint); }
 /* Inside the public shell the card sits under the nav, not centred on the viewport. */
 .wrap .login-shell { min-height: 0; padding: 24px 0; }
+
+/* What "Load more" appended, wrapped so a page refresh can restore it: no box of its own. */
+.load-more-batch { display: contents; }

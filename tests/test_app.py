@@ -1,5 +1,6 @@
 import io
 import os
+from datetime import datetime, timedelta, timezone
 import re
 import sqlite3
 import tempfile
@@ -3673,10 +3674,58 @@ def test_pages_with_forms_do_not_auto_reload_but_status_does(client, isolated_db
     for path in ("/report", "/login", "/no-such-page"):
         body = client.get(path).data.decode()
         assert "window.PORTAL_REFRESH_SECONDS = 0;" in body, path
-        assert "refresh-countdown" not in body, path
+        assert "refresh-status" not in body, path
     body = client.get("/").data.decode()
     assert "window.PORTAL_REFRESH_SECONDS = 0;" not in body
-    assert 'id="refresh-countdown"' in body
+    assert 'id="refresh-status"' in body
+    assert "refresh-countdown" not in body
+
+
+def test_public_pages_refresh_in_place_instead_of_reloading(client, isolated_db):
+    """The public shell loads the script that swaps a fragment in, not the one that
+    calls window.location.reload()."""
+    body = client.get("/").data.decode()
+    assert "js/public_refresh.js" in body
+    assert "js/main.js" not in body
+    assert 'id="live-region" data-fragment-url="/?fragment=1"' in body
+    source = open(os.path.join(os.path.dirname(app_module.__file__), "static/js/public_refresh.js")).read()
+    assert "location.reload" not in source
+
+
+def test_the_fragment_is_only_the_live_region(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    full = client.get("/server").data.decode()
+    fragment = client.get("/server?fragment=1").data.decode()
+    assert "<html" in full and 'class="page-nav"' in full
+    assert "<html" not in fragment and 'class="page-nav"' not in fragment
+    assert 'class="foot"' not in fragment
+    assert "server-section" in fragment
+
+
+def test_the_fragment_answers_304_when_nothing_changed(client, isolated_db):
+    first = client.get("/?fragment=1")
+    etag = first.headers["ETag"]
+    assert first.headers["Cache-Control"] == "no-cache"
+    again = client.get("/?fragment=1", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.data == b""
+
+
+def test_the_fragment_etag_does_not_depend_on_gzip(client, isolated_db):
+    """gzip's header carries a timestamp: a tag taken over the compressed bytes would
+    change every second and no poll would ever get a 304."""
+    plain = client.get("/?fragment=1").headers["ETag"]
+    gzipped = client.get("/?fragment=1", headers={"Accept-Encoding": "gzip"})
+    assert gzipped.headers["ETag"] == plain
+
+
+def test_the_fragment_etag_changes_with_the_content(client, isolated_db):
+    before = client.get("/?fragment=1").headers["ETag"]
+    db.set_setting("site_name", "Other")  # outside the live region: the tag must not move
+    assert client.get("/?fragment=1").headers["ETag"] == before
+    db.create_announcement({"title": "Heads up", "message": "Hi", "type": "info"})
+    assert client.get("/?fragment=1").headers["ETag"] != before
+
 
 
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):

@@ -185,6 +185,24 @@ def _compress_response(response):
     return response
 
 
+@app.after_request
+def _etag_public_fragment(response):
+    """The polled live region of a public page (`?fragment=1`): an ETag over the rendered
+    body so an unchanged page costs a 304 with no body. no-cache = "always revalidate",
+    so the browser never serves a copy without asking. Registered after
+    _compress_response on purpose: Flask runs these in reverse order, so the tag is
+    computed over the plain HTML - gzip's header carries a timestamp, which would make
+    the tag change every second."""
+    if (request.method == "GET" and request.args.get("fragment") == "1"
+            and response.status_code == 200 and response.mimetype == "text/html"
+            and not response.direct_passthrough
+            and not request.path.startswith(("/admin", "/account"))):
+        response.add_etag()
+        response.headers["Cache-Control"] = "no-cache"
+        response.make_conditional(request)
+    return response
+
+
 @app.errorhandler(404)
 def handle_not_found(e):
     return render_template("error.html", code=404, message="Page not found."), 404
@@ -361,6 +379,12 @@ def _inject_portal_user():
             "unseen_replies": db.count_unseen_replies(user["id"]) if user else 0}
 
 
+def _is_public_fragment():
+    """True for `GET <public page>?fragment=1`: the page renders only its live region,
+    which static/js/public_refresh.js swaps in place instead of reloading the page."""
+    return request.method == "GET" and request.args.get("fragment") == "1"
+
+
 @app.context_processor
 def _inject_public_chrome():
     """What public_base.html renders around every public page - the nav tabs, the
@@ -371,7 +395,8 @@ def _inject_public_chrome():
     settings-level predicates, no I/O."""
     chrome = {"site_name": db.get_setting("site_name", "Server"),
               "refresh_seconds": config.PUBLIC_REFRESH_SECONDS,
-              "repo_url": updater.REPO_URL, "active_page": None}
+              "repo_url": updater.REPO_URL, "active_page": None,
+              "public_fragment": _is_public_fragment()}
     if request.path == "/admin" or request.path.startswith(("/admin/", "/kiosk")):
         return chrome
     try:
