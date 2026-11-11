@@ -30,7 +30,7 @@
   (GPU stats) and `discord.py` (bot) both follow this: lazy-imported only inside the
   function that needs them, wrapped so a missing package degrades to "feature
   disabled, log why" rather than crashing the whole app on import. Neither is in
-  `requirements.txt` — `discord.py` is pinned separately in `requirements-discord.txt`
+  `requirements.in` — `discord.py` is pinned separately in `requirements-discord.in`/`.txt`
   (added 2026-08-29, so the version is still reproducible for anyone who *does* want
   the bot without making it part of the base install); `nvidia-ml-py` has no such file
   yet since nothing else has needed a reproducible pin for it. If you add another

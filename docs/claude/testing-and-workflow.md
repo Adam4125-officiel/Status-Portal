@@ -178,6 +178,33 @@ And when the ask is "why does X break", the single most useful thing to ask for 
 `instance/logs/app.log` around the failure, not more description — nearly every path
 in this app logs a real error now.
 
+## Dependency lock files
+
+- `requirements.in`, `requirements-dev.in` and `requirements-discord.in` hold the
+  direct dependencies. The `.txt` files are generated from them and carry hashes; do
+  not edit a `.txt` by hand. `requirements.txt` keeps its name (the updater, the
+  Dockerfile and the README use it).
+- Once one requirement has a hash, pip demands hashes for everything. That is why dev
+  and Discord have their own locked files rather than `-r requirements.txt` plus a loose
+  `pytest`. The dev file includes the runtime dependencies (`-r requirements.in`,
+  constrained by `-c requirements.txt`); the Discord file is an add-on to the runtime.
+- Regenerate on **Python 3.12** (CI and the Dockerfile use it; a lock made on 3.14
+  silently drops packages that only 3.12 needs, such as `typing-extensions`):
+
+  ```
+  pip install pip-tools
+  pip-compile --generate-hashes --strip-extras requirements.in
+  pip-compile --generate-hashes --strip-extras requirements-dev.in
+  pip-compile --generate-hashes --strip-extras requirements-discord.in
+  ```
+
+  Add `--upgrade` to move versions. Regenerate before every release and commit the
+  `.txt` files together with the `.in` change that caused them.
+- Verify in a throwaway venv: `pip install -r requirements-dev.txt -r
+  requirements-discord.txt`, then `python -c "import updater;
+  updater._install_dependencies(print)"` (the updater runs a plain `pip install -r
+  requirements.txt`, which enforces the hashes by itself).
+
 ## Release process
 
 **Never commit straight to `main`, for anything — always a branch + PR.** Explicitly

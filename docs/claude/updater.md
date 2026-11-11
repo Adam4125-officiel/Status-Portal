@@ -73,6 +73,9 @@
   `manifest.json` `updater.py` already wrote. Every `update.py` import is lazy for the
   same reason: the recovery tool must still work on a tree the update broke
   (`docs/HISTORY.md` → "`update.py rollback --emergency`").
+- **`requirements.txt` is a hash-locked file generated from `requirements.in`** (see
+  "Dependency lock files" in `testing-and-workflow.md`); the updater's plain
+  `pip install -r` verifies the hashes, so never hand-edit it.
 - **`pip install` runs only when `requirements.txt` actually changed, and a failure
   rolls the update back** — restarting into code whose dependencies aren't installed
   just fails to start, and this is the last moment where something is still running
