@@ -96,14 +96,13 @@ def set_security_headers(response):
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
-        # image.tmdb.org is the one exception, for search-result posters - same class
-        # of scoped, named-host exception as the two fonts.google* hosts above, not a
-        # general relaxation. Jellyfin-only results (no TMDB poster_path) stay
-        # text-only rather than proxying Jellyfin's own image endpoint through a
-        # request handler, which the no-live-outbound-I/O rule elsewhere exists to
-        # avoid.
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
+        # image.tmdb.org is the one exception, for search-result posters - a scoped,
+        # named-host exception, not a general relaxation. Jellyfin-only results (no
+        # TMDB poster_path) stay text-only rather than proxying Jellyfin's own image
+        # endpoint through a request handler, which the no-live-outbound-I/O rule
+        # elsewhere exists to avoid.
         "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "

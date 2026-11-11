@@ -3861,6 +3861,21 @@ def test_system_page_lists_caches_and_integration_reachability(client):
     assert "Jellyfin" in body and "not reachable" in body
 
 
+def test_fonts_are_self_hosted_and_csp_allows_no_font_host(client):
+    resp = client.get("/login")
+    html = resp.data.decode()
+    csp = resp.headers["Content-Security-Policy"]
+    assert "googleapis" not in html and "gstatic" not in html
+    assert "googleapis" not in csp and "gstatic" not in csp
+    assert "font-src 'self'" in csp
+    css = open(os.path.join(app_module.app.root_path, "static", "css", "style.css")).read()
+    files = re.findall(r'url\("\.\./fonts/([^"]+\.woff2)"\)', css)
+    assert len(files) == 8
+    for name in files:
+        assert os.path.isfile(os.path.join(app_module.app.root_path, "static", "fonts", name))
+        assert client.get(f"/static/fonts/{name}").status_code == 200
+
+
 def test_clear_browser_cache_sends_clear_site_data_without_touching_cookies(client):
     """The 'cookies' directive would sign the admin out as a side effect of a cache
     action - the one directive this must never send."""
