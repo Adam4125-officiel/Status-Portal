@@ -97,7 +97,9 @@ def fetch_bazarr_status(base_url, api_key):
         status.raise_for_status()
         version = (status.json().get("data") or {}).get("bazarr_version")
     except requests.RequestException as e:
-        return {"reachable": False, "version": None, "issues": [], "error": str(e)}
+        # str(e) embeds the full URL, query string (the API key) included.
+        return {"reachable": False, "version": None, "issues": [],
+                "error": describe_request_error(e)}
     except ValueError:
         return {"reachable": False, "version": None, "issues": [], "error": "Unexpected (non-JSON) response"}
 
