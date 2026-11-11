@@ -1526,3 +1526,23 @@ def test_daily_aggregates_are_kept_for_a_year(isolated_db):
     assert db.prune_status_daily() == 1
     assert [r[1] for r in _daily_rows(sid)] == [kept]
     assert db.prune_status_daily(0) == 0
+
+
+def test_a_new_install_starts_on_the_default_history_retention(isolated_db):
+    assert db.get_setting(db.HISTORY_RETENTION_SETTING) is None
+
+
+def test_an_upgraded_install_keeps_its_history_retention(isolated_db):
+    """An install that never saved the setting had 90 days; upgrading must not shorten
+    that behind the admin's back. One that saved a value keeps it."""
+    _rerun_backfill()  # first start of the new version on an existing database
+    assert db.get_setting(db.HISTORY_RETENTION_SETTING) == str(db.LEGACY_HISTORY_RETENTION_DAYS)
+
+    db.set_setting(db.HISTORY_RETENTION_SETTING, "45")
+    _rerun_backfill()
+    assert db.get_setting(db.HISTORY_RETENTION_SETTING) == "45"
+
+
+def test_a_new_install_is_not_pinned_on_its_second_start(isolated_db):
+    db.init_db()
+    assert db.get_setting(db.HISTORY_RETENTION_SETTING) is None

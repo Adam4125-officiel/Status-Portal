@@ -5616,10 +5616,12 @@ def _merge_dependency_health(status, dependency_statuses):
     return status
 
 
-# How long individual health-check results are kept (settings-page tunable).
-# 30 days is all get_uptime_percentages() ever reads; the extra headroom is there so
-# an admin can go look at more history than the uptime figure covers if they want to.
-DEFAULT_HISTORY_RETENTION_DAYS = 90
+# How long individual health-check results are kept (settings-page tunable). The
+# uptime figures come from the daily aggregates (status_daily, kept a year), so the
+# per-check rows are only detail. This default is what a new install gets; an install
+# that existed before the aggregates had db.LEGACY_HISTORY_RETENTION_DAYS written into
+# its settings once, by init_db(), unless it had saved a value of its own.
+DEFAULT_HISTORY_RETENTION_DAYS = 14
 
 def _history_retention_days():
     days = db.parse_int(db.get_setting("status_history_retention_days", ""))

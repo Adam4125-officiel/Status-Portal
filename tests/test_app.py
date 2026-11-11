@@ -5658,3 +5658,8 @@ def test_forms_and_per_visitor_paths_are_never_cached(client, isolated_db, user_
     db.set_setting("report_requires_login", "0")
     for path in ("/login", "/report", "/search", "/admin/login"):
         assert client.get(path).headers.get("Cache-Control") == "no-store", path
+
+
+def test_new_installs_keep_two_weeks_of_check_results(isolated_db):
+    assert app_module.DEFAULT_HISTORY_RETENTION_DAYS == 14
+    assert app_module._history_retention_days() == 14

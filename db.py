@@ -250,9 +250,13 @@ def _ensure_column(conn, table, column, ddl):
 
 
 STATUS_DAILY_BACKFILLED_SETTING = "status_daily_backfilled"
+HISTORY_RETENTION_SETTING = "status_history_retention_days"
+# What an install that never saved the retention setting got before the daily
+# aggregates existed (app.DEFAULT_HISTORY_RETENTION_DAYS is the new installs' value).
+LEGACY_HISTORY_RETENTION_DAYS = 90
 
 
-def _backfill_status_daily(conn):
+def _backfill_status_daily(conn, is_new_install=False):
     """Fills status_daily from status_history, once: on the first start of a version
     that has the table, so an upgraded install keeps the uptime it already had.
 
@@ -261,7 +265,11 @@ def _backfill_status_daily(conn):
     neither. From then on every check adds to its day directly, which is why this must
     not run again - pruned history would recount a day as fewer checks than it had.
     ON CONFLICT DO NOTHING keeps an existing day as it is if it ever does (a restored
-    file whose marker went missing)."""
+    file whose marker went missing).
+
+    The same one-time step keeps an existing install's per-check retention where it
+    was: one that never saved the setting gets the old 90-day default written down, so
+    only new installs start on the shorter default. A saved value is never touched."""
     if conn.execute("SELECT 1 FROM settings WHERE key=?",
                     (STATUS_DAILY_BACKFILLED_SETTING,)).fetchone():
         return
@@ -278,6 +286,9 @@ def _backfill_status_daily(conn):
             GROUP BY service_id, substr(checked_at, 1, 10)
             ON CONFLICT (service_id, day) DO NOTHING
         """)
+        if not is_new_install:
+            conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                         (HISTORY_RETENTION_SETTING, str(LEGACY_HISTORY_RETENTION_DAYS)))
         conn.execute("INSERT INTO settings (key, value) VALUES (?, '1') "
                      "ON CONFLICT(key) DO NOTHING", (STATUS_DAILY_BACKFILLED_SETTING,))
 
@@ -328,6 +339,9 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_db()
     c = conn.cursor()
+    # Read before anything is created: an existing database already has `services`.
+    is_new_install = not c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='services'").fetchone()
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS services (
@@ -890,7 +904,7 @@ def init_db():
     """)
     conn.commit()
 
-    _backfill_status_daily(conn)
+    _backfill_status_daily(conn, is_new_install)
     _clean_non_email_contacts(conn)
 
     # Seed defaults if empty
