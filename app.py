@@ -5289,11 +5289,11 @@ def _run_single_check(check_url, slow_threshold_ms):
     downloading the body - a whole web app's HTML, every cycle, for every service -
     was pure waste. elapsed_ms is therefore time to the response headers, not to
     the last byte of the body."""
-    start = time.time()
+    start = time.perf_counter()
     try:
         r = requests.get(check_url, timeout=5, stream=True)
         try:
-            elapsed_ms = int((time.time() - start) * 1000)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
             return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
         finally:
             r.close()
