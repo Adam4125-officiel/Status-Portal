@@ -2453,3 +2453,12 @@ The Requests section now lists the visitor's Seerr requests and their state, fro
 `media_refresh` cache. The refresh keeps the last 100 requests (the public section still shows
 20) and records Seerr's Jellyfin link for each requester; only that link attributes a request to
 a visitor. Checked on a throwaway server: the visitor sees their own request and not another's.
+
+## Cacheable public pages (2026-11)
+
+`base.html` rendered the CSRF token on every page, and rendering it creates a session: every
+anonymous reader of the status page, bots and uptime probes included, got a `Set-Cookie`, and
+no cache could keep the page. The token now renders only for an existing session or a page with
+a POST form, and an anonymous public page is sent `public, max-age=15`. Checked on a throwaway
+server: `/` anonymous has no `Set-Cookie` and is `public`; with the admin's cookie it is
+`private, no-cache`; `/admin/login` and `/report` are `no-store` and still carry the token.

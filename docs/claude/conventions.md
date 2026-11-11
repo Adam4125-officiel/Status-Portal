@@ -139,9 +139,14 @@
 - **Every admin POST is CSRF-protected via a before_request hook in `app.py`, not
   per-route.** A per-session token (`app._get_csrf_token()`, registered as the
   `csrf_token()` Jinja global) is injected into every `<form method="POST">` by
-  `static/js/csrf.js` reading a `<meta name="csrf-token">` tag `base.html` renders on
-  every page — templates never hand-embed the token, deliberately: hand-adding it to
-  the ~16 templates with a POST form risked silently missing one. Any new admin route
+  `static/js/csrf.js` reading a `<meta name="csrf-token">` tag `base.html` renders —
+  templates never hand-embed the token, deliberately: hand-adding it to the ~16
+  templates with a POST form risked silently missing one. **The tag renders only for a
+  visitor who already has a session, or on a page that sets
+  `{% set has_post_form = true %}`** (rendering it creates a session, and an anonymous
+  public page must stay cookieless to be cacheable). A new template with a POST form
+  sets that flag, or extends one that does (`admin_base.html` does);
+  `tests/test_conventions.py` fails otherwise. Any new admin route
   just needs to live under `/admin/` (the check is
   `request.path.startswith("/admin/")` + `method == "POST"`) — no per-route wiring.
   The check is bypassed when `app.testing` is set, since the test client posts raw
