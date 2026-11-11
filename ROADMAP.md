@@ -357,6 +357,23 @@ something is still dropping.
 recurs · **Effort:** unknown until there are logs — which is exactly why this
 entry exists rather than a guess at a fix.
 
+## Small fixes left over from 2.0.0
+
+Found by the review of the 2.0.0 pull requests or by the owner's test of the release
+candidates, none of them blocking. All **S**.
+
+- **A service deleted during its own check logs an ERROR with a traceback** (`FOREIGN KEY
+  constraint failed` in `db.record_check_result()`). Recognise the case in
+  `health._check_and_record_service()` and log one INFO line instead. Seen once on the real
+  install (`docs/HISTORY.md`, "2.0.0-rc.2 on the same install").
+- **A visitor whose session ends while `/media` is open sees "(retrying)" forever.** The
+  fragment answers 404 and `static/js/public_refresh.js` just retries. A reload on 401/403/404
+  fixes it, but a test forbids `location.reload` in that script on purpose
+  (`test_public_pages_refresh_in_place_instead_of_reloading`), so decide the rule first.
+- **An already expired self-signed certificate may never raise the "expired" alert**
+  (`health._read_cert_expiry`: the pinned second handshake fails and the result is dropped).
+  Suspected from reading the code, never reproduced.
+
 ## Already shipped
 
 Kept as an index, not a write-up. Each one's design decisions and its "don't break

@@ -2549,3 +2549,20 @@ line at start).
 Not exercised yet: that update was done by the 1.12.2 updater, so the removal of retired
 files (`updater.RETIRED_FILES`) first runs for real on the update from rc.1 to the next
 version.
+
+## 2.0.0-rc.2 on the same install, then 2.0.0 (2026-11-11)
+
+The owner updated the same Windows portal from rc.1 to rc.2 through the in-app updater.
+This was the first real run of the retired-file removal: the log said `Removed 6 file(s)
+the new release no longer ships.` (249 files backed up, 243 replaced), the portal restarted
+on rc.2 in about four seconds, and the new `health-check loop started, interval 15 s` line
+appeared. The owner reported the rest working and declared it stable; 2.0.0 is rc.2 with
+only `VERSION` and this note changed.
+
+One thing the rc.1 log showed, not fixed in 2.0.0: an ERROR with a full traceback,
+`health check failed for service 'SMB'` / `sqlite3.IntegrityError: FOREIGN KEY constraint
+failed` on the `status_history` insert in `db.record_check_result()`. It reads as a service
+deleted while its check was in flight (the owner had been trying TCP checks, whose timeout
+on a closed port is 5 s, which widens that window); this was not confirmed with the owner.
+The transaction rolled back, nothing was written, and the loop carried on. The foreign key
+was already enforced in 1.12.2, so the race is older than this release.
