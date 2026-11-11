@@ -2421,3 +2421,10 @@ in the inline-handler test. They now use the `data-confirm` pattern from the acc
 and each drew its own topbar, so clicking the Search tab landed on a page with no tabs
 and no footer. They now extend `public_base.html`, and the nav data comes from a
 context processor instead of every route.
+
+## Four public tabs (2026-11)
+
+The public nav had seven tabs (Status, resources, VMs, Jellyfin activity, media, info,
+Search), wrapping to three lines on a phone, and the main page repeated five of them as
+"More" cards. It is now Status, Server, Media and Info; the old addresses redirect to
+their section of `/server`, and search sits at the head of Media for signed-in visitors.
