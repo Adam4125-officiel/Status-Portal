@@ -17,6 +17,10 @@
   (`admin_settings_logo()` diffs the new filename against the stored setting before
   saving) — otherwise switching from a `.png` to an `.svg` would orphan the old file
   forever, since the path changes with the extension.
+- **`/static/uploads/` is served with `Content-Security-Policy: sandbox`**
+  (`set_security_headers`): an SVG logo can carry script, and the normal CSP allows
+  inline script, so opened directly it would run on the portal origin. `<img>` and
+  favicon use are unaffected.
 - `@app.errorhandler(413)` exists because of this feature — `MAX_CONTENT_LENGTH` was
   set app-wide long before anything could actually hit it. Without the handler an
   oversized upload falls through to Flask's default unstyled error page.
@@ -31,8 +35,10 @@
   fire-and-forget (catches and logs every failure, never raises), the route can't
   report true success/failure per channel — it just confirms it was sent, and the
   admin checks their channel, which is the entire point of the button.
-- **Manual DB backup** (`GET /admin/settings/backup-db` — GET, not POST, since it
-  has no side effects) zips a snapshot of `instance/portal.db` via
+- **Manual DB backup** (`POST /admin/settings/backup-db`, behind `_require_totp()`
+  with a code field beside the button on the About page when 2FA is on — the backup
+  holds the TOTP seed and every integration API key, so a session alone must not
+  take it) zips a snapshot of `instance/portal.db` via
   `db.backup_to_file()`, which uses SQLite's own `Connection.backup()` API rather
   than a raw file copy — a plain copy of a live database file being actively
   written by the background health-check thread could catch a torn/partial write
@@ -120,10 +126,11 @@
   `service_dependencies` rows are otherwise never resolved into public-facing
   values. **That was not true of `/api/status` until 1.9.1**: it serialised whole
   `services` rows, raw `run_target` and every internal `check_url` included, for
-  services that never opted in. `_api_service_view()` now drops `check_url` always
-  and the raw `run_target` unless `show_run_target_public` is set. It removes exactly
-  those two keys and nothing else, because external dashboards read this endpoint; a
-  test pins the full key set, so trimming more is a deliberate edit to that test.
+  services that never opted in. `_api_service_view()` now publishes only the keys in
+  `_API_SERVICE_KEYS` (an allow-list, so a new `services` column is **not** public by
+  default) plus the raw `run_target` when `show_run_target_public` is set; `check_url`
+  is never published. External dashboards read this endpoint, so no key may disappear;
+  a test pins the key set, and adding a column means deciding here whether it is public.
   `_run_target_label()`
   is a small standalone helper (`app.py`) mirroring the inline Jinja logic already
   in `admin_services.html` — not deduplicated into one shared place since one side

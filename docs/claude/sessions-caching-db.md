@@ -125,6 +125,10 @@
   a signed-in page back after logout. It overrides `send_file()`'s own header too,
   which the backup and log downloads want anyway. Public pages and `/static/` are
   untouched.
+- **`set_security_headers` also sets `base-uri 'self'`, `form-action 'self'` and
+  `object-src 'none'`** (not covered by `default-src`), `Permissions-Policy` and
+  `Cross-Origin-Opener-Policy: same-origin`. A form posting to another site would now be
+  blocked by the browser; none does today.
 - **`SEND_FILE_MAX_AGE_DEFAULT` is 30 days, which is only safe because `asset_url()`
   cache-busts every CSS/JS URL.** If you ever add a static reference that bypasses
   `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup

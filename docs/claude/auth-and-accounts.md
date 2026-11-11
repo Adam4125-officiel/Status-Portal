@@ -19,7 +19,8 @@
   caught by live testing, not the unit tests
   (`docs/HISTORY.md` → "2FA enrollment `KeyError`").
 - **Login becomes two steps when 2FA is enabled, still one step when it isn't.**
-  `session["awaiting_totp"]` is set (server-side only, unforgeable without the signed
+  `session["awaiting_totp"]` (the time the password was accepted; `_awaiting_totp()`
+  drops it after 5 minutes and the login restarts at the password) is set (server-side only, unforgeable without the signed
   session's `SECRET_KEY`) once the password step succeeds; the *next* `POST` to
   `/admin/login` is read as a code instead of a password, without re-checking the
   password. The global login-lockout counter (`_login_state`) applies to wrong codes
@@ -29,7 +30,8 @@
 - **Step-up re-authentication** for the destructive actions goes through
   `app._require_totp()` — see the convention bullet above for the call pattern and
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
-  restart, self-update — not VM control, not other admin actions); don't creep it onto
+  restart, self-update, and changing the admin password when 2FA is on — the user
+  approved that last one explicitly; not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
 - **A TOTP code is deliberately *not* single-use.** It works for its whole
   `valid_window`, so logging in and then immediately doing a step-up can take the same
@@ -55,6 +57,14 @@
   web UI at `/admin/2fa`, itself gated behind entering a current code — a hijacked
   session alone can't turn 2FA off either.
 
+- **The admin password form shares `_login_state`** (`_login_locked()` /
+  `_register_login_failure()` / `_register_login_success()`), like `/admin/2fa/disable`.
+- **Password recovery is host-level too:** an empty `instance/RESET_PASSWORD`, seen on a
+  hit of `/admin/login`, erases `admin_password_hash`, rotates the session epoch and
+  deletes itself (`app._check_and_process_password_reset_flag()`). The portal is then at
+  first-run setup, which `_first_run_setup_allowed()` limits to the local network. It
+  does not touch 2FA (that is `RESET_2FA`).
+
 ## Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0
 
 A second identity alongside the single admin: visitors sign in with their Jellyfin
@@ -71,8 +81,11 @@ public page, which has to be a deliberate choice.
   do. A signed-in Jellyfin user is a visitor with a name, not a lesser admin.
 - **`_end_user_session()` pops its own keys and must never be `session.clear()`** —
   an admin who is also signed in as a Jellyfin user in the same browser must not be
-  logged out of the admin panel by a visitor-side timeout. (`admin_logout` still
-  clears everything, which is correct in that direction and was left alone.)
+  logged out of the admin panel by a visitor-side timeout. The same
+  goes the other way: the admin idle expiry and `/admin/logout` call
+  `_end_admin_session()` (the `_ADMIN_SESSION_KEYS` only), not `session.clear()`.
+  `/logout` and `/admin/logout` are POST-only (buttons, not links; `/logout` is in
+  `_CSRF_PROTECTED_PUBLIC_PATHS`).
 - **`jellyfin_admin` in the session is groundwork, read by nothing.** Being an
   administrator in Jellyfin says nothing about this portal. It's stored for the
   per-content visibility feature on the ROADMAP; if you start reading it, make that

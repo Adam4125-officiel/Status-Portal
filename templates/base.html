@@ -60,7 +60,9 @@
           <a class="user-chip__name" href="{{ url_for('user_account') }}"
              title="Your settings and the reports you've sent">👤 {{ portal_user.name }}{%
              if unseen_replies %}<span class="user-chip__dot" title="{{ unseen_replies }} reply from the admin"></span>{% endif %}</a>
-          <a class="user-chip__out" href="{{ url_for('user_logout') }}">Sign out</a>
+          <form method="POST" action="{{ url_for('user_logout') }}" class="inline-form">
+            <button type="submit" class="user-chip__out">Sign out</button>
+          </form>
         </span>
       {% elif request.endpoint != 'user_login' %}
         <a class="btn signin" href="{{ url_for('user_login', next=request.full_path.rstrip('?')) }}">Sign in</a>

@@ -283,3 +283,12 @@ def test_a_seerr_username_is_not_cached_as_an_email(monkeypatch):
     # The rest of the record is untouched - the user still exists and is still linked.
     assert by_id["1"]["display_name"] == "zellowz_"
     assert by_id["1"]["jellyfin_user_id"] == "jf1"
+
+
+def test_fetch_bazarr_status_error_does_not_leak_the_api_key():
+    import requests
+    with patch("integrations.requests.get",
+               side_effect=requests.ConnectionError("... /api/system/status?apikey=SECRETKEY123")):
+        result = integrations.fetch_bazarr_status("http://bazarr:6767", "SECRETKEY123")
+    assert result["reachable"] is False
+    assert "SECRETKEY123" not in result["error"]

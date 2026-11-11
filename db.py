@@ -1957,6 +1957,13 @@ def set_setting(key, value):
     conn.close()
 
 
+def delete_setting(key):
+    conn = get_db()
+    conn.execute("DELETE FROM settings WHERE key=?", (key,))
+    conn.commit()
+    conn.close()
+
+
 def get_low_disk_alert_state(path):
     """Whether `path` was already below the low-disk threshold as of the last
     check - persisted (via the settings table, namespaced by mountpoint) rather

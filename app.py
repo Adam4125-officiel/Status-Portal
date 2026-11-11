@@ -107,8 +107,24 @@ def set_security_headers(response):
         "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'; "
+        # Not covered by default-src: without these an injected <base> or <form> can
+        # redirect relative URLs or form posts to another site. No form in the app
+        # posts off-site.
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "object-src 'none'"
     )
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    # An uploaded SVG can carry a script and the CSP above allows inline script. As an
+    # <img> or favicon it is inert; opened directly it would run on the portal's
+    # origin. sandbox gives it an opaque origin and no scripts, and does not affect
+    # <img> rendering.
+    if request.path.startswith("/static/uploads/"):
+        response.headers["Content-Security-Policy"] = "sandbox"
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
     # Signed-in pages must not be kept by the browser or anything in between:
     # otherwise the back button, or the next person on a shared machine, can bring
@@ -404,6 +420,14 @@ _ADMIN_SESSION_KEYS = ("logged_in", "last_seen", "admin_epoch", "awaiting_totp",
                         "login_next", "pending_totp_secret", "seerr_diagnosis")
 
 
+def _end_admin_session():
+    """Drops the admin keys and nothing else, so a browser also signed in as a Jellyfin
+    visitor stays signed in as one. Used by the idle expiry and /admin/logout; see
+    _ADMIN_SESSION_KEYS."""
+    for key in _ADMIN_SESSION_KEYS:
+        session.pop(key, None)
+
+
 def _admin_session_epoch():
     return db.get_setting(ADMIN_SESSION_EPOCH_SETTING, "")
 
@@ -496,8 +520,7 @@ def _enforce_session_timeout():
     # ADMIN_SESSION_EPOCH_SETTING). Same redirect as an expiry, and here for the same
     # ordering reason: a POST must reach the login page, not a CSRF 400.
     if session.get("admin_epoch", "") != _admin_session_epoch():
-        for key in _ADMIN_SESSION_KEYS:
-            session.pop(key, None)
+        _end_admin_session()
         if request.path.startswith("/admin/"):
             return redirect(url_for("admin_login", next=request.path))
         return
@@ -506,7 +529,7 @@ def _enforce_session_timeout():
     now = time.time()
     last_seen = session.get("last_seen")
     if timeout is not None and last_seen is not None and now - last_seen > timeout:
-        session.clear()
+        _end_admin_session()
         if request.path.startswith("/admin/"):
             flash("Your session expired after a period of inactivity. Please sign in again.", "error")
             return redirect(url_for("admin_login", next=request.path))
@@ -558,7 +581,7 @@ def _enforce_user_session():
 
 # POST paths outside /admin/ that still need CSRF protection. /report is
 # conditional rather than listed here - see _csrf_required_for().
-_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme", "/search/request"}
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/logout", "/account", "/account/theme", "/search/request"}
 
 
 def _csrf_required_for(path, method):
@@ -626,6 +649,28 @@ def login_required(f):
 
 def is_first_run():
     return db.get_setting("admin_password_hash") is None
+
+
+PASSWORD_RESET_FLAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "instance", "RESET_PASSWORD")
+
+
+def _check_and_process_password_reset_flag():
+    """Host-level password recovery, modelled on twofactor.check_and_process_reset_flag():
+    an empty file at instance/RESET_PASSWORD, seen on a hit of /admin/login, erases the
+    admin password hash, signs out every admin session and deletes itself. The portal is
+    then back at first-run setup (which _first_run_setup_allowed() keeps to the local
+    network). Leaves 2FA alone."""
+    if not os.path.exists(PASSWORD_RESET_FLAG_PATH):
+        return False
+    db.delete_setting("admin_password_hash")
+    _rotate_admin_session_epoch()
+    try:
+        os.remove(PASSWORD_RESET_FLAG_PATH)
+    except OSError:
+        _logger.exception("Password reset flag file found but could not be removed")
+    _logger.warning("Admin password erased via host-level RESET_PASSWORD flag file")
+    return True
 
 
 # Tailscale hands out addresses from here (RFC 6598 shared space), and ipaddress
@@ -1626,17 +1671,31 @@ def api_status():
     })
 
 
+# Every key /api/status publishes per service. An allow-list on purpose: a column added
+# to `services` later must not become public by default. External dashboards read these
+# keys, so none may disappear. check_url is never published; run_target only when
+# show_run_target_public is set (see _api_service_view).
+_API_SERVICE_KEYS = frozenset({
+    "api_health_mode", "auto_check", "auto_incident", "description", "group_name", "icon",
+    "id", "ignore_in_overall_status", "last_checked", "manual_override", "name",
+    "response_ms", "retry_count", "retry_interval_seconds", "show_dependencies_public",
+    "show_report_button", "show_run_target_public", "slow_threshold_ms", "sort_order",
+    "startup_grace_seconds", "status", "url",
+    # computed per request
+    "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
+    "run_target_label", "dependency_names",
+})
+
+
 def _api_service_view(service):
-    """A service row as /api/status publishes it: every field it has always carried,
-    minus the two that map the private network. check_url is the address the portal
-    probes (LAN IPs and ports), for every service; the raw run_target names a VM or
-    host, and only goes out when show_run_target_public says so - the same opt-in the
-    HTML page applies via run_target_label. Everything else stays exactly as it was,
-    because external dashboards read this endpoint and a missing key breaks them."""
-    view = dict(service)
-    view.pop("check_url", None)
-    if not service.get("show_run_target_public"):
-        view.pop("run_target", None)
+    """A service row as /api/status publishes it: only the keys in _API_SERVICE_KEYS,
+    plus the raw run_target when show_run_target_public says so - the same opt-in the
+    HTML page applies via run_target_label. check_url (the LAN address the portal
+    probes) is never published. External dashboards read this endpoint, so a key must
+    not go missing."""
+    view = {k: v for k, v in service.items() if k in _API_SERVICE_KEYS}
+    if service.get("show_run_target_public") and "run_target" in service:
+        view["run_target"] = service["run_target"]
     return view
 
 
@@ -2061,8 +2120,9 @@ def report_problem():
         if request.form.get("website"):
             flash("Thanks — your report has been submitted.", "success")
             return redirect(url_for("report_problem"))
-        rendered_at = session.get("report_form_rendered_at", 0)
-        if time.time() - rendered_at < REPORT_MIN_SECONDS_TO_FILL:
+        # Absent means the form was never opened (a script posting directly): refuse.
+        rendered_at = session.get("report_form_rendered_at")
+        if rendered_at is None or time.time() - rendered_at < REPORT_MIN_SECONDS_TO_FILL:
             flash("That was fast — please wait a moment and try again.", "error")
             return redirect(url_for("report_problem"))
         if _report_rate_limited():
@@ -2082,6 +2142,7 @@ def report_problem():
                                   reporter_user=(user or {}).get("name", "")[:100],
                                   reporter_user_id=(user or {}).get("id", ""))
         _register_report_submission()
+        session.pop("report_form_rendered_at", None)  # one GET authorises one POST
         prefix = f"{service['name']}: " if service else ""
         who = f" (from {user['name']})" if user else ""
         # Anonymous visitor text going into the admin's Discord channel: no pings.
@@ -2262,10 +2323,19 @@ def user_login():
 # POST handler and the admin-viewing-a-user's-account route (see
 # admin_user_account()) - one place naming the fields so the two can't drift apart.
 def _save_account_prefs(user_id, form):
+    """Saves the form; returns the list of error messages for contact fields that were
+    invalid (those fields are left as they were, everything else is saved)."""
+    email = form.get("notify_email", "").strip()[:200]
+    discord_id = form.get("notify_discord_id", "").strip()[:32]
+    errors = user_notify.contact_errors(email=email, discord_id=discord_id)
+    contact_fields = {}
+    if "notify_email" not in errors:
+        contact_fields["notify_email"] = email
+    if "notify_discord_id" not in errors:
+        contact_fields["notify_discord_id"] = discord_id
     db.set_user_preferences(
         user_id, theme=form.get("theme", "auto"), contact=form.get("contact", "").strip()[:200],
-        notify_email=form.get("notify_email", "").strip()[:200],
-        notify_discord_id=form.get("notify_discord_id", "").strip()[:32],
+        **contact_fields,
         notify_email_reports=bool(form.get("notify_email_reports")),
         notify_email_requests=bool(form.get("notify_email_requests")),
         notify_email_maintenance=bool(form.get("notify_email_maintenance")),
@@ -2276,6 +2346,7 @@ def _save_account_prefs(user_id, form):
         notify_email_announcements=bool(form.get("notify_email_announcements")),
         notify_email_gamesportal=bool(form.get("notify_email_gamesportal")),
         notify_discord_gamesportal=bool(form.get("notify_discord_gamesportal")))
+    return list(errors.values())
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -2296,8 +2367,11 @@ def user_account():
     user_id = user["id"]
 
     if request.method == "POST":
-        _save_account_prefs(user_id, request.form)
-        flash("Your settings have been saved.", "success")
+        errors = _save_account_prefs(user_id, request.form)
+        for message in errors:
+            flash(message, "error")
+        flash("Your settings have been saved." if not errors
+              else "The rest of your settings have been saved.", "success")
         # saved=1 tells the page to bring this browser's own stored theme into line
         # with what was just saved - otherwise the setting would appear to do nothing
         # on the very device it was changed from, because a local choice made with
@@ -2440,7 +2514,7 @@ def user_account_push_seerr_contact():
                                          discord_id=prefs["notify_discord_id"] or None)
     except (requests.RequestException, ValueError) as e:
         _logger.warning("Could not push contact details to Seerr: %s", e)
-        flash(f"Couldn't update Seerr: {e}", "error")
+        flash(f"Couldn't update Seerr: {integrations.describe_request_error(e)}", "error")
         return redirect(url_for("user_account"))
     db.set_user_preferences(user["id"], seerr_user_id=account["id"])
     user_notify._invalidate_seerr_account_cache(user["id"])
@@ -2718,7 +2792,7 @@ def user_account_theme():
     return ("", 204)
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def user_logout():
     """Ends only the visitor session - see _end_user_session() for why this must not
     be session.clear()."""
@@ -2747,14 +2821,35 @@ def _safe_next_url(raw):
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
+# How long a verified password stays good for the 2FA code step.
+AWAITING_TOTP_SECONDS = 300
+
+
+def _awaiting_totp():
+    """True while the session holds a verified password that is still waiting for its
+    code. The flag is the time the password was accepted; past AWAITING_TOTP_SECONDS
+    (or in a session that stored a bare True before it was timestamped) it is dropped
+    and the login falls back to the password step."""
+    stamp = session.get("awaiting_totp")
+    if not stamp:
+        return False
+    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+            or time.time() - stamp > AWAITING_TOTP_SECONDS):
+        session.pop("awaiting_totp", None)
+        session.pop("login_next", None)
+        return False
+    return True
+
+
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     # Cheap check (a single os.path.exists()) on every hit, so a host-level 2FA
     # reset (see twofactor.py) takes effect the moment someone next loads this
     # page - no app restart needed.
     twofactor.check_and_process_reset_flag()
+    _check_and_process_password_reset_flag()
     first_run = is_first_run()
-    awaiting_totp = session.get("awaiting_totp", False)
+    awaiting_totp = _awaiting_totp()
 
     if request.method == "POST":
         if not first_run and _login_locked():
@@ -2800,7 +2895,7 @@ def admin_login():
                 if twofactor.is_enabled():
                     # Login isn't complete yet - don't reset the failure counter
                     # or set logged_in until the code step also succeeds.
-                    session["awaiting_totp"] = True
+                    session["awaiting_totp"] = time.time()
                     session["login_next"] = (_safe_next_url(request.args.get("next"))
                                              or url_for("admin_dashboard"))
                     return render_template("login.html", first_run=False, awaiting_totp=True)
@@ -2813,9 +2908,9 @@ def admin_login():
     return render_template("login.html", first_run=first_run, awaiting_totp=awaiting_totp)
 
 
-@app.route("/admin/logout")
+@app.route("/admin/logout", methods=["POST"])
 def admin_logout():
-    session.clear()
+    _end_admin_session()
     return redirect(url_for("index"))
 
 
@@ -4231,13 +4326,26 @@ def admin_settings():
         new = request.form.get("new_password", "")
         confirm = request.form.get("confirm_password", "")
         stored = db.get_setting("admin_password_hash")
-        if not check_password_hash(stored, current):
+        # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
+        # a stolen session cookie this form was an unthrottled password-guessing loop.
+        if _login_locked():
+            flash("Too many incorrect attempts - try again in a few minutes.", "error")
+        elif not check_password_hash(stored, current):
+            _register_login_failure()
             flash("Current password is incorrect.", "error")
         elif len(new) < 6:
             flash("New password must be at least 6 characters.", "error")
         elif new != confirm:
             flash("Passwords do not match.", "error")
         else:
+            # With 2FA on, changing the password also needs a current code: it is the
+            # action that signs the real admin out and leaves a cookie thief in.
+            blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
+                                    "admin_settings")
+            if blocked:
+                return blocked
+            if not twofactor.is_enabled():
+                _register_login_success()
             db.set_setting("admin_password_hash", generate_password_hash(new))
             # The natural reaction to a suspected compromise, so it has to actually
             # lock out a copied cookie - every other admin session ends here.
@@ -4246,6 +4354,7 @@ def admin_settings():
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
                             kiosk_min_rotation=KIOSK_MIN_ROTATION_SECONDS,
@@ -4552,9 +4661,15 @@ def admin_device_regenerate_key():
     return redirect(url_for("admin_device"))
 
 
-@app.route("/admin/settings/backup-db")
+@app.route("/admin/settings/backup-db", methods=["POST"])
 @login_required
 def admin_settings_backup_db():
+    """The backup holds the TOTP seed and every integration API key, so a session
+    cookie alone must not be enough to take it: POST behind _require_totp(), like the
+    restore."""
+    blocked = _require_totp("Enter your 2FA code to download a backup.", "admin_about")
+    if blocked:
+        return blocked
     if not os.path.isfile(db.DB_PATH):
         abort(404)
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4802,7 +4917,9 @@ def admin_user_account(user_id):
                                message="No such user in the cached Jellyfin user list."), 404
 
     if request.method == "POST":
-        _save_account_prefs(user_id, request.form)
+        errors = _save_account_prefs(user_id, request.form)
+        for message in errors:
+            flash(message, "error")
         flash(f"Saved settings for {target['name']}.", "success")
         return redirect(url_for("admin_user_account", user_id=user_id))
 

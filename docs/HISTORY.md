@@ -2286,3 +2286,46 @@ local time, so on a UTC+2 machine the same update reads as 19:18 in the log and 
 in the folder name. Consistent with everything else in this app storing UTC, and the
 CLI's `list-backups`/`rollback` never require reading the timestamp by eye — but it
 does look like a mismatch if you're picking a backup by hand.
+
+## Admin password form throttled, 2FA-gated, with a host-level reset (2026-11)
+
+The change-password form compared the current password with no counter, so a stolen
+session cookie allowed unlimited online guessing (the same gap `/admin/2fa/disable` had).
+It now shares the login lockout counter and, when 2FA is on, requires a current code via
+`_require_totp()` (the user explicitly agreed to extend that helper to it). Since the
+password had no recovery path, `instance/RESET_PASSWORD` was added next to `RESET_2FA`.
+The minimum length stays at 6.
+
+## SMTP certificate check, report-form timing, email subject (2026-11)
+
+`starttls()` and `SMTP_SSL` ran without a context, so Python skipped certificate and
+host-name verification; both now use a default context, with `PORTAL_SMTP_VERIFY_TLS=false`
+as an explicit opt-out. `/report` treated a missing `report_form_rendered_at` as "rendered
+long ago", so a cookie-less POST passed the minimum-fill-time check; it is now refused and
+the value is cleared after an accepted report. A multi-line email subject raised
+`ValueError` out of `notify()`; line breaks become spaces.
+
+## Headers, uploads sandbox, /api/status allow-list (2026-11)
+
+The CSP lacked `base-uri`, `form-action` and `object-src`, and there was no
+`Permissions-Policy` or COOP; all are added. An uploaded SVG logo opened directly would run
+script on the portal origin, so `/static/uploads/` is served with `CSP: sandbox`.
+`/api/status` published every `services` column except two; it now uses an allow-list equal
+to the keys published before, so new columns stay private until chosen.
+
+## Contact validation and error leaks (2026-11)
+
+`/account` stored any email or Discord ID as typed (a probe saved `abc; drop`) while
+`save_contact()` validated; both now share `contact_errors()`. Bazarr's error text held the
+API key (it travels in the URL), and the Seerr push messages showed the internal host;
+both now use `describe_request_error()`.
+
+## Sessions, logout and backup download (2026-11)
+
+The admin idle expiry and `/admin/logout` called `session.clear()` and so also ended a
+Jellyfin visitor sign-in in the same browser; they now drop only the admin keys.
+`/logout` and `/admin/logout` were GET links, so a prefetch could sign someone out; they
+are POST buttons. `awaiting_totp` had no date, leaving a password-verified session
+replayable for the code step indefinitely; it now expires after 5 minutes. The database
+backup download needed only a session although the file holds the TOTP seed and API keys;
+it is a POST behind `_require_totp()`, like the restore.

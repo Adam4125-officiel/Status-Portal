@@ -228,9 +228,16 @@
     A zipped, consistent snapshot of <code>instance/portal.db</code>, taken right now —
     worth keeping an off-box copy of, and worth taking before poking at anything by hand.
   </p>
-  <p>
-    <a href="{{ url_for('admin_settings_backup_db') }}" class="btn secondary">Download a backup</a>
-  </p>
+  <form method="POST" action="{{ url_for('admin_settings_backup_db') }}">
+    {% if totp_enabled %}
+    <div class="field">
+      <label for="backup-totp">2FA code</label>
+      <input type="text" id="backup-totp" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+             maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+    </div>
+    {% endif %}
+    <button type="submit" class="btn secondary">Download a backup</button>
+  </form>
 
   <h3 style="font-size: 14px; margin: 20px 0 6px;">Restore one</h3>
   <p style="font-size: 13px; color: var(--text-dim); margin-top: 0;">

@@ -147,8 +147,9 @@
   hand-rolled copy.** It returns `None` when the caller may proceed and a
   ready-to-return redirect when it must not, so every call site reads
   `blocked = _require_totp(...); if blocked: return blocked`. Used by
-  `admin_host_control`, `admin_system_restart` and `admin_update` — the three actions
-  where a stolen/replayed session cookie alone must not be enough. Adding a fourth
+  `admin_host_control`, `admin_system_restart`, `admin_update` and the password change
+  in `admin_settings` — the actions where a stolen/replayed session cookie alone must
+  not be enough. Adding a fourth
   destructive action means calling this helper, not re-inlining the check: three
   hand-maintained copies is three chances for one to quietly stop matching the
   others. (The login flow and `/admin/2fa` enable/disable are *not* step-up and

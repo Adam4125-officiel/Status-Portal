@@ -25,6 +25,10 @@
 - **An unrecognised `PORTAL_SMTP_SECURITY` upgrades to STARTTLS, never downgrades to
   plaintext.** Failing to connect is a far better outcome than quietly sending
   credentials in the clear because someone typo'd the value.
+- **The SMTP certificate is verified by default** (`ssl.create_default_context()` for
+  both STARTTLS and SSL). `PORTAL_SMTP_VERIFY_TLS=false` is the explicit opt-out for a
+  self-signed local relay. `build_email()` flattens line breaks in the subject to
+  spaces, since a header can't hold them and `notify()` must never raise.
 - **The HTML body is built with `html.escape()`, not a Jinja template.**
   `notifications.py` is called from the background health-check thread, where there is
   no app or request context to render a template in — and this module deliberately
@@ -184,6 +188,13 @@
   visitor prompt use. A failed write-back is *reported but not rolled back*: losing what
   somebody just typed because another service was unreachable is the worse outcome, and
   the local value is what delivery reads.
+- **Contact fields are validated by one function, `user_notify.contact_errors()`**, used
+  by `save_contact()` and `_save_account_prefs()` (the `/account` form, visitor and
+  admin views). An invalid value gives an error message and that field is not saved; the
+  rest of the form is. Discord IDs are digits only.
+- **Visitor-facing messages never carry `{e}` from an outbound call**: use
+  `integrations.describe_request_error(e)`; the raw text holds internal hosts and, for
+  Bazarr, the API key in its query string.
 - **The account page auto-fills from a linked Seerr account the first time it's opened
   with both fields still blank**, rather than waiting for the manual "Use these
   details here" button - `user_notify.adopt_seerr_contact(user_id, account)` is the one

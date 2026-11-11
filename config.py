@@ -188,6 +188,9 @@ SMTP_SECURITY = os.environ.get("PORTAL_SMTP_SECURITY", "starttls").strip().lower
 # delivering immediately can still take a few seconds to accept. Same reasoning as
 # BYPARR_TIMEOUT_SECONDS and JELLYFIN_AUTH_TIMEOUT_SECONDS.
 SMTP_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SMTP_TIMEOUT_SECONDS", "10"))
+# Verify the SMTP server's certificate and host name (STARTTLS and SSL modes). Set to
+# false only for a local relay with a self-signed certificate.
+SMTP_VERIFY_TLS = os.environ.get("PORTAL_SMTP_VERIFY_TLS", "true").strip().lower() != "false"
 
 # ---------------------------------------------------------------------------
 # Unified search (see media_search.py)

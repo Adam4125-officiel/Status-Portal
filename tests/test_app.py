@@ -1,3 +1,4 @@
+from werkzeug.security import check_password_hash
 import io
 import os
 import re
@@ -52,6 +53,20 @@ def test_csrf_protection_rejects_missing_or_wrong_token(isolated_db, monkeypatch
         resp = c.post("/admin/login", data={
             "password": "testpass123", "confirm": "testpass123", "csrf_token": token})
         assert resp.status_code == 302
+
+
+def test_logout_is_post_only_and_visitor_logout_is_csrf_protected(isolated_db, monkeypatch):
+    """A link or a prefetch must not sign anybody out, and a cross-site form must not
+    either. The sign-out buttons render as forms the CSRF script can complete."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    with app_module.app.test_client() as c:
+        assert c.get("/logout").status_code == 405
+        assert c.get("/admin/logout").status_code == 405
+        token = _extract_csrf_token(c.get("/").data)
+        assert c.post("/logout").status_code == 400
+        assert c.post("/admin/logout").status_code == 400
+        assert c.post("/logout", data={"csrf_token": token}).status_code == 302
+        assert c.post("/admin/logout", data={"csrf_token": token}).status_code == 302
 
 
 def test_compute_overall_status():
@@ -367,7 +382,7 @@ def test_first_run_setup_behind_a_declared_proxy_uses_the_forwarded_address(clie
 def test_the_first_run_guard_does_not_affect_a_normal_login(client):
     """Once a password exists, signing in from anywhere works exactly as before."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     resp = client.post("/admin/login", data={"password": "testpass123"},
                        environ_base={"REMOTE_ADDR": "1.1.1.1"}, headers={"CF-Connecting-IP": "1.1.1.1"})
     assert resp.status_code == 302
@@ -376,7 +391,7 @@ def test_the_first_run_guard_does_not_affect_a_normal_login(client):
 
 def test_login_lockout(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.get("/admin/logout")
+    client.post("/admin/logout")
 
     for _ in range(5):
         client.post("/admin/login", data={"password": "wrong"})
@@ -411,7 +426,7 @@ def test_admin_login_next_cannot_redirect_off_site(client):
     lands the admin on a look-alike page right after a real login."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     for hostile in _HOSTILE_NEXT_VALUES:
-        client.get("/admin/logout")
+        client.post("/admin/logout")
         resp = client.post("/admin/login", query_string={"next": hostile},
                             data={"password": "testpass123"})
         assert resp.status_code == 302
@@ -422,7 +437,7 @@ def test_admin_login_next_cannot_redirect_off_site_through_the_totp_step(client)
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     secret = _enable_totp_directly()
     for hostile in ("https://evil.invalid/phish", "/\\evil.invalid/x"):
-        client.get("/admin/logout")
+        client.post("/admin/logout")
         client.post("/admin/login", query_string={"next": hostile}, data={"password": "testpass123"})
         resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
         assert resp.status_code == 302
@@ -431,13 +446,13 @@ def test_admin_login_next_cannot_redirect_off_site_through_the_totp_step(client)
 
 def test_admin_login_relative_next_is_still_honoured_on_both_paths(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     resp = client.post("/admin/login", query_string={"next": "/admin/settings"},
                         data={"password": "testpass123"})
     assert resp.headers["Location"].endswith("/admin/settings")
 
     secret = _enable_totp_directly()
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     client.post("/admin/login", query_string={"next": "/admin/integrations"},
                  data={"password": "testpass123"})
     resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()})
@@ -454,7 +469,7 @@ def _enable_totp_directly(secret=None):
 def test_login_with_2fa_requires_second_step(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     secret = _enable_totp_directly()
-    client.get("/admin/logout")
+    client.post("/admin/logout")
 
     # Correct password alone must not log in yet - a second, code-entry step follows.
     resp = client.post("/admin/login", data={"password": "testpass123"}, follow_redirects=True)
@@ -471,13 +486,39 @@ def test_login_with_2fa_requires_second_step(client):
 def test_login_with_2fa_wrong_code_does_not_grant_access(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     _enable_totp_directly()
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     client.post("/admin/login", data={"password": "testpass123"})
 
     resp = client.post("/admin/login", data={"totp_code": "000000"}, follow_redirects=True)
     assert b"Incorrect code" in resp.data
     resp = client.get("/admin/services")
     assert resp.status_code == 302  # still not logged in
+
+
+def test_the_2fa_step_expires_five_minutes_after_the_password(client):
+    """A session that has passed the password step but not the code step used to stay
+    replayable forever. Past 5 minutes the login starts over at the password."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.post("/admin/logout")
+    client.post("/admin/login", data={"password": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess["awaiting_totp"] > 0
+        sess["awaiting_totp"] = time.time() - 301
+
+    resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()},
+                       follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Two-factor code" not in resp.data
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "awaiting_totp" not in sess
+
+    # Inside the window the same code step still completes.
+    client.post("/admin/login", data={"password": "testpass123"})
+    assert client.post("/admin/login",
+                       data={"totp_code": pyotp.TOTP(secret).now()}).status_code == 302
+    assert client.get("/admin/services").status_code == 200
 
 
 def test_login_without_2fa_stays_single_step(client):
@@ -581,7 +622,7 @@ def test_a_totp_code_used_to_log_in_also_works_for_an_immediate_step_up(client, 
                          lambda action: calls.append(action) or (True, "Host restart command sent."))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     secret = _enable_totp_directly()
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     code = pyotp.TOTP(secret).now()
     client.post("/admin/login", data={"password": "testpass123"})
     assert client.post("/admin/login", data={"totp_code": code}).status_code == 302
@@ -710,7 +751,7 @@ def test_admin_2fa_reset_flag_file(client, monkeypatch, tmp_path):
     monkeypatch.setattr(twofactor, "RESET_FLAG_PATH", str(flag_path))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     _enable_totp_directly()
-    client.get("/admin/logout")
+    client.post("/admin/logout")
 
     flag_path.write_text("")
     client.get("/admin/login")  # the reset check runs on every hit of this route
@@ -789,7 +830,7 @@ def test_admin_logout_signs_out_only_that_browser(client):
     a password change is for."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     other_device = _copy_of_session_cookie(client)
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     assert client.get("/admin/services").status_code == 302
     assert other_device.get("/admin/services").status_code == 200
 
@@ -826,7 +867,7 @@ def test_admin_login_and_revocation_leave_a_visitor_session_alone(client, user_a
     """The visitor's Jellyfin sign-in is a separate identity: an admin login in the
     same browser keeps it, and so does that admin session being revoked later."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     _sign_in(client, monkeypatch)
     client.post("/admin/login", data={"password": "testpass123"})
     with client.session_transaction() as sess:
@@ -1693,6 +1734,41 @@ def test_api_status_keeps_every_other_service_field(client):
         "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
         "run_target_label", "dependency_names"}
     assert set(published) == expected
+
+
+def test_api_status_publishes_only_the_allow_listed_keys(client):
+    """A column added to `services` must not reach /api/status by accident: the
+    published keys are an explicit list, so a new one fails here until someone decides."""
+    sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
+                              "run_target": "host", "show_run_target_public": 1})
+    published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
+    assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
+    row = db.get_service(sid)
+    assert set(row) - {"check_url", "run_target"} <= app_module._API_SERVICE_KEYS
+
+
+def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):
+    resp = client.get("/")
+    csp = resp.headers["Content-Security-Policy"]
+    for directive in ("base-uri 'self'", "form-action 'self'", "object-src 'none'"):
+        assert directive in csp
+    assert "camera=()" in resp.headers["Permissions-Policy"]
+    assert resp.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+
+
+def test_uploaded_files_are_served_sandboxed_but_other_static_files_are_not(client):
+    upload_dir = os.path.join(app_module.app.root_path, "static", "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    path = os.path.join(upload_dir, "test-sandbox.svg")
+    with open(path, "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>')
+    try:
+        resp = client.get("/static/uploads/test-sandbox.svg")
+        assert resp.status_code == 200
+        assert resp.headers["Content-Security-Policy"] == "sandbox"
+    finally:
+        os.remove(path)
+    assert client.get("/").headers["Content-Security-Policy"] != "sandbox"
 
 
 def _statements_for(client, path, monkeypatch):
@@ -3275,7 +3351,7 @@ def test_notifications_page_lists_every_channel_and_its_state(client, monkeypatc
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.get("/admin/settings/backup-db")
+    resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
     assert resp.mimetype == "application/zip"
     assert "attachment" in resp.headers.get("Content-Disposition", "")
@@ -3294,6 +3370,31 @@ def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     assert "settings" in tables
 
 
+def test_admin_settings_backup_db_is_post_only_and_needs_a_code_when_2fa_is_on(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    assert client.get("/admin/settings/backup-db").status_code == 405
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/settings/backup-db", follow_redirects=True)
+    assert resp.mimetype != "application/zip"
+    assert b"Enter your 2FA code to download a backup" in resp.data
+    resp = client.post("/admin/settings/backup-db", data={"totp_code": "000000"})
+    assert resp.status_code == 302
+
+    resp = client.post("/admin/settings/backup-db", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/zip"
+
+
+def test_about_page_backup_button_is_a_form_with_a_code_field_under_2fa(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    html = client.get("/admin/about").data.decode()
+    assert 'action="/admin/settings/backup-db"' in html
+    assert 'id="backup-totp"' not in html
+    _enable_totp_directly()
+    assert 'id="backup-totp"' in client.get("/admin/about").data.decode()
+
+
 def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypatch):
     """Replaces an older test that asserted the route refused to send. It doesn't need
     to: notify() with nothing configured is a no-op, and the button is disabled in the
@@ -3307,7 +3408,7 @@ def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypa
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.get("/admin/settings/backup-db")
+    resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
     assert resp.mimetype == "application/zip"
     assert "attachment" in resp.headers.get("Content-Disposition", "")
@@ -4137,11 +4238,31 @@ def test_signing_out_ends_only_the_visitor_session(client, user_auth, monkeypatc
     out of the admin panel by clicking "Sign out" on the public page."""
     _login(client)
     _sign_in(client, monkeypatch)
-    client.get("/logout")
+    client.post("/logout")
     with client.session_transaction() as sess:
         assert "portal_user" not in sess
         assert sess.get("logged_in") is True
     assert client.get("/admin/services").status_code == 200
+
+
+def test_admin_idle_expiry_and_admin_logout_leave_a_visitor_session_alone(client, user_auth, monkeypatch):
+    """Both used to session.clear(), which also signed the browser out as a Jellyfin
+    visitor. Only the admin keys go, as with a revoked epoch."""
+    _sign_in(client, monkeypatch)
+    _login(client)
+    db.set_setting("admin_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 3601
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
+
+    _login(client)
+    client.post("/admin/logout")
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
 
 
 def test_a_signed_in_visitor_is_redirected_away_from_the_sign_in_page(client, user_auth, monkeypatch):
@@ -4159,7 +4280,7 @@ def test_the_next_parameter_cannot_redirect_off_site(client, user_auth, monkeypa
         resp = client.post("/login", data={"username": "adam", "password": "pw",
                                             "next": hostile})
         assert "evil.invalid" not in resp.headers["Location"]
-        client.get("/logout")
+        client.post("/logout")
 
 
 def test_a_relative_next_parameter_is_honoured(client, user_auth, monkeypatch):
@@ -4289,7 +4410,7 @@ def test_the_report_gate_redirects_back_to_the_right_service(client, user_auth):
 def test_the_admin_reports_page_shows_who_filed_a_report(client, user_auth, monkeypatch):
     _sign_in(client, monkeypatch)
     db.create_problem_report("something", "", None, reporter_user="adam")
-    client.get("/logout")
+    client.post("/logout")
     _login(client)
     assert "adam" in client.get("/admin/reports").data.decode()
 
@@ -4520,11 +4641,11 @@ def test_an_admin_reply_is_shown_to_the_reporter(client, user_auth, monkeypatch)
     _sign_in(client, monkeypatch)
     _file_report(client)
     rid = db.list_problem_reports()[0]["id"]
-    client.get("/logout")
+    client.post("/logout")
 
     _login(client)
     client.post(f"/admin/reports/{rid}/reply", data={"reply": "Restarted the transcoder."})
-    client.get("/admin/logout")
+    client.post("/admin/logout")
 
     _sign_in(client, monkeypatch)
     body = client.get("/account").data.decode()
@@ -4548,11 +4669,11 @@ def test_a_linked_incident_is_shown_on_the_account_page(client, user_auth, monke
     _sign_in(client, monkeypatch)
     _file_report(client, "Jellyfin is down")
     rid = db.list_problem_reports()[0]["id"]
-    client.get("/logout")
+    client.post("/logout")
 
     _login(client)
     client.post(f"/admin/reports/{rid}/create-incident")
-    client.get("/admin/logout")
+    client.post("/admin/logout")
 
     _sign_in(client, monkeypatch)
     body = client.get("/account").data.decode()
@@ -4648,15 +4769,15 @@ def test_the_admin_list_shows_whether_a_reply_has_been_read(client, user_auth, m
     _sign_in(client, monkeypatch)
     _file_report(client)
     rid = db.list_problem_reports()[0]["id"]
-    client.get("/logout")
+    client.post("/logout")
     _login(client)
     client.post(f"/admin/reports/{rid}/reply", data={"reply": "On it."})
     assert "unread" in client.get("/admin/reports").data.decode()
 
-    client.get("/admin/logout")
+    client.post("/admin/logout")
     _sign_in(client, monkeypatch)
     client.get("/account")
-    client.get("/logout")
+    client.post("/logout")
     _login(client)
     body = client.get("/admin/reports").data.decode()
     assert "· read" in body or "read</div>" in body
@@ -4721,7 +4842,7 @@ def test_a_user_reply_shows_up_on_the_admin_nav_badge(client, user_auth, monkeyp
     rid = db.list_problem_reports()[0]["id"]
     db.update_problem_report_status(rid, "reviewed")  # no longer "new", so the badge is 0
     client.post(f"/account/reports/{rid}/reply", data={"body": "Still happening."})
-    client.get("/logout")
+    client.post("/logout")
 
     _login(client)
     assert db.count_unseen_user_messages() == 1
@@ -4866,3 +4987,68 @@ def test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type(client, mon
         with open(os.path.join(static_js, f"{script}.js"), encoding="utf-8") as f:
             source = f.read()
         assert "EXPECTED_WORD" not in source and "expectedWord" not in source, script
+
+
+def _login_admin(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+
+def _change_password(client, current, **extra):
+    return client.post("/admin/settings", data={"current_password": current,
+                                                 "new_password": "changed456",
+                                                 "confirm_password": "changed456", **extra})
+
+
+def test_password_change_form_locks_after_repeated_wrong_passwords(client):
+    _login_admin(client)
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        _change_password(client, "wrong")
+    # Locked: even the right password is refused now.
+    _change_password(client, "testpass123")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+
+
+def test_password_change_with_2fa_requires_a_code(client):
+    _login_admin(client)
+    secret = _enable_totp_directly()
+    _change_password(client, "testpass123")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+    _change_password(client, "testpass123", totp_code="000000")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+    _change_password(client, "testpass123", totp_code=pyotp.TOTP(secret).now())
+    assert check_password_hash(db.get_setting("admin_password_hash"), "changed456")
+
+
+def test_reset_password_flag_erases_hash_and_is_self_cleaning(client, monkeypatch, tmp_path):
+    flag = tmp_path / "RESET_PASSWORD"
+    monkeypatch.setattr(app_module, "PASSWORD_RESET_FLAG_PATH", str(flag))
+    _login_admin(client)
+    secret = _enable_totp_directly()
+    thief = _copy_of_session_cookie(client)
+
+    client.get("/admin/login")
+    assert db.get_setting("admin_password_hash") is not None  # no file: no-op
+
+    flag.write_text("")
+    client.get("/admin/login")
+    assert db.get_setting("admin_password_hash") is None
+    assert not flag.exists()
+    assert twofactor.is_enabled() is True and db.get_setting("admin_totp_secret") == secret
+    assert thief.get("/admin/services").status_code == 302  # sessions rotated out
+
+
+def test_report_problem_post_without_opening_form_is_refused(client):
+    resp = client.post("/report", data={"message": "direct post, no cookie"})
+    assert resp.status_code == 302
+    assert db.list_problem_reports() == []
+
+
+def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
+    monkeypatch.setattr(app_module.notifications, "notify", lambda *a, **kw: None)
+    app_module._report_state["window_start"] = 0.0
+    app_module._report_state["count"] = 0
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 10
+    client.post("/report", data={"message": "first"})
+    client.post("/report", data={"message": "second"})
+    assert [r["message"] for r in db.list_problem_reports()] == ["first"]
