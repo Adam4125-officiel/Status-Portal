@@ -3707,7 +3707,7 @@ def test_the_fragment_is_only_the_live_region(client, isolated_db):
 def test_the_fragment_answers_304_when_nothing_changed(client, isolated_db):
     first = client.get("/?fragment=1")
     etag = first.headers["ETag"]
-    assert first.headers["Cache-Control"] == "no-cache"
+    assert first.headers["Cache-Control"] == "public, max-age=15"
     again = client.get("/?fragment=1", headers={"If-None-Match": etag})
     assert again.status_code == 304
     assert again.data == b""
@@ -5597,3 +5597,55 @@ def test_the_csrf_token_still_reaches_every_page_with_a_form(isolated_db, user_a
                                                        "csrf_token": token})
         assert resp.status_code == 302
     assert db.get_setting("site_name") == "Renamed"
+
+
+def test_an_anonymous_public_page_is_publicly_cacheable_for_a_short_while(client, isolated_db):
+    """No cookie in, none out: a browser or Cloudflare may keep the page briefly, which
+    is what lets the status page answer while the server itself is down."""
+    db.set_setting("show_public_cpu", "1")
+    for path in ("/", "/server", "/info", "/?fragment=1"):
+        resp = client.get(path, headers={"Accept-Encoding": "gzip"})
+        assert resp.status_code == 200, path
+        assert resp.headers["Cache-Control"] == "public, max-age=15", path
+        assert "Cookie" in resp.headers["Vary"] and "Accept-Encoding" in resp.headers["Vary"], path
+    etag = client.get("/?fragment=1").headers["ETag"]
+    again = client.get("/?fragment=1", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.headers["Cache-Control"] == "public, max-age=15"
+
+
+def test_a_page_rendered_for_someone_with_a_session_is_never_public(client, isolated_db,
+                                                                    user_auth, monkeypatch):
+    """A signed-in visitor's page carries their name and a CSRF token; it must never be
+    stored by a shared cache. Same for an admin reading the public page, and for any
+    request that merely carries a session cookie."""
+    paths = ("/", "/server", "/info", "/?fragment=1")
+    with app_module.app.test_client() as c:
+        c.set_cookie("session", "anything")
+        for path in paths:
+            cache_control = c.get(path).headers["Cache-Control"]
+            assert "public" not in cache_control and "no-cache" in cache_control, path
+    _sign_in(client, monkeypatch)
+    for path in paths:
+        resp = client.get(path)
+        assert "public" not in resp.headers["Cache-Control"], path
+        assert resp.headers["Cache-Control"] == "private, no-cache", path
+    with app_module.app.test_client() as c:
+        _login(c)
+        assert c.get("/").headers["Cache-Control"] == "private, no-cache"
+
+
+def test_a_response_that_starts_a_session_is_never_public(client, isolated_db):
+    """A page that sets the cookie itself (here a flash message on an otherwise
+    anonymous request) must not be cached with that Set-Cookie attached."""
+    with app_module.app.test_request_context("/"):
+        app_module.flash("hello")
+        resp = app_module.app.make_response("<p>x</p>")
+        app_module._apply_cache_policy(resp)
+        assert resp.headers["Cache-Control"] == "private, no-cache"
+
+
+def test_forms_and_per_visitor_paths_are_never_cached(client, isolated_db, user_auth):
+    db.set_setting("report_requires_login", "0")
+    for path in ("/login", "/report", "/search", "/admin/login"):
+        assert client.get(path).headers.get("Cache-Control") == "no-store", path

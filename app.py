@@ -138,13 +138,50 @@ def set_security_headers(response):
     if request.path.startswith("/static/uploads/"):
         response.headers["Content-Security-Policy"] = "sandbox"
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
-    # Signed-in pages must not be kept by the browser or anything in between:
-    # otherwise the back button, or the next person on a shared machine, can bring
-    # an admin or account page back after logout. Overrides the send_file() default
-    # too, which is what the two point-in-time downloads under /admin/ want anyway.
-    if request.path == "/admin" or request.path.startswith(("/admin/", "/account")):
-        response.headers["Cache-Control"] = "no-store"
+    _apply_cache_policy(response)
     return response
+
+
+# Pages that are per-visitor or carry a form: never kept by the browser or anything in
+# between, whoever asks. Matched as a path or a path prefix followed by "/".
+_NEVER_CACHED_PATHS = ("/admin", "/account", "/search", "/login", "/report")
+# How long a browser or a CDN may keep an anonymous public page. Short enough that a
+# status change shows within one refresh; long enough that a burst of visitors (or a
+# CDN serving the page while the origin is down) costs one render.
+PUBLIC_CACHE_SECONDS = 15
+
+
+def _apply_cache_policy(response):
+    """Cache-Control for HTML, in three tiers.
+
+    * Under _NEVER_CACHED_PATHS: `no-store`, so the back button, or the next person on
+      a shared machine, can't bring an admin or account page back after logout.
+      Overrides the send_file() default too, which is what the two point-in-time
+      downloads under /admin/ want anyway.
+    * Any other page, for a request carrying a session cookie or leaving with one:
+      `private, no-cache` - never a shared cache (the page can show a name, a sign-out
+      button, a CSRF token), and the browser revalidates, which keeps the polled
+      fragment's 304.
+    * The rest - an anonymous GET of a public page that set no cookie (base.html
+      renders the CSRF token only when a session or a form needs it) - is
+      `public, max-age=PUBLIC_CACHE_SECONDS`, which lets Cloudflare serve it, even
+      while this server is down. `Vary: Cookie` alone does not stop Cloudflare
+      serving it to a signed-in visitor: its cache rule must bypass on the `session`
+      cookie (docs/claude/sessions-caching-db.md).
+
+    Static files and non-HTML responses keep whatever they already had."""
+    path = request.path
+    if any(path == p or path.startswith(p + "/") for p in _NEVER_CACHED_PATHS):
+        response.headers["Cache-Control"] = "no-store"
+        return
+    if path.startswith("/static/") or response.mimetype != "text/html":
+        return
+    response.vary.add("Cookie")
+    if (app.config["SESSION_COOKIE_NAME"] in request.cookies or session or session.modified
+            or "Set-Cookie" in response.headers):
+        response.headers["Cache-Control"] = "private, no-cache"
+    elif request.method in ("GET", "HEAD") and response.status_code in (200, 304):
+        response.headers["Cache-Control"] = f"public, max-age={PUBLIC_CACHE_SECONDS}"
 
 
 # text/html and the JSON API are the two payload types the audit measured: a
@@ -188,8 +225,8 @@ def _compress_response(response):
 @app.after_request
 def _etag_public_fragment(response):
     """The polled live region of a public page (`?fragment=1`): an ETag over the rendered
-    body so an unchanged page costs a 304 with no body. no-cache = "always revalidate",
-    so the browser never serves a copy without asking. Registered after
+    body so an unchanged page costs a 304 with no body. Cache-Control is left to
+    _apply_cache_policy(), like any other page. Registered after
     _compress_response on purpose: Flask runs these in reverse order, so the tag is
     computed over the plain HTML - gzip's header carries a timestamp, which would make
     the tag change every second."""
@@ -198,7 +235,6 @@ def _etag_public_fragment(response):
             and not response.direct_passthrough
             and not request.path.startswith(("/admin", "/account"))):
         response.add_etag()
-        response.headers["Cache-Control"] = "no-cache"
         response.make_conditional(request)
     return response
 
