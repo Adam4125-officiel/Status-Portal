@@ -32,6 +32,12 @@ A service can be checked by opening `host:port` instead of an HTTP request, for 
 like SMB shares that previously had to be left unmonitored or forced by hand. Verified
 here against local sockets and a throwaway server only; not against a real SMB share.
 
+### TLS certificate expiry alert (added 2026-11-11)
+
+A daily task warns once when an HTTPS service's certificate has fewer than N days
+left. Verified against a local self-signed TLS server and mocked dates only; not
+against a real expiring certificate or a real notification channel.
+
 ### The synchronous integration check that blocked every page load (fixed 2026-07-23)
 
 The public page used to call the Jellyfin/*Arr status checker synchronously on every

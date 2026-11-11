@@ -124,6 +124,18 @@
   Discord, `python app.py` killed and restarted against the same database — the
   notification fired exactly once per disk across both runs, never a second
   time after restart.
+- **TLS certificate expiry alert** (`app._check_tls_certificates()`, scheduler task
+  `tls_certificates`, daily 04:00): same shape as the low-disk alert -
+  notification-only, **edge-triggered** (once when a certificate falls inside the
+  window, silent reset once it is back outside, i.e. renewed), state in `settings`
+  (`tls_alert_state:<service id>`, expiry date in `tls_expiry:<service id>`, both
+  removed by `db.delete_service()`), so a restart cannot repeat a warning. Window:
+  `tls_expiry_alert_days` (Settings, default 14). Only auto-checked `http`-type
+  services whose `check_url` is `https://`. A certificate that does not verify
+  (self-signed) is still read, by pinning exactly that certificate for a second
+  handshake; an already-expired one is reported as expiring now. An unreadable host
+  leaves the last state alone. The date is shown on the admin Services page only -
+  never in `/api/status` or on a public page.
 - **`_enrich_services()`** (used by both `index()` and `/api/status`, so the JSON
   API gets these fields too, same as every other enriched field it already
   returns) computes `run_target_label`/`dependency_names` only when the
