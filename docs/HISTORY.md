@@ -2393,3 +2393,10 @@ which makes pip refuse the install (and the self-update) there.
 every save rewrote every setting, unticking the boxes it did not contain. It is now three
 forms (Public page, Monitoring, Security) with separate handlers that write only their own
 keys. `/admin/settings/general` stays at its address and keeps the public-page keys.
+
+## Security page (2026-11)
+
+The password and session timeout sat in Settings, 2FA had its own menu entry, the two API keys
+were on Channels and Display device, and nothing could sign out other sessions on demand (the
+epoch rotated only as a side effect of a password or 2FA change). `/admin/security` gathers them,
+adds the sign-out button and a checks panel; every old route still works.

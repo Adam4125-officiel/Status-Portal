@@ -282,11 +282,25 @@
 
 - **Public page, Monitoring and Security are three forms with three handlers**
   (`admin_settings_general`, `admin_settings_monitoring`, `admin_settings_security`),
-  each with its own anchor. **Each handler writes only its own keys.** An unticked
+  each with its own anchor (the Security form itself now renders on `/admin/security`). **Each handler writes only its own keys.** An unticked
   checkbox is simply absent from a POST and reads as "off", so a handler that also
   wrote another form's keys would reset that form's boxes on every save. A new
   setting goes in the handler of the form that shows it; `test_each_settings_form_writes_only_its_own_keys`
   covers it. The service defaults live in the Monitoring form (rule 8 still applies).
+
+## Security page (`/admin/security`)
+
+- One page for password, 2FA status (the setup itself stays on `/admin/2fa`), session
+  timeout, "Sign out all other sessions" (`_rotate_admin_session_epoch()`, behind
+  `_require_totp()`), both API keys and a checks panel (`_security_checks()`).
+- **Nothing it shows has a new handler.** The password form posts to `/admin/security`
+  (`_change_admin_password()`, shared with the older POST to `/admin/settings`, which
+  still works), the timeout to `/admin/settings/security`, the key buttons to their
+  original routes, which return here when the form carries `back=security` (`_key_page()`,
+  a whitelist, not a free `next`).
+- The checks read the request, settings and the update cache only. HTTPS counts as seen
+  from `request.is_secure` or an `X-Forwarded-Proto: https` header, because without
+  `PORTAL_BEHIND_PROXY` the first is false behind a tunnel.
 
 ## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
 
