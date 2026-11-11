@@ -89,7 +89,6 @@ PAGES = [
     ("admin_2fa.html", "admin_2fa", "Two-factor auth"),
     ("admin_2fa_enable.html", "admin_2fa_enable", "Two-factor auth · Set up"),
     ("admin_about.html", "admin_about", "About"),
-    ("admin_clear_browser_cache.html", "admin_system_clear_browser_cache", "System · Clear browser cache"),
 ]
 
 # Templates that are page furniture rather than a page, so they have no entry above and
