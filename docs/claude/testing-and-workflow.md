@@ -188,18 +188,22 @@ in this app logs a real error now.
   and Discord have their own locked files rather than `-r requirements.txt` plus a loose
   `pytest`. The dev file includes the runtime dependencies (`-r requirements.in`,
   constrained by `-c requirements.txt`); the Discord file is an add-on to the runtime.
-- Regenerate on **Python 3.12** (CI and the Dockerfile use it; a lock made on 3.14
-  silently drops packages that only 3.12 needs, such as `typing-extensions`):
+- Regenerate as a **universal** lock, so one file serves every platform and Python the
+  README supports (3.10+). A plain `pip-compile` run on Linux drops everything behind a
+  marker: `colorama` on Windows, `typing-extensions`/`async-timeout` on older Pythons,
+  `audioop-lts` on 3.13+. With hashes in the file pip then refuses the install on those
+  machines, and a self-update fails. Use uv:
 
   ```
-  pip install pip-tools
-  pip-compile --generate-hashes --strip-extras requirements.in
-  pip-compile --generate-hashes --strip-extras requirements-dev.in
-  pip-compile --generate-hashes --strip-extras requirements-discord.in
+  pip install uv
+  for n in requirements requirements-dev requirements-discord; do
+    uv pip compile --universal --generate-hashes --python-version 3.10 --no-header $n.in -o $n.txt
+  done
   ```
 
   Add `--upgrade` to move versions. Regenerate before every release and commit the
-  `.txt` files together with the `.in` change that caused them.
+  `.txt` files together with the `.in` change that caused them. Check that
+  `requirements.txt` still has `colorama==... ; sys_platform == 'win32'`.
 - Verify in a throwaway venv: `pip install -r requirements-dev.txt -r
   requirements-discord.txt`, then `python -c "import updater;
   updater._install_dependencies(print)"` (the updater runs a plain `pip install -r
