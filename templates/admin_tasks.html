@@ -124,6 +124,16 @@
   control it. They're shown so this page is the complete answer to “what does this portal
   do on a timer”, rather than two thirds of it.
 </p>
+<p style="font-size: 13px; margin-bottom: 14px;">
+  Last health-check cycle finished:
+  {% if last_health_cycle_at %}
+    <span class="local-time" data-utc="{{ last_health_cycle_at }}">{{ last_health_cycle_at[:16].replace('T', ' ') }} UTC</span>
+  {% else %}
+    <span style="color: var(--text-faint);">not yet</span>
+  {% endif %}
+  · Heartbeat ping:
+  {% if heartbeat_enabled %}on (<code>PORTAL_HEARTBEAT_URL</code>){% else %}<span style="color: var(--text-faint);">off</span>{% endif %}
+</p>
 <div class="form-panel">
   <div class="admin-table" style="font-size: 13px;">
     <table>

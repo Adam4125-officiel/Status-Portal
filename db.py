@@ -55,6 +55,17 @@ class _PooledConnection:
         return self._conn.__exit__(exc_type, exc_val, exc_tb)
 
 
+def _open_connection():
+    """Every row-returning connection db.py opens comes from here. synchronous=NORMAL
+    is safe under WAL (a power cut can lose the last commits, never corrupt the file)
+    and skips an fsync per commit; it is per-connection, so it is set on each one."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
 def get_db():
     """Opens a connection to the database - or, inside a request scope (see
     begin_request_scope() below), returns the one connection already open for the
@@ -71,9 +82,7 @@ def get_db():
     cached = getattr(_scoped, "conn", None)
     if cached is not None:
         return cached
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = _open_connection()
     return conn
 
 
@@ -82,9 +91,7 @@ def begin_request_scope():
     this thread makes until end_request_scope() is called - called from app.py's
     very first before_request hook, before anything else that might touch the
     database, so the whole request benefits."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = _open_connection()
     _scoped.raw = conn
     _scoped.conn = _PooledConnection(conn)
 
@@ -109,7 +116,9 @@ def backup_to_file(dest_path):
     (or anything else) is actively writing. A plain file copy of DB_PATH could catch
     a torn/partial write mid-transaction; Connection.backup() can't."""
     source = sqlite3.connect(DB_PATH)
+    source.execute("PRAGMA synchronous = NORMAL")
     dest = sqlite3.connect(dest_path)
+    dest.execute("PRAGMA synchronous = NORMAL")
     with dest:
         source.backup(dest)
     source.close()
@@ -211,6 +220,7 @@ def restore_from_file(src_path):
     end_request_scope()
     try:
         conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.close()
     except sqlite3.DatabaseError:
@@ -1022,6 +1032,24 @@ def update_service_status_from_check(service_id, status, response_ms):
         WHERE id=? AND manual_override=0
     """, (status, response_ms, now_iso(), service_id))
     conn.commit()
+    conn.close()
+
+
+def record_check_result(service_id, status, response_ms):
+    """One health-check result: the service's current state and its history row in a
+    single transaction, so a crash cannot leave one without the other. Same rules as
+    update_service_status_from_check() (manual_override services keep their state)
+    plus record_status_history() (the history row is written regardless)."""
+    conn = get_db()
+    now = now_iso()
+    with conn:
+        conn.execute("""
+            UPDATE services SET status=?, response_ms=?, last_checked=?
+            WHERE id=? AND manual_override=0
+        """, (status, response_ms, now, service_id))
+        conn.execute("""
+            INSERT INTO status_history (service_id, status, response_ms, checked_at) VALUES (?, ?, ?, ?)
+        """, (service_id, status, response_ms, now))
     conn.close()
 
 

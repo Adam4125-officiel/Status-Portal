@@ -495,3 +495,29 @@ def test_a_bad_socket_descriptor_never_blocks_a_restart(monkeypatch):
     happen - especially this restart, which follows a database having been replaced."""
     monkeypatch.setenv("WERKZEUG_SERVER_FD", "not-a-number")
     app_module._release_dev_server_socket()  # must not raise
+
+
+def test_scheduled_backup_task_writes_a_snapshot_and_prunes_only_its_own(isolated_db, tmp_path, monkeypatch):
+    snapshot_dir = tmp_path / "snaps"
+    snapshot_dir.mkdir()
+    monkeypatch.setattr(app_module, "DB_SAFETY_BACKUP_DIR", str(snapshot_dir))
+    monkeypatch.setattr(app_module, "KEEP_SCHEDULED_DB_BACKUPS", 2)
+    monkeypatch.setattr(app_module, "KEEP_DB_SAFETY_BACKUPS", 1)
+    for n in range(3):
+        for prefix in ("portal-scheduled-", "portal-before-restore-"):
+            path = snapshot_dir / f"{prefix}2026010{n}-000000.db"
+            path.write_bytes(b"x")
+            os.utime(path, (1_700_000_000 + n, 1_700_000_000 + n))
+    message = app_module._db_backup_task()
+    assert message.startswith("Saved portal-scheduled-")
+    assert len(list(snapshot_dir.glob("portal-scheduled-*.db"))) == 2
+    assert len(list(snapshot_dir.glob("portal-before-restore-*.db"))) == 3
+    new = [p for p in snapshot_dir.glob("portal-scheduled-*.db") if p.stat().st_size > 1]
+    assert len(new) == 1 and new[0].read_bytes().startswith(b"SQLite format 3\x00")
+
+
+def test_scheduled_backup_is_a_daily_task_shown_on_about(admin):
+    from scheduler import get_task
+    assert get_task("db_backup").defaults["schedule_kind"] == "daily"
+    html = admin.get("/admin/about").get_data(as_text=True)
+    assert "Back up the database" in html

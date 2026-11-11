@@ -75,3 +75,10 @@
   own "Jellyfin activity" section whenever the list is non-empty, regardless of
   whether high-load's thresholds are also tripped. Reads the same
   background-refreshed cache — no extra polling added.
+
+- **End of a cycle is `_finish_health_cycle()`**, the last step of `run_health_checks()`:
+  it stores `last_health_cycle_at` in `settings` (shown on `/admin/tasks`) and, when
+  `PORTAL_HEARTBEAT_URL` is set, sends a GET with a 5 s timeout. It must never raise,
+  and it logs only the exception type, never the URL: heartbeat URLs carry a secret
+  token. The ping goes at the *end* of the try block on purpose - a cycle that raised
+  sends no heartbeat, which is what lets the external monitor notice.

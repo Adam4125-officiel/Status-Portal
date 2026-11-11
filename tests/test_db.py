@@ -1337,3 +1337,30 @@ def test_clearing_a_group_stores_no_group(isolated_db):
     db.update_service(sid, {"name": "x", "url": "", "group_name": ""})
     assert _group_of(sid) == ""
     assert db.list_service_groups() == []
+
+
+def test_connections_use_synchronous_normal(isolated_db):
+    # 1 == NORMAL; SQLite's default under WAL is 2 (FULL), an fsync per commit.
+    conn = db.get_db()
+    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+    conn.close()
+    db.begin_request_scope()
+    try:
+        assert db.get_db().execute("PRAGMA synchronous").fetchone()[0] == 1
+    finally:
+        db.end_request_scope()
+
+
+def test_record_check_result_writes_state_and_history_atomically(isolated_db):
+    sid = db.list_services()[0]["id"]
+    db.record_check_result(sid, "down", None)
+    assert db.get_service(sid)["status"] == "down"
+    conn = db.get_db()
+    assert conn.execute("SELECT COUNT(*) FROM status_history WHERE service_id=?", (sid,)).fetchone()[0] == 1
+    # If the history insert fails, the state update must roll back with it.
+    conn.execute("DROP TABLE status_history")
+    conn.commit()
+    conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        db.record_check_result(sid, "operational", 10)
+    assert db.get_service(sid)["status"] == "down"

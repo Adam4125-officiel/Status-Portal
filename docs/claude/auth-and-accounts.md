@@ -71,6 +71,12 @@ A second identity alongside the single admin: visitors sign in with their Jellyf
 username and password. **Off by default** — enabling it puts a login form on the
 public page, which has to be a deliberate choice.
 
+- **`/login` holds at most `USER_LOGIN_MAX_CONCURRENT` Jellyfin calls at once**
+  (`_user_login_slots`, a third of the waitress pool, like `media_search._outbound_slots`).
+  Past that the visitor gets "try again in a moment" and it is *not* counted as a
+  failed sign-in. The lockout counter only moves after Jellyfin answers, so it cannot
+  stop a simultaneous burst. A new semaphore like this is a module-level cache: reset
+  it in `tests/conftest.py`.
 - **The admin login is untouched, and the separation is structural, not a
   convention.** `session["logged_in"]` is written in exactly one function
   (`_start_admin_session`) and nothing in the visitor flow can reach it;

@@ -108,6 +108,9 @@ SECRET_KEY = _load_or_create_secret_key()
 # The server-side idle check in app.py is the authoritative one; this is the backstop.
 SESSION_COOKIE_MAX_AGE_DAYS = 30
 PORT = int(os.environ.get("PORTAL_PORT", "5000"))
+# Address the server binds. 0.0.0.0 = every interface; set 127.0.0.1 when a reverse
+# proxy or tunnel on the same machine is the only thing that should reach it.
+HOST = os.environ.get("PORTAL_HOST", "0.0.0.0").strip() or "0.0.0.0"
 
 # Backend health-check frequency (server-side polling of each service's check_url).
 CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_CHECK_INTERVAL_SECONDS", "120"))
@@ -216,6 +219,12 @@ SEARCH_TIMEOUT_SECONDS = int(os.environ.get("PORTAL_SEARCH_TIMEOUT_SECONDS", "6"
 # keystroke - this limit is the backstop, not the mechanism.
 SEARCH_RATE_LIMIT = int(os.environ.get("PORTAL_SEARCH_RATE_LIMIT", "40"))
 SEARCH_RATE_WINDOW_SECONDS = int(os.environ.get("PORTAL_SEARCH_RATE_WINDOW_SECONDS", "60"))
+
+# Outbound heartbeat: when set, a GET is sent to this URL at the end of every
+# health-check cycle (healthchecks.io, a hosted Uptime Kuma push monitor...), so
+# something outside this machine notices when the portal or its host goes quiet.
+# Blank = off. Env-only: such URLs usually carry a secret token in the path.
+HEARTBEAT_URL = os.environ.get("PORTAL_HEARTBEAT_URL", "").strip()
 
 # Optional Discord bot (separate feature from the webhook above - see discord_bot.py).
 # Blank = disabled entirely, no bot thread started. A bot token is a full login

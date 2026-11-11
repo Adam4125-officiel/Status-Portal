@@ -79,6 +79,18 @@ was needed.
 
 ---
 
+### No automatic copy of the database (fixed 2026-11-11)
+
+The only database copies were a manual download and the snapshot taken before a
+restore, although the file holds every setting, integration key and the history. A
+daily `db_backup` task now keeps seven copies in `instance/db_backups/`.
+
+### Nothing watched the portal from outside (fixed 2026-11-11)
+
+The status page lives on the machine it reports on, and a frozen check loop left it
+green. `PORTAL_HEARTBEAT_URL` now gets a ping at the end of every cycle, so an external
+monitor notices silence; `/admin/tasks` shows when the last cycle finished.
+
 ## Public page and templates
 
 ### The missed service-card timestamp (2026-07-23)
@@ -2329,3 +2341,17 @@ are POST buttons. `awaiting_totp` had no date, leaving a password-verified sessi
 replayable for the code step indefinitely; it now expires after 5 minutes. The database
 backup download needed only a session although the file holds the TOTP seed and API keys;
 it is a POST behind `_require_totp()`, like the restore.
+
+## Visitor sign-in concurrency and listen address (2026-11)
+
+`/login` called Jellyfin with no cap, and the lockout counter only moves after a reply,
+so about a dozen simultaneous slow sign-ins could hold every waitress thread; it now
+shares the search's bounded-semaphore pattern. The server bound `0.0.0.0` unconditionally
+and `python app.py` ignored `PORTAL_PORT`; both now read `config.HOST` and `config.PORT`.
+
+## Small cleanups (2026-11)
+
+Two tests shared one name, so only the second ran; compose defaulted the search rate
+limit to 20 while `config.py` says 40. Connections now use `synchronous=NORMAL` (safe
+under WAL, one fsync fewer per commit), each check's state and history row share a
+transaction, and check timing uses `time.perf_counter()`.

@@ -87,6 +87,11 @@
   hence `config.WAITRESS_THREADS` (default 12) as well. WAL is a persistent property
   of the file, set once in `init_db()`; it can't be enabled on a network filesystem
   (SMB/NFS), which is why the switch is wrapped and logged rather than assumed.
+- **Every connection db.py opens sets `PRAGMA synchronous=NORMAL`, and a health check's
+  result is written by `db.record_check_result()`.** `synchronous` is per-connection
+  (WAL itself is persistent), so a new `sqlite3.connect()` in `db.py` goes through
+  `_open_connection()` or sets it itself. `record_check_result()` writes the service
+  state and its `status_history` row in one transaction; don't split them again.
 - **`db.get_db()` returns one pooled connection per request, not a fresh connection
   per call** (added in the v1.8.2 performance batch). `app.py`'s first
   `before_request` hook calls `db.begin_request_scope()`, which opens a connection

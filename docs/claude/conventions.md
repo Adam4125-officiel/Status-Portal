@@ -61,6 +61,10 @@
   time to the response headers, not to the last byte (before 1.9.1 it was the full
   download). A server that sends headers and then stalls its body is "reachable",
   consistent with the rule above.
+- **The listen address is `config.HOST` (`PORTAL_HOST`, default `0.0.0.0`), the port
+  `config.PORT`, in both `serve_waitress.py` and `python app.py`.** Never hard-code
+  either. Set `127.0.0.1` when a tunnel on the same machine is the only way in; under
+  docker leave `0.0.0.0` or the published port stops working.
 - **A service stuck at ~2000 ms on a `localhost` check URL is almost always IPv4-only,
   not slow.** On Windows, `localhost` resolves to `::1` first, and a service listening
   only on `0.0.0.0` makes the connection wait ~2 s before falling back to `127.0.0.1`.

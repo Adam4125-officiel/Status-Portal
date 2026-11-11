@@ -781,6 +781,14 @@ USER_LOGIN_LOCKOUT_THRESHOLD = 10
 USER_LOGIN_LOCKOUT_SECONDS = 300
 
 
+# Caps how many Jellyfin sign-ins may be in flight at once, so a burst of slow ones
+# can't hold every waitress thread (same third-of-the-pool reasoning as
+# media_search._outbound_slots). The lockout counter only moves after Jellyfin
+# answers, so it can't stop a simultaneous burst by itself.
+USER_LOGIN_MAX_CONCURRENT = max(1, config.WAITRESS_THREADS // 3)
+_user_login_slots = threading.BoundedSemaphore(USER_LOGIN_MAX_CONCURRENT)
+
+
 def _user_login_locked():
     return time.time() < _user_login_state["locked_until"]
 
@@ -2282,7 +2290,15 @@ def user_login():
             flash("Enter your Jellyfin username and password.", "error")
             return render_template("user_login.html", next_url=next_url)
 
-        result = jellyfin_auth.authenticate(username, password)
+        slots = _user_login_slots
+        if not slots.acquire(blocking=False):
+            # Busy, not a wrong guess: never counted towards the lockout.
+            flash("Sign-in is busy right now - please try again in a moment.", "error")
+            return render_template("user_login.html", next_url=next_url)
+        try:
+            result = jellyfin_auth.authenticate(username, password)
+        finally:
+            slots.release()
         if result["ok"]:
             _register_user_login_success()
             _start_user_session(result["user"])
@@ -3802,6 +3818,8 @@ def admin_about():
         releases_url=updater.RELEASES_PAGE_URL,
         backups=list(reversed(updater.list_backups()))[:5],
         db_backups=list_db_safety_backups(),
+        scheduled_db_backups=list_db_safety_backups(SCHEDULED_BACKUP_PREFIX),
+        db_backup_task=scheduler.task_view(scheduler.get_task("db_backup")),
         python_version=sys.version.split()[0],
         platform_name=f"{platform.system()} {platform.release()}".strip(),
         db_path=db.DB_PATH,
@@ -3930,6 +3948,11 @@ def admin_update():
 # else. Neither can restore the other.
 DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
 KEEP_DB_SAFETY_BACKUPS = 5
+# The daily `db_backup` task writes into the same folder under its own prefix. Listing
+# and pruning are per prefix, so neither kind of copy can ever push out the other.
+SAFETY_BACKUP_PREFIX = "portal-before-restore-"
+SCHEDULED_BACKUP_PREFIX = "portal-scheduled-"
+KEEP_SCHEDULED_DB_BACKUPS = 7
 
 # An extracted database is capped separately from the upload itself, so a small zip
 # that expands to an enormous file (a zip bomb) is refused before it is written out.
@@ -4018,17 +4041,20 @@ def _db_safety_snapshot():
     could catch a torn write from the background health-check thread."""
     os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"portal-before-restore-{stamp}.db")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"{SAFETY_BACKUP_PREFIX}{stamp}.db")
     db.backup_to_file(path)
     return path
 
 
-def list_db_safety_backups():
-    """Newest first. A local os.listdir + stat, the same cheap class of call as
+def list_db_safety_backups(prefix=None):
+    """Newest first. `prefix` selects the kind of copy; the default is the
+    "before a restore" ones. A local os.listdir + stat, the same cheap class of call as
     asset_url()'s getmtime - not the kind of slow outbound I/O the no-blocking-in-a-
     request-handler rule is about, and not worth a cache."""
     try:
-        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR) if n.endswith(".db")]
+        prefix = SAFETY_BACKUP_PREFIX if prefix is None else prefix
+        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR)
+                 if n.endswith(".db") and n.startswith(prefix)]
     except OSError:
         return []
     entries = []
@@ -4044,16 +4070,50 @@ def list_db_safety_backups():
     return sorted(entries, key=lambda e: e["created_at"], reverse=True)
 
 
-def _prune_db_safety_backups():
-    """Keeps the newest KEEP_DB_SAFETY_BACKUPS. Reads the module constant inside the
+def _prune_db_safety_backups(prefix=None, keep=None):
+    """Keeps the newest KEEP_DB_SAFETY_BACKUPS (of the given prefix). Reads the module constant inside the
     function rather than as a default argument, so a monkeypatched value in a test is
     actually honoured - a default arg binds at def time, the same trap that made
     updater._prune_backups pass for the wrong reason once."""
-    for entry in list_db_safety_backups()[KEEP_DB_SAFETY_BACKUPS:]:
+    keep = KEEP_DB_SAFETY_BACKUPS if keep is None else keep
+    for entry in list_db_safety_backups(prefix)[keep:]:
         try:
             os.remove(entry["path"])
         except OSError:
             _logger.warning("Could not prune old database snapshot %s", entry["name"])
+
+
+def _db_backup_task():
+    """Body of the `db_backup` scheduled task: a consistent snapshot of the database
+    into instance/db_backups/, keeping the newest KEEP_SCHEDULED_DB_BACKUPS. Only
+    "portal-scheduled-*" files are ever pruned - the before-restore copies are not
+    this task's to delete."""
+    os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"{SCHEDULED_BACKUP_PREFIX}{stamp}.db")
+    try:
+        db.backup_to_file(path)
+    except Exception:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+        raise
+    _prune_db_safety_backups(SCHEDULED_BACKUP_PREFIX, KEEP_SCHEDULED_DB_BACKUPS)
+    return f"Saved {os.path.basename(path)}."
+
+
+scheduler.register(
+    "db_backup",
+    "Back up the database",
+    "Saves a consistent copy of the database to instance/db_backups/ every day and "
+    "keeps the newest seven. The database holds all settings, integrations and "
+    "history, so this is the copy to reach for if the disk or the file is damaged.",
+    _db_backup_task,
+    default_schedule_kind="daily",
+    default_daily_at="03:00",
+)
 
 
 @app.route("/admin/about/restore-db", methods=["POST"])
@@ -5103,6 +5163,8 @@ def admin_discord_bot_guilds():
 def admin_tasks():
     return render_template("admin_tasks.html", tasks=scheduler.list_task_views(),
                             loops=scheduler.list_loop_views(),
+                            last_health_cycle_at=db.get_setting(LAST_HEALTH_CYCLE_SETTING),
+                            heartbeat_enabled=bool(config.HEARTBEAT_URL),
                             tick_seconds=config.SCHEDULER_TICK_SECONDS, active="tasks")
 
 
@@ -5227,11 +5289,11 @@ def _run_single_check(check_url, slow_threshold_ms):
     downloading the body - a whole web app's HTML, every cycle, for every service -
     was pure waste. elapsed_ms is therefore time to the response headers, not to
     the last byte of the body."""
-    start = time.time()
+    start = time.perf_counter()
     try:
         r = requests.get(check_url, timeout=5, stream=True)
         try:
-            elapsed_ms = int((time.time() - start) * 1000)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
             return _check_status_for_response(r, elapsed_ms, slow_threshold_ms), elapsed_ms
         finally:
             r.close()
@@ -5425,8 +5487,7 @@ def _check_and_record_service(s, status_by_id):
                                     _linked_integration_reachable(s["id"]))
         dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
         status = _merge_dependency_health(status, dependency_statuses)
-        db.update_service_status_from_check(s["id"], status, elapsed_ms)
-        db.record_status_history(s["id"], status, elapsed_ms)
+        db.record_check_result(s["id"], status, elapsed_ms)
         # Status/response time are recorded above regardless - only the
         # auto-incident escalation is held back during the grace window, so a
         # service that's still booting doesn't get an incident opened on it.
@@ -5434,6 +5495,28 @@ def _check_and_record_service(s, status_by_id):
             _handle_incident_lifecycle(s, previous_status, status)
     except Exception:
         _logger.exception("health check failed for service '%s'", s.get("name", "?"))
+
+
+HEARTBEAT_TIMEOUT_SECONDS = 5
+LAST_HEALTH_CYCLE_SETTING = "last_health_cycle_at"
+
+
+def _finish_health_cycle():
+    """End-of-cycle bookkeeping: record when the cycle finished (shown on
+    /admin/tasks) and ping PORTAL_HEARTBEAT_URL if one is set. Never raises - a dead
+    heartbeat endpoint or a locked database must not stop the next cycle."""
+    try:
+        db.set_setting(LAST_HEALTH_CYCLE_SETTING, datetime.now(timezone.utc).isoformat())
+    except Exception:
+        _logger.exception("could not record the end of the health-check cycle")
+    url = config.HEARTBEAT_URL
+    if not url:
+        return
+    try:
+        requests.get(url, timeout=HEARTBEAT_TIMEOUT_SECONDS).raise_for_status()
+    except Exception as e:
+        # Not the URL itself: heartbeat URLs usually carry a secret token.
+        _logger.warning("heartbeat ping failed: %s", type(e).__name__)
 
 
 def run_health_checks():
@@ -5474,6 +5557,7 @@ def run_health_checks():
             # the things that genuinely have to happen on the health-check cycle:
             # maintenance windows first, then every service's status, then the
             # integration cache that _merge_api_health() reads from.
+            _finish_health_cycle()
         except Exception:
             _logger.exception("health-check loop error")
         time.sleep(config.CHECK_INTERVAL_SECONDS)
@@ -5628,4 +5712,4 @@ if __name__ == "__main__":
     scheduler.start()
     discord_bot.start()
     # debug must stay False whenever this is reachable outside localhost.
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=config.HOST, port=config.PORT, debug=False)

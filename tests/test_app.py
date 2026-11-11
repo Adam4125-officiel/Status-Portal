@@ -3406,7 +3406,7 @@ def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypa
     assert b"Set up a channel above first" in resp.data
 
 
-def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+def test_admin_settings_backup_db_zip_contains_openable_database(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
@@ -5052,3 +5052,97 @@ def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
     client.post("/report", data={"message": "first"})
     client.post("/report", data={"message": "second"})
     assert [r["message"] for r in db.list_problem_reports()] == ["first"]
+
+
+# ---------------------------------------------------------------------------
+# End of a health-check cycle: heartbeat ping and last-cycle timestamp
+# ---------------------------------------------------------------------------
+
+def test_finish_health_cycle_records_time_and_pings_heartbeat(monkeypatch):
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/abc")
+    monkeypatch.setattr(app_module.requests, "get",
+                        lambda url, timeout: calls.append((url, timeout)) or _Resp())
+    app_module._finish_health_cycle()
+    assert calls == [("https://ping.example/abc", 5)]
+    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+
+
+def test_finish_health_cycle_without_url_makes_no_request(monkeypatch):
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "")
+
+    def boom(*a, **k):
+        raise AssertionError("no request expected")
+
+    monkeypatch.setattr(app_module.requests, "get", boom)
+    app_module._finish_health_cycle()
+    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+
+
+def test_finish_health_cycle_never_raises_and_does_not_log_the_url(monkeypatch, caplog):
+    def boom(url, timeout):
+        raise app_module.requests.ConnectionError("https://ping.example/SECRET refused")
+
+    monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/SECRET")
+    monkeypatch.setattr(app_module.requests, "get", boom)
+    app_module._finish_health_cycle()
+    assert "heartbeat ping failed" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+def test_admin_tasks_shows_last_health_cycle(client, demo_task):
+    _login(client)
+    assert "not yet" in client.get("/admin/tasks").data.decode()
+    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2026-11-11T10:20:30+00:00")
+    assert "2026-11-11 10:20" in client.get("/admin/tasks").data.decode()
+
+
+def test_sign_in_is_refused_without_a_failure_when_every_slot_is_taken(client, user_auth, monkeypatch):
+    """A burst of slow Jellyfin sign-ins must not hold every server thread: past the
+    cap, the visitor is told to retry, Jellyfin isn't called, and it isn't a failure."""
+    calls = []
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate",
+                        lambda u, p: calls.append(u) or {"ok": False, "reason": "invalid"})
+    slots = app_module._user_login_slots
+    taken = 0
+    while slots.acquire(blocking=False):
+        taken += 1
+    try:
+        resp = client.post("/login", data={"username": "adam", "password": "pw"},
+                           follow_redirects=True)
+    finally:
+        for _ in range(taken):
+            slots.release()
+    assert "try again in a moment" in resp.data.decode()
+    assert calls == []
+    assert app_module._user_login_state["failures"] == 0
+
+
+def test_the_sign_in_slot_is_released_even_when_authenticate_raises(client, user_auth, monkeypatch):
+    def boom(u, p):
+        raise RuntimeError("x")
+    monkeypatch.setattr(app_module.jellyfin_auth, "authenticate", boom)
+    for _ in range(app_module.USER_LOGIN_MAX_CONCURRENT + 2):
+        try:
+            client.post("/login", data={"username": "adam", "password": "pw"})
+        except RuntimeError:
+            pass
+    assert _sign_in(client, monkeypatch).status_code == 302
+
+
+def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch):
+    import importlib
+    import config as config_module
+    try:
+        monkeypatch.delenv("PORTAL_HOST", raising=False)
+        assert importlib.reload(config_module).HOST == "0.0.0.0"
+        monkeypatch.setenv("PORTAL_HOST", "127.0.0.1")
+        assert importlib.reload(config_module).HOST == "127.0.0.1"
+    finally:
+        monkeypatch.delenv("PORTAL_HOST", raising=False)
+        importlib.reload(config_module)
