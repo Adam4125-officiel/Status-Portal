@@ -108,6 +108,21 @@ PENDING_MARKER_PATH = os.path.join(INSTANCE_DIR, "update_pending.json")
 INSTALLED_FILES_PATH = os.path.join(INSTANCE_DIR, "installed_files.json")
 KEEP_BACKUPS = 5
 
+# Files a release once shipped and a later one dropped *before* the installed list
+# existed. An install updated by a version without the list never gets one naming
+# them, so without this they would stay forever. Treated exactly like entries of the
+# installed list: removed only when absent from the incoming archive, backed up
+# first, put back by a rollback. Up to v1.12.2 no release had ever dropped a file,
+# so this is the complete set; files dropped from now on are covered by the list.
+RETIRED_FILES = (
+    "static/js/admin_browser_cache_form.js",
+    "static/js/admin_clear_browser_cache.js",
+    "templates/admin_clear_browser_cache.html",
+    "templates/public/activity.html",
+    "templates/public/resources.html",
+    "templates/public/vms.html",
+)
+
 # Windows can refuse a rename while another process still has the destination open
 # (an editor, an antivirus scanner, or this very app streaming a static file). Not a
 # thing on POSIX, where a rename over an open file always succeeds - but harmless to
@@ -721,9 +736,10 @@ def _restore_installed_files(files):
 
 
 def _stale_files(previous, members):
-    """Files the previous update installed that the incoming archive no longer has,
-    and that are still on disk. Without a previous list, nothing: the files on disk
-    then can't be told apart from ones the admin added, so none is deleted.
+    """Files the previous update installed (plus RETIRED_FILES) that the incoming
+    archive no longer has, and that are still on disk. Without a previous list, only
+    RETIRED_FILES: any other file on disk then can't be told apart from one the
+    admin added, so it is not deleted.
 
     The list lives in instance/ and is our own, but it's still re-validated with the
     same rules as an archive member - and an entry that fails them is skipped, never
@@ -1101,7 +1117,7 @@ def perform_update(channel=None, force=False, install_deps=True, allow_dev_check
         old_requirements = _read_file_bytes(os.path.join(config.APP_ROOT, "requirements.txt"))
 
         installed_before = read_installed_files()
-        stale = _stale_files(installed_before, members)
+        stale = _stale_files((installed_before or []) + list(RETIRED_FILES), members)
         backup_dir, manifest = _make_backup(members, current_version(), archive_version, channel,
                                             stale, installed_before)
         progress(f"Backed up {len(manifest['replaced']) + len(stale)} existing file(s) to "

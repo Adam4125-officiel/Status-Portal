@@ -531,10 +531,8 @@ def test_old_backups_are_pruned(monkeypatch, fake_app_dir):
 # ---------------------------------------------------------------------------
 # Files a later release dropped
 # ---------------------------------------------------------------------------
-# Real file names: the ones the "Clear this browser's cache" page and the old public
-# templates left behind, which is the case this exists for.
-RETIRED = ("templates/admin_clear_browser_cache.html", "static/js/admin_clear_browser_cache.js",
-           "templates/public/vms.html")
+# Deliberately not in updater.DROPPED_FILES, so these exercise the installed list only.
+DROPPED = ("templates/old_page.html", "static/js/old_page.js", "old_module.py")
 
 
 def _release_files(version, *extra):
@@ -554,18 +552,18 @@ def _update_to(monkeypatch, version, files):
 
 
 def test_an_update_records_the_files_it_installed(monkeypatch, fake_app_dir):
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
-    assert sorted(updater.read_installed_files()) == sorted(_release_files("1.5.0", *RETIRED))
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
+    assert sorted(updater.read_installed_files()) == sorted(_release_files("1.5.0", *DROPPED))
 
 
 def test_files_a_release_dropped_are_backed_up_then_deleted(monkeypatch, fake_app_dir):
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
     (fake_app_dir / "my_own_notes.txt").write_text("the admin's, never shipped")
 
     result = _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
 
-    assert result["files_removed"] == len(RETIRED)
-    for name in RETIRED:
+    assert result["files_removed"] == len(DROPPED)
+    for name in DROPPED:
         assert not (fake_app_dir / name).exists()
     # A directory the removal emptied goes too; one still in use stays.
     assert not (fake_app_dir / "static" / "js").exists()
@@ -573,21 +571,21 @@ def test_files_a_release_dropped_are_backed_up_then_deleted(monkeypatch, fake_ap
     # A file no release ever listed is not the updater's to delete.
     assert (fake_app_dir / "my_own_notes.txt").exists()
     manifest = updater.list_backups()[-1]
-    assert sorted(manifest["removed"]) == sorted(RETIRED)
-    for name in RETIRED:
+    assert sorted(manifest["removed"]) == sorted(DROPPED)
+    for name in DROPPED:
         assert (Path(manifest["path"]) / name).read_text() == f"{name} 1.5.0"
     # The new list no longer names them, so they're not "removed" a second time.
-    assert not set(RETIRED) & set(updater.read_installed_files())
+    assert not set(DROPPED) & set(updater.read_installed_files())
 
 
 def test_rollback_puts_removed_files_back_and_restores_the_previous_list(monkeypatch, fake_app_dir):
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
     list_before = updater.read_installed_files()
     _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
 
     updater.rollback(progress=lambda m: None)
 
-    for name in RETIRED:
+    for name in DROPPED:
         assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
     assert (fake_app_dir / "app.py").read_text() == "app 1.5.0\n"
     # The restored tree is described by its own list again, so updating once more
@@ -597,14 +595,14 @@ def test_rollback_puts_removed_files_back_and_restores_the_previous_list(monkeyp
 
 def test_emergency_rollback_puts_removed_files_back(monkeypatch, fake_app_dir):
     import update
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
     list_before = updater.read_installed_files()
     _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
 
     monkeypatch.setattr(update, "APP_ROOT", str(fake_app_dir))
     assert update._emergency_rollback() == 0
 
-    for name in RETIRED:
+    for name in DROPPED:
         assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
     assert updater.read_installed_files() == list_before
 
@@ -616,7 +614,7 @@ def test_rolling_back_the_first_listed_update_removes_the_list(monkeypatch, fake
 
 
 def test_a_failed_update_puts_removed_files_back(monkeypatch, fake_app_dir):
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
     list_before = updater.read_installed_files()
 
     def boom(progress):
@@ -628,7 +626,7 @@ def test_a_failed_update_puts_removed_files_back(monkeypatch, fake_app_dir):
     with pytest.raises(updater.UpdateError, match="rolled back"):
         updater.perform_update(progress=lambda m: None)
 
-    for name in RETIRED:
+    for name in DROPPED:
         assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
     assert updater.read_installed_files() == list_before
 
@@ -637,7 +635,7 @@ def test_without_a_previous_list_nothing_is_deleted(monkeypatch, fake_app_dir):
     """The first update from a version that kept no list: what's on disk can't be
     told apart from the admin's own files, so everything stays - and the list starts
     from here."""
-    for name in RETIRED:
+    for name in DROPPED:
         (fake_app_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (fake_app_dir / name).write_text("left by an old version")
 
@@ -645,9 +643,44 @@ def test_without_a_previous_list_nothing_is_deleted(monkeypatch, fake_app_dir):
 
     assert result["files_removed"] == 0
     assert updater.list_backups()[-1]["removed"] == []
-    for name in RETIRED:
+    for name in DROPPED:
         assert (fake_app_dir / name).exists()
     assert sorted(updater.read_installed_files()) == sorted(_release_files("1.5.0"))
+
+
+def test_files_dropped_before_the_list_existed_are_removed_without_a_list(monkeypatch, fake_app_dir):
+    """An install updated by a version that kept no list never gets one naming the
+    files dropped back then - so those exact paths are removed anyway, and nothing
+    else."""
+    for name in updater.RETIRED_FILES:
+        (fake_app_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (fake_app_dir / name).write_text("left by an old version")
+    (fake_app_dir / "old_module.py").write_text("not ours to judge")
+
+    result = _update_to(monkeypatch, "1.5.0", _release_files("1.5.0"))
+
+    assert result["files_removed"] == len(updater.RETIRED_FILES)
+    for name in updater.RETIRED_FILES:
+        assert not (fake_app_dir / name).exists()
+    assert (fake_app_dir / "old_module.py").exists()
+    updater.rollback(progress=lambda m: None)
+    for name in updater.RETIRED_FILES:
+        assert (fake_app_dir / name).read_text() == "left by an old version"
+
+
+def test_a_retired_file_a_release_ships_again_is_kept(monkeypatch, fake_app_dir):
+    name = updater.RETIRED_FILES[0]
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", name))
+    assert (fake_app_dir / name).read_text() == f"{name} 1.5.0"
+
+
+def test_retired_files_are_really_gone_from_the_repository_and_not_protected():
+    """A retired path that came back would still be safe (it would be in the archive),
+    but it would mean this list is wrong - and it must never name a protected path."""
+    repo = os.path.dirname(os.path.abspath(updater.__file__))
+    for name in updater.RETIRED_FILES:
+        assert not os.path.exists(os.path.join(repo, name)), name
+        assert not updater._is_protected(name), name
 
 
 @pytest.mark.parametrize("content", ["not json", "{}", '{"files": "app.py"}', '{"files": [1]}'])
@@ -692,8 +725,8 @@ def test_a_locked_stale_file_is_kept_and_retried_next_time(monkeypatch, fake_app
     behaved before, so it doesn't undo the update - it stays listed and the next one
     tries again."""
     monkeypatch.setattr(updater, "REPLACE_RETRY_DELAY_SECONDS", 0)
-    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *RETIRED))
-    locked = RETIRED[0]
+    _update_to(monkeypatch, "1.5.0", _release_files("1.5.0", *DROPPED))
+    locked = DROPPED[0]
     real_remove = os.remove
 
     def remove(path, *a, **k):
@@ -703,7 +736,7 @@ def test_a_locked_stale_file_is_kept_and_retried_next_time(monkeypatch, fake_app
     monkeypatch.setattr(updater.os, "remove", remove)
     result = _update_to(monkeypatch, "1.6.0", _release_files("1.6.0"))
 
-    assert result["applied"] is True and result["files_removed"] == len(RETIRED) - 1
+    assert result["applied"] is True and result["files_removed"] == len(DROPPED) - 1
     assert (fake_app_dir / locked).exists()
     assert (fake_app_dir / "app.py").read_text() == "app 1.6.0\n"
     assert locked in updater.read_installed_files()
