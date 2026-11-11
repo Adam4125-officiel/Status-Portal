@@ -5487,8 +5487,7 @@ def _check_and_record_service(s, status_by_id):
                                     _linked_integration_reachable(s["id"]))
         dependency_statuses = [status_by_id.get(dep_id) for dep_id in db.get_service_dependencies(s["id"])]
         status = _merge_dependency_health(status, dependency_statuses)
-        db.update_service_status_from_check(s["id"], status, elapsed_ms)
-        db.record_status_history(s["id"], status, elapsed_ms)
+        db.record_check_result(s["id"], status, elapsed_ms)
         # Status/response time are recorded above regardless - only the
         # auto-incident escalation is held back during the grace window, so a
         # service that's still booting doesn't get an incident opened on it.
