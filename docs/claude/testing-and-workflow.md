@@ -328,6 +328,9 @@ after the merge, not on the feature branch.
   `requirements-discord.txt` as well as `requirements-dev.txt`: several test modules
   import discord.py and fail without it. A clean venv with only `requirements-dev.txt`
   gives 28 failures in `tests/test_discord_bot.py` and similar, so do not drop it.
+- A separate `docker` job builds the image, starts it and expects `/` to answer 200
+  within about a minute. It is blocking, unlike ruff and pip-audit. If it fails, the
+  container logs are printed in the job.
 - Ruff and pip-audit are advisory (`continue-on-error`) until their findings are
   cleared. Ruff's default rule set changes between versions, so its count moves too.
 - Dependabot checks pip and GitHub Actions weekly. Security reports go through
