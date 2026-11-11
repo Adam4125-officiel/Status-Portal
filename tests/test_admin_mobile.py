@@ -26,3 +26,15 @@ def test_menu_summary_names_other_pages_too(client):
     _login(client)
     html = client.get("/admin/logs").get_data(as_text=True)
     assert "Logs" in re.search(r"<summary.*?</summary>", html, re.S).group(0)
+
+
+def test_services_table_marks_secondary_and_short_columns(client):
+    db.create_service({"name": "Plex", "url": "http://plex.example"})
+    _login(client)
+    html = client.get("/admin/services").get_data(as_text=True)
+    head = re.search(r"<thead>.*?</thead>", html, re.S).group(0)
+    assert head.count("col-secondary") == 3
+    assert head.count("col-short") == 2
+    css = (ROOT / "static/css/style.css").read_text()
+    assert ".admin-table .col-secondary { display: none; }" in css
+    assert ".admin-table .col-short { white-space: nowrap;" in css
