@@ -4661,9 +4661,15 @@ def admin_device_regenerate_key():
     return redirect(url_for("admin_device"))
 
 
-@app.route("/admin/settings/backup-db")
+@app.route("/admin/settings/backup-db", methods=["POST"])
 @login_required
 def admin_settings_backup_db():
+    """The backup holds the TOTP seed and every integration API key, so a session
+    cookie alone must not be enough to take it: POST behind _require_totp(), like the
+    restore."""
+    blocked = _require_totp("Enter your 2FA code to download a backup.", "admin_about")
+    if blocked:
+        return blocked
     if not os.path.isfile(db.DB_PATH):
         abort(404)
     with tempfile.TemporaryDirectory() as tmp_dir:

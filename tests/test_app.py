@@ -3351,7 +3351,7 @@ def test_notifications_page_lists_every_channel_and_its_state(client, monkeypatc
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.get("/admin/settings/backup-db")
+    resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
     assert resp.mimetype == "application/zip"
     assert "attachment" in resp.headers.get("Content-Disposition", "")
@@ -3370,6 +3370,31 @@ def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     assert "settings" in tables
 
 
+def test_admin_settings_backup_db_is_post_only_and_needs_a_code_when_2fa_is_on(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    assert client.get("/admin/settings/backup-db").status_code == 405
+    secret = _enable_totp_directly()
+
+    resp = client.post("/admin/settings/backup-db", follow_redirects=True)
+    assert resp.mimetype != "application/zip"
+    assert b"Enter your 2FA code to download a backup" in resp.data
+    resp = client.post("/admin/settings/backup-db", data={"totp_code": "000000"})
+    assert resp.status_code == 302
+
+    resp = client.post("/admin/settings/backup-db", data={"totp_code": pyotp.TOTP(secret).now()})
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/zip"
+
+
+def test_about_page_backup_button_is_a_form_with_a_code_field_under_2fa(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    html = client.get("/admin/about").data.decode()
+    assert 'action="/admin/settings/backup-db"' in html
+    assert 'id="backup-totp"' not in html
+    _enable_totp_directly()
+    assert 'id="backup-totp"' in client.get("/admin/about").data.decode()
+
+
 def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypatch):
     """Replaces an older test that asserted the route refused to send. It doesn't need
     to: notify() with nothing configured is a no-op, and the button is disabled in the
@@ -3383,7 +3408,7 @@ def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypa
 
 def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.get("/admin/settings/backup-db")
+    resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
     assert resp.mimetype == "application/zip"
     assert "attachment" in resp.headers.get("Content-Disposition", "")
