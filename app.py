@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import secrets
+import socket
 import sys
 import tempfile
 import threading
@@ -1829,7 +1830,7 @@ def api_status():
 
 # Every key /api/status publishes per service. An allow-list on purpose: a column added
 # to `services` later must not become public by default. External dashboards read these
-# keys, so none may disappear. check_url is never published; run_target only when
+# keys, so none may disappear. check_url and check_type are never published; run_target only when
 # show_run_target_public is set (see _api_service_view).
 _API_SERVICE_KEYS = frozenset({
     "api_health_mode", "auto_check", "auto_incident", "description", "group_name", "icon",
@@ -5559,14 +5560,54 @@ def _within_grace_period(service):
     return grace > 0 and (time.monotonic() - _APP_START) < grace
 
 
-def _run_single_check(check_url, slow_threshold_ms):
-    """One HTTP attempt against check_url. Returns (status, elapsed_ms).
+TCP_CHECK_TIMEOUT_SECONDS = 5
+
+
+def _split_host_port(target):
+    """(host, port) from a 'host:port' string, or None when it is not one. Accepts
+    '[::1]:80' for IPv6 and tolerates a leading scheme or a trailing path, which people
+    paste out of habit."""
+    target = str(target or "").strip()
+    if "://" in target:
+        target = target.split("://", 1)[1]
+    target = target.split("/", 1)[0]
+    host, sep, port = target.rpartition(":")
+    host = host.strip("[]")
+    if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
+        return None
+    return host, int(port)
+
+
+def _run_tcp_check(target, slow_threshold_ms):
+    """One TCP attempt: is the port open? Returns (status, elapsed_ms), the same shape
+    and the same states as the HTTP check - connected is operational (slow past the
+    threshold), anything else, including a target that is not host:port, is down."""
+    endpoint = _split_host_port(target)
+    if endpoint is None:
+        return "down", None
+    start = time.perf_counter()
+    try:
+        with socket.create_connection(endpoint, timeout=TCP_CHECK_TIMEOUT_SECONDS):
+            pass
+    except OSError:
+        return "down", None
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    if slow_threshold_ms and elapsed_ms > slow_threshold_ms:
+        return "slow", elapsed_ms
+    return "operational", elapsed_ms
+
+
+def _run_single_check(check_url, slow_threshold_ms, check_type="http"):
+    """One attempt against check_url (an HTTP request, or a TCP connect to host:port
+    when check_type is "tcp"). Returns (status, elapsed_ms).
 
     Streamed, and closed as soon as the status line and headers are in: the verdict
     only ever depends on the status code (see _check_status_for_response), so
     downloading the body - a whole web app's HTML, every cycle, for every service -
     was pure waste. elapsed_ms is therefore time to the response headers, not to
     the last byte of the body."""
+    if check_type == "tcp":
+        return _run_tcp_check(check_url, slow_threshold_ms)
     start = time.perf_counter()
     try:
         r = requests.get(check_url, timeout=5, stream=True)
@@ -5595,14 +5636,15 @@ def _check_service_status(service):
     "retrying" instead of silently keeping the last-known status - narrow (only
     matters if a request lands in the same seconds-long window), but real, since
     this loop can block for up to retry_count * retry_interval_seconds."""
-    status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+    check_type = service.get("check_type") or "http"
+    status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"], check_type)
     retries_left = service.get("retry_count") or 0
     interval = service.get("retry_interval_seconds") or 0
     try:
         while status == "down" and retries_left > 0:
             _retry_in_progress.add(service.get("id"))
             time.sleep(interval)
-            status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+            status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"], check_type)
             retries_left -= 1
     finally:
         _retry_in_progress.discard(service.get("id"))

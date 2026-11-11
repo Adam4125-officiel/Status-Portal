@@ -1727,13 +1727,13 @@ def test_api_status_never_leaks_check_urls_or_unpublished_run_targets(client):
 
 
 def test_api_status_keeps_every_other_service_field(client):
-    """External devices read this endpoint, so the trim is exactly those two keys -
-    nothing else may disappear."""
+    """External devices read this endpoint, so the trim is exactly those keys (the
+    probe address and how it is probed stay private) - nothing else may disappear."""
     sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
                               "run_target": "host"})
     row = db.get_service(sid)
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
-    expected = (set(row) - {"check_url", "run_target"}) | {
+    expected = (set(row) - {"check_url", "check_type", "run_target"}) | {
         "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
         "run_target_label", "dependency_names"}
     assert set(published) == expected
@@ -1747,7 +1747,7 @@ def test_api_status_publishes_only_the_allow_listed_keys(client):
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
     assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
     row = db.get_service(sid)
-    assert set(row) - {"check_url", "run_target"} <= app_module._API_SERVICE_KEYS
+    assert set(row) - {"check_url", "check_type", "run_target"} <= app_module._API_SERVICE_KEYS
 
 
 def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):

@@ -44,13 +44,22 @@
   <div class="field">
     <label class="field-check">
       <input type="checkbox" name="auto_check" {{ 'checked' if service and service.auto_check }}>
-      Check automatically (HTTP ping every 2 min — only for a service that responds over HTTP, not SMB/FTP)
+      Check automatically (every 2 min, over HTTP or by opening a TCP port - see check type below)
     </label>
   </div>
   <div class="field">
-    <label for="check_url">Check URL (if auto-check is on)</label>
-    <input type="text" id="check_url" name="check_url" value="{{ service.check_url if service else '' }}" placeholder="http://192.168.1.x:port/health">
-    <div class="field-hint">A response is treated as reachable regardless of status code (a 401/403 login prompt still counts as up) - only a 5xx server error or a failed connection counts against it. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
+    <label for="check_type">Check type</label>
+    {% set current_check_type = service.check_type if service else 'http' %}
+    <select id="check_type" name="check_type">
+      <option value="http" {{ 'selected' if current_check_type != 'tcp' }}>HTTP - request the URL below</option>
+      <option value="tcp" {{ 'selected' if current_check_type == 'tcp' }}>TCP port - connect to host:port below (5 s limit)</option>
+    </select>
+    <div class="field-hint">Use TCP for something that does not speak HTTP, such as an SMB share (192.168.1.x:445) or a database. Open port = operational; refused or timed out = down. Retries, slow threshold and incidents work the same way.</div>
+  </div>
+  <div class="field">
+    <label for="check_url">Check URL or host:port (if auto-check is on)</label>
+    <input type="text" id="check_url" name="check_url" value="{{ service.check_url if service else '' }}" placeholder="http://192.168.1.x:port/health or 192.168.1.x:445">
+    <div class="field-hint">For an HTTP check, a response is treated as reachable regardless of status code (a 401/403 login prompt still counts as up) - only a 5xx server error or a failed connection counts against it. Leave everything blank (and auto-check unchecked) for something like an SMB share.</div>
   </div>
   <div class="field">
     <label for="slow_threshold_ms">Slow threshold (ms)</label>
