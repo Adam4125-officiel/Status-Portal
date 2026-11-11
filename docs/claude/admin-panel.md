@@ -278,6 +278,16 @@
   shows up without a restart while a search does no disk I/O. It's in
   `admin_search.clear_caches()` and `tests/conftest.py` like every other module cache.
 
+## Settings: three independent forms (`/admin/settings`)
+
+- **Public page, Monitoring and Security are three forms with three handlers**
+  (`admin_settings_general`, `admin_settings_monitoring`, `admin_settings_security`),
+  each with its own anchor. **Each handler writes only its own keys.** An unticked
+  checkbox is simply absent from a POST and reads as "off", so a handler that also
+  wrote another form's keys would reset that form's boxes on every save. A new
+  setting goes in the handler of the form that shows it; `test_each_settings_form_writes_only_its_own_keys`
+  covers it. The service defaults live in the Monitoring form (rule 8 still applies).
+
 ## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
 
 - **Every admin form submit remembers the page's scroll position and restores it
