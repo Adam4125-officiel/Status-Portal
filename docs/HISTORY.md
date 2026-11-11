@@ -2400,3 +2400,11 @@ The password and session timeout sat in Settings, 2FA had its own menu entry, th
 were on Channels and Display device, and nothing could sign out other sessions on demand (the
 epoch rotated only as a side effect of a password or 2FA change). `/admin/security` gathers them,
 adds the sign-out button and a checks panel; every old route still works.
+
+## Admin menu and overview (2026-11)
+
+The "System" group held seven unrelated pages, "About" hid the update and database-restore
+controls, and `/admin` just redirected to Services. The menu is regrouped (Status, Public content,
+Connections, Notifications, System), "About" is "Updates & backups", and `/admin` shows an
+overview of failing services, open incidents, unread reports, pending approvals, updates, failed
+tasks, a stale health-check cycle, unreachable integrations and failed notifications. No route moved.

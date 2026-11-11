@@ -169,8 +169,8 @@
 
 ## Admin panel navigation (`templates/admin_base.html`)
 
-- **The nav is grouped by what an admin is trying to do** (Status · Content ·
-  Monitoring · Notifications · System), not by when a feature was added. Group
+- **The nav is grouped by what an admin is trying to do** (Overview, then
+  Status · Public content · Connections · Notifications · System), not by when a feature was added. Group
   headings are `.admin-nav__group` spans, not nested lists — the nav is still a flat
   sequence of `<a>` tags, which is what keeps the `active` matching trivial.
 - **Grouping is presentation only: no route ever moves for it.** Bookmarks are the
@@ -178,9 +178,15 @@
   URL; if a genuinely new page is needed (as `/admin/notifications` was), add the
   route rather than relocating an existing one.
 - **`.admin-nav` needs `overflow-y: auto`.** The grouped nav is ~966px tall and a
-  laptop viewport is ~650–720px, so without it the bottom entries (About, Two-factor
-  auth) are simply unreachable — invisible to every route-level test and obvious the
+  laptop viewport is ~650–720px, so without it the bottom entries (Security, Updates &
+  backups) are simply unreachable — invisible to every route-level test and obvious the
   moment you open a browser at a real window height.
+- **`/admin` is an overview, not a redirect** (`_overview_items()`): rows of
+  crit/warn/ok, worst first, built only from the database, caches and settings - never a
+  live call. A new "needs attention" signal is one more `add()` there. It has no
+  trailing slash, so `_inject_admin_badges()` matches `/admin` explicitly as well as
+  `/admin/...`. The Two-factor pages have no menu entry; Security stays highlighted.
+  "About" is now "Updates & backups" (same `/admin/about` URL).
 - **Under 720px the menu is a `<details>`** (`#admin_nav_menu`) whose summary shows the
   current page (from the `nav_labels` map in `admin_base.html`, keyed by `active`) and
   the badge total. It is rendered `open` and the summary is hidden above 720px, so
