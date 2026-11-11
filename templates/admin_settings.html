@@ -5,6 +5,13 @@
   <h1>Settings</h1>
 </div>
 
+<nav class="settings-section-nav" aria-label="Settings sections">
+  <a href="#public-page">Public page</a>
+  <a href="#monitoring">Monitoring</a>
+  <a href="#security">Security</a>
+</nav>
+
+<h2 id="public-page" class="settings-section-title">Public page</h2>
 <form method="POST" action="{{ url_for('admin_settings_general') }}" class="form-panel" style="margin-bottom: 20px;">
   <div class="field">
     <label for="site_name">Server / site name</label>
@@ -128,6 +135,13 @@
     <input type="number" id="public_history_days" name="public_history_days" min="0" value="{{ public_history_days }}" placeholder="blank = show everything">
     <div class="field-hint">Hides a *resolved* incident from the initial public page once it's older than this — a still-open incident is never hidden regardless of age. Hidden items (and the maintenance history list, which is never shown by default at all) stay reachable via the "Load more" / "Show maintenance history" buttons. Leave blank to show full history with no cutoff, like before this setting existed.</div>
   </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save public page settings</button>
+  </div>
+</form>
+
+<h2 id="monitoring" class="settings-section-title">Monitoring</h2>
+<form method="POST" action="{{ url_for('admin_settings_monitoring') }}" class="form-panel" style="margin-bottom: 20px;">
   <div class="field">
     <label>High-load thresholds</label>
     <div class="field-hint" style="margin-bottom: 8px;">The high-load indicator lights up if any of these is exceeded (or if Jellyfin reports an active transcode or a running background task like trickplay generation, when a Jellyfin integration is configured).</div>
@@ -148,11 +162,6 @@
     <label for="lowdisk_percent_threshold">Low disk space alert (% used)</label>
     <input type="number" id="lowdisk_percent_threshold" name="lowdisk_percent_threshold" min="0" max="100" value="{{ lowdisk_percent_threshold }}" placeholder="blank = off">
     <div class="field-hint">Sends a push notification (not an incident — disk space isn't tied to any one service) when any disk's used space reaches this percentage, and another when it drops back below it. Leave blank to disable.</div>
-  </div>
-  <div class="field">
-    <label for="admin_session_timeout_hours">Admin session timeout (hours of inactivity)</label>
-    <input type="number" id="admin_session_timeout_hours" name="admin_session_timeout_hours" min="0" max="{{ max_session_timeout_hours }}" value="{{ admin_session_timeout_hours }}" placeholder="0 = no idle timeout">
-    <div class="field-hint">Signs you out of /admin after this long without any activity — applied server-side, so it behaves identically on every device and browser. Any page you load resets the clock. Set to 0 for no idle timeout, in which case the sign-in still expires after {{ session_cookie_max_age_days }} days. Changing this takes effect immediately, without a restart.</div>
   </div>
   <div class="field">
     <label for="status_history_retention_days">Keep per-check history for (days)</label>
@@ -216,7 +225,7 @@
     </label>
   </div>
   <div class="form-actions">
-    <button type="submit" class="btn">Save</button>
+    <button type="submit" class="btn">Save monitoring settings</button>
   </div>
 </form>
 
@@ -239,7 +248,19 @@
   </div>
 </form>
 
-<form method="POST" class="form-panel">
+<h2 id="security" class="settings-section-title">Security</h2>
+<form method="POST" action="{{ url_for('admin_settings_security') }}" class="form-panel" style="margin-bottom: 20px;">
+  <div class="field">
+    <label for="admin_session_timeout_hours">Admin session timeout (hours of inactivity)</label>
+    <input type="number" id="admin_session_timeout_hours" name="admin_session_timeout_hours" min="0" max="{{ max_session_timeout_hours }}" value="{{ admin_session_timeout_hours }}" placeholder="0 = no idle timeout">
+    <div class="field-hint">Signs you out of /admin after this long without any activity — applied server-side, so it behaves identically on every device and browser. Any page you load resets the clock. Set to 0 for no idle timeout, in which case the sign-in still expires after {{ session_cookie_max_age_days }} days. Changing this takes effect immediately, without a restart.</div>
+  </div>
+  <div class="form-actions">
+    <button type="submit" class="btn">Save security settings</button>
+  </div>
+</form>
+
+<form method="POST" action="{{ url_for('admin_settings') }}" class="form-panel">
   <div class="field">
     <label for="current_password">Current password</label>
     <input type="password" id="current_password" name="current_password" required>

@@ -4431,8 +4431,6 @@ def admin_settings_general():
     db.set_setting("media_calendar_days", _setting_digits(
         request.form.get("media_calendar_days"), str(integrations.DEFAULT_CALENDAR_DAYS)))
     db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
-    for key, default in integrations.HIGHLOAD_DEFAULTS.items():
-        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
@@ -4449,13 +4447,19 @@ def admin_settings_general():
     db.set_setting("kiosk_views", ",".join(
         key for key in request.form.getlist("kiosk_views") if key in KIOSK_VIEW_LABELS))
     db.set_setting("public_history_days", _setting_digits(request.form.get("public_history_days"), ""))
+    flash("Public page settings saved.", "success")
+    return redirect(url_for("admin_settings") + "#public-page")
+
+
+# Each settings form writes only its own keys: a checkbox that is absent from the POST
+# reads as "unchecked", so a shared handler would reset the other forms' boxes.
+@app.route("/admin/settings/monitoring", methods=["POST"])
+@login_required
+def admin_settings_monitoring():
+    for key, default in integrations.HIGHLOAD_DEFAULTS.items():
+        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     db.set_setting("lowdisk_percent_threshold",
                     _setting_digits(request.form.get("lowdisk_percent_threshold"), ""))
-    # Both stored as plain digit strings; a non-numeric submission falls back to the
-    # default rather than being stored blank, since neither has a meaningful
-    # "unset" state the way the two optional thresholds above do.
-    db.set_setting("admin_session_timeout_hours", _setting_digits(
-        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
     retention = db.parse_int(request.form.get("status_history_retention_days"))
     db.set_setting("status_history_retention_days",
                     str(retention) if retention else str(DEFAULT_HISTORY_RETENTION_DAYS))
@@ -4470,8 +4474,20 @@ def admin_settings_general():
                     "1" if request.form.get("service_default_show_run_target_public") else "0")
     db.set_setting("service_default_show_dependencies_public",
                     "1" if request.form.get("service_default_show_dependencies_public") else "0")
-    flash("Settings updated.", "success")
-    return redirect(url_for("admin_settings"))
+    flash("Monitoring settings saved.", "success")
+    return redirect(url_for("admin_settings") + "#monitoring")
+
+
+@app.route("/admin/settings/security", methods=["POST"])
+@login_required
+def admin_settings_security():
+    # Both stored as plain digit strings; a non-numeric submission falls back to the
+    # default rather than being stored blank, since neither has a meaningful
+    # "unset" state the way the two optional thresholds above do.
+    db.set_setting("admin_session_timeout_hours", _setting_digits(
+        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
+    flash("Security settings saved.", "success")
+    return redirect(url_for("admin_settings") + "#security")
 
 
 # ---- Notifications ----

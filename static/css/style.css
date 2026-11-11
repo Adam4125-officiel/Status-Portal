@@ -1017,6 +1017,8 @@ footer.foot {
   max-width: 560px;
 }
 .field { margin-bottom: 16px; }
+.settings-section-title { font-size: 18px; margin: 28px 0 12px; scroll-margin-top: 16px; }
+.settings-section-nav { display: flex; gap: 16px; margin-bottom: 8px; font-size: 14px; }
 .field label {
   display: block;
   font-size: 12.5px;

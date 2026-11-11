@@ -1093,7 +1093,7 @@ def test_wizard_combined_form_prefills_service_defaults(client):
     never reachable from it at all (db.create_service() silently fell back to its
     own hardcoded literals instead)."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={
+    client.post("/admin/settings/monitoring", data={
         "service_default_slow_threshold_ms": "1500", "service_default_retry_count": "2",
     })
     resp = client.get("/admin/new/combined")
@@ -1109,7 +1109,7 @@ def test_wizard_combined_form_prefills_run_target_and_visibility_defaults(client
     on the wizard, exactly the class of bug the two regression tests above already
     guard against for the original field set - same fix, same shape."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={
+    client.post("/admin/settings/monitoring", data={
         "service_default_run_target": "host",
         "service_default_show_run_target_public": "on",
         "service_default_show_dependencies_public": "on",
@@ -1124,7 +1124,7 @@ def test_wizard_combined_form_prefills_run_target_and_visibility_defaults(client
 
 def test_admin_service_new_form_prefills_run_target_and_visibility_defaults(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={
+    client.post("/admin/settings/monitoring", data={
         "service_default_run_target": "host",
         "service_default_show_run_target_public": "on",
         "service_default_show_dependencies_public": "on",
@@ -1137,7 +1137,7 @@ def test_admin_service_new_form_prefills_run_target_and_visibility_defaults(clie
 
 def test_admin_settings_general_saves_run_target_and_visibility_defaults(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/general", data={
+    resp = client.post("/admin/settings/monitoring", data={
         "service_default_run_target": "vm:VM-Media02",
         "service_default_show_run_target_public": "on",
         "service_default_show_dependencies_public": "on",
@@ -1156,7 +1156,7 @@ def test_wizard_combined_applies_configured_service_defaults_on_create(client):
     admin - must land on the created service, not app.py's/db.py's own hardcoded
     fallbacks."""
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={
+    client.post("/admin/settings/monitoring", data={
         "service_default_slow_threshold_ms": "1500", "service_default_startup_grace_seconds": "30",
         "service_default_retry_count": "3", "service_default_retry_interval_seconds": "15",
     })
@@ -2185,7 +2185,7 @@ def test_low_disk_alert_state_survives_restart_no_duplicate_notification(isolate
 
 def test_admin_settings_general_saves_lowdisk_threshold(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/general", data={"lowdisk_percent_threshold": "85"})
+    resp = client.post("/admin/settings/monitoring", data={"lowdisk_percent_threshold": "85"})
     assert resp.status_code == 302
     assert db.get_setting("lowdisk_percent_threshold") == "85"
 
@@ -2961,7 +2961,7 @@ def test_admin_settings_general_saves_layout_order(client):
 
 def test_admin_settings_general_saves_service_defaults(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/settings/general", data={
+    resp = client.post("/admin/settings/monitoring", data={
         "service_default_slow_threshold_ms": "1500",
         "service_default_startup_grace_seconds": "30",
         "service_default_retry_count": "2",
@@ -2980,7 +2980,7 @@ def test_admin_settings_general_saves_service_defaults(client):
 
 def test_admin_service_new_form_prefills_from_defaults(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={"service_default_slow_threshold_ms": "1500"})
+    client.post("/admin/settings/monitoring", data={"service_default_slow_threshold_ms": "1500"})
     resp = client.get("/admin/services/new")
     assert b'id="slow_threshold_ms"' in resp.data
     assert b'value="1500"' in resp.data
@@ -2992,7 +2992,7 @@ def test_admin_service_new_defaults_do_not_affect_existing_services(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     sid = db.list_services()[0]["id"]
     before = db.get_service(sid)["slow_threshold_ms"]
-    client.post("/admin/settings/general", data={"service_default_slow_threshold_ms": "9999"})
+    client.post("/admin/settings/monitoring", data={"service_default_slow_threshold_ms": "9999"})
     assert db.get_service(sid)["slow_threshold_ms"] == before
 
 
@@ -3290,9 +3290,11 @@ def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
 def test_settings_save_refuses_non_ascii_digits(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     client.post("/admin/settings/general", data={
-        "public_history_days": "²", "lowdisk_percent_threshold": "١٢",
-        "highload_cpu_percent": "²", "status_history_retention_days": "²",
-        "admin_session_timeout_hours": "9" * 30, "kiosk_rotation_seconds": "30"})
+        "public_history_days": "²", "kiosk_rotation_seconds": "30"})
+    client.post("/admin/settings/monitoring", data={
+        "lowdisk_percent_threshold": "١٢",
+        "highload_cpu_percent": "²", "status_history_retention_days": "²"})
+    client.post("/admin/settings/security", data={"admin_session_timeout_hours": "9" * 30})
     assert db.get_setting("public_history_days") == ""
     assert db.get_setting("lowdisk_percent_threshold") == ""
     assert db.get_setting("highload_cpu_percent") == "90"
@@ -3671,11 +3673,11 @@ def test_expired_session_on_a_post_redirects_to_login_rather_than_failing_csrf(i
 
 def test_session_timeout_setting_round_trips_and_falls_back_when_invalid(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    client.post("/admin/settings/general", data={"site_name": "S", "admin_session_timeout_hours": "6"})
+    client.post("/admin/settings/security", data={"admin_session_timeout_hours": "6"})
     assert db.get_setting("admin_session_timeout_hours") == "6"
     assert app_module._session_timeout_seconds() == 6 * 3600
 
-    client.post("/admin/settings/general", data={"site_name": "S", "admin_session_timeout_hours": "not-a-number"})
+    client.post("/admin/settings/security", data={"admin_session_timeout_hours": "not-a-number"})
     assert db.get_setting("admin_session_timeout_hours") == str(app_module.DEFAULT_SESSION_TIMEOUT_HOURS)
 
 
@@ -5163,3 +5165,32 @@ def test_footer_version_and_project_link_can_be_hidden(client):
     assert "RSS feed" in html and "Report a problem" in html
     client.post("/admin/settings/general", data={"show_public_version": "on"})
     assert updater.REPO_URL in client.get("/").data.decode()
+
+
+def test_each_settings_form_writes_only_its_own_keys(client):
+    """A checkbox absent from a POST reads as unchecked, so a form must never touch
+    another form's settings - saving one section used to reset the other two."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    seeded = {
+        "show_public_cpu": "1", "kiosk_enabled": "1", "media_requires_login": "1",
+        "public_history_days": "30", "site_name": "Mine", "show_public_version": "1",
+        "lowdisk_percent_threshold": "80", "highload_cpu_percent": "70",
+        "status_history_retention_days": "45", "service_default_auto_incident": "1",
+        "service_default_show_run_target_public": "1", "service_default_slow_threshold_ms": "1234",
+        "admin_session_timeout_hours": "7",
+    }
+    public = {k for k in seeded if k in (
+        "show_public_cpu", "kiosk_enabled", "media_requires_login", "public_history_days",
+        "site_name", "show_public_version")}
+    monitoring = {k for k in seeded if k not in public and k != "admin_session_timeout_hours"}
+    security = {"admin_session_timeout_hours"}
+
+    def reseed():
+        for key, value in seeded.items():
+            db.set_setting(key, value)
+
+    for route, own in (("general", public), ("monitoring", monitoring), ("security", security)):
+        reseed()
+        assert client.post(f"/admin/settings/{route}", data={}).status_code == 302
+        for key in set(seeded) - own:
+            assert db.get_setting(key) == seeded[key], f"{route} form changed {key}"
