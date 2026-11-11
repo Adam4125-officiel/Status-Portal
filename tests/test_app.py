@@ -13,6 +13,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import app as app_module
 import db
+import routes.api as routes_api
 import health as health_module
 import scheduler
 import twofactor
@@ -1746,9 +1747,9 @@ def test_api_status_publishes_only_the_allow_listed_keys(client):
     sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
                               "run_target": "host", "show_run_target_public": 1})
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
-    assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
+    assert set(published) == routes_api._API_SERVICE_KEYS | {"run_target"}
     row = db.get_service(sid)
-    assert set(row) - {"check_url", "check_type", "run_target"} <= app_module._API_SERVICE_KEYS
+    assert set(row) - {"check_url", "check_type", "run_target"} <= routes_api._API_SERVICE_KEYS
 
 
 def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):

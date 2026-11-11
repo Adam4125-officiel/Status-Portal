@@ -23,6 +23,7 @@ Rules for adding to this file
 - Static checks only. Anything needing a running app belongs in test_app.py.
 """
 import ast
+import importlib
 import os
 import re
 
@@ -51,6 +52,20 @@ def _python_modules():
     for name in sorted(os.listdir(REPO)):
         if name.endswith(".py"):
             yield name, _read(name)
+    for name in sorted(os.listdir(os.path.join(REPO, "routes"))):
+        if name.endswith(".py"):
+            yield f"routes/{name}", _read("routes", name)
+
+
+def _views_tree():
+    """app.py and every routes/ module parsed as one tree: the views moved out of
+    app.py into routes/ (see routes/__init__.py), and the checks on them must follow
+    a view wherever it lives rather than silently finding nothing."""
+    body = []
+    for name, source in [("app.py", _read("app.py"))] + [
+            (n, s) for n, s in _python_modules() if n.startswith("routes/")]:
+        body.extend(ast.parse(source, filename=name).body)
+    return ast.Module(body=body, type_ignores=[])
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +214,8 @@ ALL_STATUSES = {"operational", "slow", "degraded", "maintenance", "down"}
 
 
 @pytest.mark.parametrize("module, constant", [
-    ("app", "STATUS_BADGE_LABEL"),
-    ("app", "STATUS_BADGE_COLOR"),
+    ("routes.api", "STATUS_BADGE_LABEL"),
+    ("routes.api", "STATUS_BADGE_COLOR"),
     ("discord_bot", "PRESENCE_TEXT"),
     ("discord_bot", "_EMBED_COLOR_NAME"),
     ("device_api", "STATUS_RANK"),
@@ -210,7 +225,7 @@ def test_status_maps_cover_every_status_including_slow(module, constant):
     are enumerated needs an entry for it too. A map missing it doesn't crash - it
     renders a blank badge or a missing colour, which is exactly the kind of thing that
     ships unnoticed."""
-    mod = __import__(module)
+    mod = importlib.import_module(module)
     mapping = getattr(mod, constant)
     assert set(mapping) == ALL_STATUSES, (
         f"{module}.{constant} covers {sorted(mapping)}; expected {sorted(ALL_STATUSES)}. "
@@ -272,10 +287,10 @@ def test_the_device_api_is_get_only_and_gated_first():
     So: the route accepts GET only, and its first two statements are the 404 gate
     (`device_api_enabled()`) and the shared key check (`_check_api_key()`), in that
     order. A data lookup added above them would answer an unauthenticated request."""
-    tree = ast.parse(_read("app.py"))
+    tree = _views_tree()
     func = next((n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == "api_device_summary"), None)
-    assert func is not None, "api_device_summary() not found in app.py - was it renamed?"
+    assert func is not None, "api_device_summary() not found in app.py or routes/ - was it renamed?"
     route = next(d for d in func.decorator_list
                  if isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "route")
     assert not any(kw.arg == "methods" for kw in route.keywords), (
@@ -309,7 +324,7 @@ def test_only_the_admin_session_helper_ever_sets_logged_in():
     `logged_in` session key is written in exactly one function. If a second place
     starts setting it, the isolation stops being structural and becomes something
     someone has to remember, which is how this class of bug happens."""
-    tree = ast.parse(_read("app.py"))
+    tree = _views_tree()
     setters = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -330,11 +345,11 @@ def test_only_the_admin_session_helper_ever_sets_logged_in():
 
 def test_the_visitor_session_helper_never_touches_admin_session_keys():
     """Same guarantee from the other direction."""
-    tree = ast.parse(_read("app.py"))
+    tree = _views_tree()
     for name in ("_start_user_session", "_end_user_session"):
         func = next((n for n in ast.walk(tree)
                      if isinstance(n, ast.FunctionDef) and n.name == name), None)
-        assert func is not None, f"{name}() not found in app.py - was it renamed?"
+        assert func is not None, f"{name}() not found in app.py or routes/ - was it renamed?"
         # Strip the docstring before inspecting: these functions *explain* the rule
         # in prose, and a check that fires on the comment describing it is exactly
         # the kind of false positive that teaches people to ignore this file.
@@ -356,7 +371,7 @@ def test_admin_routes_are_all_gated_by_the_admin_decorator():
     and nothing else), so no amount of getting the visitor flow wrong can expose an
     admin page. The two login pages are the deliberate exceptions - they're how you
     get a session in the first place."""
-    tree = ast.parse(_read("app.py"))
+    tree = _views_tree()
     exempt = {"admin_login", "admin_logout"}
     missing = []
     for node in ast.walk(tree):
@@ -398,10 +413,10 @@ def test_destructive_routes_go_through_require_totp(route_func):
     admin_2fa_enable is the one that refuses instead of asking: with a stolen cookie
     it would otherwise swap the admin's authenticator for the attacker's, which
     defeats every other route in this list at once."""
-    tree = ast.parse(_read("app.py"))
+    tree = _views_tree()
     func = next((n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == route_func), None)
-    assert func is not None, f"{route_func}() not found in app.py - was it renamed?"
+    assert func is not None, f"{route_func}() not found in app.py or routes/ - was it renamed?"
     if route_func in _REFUSED_WHILE_2FA_ENABLED:
         # The refusal has to come first, before anything reads or writes a secret.
         first = next(n for n in func.body
