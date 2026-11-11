@@ -1696,6 +1696,30 @@ def test_api_status_keeps_every_other_service_field(client):
     assert set(published) == expected
 
 
+def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):
+    resp = client.get("/")
+    csp = resp.headers["Content-Security-Policy"]
+    for directive in ("base-uri 'self'", "form-action 'self'", "object-src 'none'"):
+        assert directive in csp
+    assert "camera=()" in resp.headers["Permissions-Policy"]
+    assert resp.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+
+
+def test_uploaded_files_are_served_sandboxed_but_other_static_files_are_not(client):
+    upload_dir = os.path.join(app_module.app.root_path, "static", "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    path = os.path.join(upload_dir, "test-sandbox.svg")
+    with open(path, "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>')
+    try:
+        resp = client.get("/static/uploads/test-sandbox.svg")
+        assert resp.status_code == 200
+        assert resp.headers["Content-Security-Policy"] == "sandbox"
+    finally:
+        os.remove(path)
+    assert client.get("/").headers["Content-Security-Policy"] != "sandbox"
+
+
 def _statements_for(client, path, monkeypatch):
     """How many SQL statements one request runs, counted with SQLite's own trace hook
     on every connection it opens."""

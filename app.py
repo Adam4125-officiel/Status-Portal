@@ -107,8 +107,24 @@ def set_security_headers(response):
         "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'; "
+        # Not covered by default-src: without these an injected <base> or <form> can
+        # redirect relative URLs or form posts to another site. No form in the app
+        # posts off-site.
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "object-src 'none'"
     )
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    # An uploaded SVG can carry a script and the CSP above allows inline script. As an
+    # <img> or favicon it is inert; opened directly it would run on the portal's
+    # origin. sandbox gives it an opaque origin and no scripts, and does not affect
+    # <img> rendering.
+    if request.path.startswith("/static/uploads/"):
+        response.headers["Content-Security-Policy"] = "sandbox"
     response.headers["Server"] = "status-portal"  # don't advertise the underlying framework/server
     # Signed-in pages must not be kept by the browser or anything in between:
     # otherwise the back button, or the next person on a shared machine, can bring
