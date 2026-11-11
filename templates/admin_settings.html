@@ -183,6 +183,11 @@
     <div class="field-hint">Sends a push notification (not an incident — disk space isn't tied to any one service) when any disk's used space reaches this percentage, and another when it drops back below it. Leave blank to disable.</div>
   </div>
   <div class="field">
+    <label for="tls_expiry_alert_days">TLS certificate warning (days left)</label>
+    <input type="number" id="tls_expiry_alert_days" name="tls_expiry_alert_days" min="1" max="365" value="{{ tls_expiry_alert_days }}" placeholder="blank = 14">
+    <div class="field-hint">A daily task reads the certificate of every service checked over HTTPS and sends one notification when fewer than this many days are left. It warns again only after the certificate has been renewed and runs low again. The expiry date shows on the Services page.</div>
+  </div>
+  <div class="field">
     <label for="status_history_retention_days">Keep per-check history for (days)</label>
     <input type="number" id="status_history_retention_days" name="status_history_retention_days" min="1" max="3650" value="{{ status_history_retention_days }}">
     <div class="field-hint">How long individual health-check results are kept. The uptime percentages come from daily summaries kept for a year, so these rows are only detail — and they are a row per service per check. Older rows are pruned once a day by a scheduled task.</div>

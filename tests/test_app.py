@@ -3272,7 +3272,7 @@ def test_api_maintenance_history_never_500s_on_a_hostile_offset(client, offset):
                                   "kiosk_rotation_seconds", "lowdisk_percent_threshold",
                                   "media_calendar_days", "status_history_retention_days",
                                   "admin_session_timeout_hours", "jellyfin_auth_integration_id",
-                                  "seerr_integration_id"])
+                                  "seerr_integration_id", "tls_expiry_alert_days"])
 def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
     """A value like "²" stored before the write side was fixed (or edited in by hand)
     must read as unset, not raise on every page that reads it."""
@@ -3282,6 +3282,7 @@ def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
     assert app_module._public_history_days() is None
     assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
     assert app_module._lowdisk_threshold() is None
+    assert app_module._tls_alert_days() == app_module.DEFAULT_TLS_ALERT_DAYS
     assert app_module._kiosk_rotation_seconds() == app_module.KIOSK_DEFAULT_ROTATION_SECONDS
     assert app_module._session_timeout_seconds() == app_module.DEFAULT_SESSION_TIMEOUT_HOURS * 3600
     assert app_module.integrations.high_load_thresholds()["cpu_percent"] == 90

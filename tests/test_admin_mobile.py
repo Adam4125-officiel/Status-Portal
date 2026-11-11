@@ -33,7 +33,7 @@ def test_services_table_marks_secondary_and_short_columns(client):
     _login(client)
     html = client.get("/admin/services").get_data(as_text=True)
     head = re.search(r"<thead>.*?</thead>", html, re.DOTALL).group(0)
-    assert head.count("col-secondary") == 3
+    assert head.count("col-secondary") == 4
     assert head.count("col-short") == 2
     css = (ROOT / "static/css/style.css").read_text()
     assert ".admin-table .col-secondary { display: none; }" in css

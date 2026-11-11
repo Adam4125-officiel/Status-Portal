@@ -1138,6 +1138,8 @@ def delete_service(service_id):
     # before that column did) never had that FK constraint defined in the first place.
     conn.execute("UPDATE integrations SET service_id=NULL WHERE service_id=?", (service_id,))
     conn.execute("DELETE FROM services WHERE id=?", (service_id,))
+    conn.execute("DELETE FROM settings WHERE key IN (?, ?)",
+                 (f"tls_alert_state:{service_id}", f"tls_expiry:{service_id}"))
     conn.commit()
     conn.close()
 
@@ -2157,6 +2159,26 @@ def get_low_disk_alert_state(path):
 
 def set_low_disk_alert_state(path, is_low):
     set_setting(f"lowdisk_alert_state:{path}", "1" if is_low else "0")
+
+
+def get_tls_alert_state(service_id):
+    """Whether the daily certificate check already warned about this service's
+    certificate (it is inside the warning window). Persisted in `settings` like the
+    low-disk state, so a restart cannot re-send a warning."""
+    return get_setting(f"tls_alert_state:{service_id}") == "1"
+
+
+def set_tls_alert_state(service_id, warned):
+    set_setting(f"tls_alert_state:{service_id}", "1" if warned else "0")
+
+
+def get_tls_expiry(service_id):
+    """The certificate expiry (ISO date, UTC) the daily check last read, or ''."""
+    return get_setting(f"tls_expiry:{service_id}", "")
+
+
+def set_tls_expiry(service_id, expires_on):
+    set_setting(f"tls_expiry:{service_id}", expires_on)
 
 
 # ---------- Discord bot status-message tracking ----------
