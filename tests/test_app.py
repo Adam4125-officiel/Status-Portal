@@ -5294,3 +5294,18 @@ def test_security_checks_flag_an_available_update(client, monkeypatch):
     assert "A newer version is available" in client.get("/admin/security").get_data(as_text=True)
     monkeypatch.setitem(app_module.updater._update_cache, "result", {"update_available": False})
     assert "A newer version is available" not in client.get("/admin/security").get_data(as_text=True)
+
+
+def test_admin_nav_groups_and_the_updates_page_name(client):
+    """The menu is grouped by intention and the old "About" page is named for what it
+    does. Its h1, title and menu label must agree (CLAUDE.md), and the old URL stays."""
+    _login(client)
+    body = client.get("/admin/about").get_data(as_text=True)
+    assert "<h1>Updates &amp; backups</h1>" in body
+    assert "<title>Updates &amp; backups" in body or "Updates &amp; backups — Admin" in body
+    assert ">About<" not in body
+    groups = re.findall(r'admin-nav__group">([^<]+)<', body)
+    assert groups == ["Status", "Public content", "Connections", "Notifications", "System"]
+    # Two-factor pages keep Security highlighted instead of having their own entry.
+    tfa = client.get("/admin/2fa").get_data(as_text=True)
+    assert 'class="active">Security' in tfa
