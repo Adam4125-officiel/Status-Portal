@@ -420,6 +420,14 @@ _ADMIN_SESSION_KEYS = ("logged_in", "last_seen", "admin_epoch", "awaiting_totp",
                         "login_next", "pending_totp_secret", "seerr_diagnosis")
 
 
+def _end_admin_session():
+    """Drops the admin keys and nothing else, so a browser also signed in as a Jellyfin
+    visitor stays signed in as one. Used by the idle expiry and /admin/logout; see
+    _ADMIN_SESSION_KEYS."""
+    for key in _ADMIN_SESSION_KEYS:
+        session.pop(key, None)
+
+
 def _admin_session_epoch():
     return db.get_setting(ADMIN_SESSION_EPOCH_SETTING, "")
 
@@ -512,8 +520,7 @@ def _enforce_session_timeout():
     # ADMIN_SESSION_EPOCH_SETTING). Same redirect as an expiry, and here for the same
     # ordering reason: a POST must reach the login page, not a CSRF 400.
     if session.get("admin_epoch", "") != _admin_session_epoch():
-        for key in _ADMIN_SESSION_KEYS:
-            session.pop(key, None)
+        _end_admin_session()
         if request.path.startswith("/admin/"):
             return redirect(url_for("admin_login", next=request.path))
         return
@@ -522,7 +529,7 @@ def _enforce_session_timeout():
     now = time.time()
     last_seen = session.get("last_seen")
     if timeout is not None and last_seen is not None and now - last_seen > timeout:
-        session.clear()
+        _end_admin_session()
         if request.path.startswith("/admin/"):
             flash("Your session expired after a period of inactivity. Please sign in again.", "error")
             return redirect(url_for("admin_login", next=request.path))
@@ -2883,7 +2890,7 @@ def admin_login():
 
 @app.route("/admin/logout")
 def admin_logout():
-    session.clear()
+    _end_admin_session()
     return redirect(url_for("index"))
 
 

@@ -4180,6 +4180,26 @@ def test_signing_out_ends_only_the_visitor_session(client, user_auth, monkeypatc
     assert client.get("/admin/services").status_code == 200
 
 
+def test_admin_idle_expiry_and_admin_logout_leave_a_visitor_session_alone(client, user_auth, monkeypatch):
+    """Both used to session.clear(), which also signed the browser out as a Jellyfin
+    visitor. Only the admin keys go, as with a revoked epoch."""
+    _sign_in(client, monkeypatch)
+    _login(client)
+    db.set_setting("admin_session_timeout_hours", "1")
+    with client.session_transaction() as sess:
+        sess["last_seen"] = time.time() - 3601
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
+
+    _login(client)
+    client.get("/admin/logout")
+    with client.session_transaction() as sess:
+        assert "logged_in" not in sess
+        assert sess["portal_user"]["id"] == "u1"
+
+
 def test_a_signed_in_visitor_is_redirected_away_from_the_sign_in_page(client, user_auth, monkeypatch):
     _sign_in(client, monkeypatch)
     assert client.get("/login").status_code == 302
