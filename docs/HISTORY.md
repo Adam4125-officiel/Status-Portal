@@ -2408,3 +2408,9 @@ controls, and `/admin` just redirected to Services. The menu is regrouped (Statu
 Connections, Notifications, System), "About" is "Updates & backups", and `/admin` shows an
 overview of failing services, open incidents, unread reports, pending approvals, updates, failed
 tasks, a stale health-check cycle, unreachable integrations and failed notifications. No route moved.
+
+## Admin confirmations (2026-11)
+
+Nine admin forms used an inline `onsubmit="return confirm(...)"`, each needing an allow-list entry
+in the inline-handler test. They now use the `data-confirm` pattern from the account page, shared in
+`static/js/confirm.js`. Deleting a service warns that its maintenance windows go with it.

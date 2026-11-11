@@ -167,17 +167,15 @@
   and then hands to the JS engine a second time as code. Put it in a `data-*`
   attribute and read it from a JS listener instead (`static/js/admin_vm_control.js` is
   the reference implementation). This was a real XSS via Hyper-V VM names
-  (`docs/HISTORY.md` → "VM-name XSS"). The pre-existing
-  `onsubmit="confirm('Delete {{ s.name }}?')"` pattern in the admin list templates is
-  different and lower-risk (only the already-fully-privileged portal admin sets those
-  names — self-XSS, no privilege gain) and was deliberately left alone, but **don't
-  copy that pattern** for any value that can originate from outside the portal's own
-  admin (an external API, another local account/service, etc.). **This is now a
+  (`docs/HISTORY.md` → "VM-name XSS"). Every confirmation (admin delete
+  buttons included) is a `data-confirm` attribute on the `<form>`, handled by
+  `static/js/confirm.js` (loaded by `admin_base.html` and `account.html`); no inline
+  `onsubmit` remains. **This is now a
   convention test** (`test_no_template_values_inside_inline_event_handlers`): any
   `{{ }}` inside an `on*=` attribute fails unless it's an explicit entry in
-  `_INLINE_HANDLER_EXPRESSIONS_ALLOWED`. The second real instance was a Jellyfin
+  `_INLINE_HANDLER_EXPRESSIONS_ALLOWED` (empty today). The second real instance was a Jellyfin
   username in `account.html`'s "Send these details to Seerr" confirm, now a
-  `data-confirm` attribute read by `static/js/account.js`.
+  `data-confirm` attribute.
 - **A background thread that can shell out to run a real OS command (host
   restart/shutdown, VM control) must never be exercised for real in this sandbox, or
   against any environment you're not certain you're allowed to affect** — not even to
