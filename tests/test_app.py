@@ -62,7 +62,9 @@ def test_logout_is_post_only_and_visitor_logout_is_csrf_protected(isolated_db, m
     with app_module.app.test_client() as c:
         assert c.get("/logout").status_code == 405
         assert c.get("/admin/logout").status_code == 405
-        token = _extract_csrf_token(c.get("/").data)
+        # An anonymous public page carries no token (it would set a cookie); the
+        # sign-in page has a form, so it does.
+        token = _extract_csrf_token(c.get("/admin/login").data)
         assert c.post("/logout").status_code == 400
         assert c.post("/admin/logout").status_code == 400
         assert c.post("/logout", data={"csrf_token": token}).status_code == 302
@@ -5540,3 +5542,58 @@ def test_the_account_page_lists_only_the_visitors_own_requests(client, user_auth
     assert "Someone Elses Film" not in body
     assert "Pending approval" in body
     assert "not listed on this page yet" not in body
+
+
+def test_an_anonymous_visitor_reading_public_pages_gets_no_cookie(client, isolated_db, user_auth):
+    """Rendering the CSRF token creates a session, so it used to hand every reader of
+    the status page (every bot, every uptime probe) a cookie - which also made the page
+    uncacheable. A page with no POST form, read by someone with no session, has no
+    token to render."""
+    db.set_setting("show_public_cpu", "1")
+    for path in ("/", "/server", "/info", "/?fragment=1", "/nope-404"):
+        resp = client.get(path)
+        assert "Set-Cookie" not in resp.headers, path
+        assert b'name="csrf-token"' not in resp.data, path
+
+
+def test_the_csrf_token_still_reaches_every_page_with_a_form(isolated_db, user_auth, monkeypatch):
+    """With the real check on: the visitor sign-in form, the report form (anonymous and
+    signed in), and every admin page still carry a token that _check_csrf accepts."""
+    monkeypatch.setitem(app_module.app.config, "TESTING", False)
+    _auth_returns(monkeypatch, {"ok": True, "user": {"id": "u1", "name": "adam",
+                                                      "is_administrator": False,
+                                                      "is_disabled": False}})
+    sid = db.list_services()[0]["id"]
+    with app_module.app.test_client() as c:
+        # Anonymous report (allowed here): the form renders a token even though the
+        # anonymous POST doesn't need one.
+        db.set_setting("report_requires_login", "0")
+        _extract_csrf_token(c.get("/report").data)
+        token = _extract_csrf_token(c.get("/login").data)
+        resp = c.post("/login", data={"username": "adam", "password": "pw", "csrf_token": token})
+        assert resp.status_code == 302
+        # Signed in, the report form is protected - and its page carries the token.
+        token = _extract_csrf_token(c.get("/report").data)
+        resp = c.post("/report", data={"service_id": sid, "description": "Buffering a lot",
+                                       "csrf_token": token})
+        assert resp.status_code != 400
+        # A signed-in visitor keeps the token on pages without a form (theme sync).
+        assert _extract_csrf_token(c.get("/").data) == token
+
+    with app_module.app.test_client() as c:
+        token = _extract_csrf_token(c.get("/admin/login").data)
+        resp = c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
+                                            "csrf_token": token})
+        assert resp.status_code == 302
+        for _template, endpoint, _label in app_module.admin_search.PAGES:
+            with app_module.app.test_request_context():
+                path = app_module.url_for(endpoint)
+            page = c.get(path)
+            assert page.status_code == 200, path
+            token = _extract_csrf_token(page.data)
+            with c.session_transaction() as sess:
+                assert token == sess["csrf_token"], path
+        resp = c.post("/admin/settings/general", data={"site_name": "Renamed",
+                                                       "csrf_token": token})
+        assert resp.status_code == 302
+    assert db.get_setting("site_name") == "Renamed"
