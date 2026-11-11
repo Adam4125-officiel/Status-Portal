@@ -45,6 +45,11 @@
   mid-transaction; `Connection.backup()` can't. Deliberately kept separate from
   `updater.py`'s own pre-update backup machinery, which backs up app *code* for
   rollback — a different concern from an on-demand DB export.
+- **Scheduled DB backup** (`db_backup` task in `app.py`, daily 03:00 UTC) writes
+  `instance/db_backups/portal-scheduled-<stamp>.db` and keeps the newest 7
+  (`KEEP_SCHEDULED_DB_BACKUPS`). It shares the folder with the before-restore
+  snapshots, so listing and pruning are **always per filename prefix**
+  (`SCHEDULED_BACKUP_PREFIX` / `SAFETY_BACKUP_PREFIX`): never prune the folder as a whole.
 - **Dark mode now defaults to `prefers-color-scheme`** when no explicit choice has
   been saved yet (previously always defaulted to dark regardless of the OS
   setting). Both `static/js/theme.js` *and* the FOUC-prevention inline script in

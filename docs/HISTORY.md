@@ -79,6 +79,12 @@ was needed.
 
 ---
 
+### No automatic copy of the database (fixed 2026-11-11)
+
+The only database copies were a manual download and the snapshot taken before a
+restore, although the file holds every setting, integration key and the history. A
+daily `db_backup` task now keeps seven copies in `instance/db_backups/`.
+
 ## Public page and templates
 
 ### The missed service-card timestamp (2026-07-23)
