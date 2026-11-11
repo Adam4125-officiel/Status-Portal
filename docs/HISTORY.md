@@ -26,6 +26,12 @@ Rough chronological range: 2026-07-22 through 2026-09-24.
 
 ## Health checks and the incident lifecycle
 
+### TCP port checks (added 2026-11-11)
+
+A service can be checked by opening `host:port` instead of an HTTP request, for things
+like SMB shares that previously had to be left unmonitored or forced by hand. Verified
+here against local sockets and a throwaway server only; not against a real SMB share.
+
 ### The synchronous integration check that blocked every page load (fixed 2026-07-23)
 
 The public page used to call the Jellyfin/*Arr status checker synchronously on every
