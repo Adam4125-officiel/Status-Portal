@@ -19,7 +19,8 @@
   caught by live testing, not the unit tests
   (`docs/HISTORY.md` → "2FA enrollment `KeyError`").
 - **Login becomes two steps when 2FA is enabled, still one step when it isn't.**
-  `session["awaiting_totp"]` is set (server-side only, unforgeable without the signed
+  `session["awaiting_totp"]` (the time the password was accepted; `_awaiting_totp()`
+  drops it after 5 minutes and the login restarts at the password) is set (server-side only, unforgeable without the signed
   session's `SECRET_KEY`) once the password step succeeds; the *next* `POST` to
   `/admin/login` is read as a code instead of a password, without re-checking the
   password. The global login-lockout counter (`_login_state`) applies to wrong codes
@@ -80,8 +81,11 @@ public page, which has to be a deliberate choice.
   do. A signed-in Jellyfin user is a visitor with a name, not a lesser admin.
 - **`_end_user_session()` pops its own keys and must never be `session.clear()`** —
   an admin who is also signed in as a Jellyfin user in the same browser must not be
-  logged out of the admin panel by a visitor-side timeout. (`admin_logout` still
-  clears everything, which is correct in that direction and was left alone.)
+  logged out of the admin panel by a visitor-side timeout. The same
+  goes the other way: the admin idle expiry and `/admin/logout` call
+  `_end_admin_session()` (the `_ADMIN_SESSION_KEYS` only), not `session.clear()`.
+  `/logout` and `/admin/logout` are POST-only (buttons, not links; `/logout` is in
+  `_CSRF_PROTECTED_PUBLIC_PATHS`).
 - **`jellyfin_admin` in the session is groundwork, read by nothing.** Being an
   administrator in Jellyfin says nothing about this portal. It's stored for the
   per-content visibility feature on the ROADMAP; if you start reading it, make that

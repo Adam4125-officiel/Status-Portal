@@ -35,8 +35,10 @@
   fire-and-forget (catches and logs every failure, never raises), the route can't
   report true success/failure per channel — it just confirms it was sent, and the
   admin checks their channel, which is the entire point of the button.
-- **Manual DB backup** (`GET /admin/settings/backup-db` — GET, not POST, since it
-  has no side effects) zips a snapshot of `instance/portal.db` via
+- **Manual DB backup** (`POST /admin/settings/backup-db`, behind `_require_totp()`
+  with a code field beside the button on the About page when 2FA is on — the backup
+  holds the TOTP seed and every integration API key, so a session alone must not
+  take it) zips a snapshot of `instance/portal.db` via
   `db.backup_to_file()`, which uses SQLite's own `Connection.backup()` API rather
   than a raw file copy — a plain copy of a live database file being actively
   written by the background health-check thread could catch a torn/partial write

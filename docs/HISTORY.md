@@ -2319,3 +2319,13 @@ to the keys published before, so new columns stay private until chosen.
 `save_contact()` validated; both now share `contact_errors()`. Bazarr's error text held the
 API key (it travels in the URL), and the Seerr push messages showed the internal host;
 both now use `describe_request_error()`.
+
+## Sessions, logout and backup download (2026-11)
+
+The admin idle expiry and `/admin/logout` called `session.clear()` and so also ended a
+Jellyfin visitor sign-in in the same browser; they now drop only the admin keys.
+`/logout` and `/admin/logout` were GET links, so a prefetch could sign someone out; they
+are POST buttons. `awaiting_totp` had no date, leaving a password-verified session
+replayable for the code step indefinitely; it now expires after 5 minutes. The database
+backup download needed only a session although the file holds the TOTP seed and API keys;
+it is a POST behind `_require_totp()`, like the restore.
