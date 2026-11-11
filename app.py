@@ -2821,6 +2821,26 @@ def _safe_next_url(raw):
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
+# How long a verified password stays good for the 2FA code step.
+AWAITING_TOTP_SECONDS = 300
+
+
+def _awaiting_totp():
+    """True while the session holds a verified password that is still waiting for its
+    code. The flag is the time the password was accepted; past AWAITING_TOTP_SECONDS
+    (or in a session that stored a bare True before it was timestamped) it is dropped
+    and the login falls back to the password step."""
+    stamp = session.get("awaiting_totp")
+    if not stamp:
+        return False
+    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+            or time.time() - stamp > AWAITING_TOTP_SECONDS):
+        session.pop("awaiting_totp", None)
+        session.pop("login_next", None)
+        return False
+    return True
+
+
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     # Cheap check (a single os.path.exists()) on every hit, so a host-level 2FA
@@ -2829,7 +2849,7 @@ def admin_login():
     twofactor.check_and_process_reset_flag()
     _check_and_process_password_reset_flag()
     first_run = is_first_run()
-    awaiting_totp = session.get("awaiting_totp", False)
+    awaiting_totp = _awaiting_totp()
 
     if request.method == "POST":
         if not first_run and _login_locked():
@@ -2875,7 +2895,7 @@ def admin_login():
                 if twofactor.is_enabled():
                     # Login isn't complete yet - don't reset the failure counter
                     # or set logged_in until the code step also succeeds.
-                    session["awaiting_totp"] = True
+                    session["awaiting_totp"] = time.time()
                     session["login_next"] = (_safe_next_url(request.args.get("next"))
                                              or url_for("admin_dashboard"))
                     return render_template("login.html", first_run=False, awaiting_totp=True)

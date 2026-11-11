@@ -495,6 +495,32 @@ def test_login_with_2fa_wrong_code_does_not_grant_access(client):
     assert resp.status_code == 302  # still not logged in
 
 
+def test_the_2fa_step_expires_five_minutes_after_the_password(client):
+    """A session that has passed the password step but not the code step used to stay
+    replayable forever. Past 5 minutes the login starts over at the password."""
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    secret = _enable_totp_directly()
+    client.post("/admin/logout")
+    client.post("/admin/login", data={"password": "testpass123"})
+    with client.session_transaction() as sess:
+        assert sess["awaiting_totp"] > 0
+        sess["awaiting_totp"] = time.time() - 301
+
+    resp = client.post("/admin/login", data={"totp_code": pyotp.TOTP(secret).now()},
+                       follow_redirects=True)
+    assert resp.status_code == 200
+    assert b"Two-factor code" not in resp.data
+    assert client.get("/admin/services").status_code == 302
+    with client.session_transaction() as sess:
+        assert "awaiting_totp" not in sess
+
+    # Inside the window the same code step still completes.
+    client.post("/admin/login", data={"password": "testpass123"})
+    assert client.post("/admin/login",
+                       data={"totp_code": pyotp.TOTP(secret).now()}).status_code == 302
+    assert client.get("/admin/services").status_code == 200
+
+
 def test_login_without_2fa_stays_single_step(client):
     """Regression guard: 2FA must remain fully optional - a fresh install with it
     never touched logs in from the password step alone, same as before it existed."""
