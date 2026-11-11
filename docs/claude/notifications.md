@@ -192,6 +192,16 @@
   by `save_contact()` and `_save_account_prefs()` (the `/account` form, visitor and
   admin views). An invalid value gives an error message and that field is not saved; the
   rest of the form is. Discord IDs are digits only.
+- **`/account` is four sections (Reports, Requests, Notifications, Preferences) around
+  one settings form.** The form element (`id="account-prefs"`) is empty; the theme,
+  contact and notification fields sit in their sections and join it with
+  `form="account-prefs"`, so the Seerr and admin panels can be separate forms in the same
+  section. A new notification checkbox is one table row in `account.html` plus its field
+  in `_save_account_prefs()`; a channel that does not exist for an event is a dash, never
+  a disabled box. The admin view (`admin_user_account`) uses the same template.
+- **Signed-in visitors have no free-text contact box.** `_save_account_prefs()` never
+  writes `contact`; `/report` attaches the stored one (if any) for a signed-in reporter
+  and reads the posted box only for anonymous reports.
 - **Visitor-facing messages never carry `{e}` from an outbound call**: use
   `integrations.describe_request_error(e)`; the raw text holds internal hosts and, for
   Bazarr, the API key in its query string.

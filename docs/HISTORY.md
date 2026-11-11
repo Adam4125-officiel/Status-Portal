@@ -2436,3 +2436,13 @@ Every open public tab reloaded itself each minute, losing its scroll position an
 how fresh the data was. The pages now re-fetch their live region as a fragment with an ETag
 (a 304 when nothing changed), show "Updated 12 s ago", and warn when the last health-check cycle
 is more than three intervals old.
+
+## Account page in sections (2026-11)
+
+`/account` was one scroll with no navigation, two lists of five near-identical checkboxes
+for notifications, and a free-text contact box that signed-in visitors no longer needed.
+It is now Reports, Requests, Notifications and Preferences with anchor links; notifications
+are a table (one row per event, Email and Discord columns, a dash where a channel does not
+exist). Signed-in visitors lose the free-text contact box on `/account` and `/report`;
+anonymous reports keep it. The Requests section is a placeholder until the visitor's Seerr
+requests are listed.
