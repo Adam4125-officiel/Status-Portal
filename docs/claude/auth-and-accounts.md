@@ -29,7 +29,8 @@
 - **Step-up re-authentication** for the destructive actions goes through
   `app._require_totp()` — see the convention bullet above for the call pattern and
   which routes use it. Scoped deliberately narrow (host restart/shutdown, app/bot
-  restart, self-update — not VM control, not other admin actions); don't creep it onto
+  restart, self-update, and changing the admin password when 2FA is on — the user
+  approved that last one explicitly; not VM control, not other admin actions); don't creep it onto
   other routes without discussing it first.
 - **A TOTP code is deliberately *not* single-use.** It works for its whole
   `valid_window`, so logging in and then immediately doing a step-up can take the same
@@ -54,6 +55,14 @@
   meaningfully different trust boundary. Routine self-service disabling stays in the
   web UI at `/admin/2fa`, itself gated behind entering a current code — a hijacked
   session alone can't turn 2FA off either.
+
+- **The admin password form shares `_login_state`** (`_login_locked()` /
+  `_register_login_failure()` / `_register_login_success()`), like `/admin/2fa/disable`.
+- **Password recovery is host-level too:** an empty `instance/RESET_PASSWORD`, seen on a
+  hit of `/admin/login`, erases `admin_password_hash`, rotates the session epoch and
+  deletes itself (`app._check_and_process_password_reset_flag()`). The portal is then at
+  first-run setup, which `_first_run_setup_allowed()` limits to the local network. It
+  does not touch 2FA (that is `RESET_2FA`).
 
 ## Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0
 

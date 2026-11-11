@@ -2286,3 +2286,12 @@ local time, so on a UTC+2 machine the same update reads as 19:18 in the log and 
 in the folder name. Consistent with everything else in this app storing UTC, and the
 CLI's `list-backups`/`rollback` never require reading the timestamp by eye — but it
 does look like a mismatch if you're picking a backup by hand.
+
+## Admin password form throttled, 2FA-gated, with a host-level reset (2026-11)
+
+The change-password form compared the current password with no counter, so a stolen
+session cookie allowed unlimited online guessing (the same gap `/admin/2fa/disable` had).
+It now shares the login lockout counter and, when 2FA is on, requires a current code via
+`_require_totp()` (the user explicitly agreed to extend that helper to it). Since the
+password had no recovery path, `instance/RESET_PASSWORD` was added next to `RESET_2FA`.
+The minimum length stays at 6.
