@@ -188,6 +188,13 @@
   visitor prompt use. A failed write-back is *reported but not rolled back*: losing what
   somebody just typed because another service was unreachable is the worse outcome, and
   the local value is what delivery reads.
+- **Contact fields are validated by one function, `user_notify.contact_errors()`**, used
+  by `save_contact()` and `_save_account_prefs()` (the `/account` form, visitor and
+  admin views). An invalid value gives an error message and that field is not saved; the
+  rest of the form is. Discord IDs are digits only.
+- **Visitor-facing messages never carry `{e}` from an outbound call**: use
+  `integrations.describe_request_error(e)`; the raw text holds internal hosts and, for
+  Bazarr, the API key in its query string.
 - **The account page auto-fills from a linked Seerr account the first time it's opened
   with both fields still blank**, rather than waiting for the manual "Use these
   details here" button - `user_notify.adopt_seerr_contact(user_id, account)` is the one

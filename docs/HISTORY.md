@@ -2312,3 +2312,10 @@ The CSP lacked `base-uri`, `form-action` and `object-src`, and there was no
 script on the portal origin, so `/static/uploads/` is served with `CSP: sandbox`.
 `/api/status` published every `services` column except two; it now uses an allow-list equal
 to the keys published before, so new columns stay private until chosen.
+
+## Contact validation and error leaks (2026-11)
+
+`/account` stored any email or Discord ID as typed (a probe saved `abc; drop`) while
+`save_contact()` validated; both now share `contact_errors()`. Bazarr's error text held the
+API key (it travels in the URL), and the Seerr push messages showed the internal host;
+both now use `describe_request_error()`.
