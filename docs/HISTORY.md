@@ -85,6 +85,12 @@ The only database copies were a manual download and the snapshot taken before a
 restore, although the file holds every setting, integration key and the history. A
 daily `db_backup` task now keeps seven copies in `instance/db_backups/`.
 
+### Nothing watched the portal from outside (fixed 2026-11-11)
+
+The status page lives on the machine it reports on, and a frozen check loop left it
+green. `PORTAL_HEARTBEAT_URL` now gets a ping at the end of every cycle, so an external
+monitor notices silence; `/admin/tasks` shows when the last cycle finished.
+
 ## Public page and templates
 
 ### The missed service-card timestamp (2026-07-23)
