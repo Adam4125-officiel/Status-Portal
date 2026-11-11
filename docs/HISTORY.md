@@ -439,6 +439,18 @@ Fixed by making every `update.py` import lazy and adding a self-contained emerge
 path that reads only the `manifest.json` `updater.py` already wrote. Found by live
 testing, not by review.
 
+### Files a release dropped stayed installed (fixed 2026-11-11)
+
+An update wrote the archive's files and nothing else, so a page, template or script
+removed upstream (the "Clear this browser's cache" page and its scripts, the old
+public `vms`/`activity`/`resources` templates) stayed on disk, importable and served.
+Updates now keep `instance/installed_files.json` and remove what the next release
+dropped. The update *to* this version is run by the old code, and the first list is
+written from the archive after it, so neither would ever name these six files:
+`updater.RETIRED_FILES` names them. Checked in a sandbox by updating a `git archive`
+of `main` to one of the branch, with and without a list: all six removed, then put
+back by a rollback. Not yet run on Windows.
+
 ### The em-dash `UnicodeEncodeError` (2026-08-10)
 
 An em dash in `update.py`'s header line raised `UnicodeEncodeError` on a Windows
