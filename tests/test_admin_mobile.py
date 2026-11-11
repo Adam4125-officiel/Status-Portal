@@ -16,7 +16,7 @@ def test_admin_menu_is_a_details_with_current_page_and_badge_total(client):
     _login(client)
     html = client.get("/admin/services").get_data(as_text=True)
     assert 'id="admin_nav_menu"' in html and "<summary" in html
-    summary = re.search(r"<summary.*?</summary>", html, re.S).group(0)
+    summary = re.search(r"<summary.*?</summary>", html, re.DOTALL).group(0)
     assert "Services" in summary
     assert 'class="nav-badge">1<' in summary
     assert "js/admin_nav.js" in html
@@ -25,14 +25,14 @@ def test_admin_menu_is_a_details_with_current_page_and_badge_total(client):
 def test_menu_summary_names_other_pages_too(client):
     _login(client)
     html = client.get("/admin/logs").get_data(as_text=True)
-    assert "Logs" in re.search(r"<summary.*?</summary>", html, re.S).group(0)
+    assert "Logs" in re.search(r"<summary.*?</summary>", html, re.DOTALL).group(0)
 
 
 def test_services_table_marks_secondary_and_short_columns(client):
     db.create_service({"name": "Plex", "url": "http://plex.example"})
     _login(client)
     html = client.get("/admin/services").get_data(as_text=True)
-    head = re.search(r"<thead>.*?</thead>", html, re.S).group(0)
+    head = re.search(r"<thead>.*?</thead>", html, re.DOTALL).group(0)
     assert head.count("col-secondary") == 3
     assert head.count("col-short") == 2
     css = (ROOT / "static/css/style.css").read_text()

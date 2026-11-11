@@ -1,4 +1,3 @@
-from werkzeug.security import check_password_hash
 import io
 import os
 import re
@@ -9,7 +8,7 @@ import zipfile
 
 import pyotp
 import pytest
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import app as app_module
 import db
@@ -1289,8 +1288,9 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
                             "api_key": "x", "enabled": 1, "service_id": sid, "auto_incident": 1})
 
-    import integrations as integrations_module
     import pytest as _pytest
+
+    import integrations as integrations_module
     with _pytest.MonkeyPatch.context() as mp:
         mp.setattr(integrations_module, "fetch_integration_status",
                    lambda integ: {"reachable": False, "version": None, "issues": [], "error": "down"})
@@ -4068,7 +4068,6 @@ def user_auth(isolated_db):
                             "show_on_public": 0, "auto_incident": 0})
     db.set_setting("jellyfin_auth_enabled", "1")
     db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
-    return None
 
 
 def _auth_returns(monkeypatch, result):
@@ -5108,6 +5107,7 @@ def test_the_sign_in_slot_is_released_even_when_authenticate_raises(client, user
 
 def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch):
     import importlib
+
     import config as config_module
     try:
         monkeypatch.delenv("PORTAL_HOST", raising=False)

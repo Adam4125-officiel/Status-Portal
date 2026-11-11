@@ -582,7 +582,7 @@ def test_delivery_uses_contact_details_seerr_knows_about(isolated_db, monkeypatc
     sent = []
     monkeypatch.setattr(user_notify.notifications, "send_email",
                         lambda s_, b, recipients=None: sent.append(recipients) or True)
-    monkeypatch.setattr(user_notify.notifications, "email_recipients", lambda: [])
+    monkeypatch.setattr(user_notify.notifications, "email_recipients", list)
     db.set_setting("user_notifications_enabled", "1")
     db.replace_seerr_contacts([{"jellyfin_user_id": "u1", "seerr_user_id": "7",
                                  "display_name": "U1", "email": "seerr@example.com",
@@ -1330,10 +1330,10 @@ def test_the_prompt_endpoint_requires_a_signed_in_visitor(client, isolated_db):
 # Verified against seerr-team/seerr's server/routes/user/usersettings.ts. The user list
 # carries email; Discord IDs live on a per-user notification-settings sub-resource, and
 # are a *list*. Reading only the base record is why email synced and Discord never did.
-import json as _json          # noqa: E402
-import threading as _threading  # noqa: E402
-from http.server import BaseHTTPRequestHandler, HTTPServer  # noqa: E402
-from urllib.parse import urlparse as _urlparse  # noqa: E402
+import json as _json
+import threading as _threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse as _urlparse
 
 
 class _SeerrStub(BaseHTTPRequestHandler):

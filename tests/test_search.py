@@ -20,7 +20,6 @@ import db
 import integrations
 import media_search
 
-
 ROUTES = {}
 
 
@@ -682,9 +681,8 @@ def test_a_slot_is_given_back_even_when_the_call_fails(visitor, monkeypatch):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(media_search, "search", boom)
     for _ in range(media_search.MAX_CONCURRENT_OUTBOUND + 1):
-        with pytest.raises(RuntimeError):
-            with media_search.outbound_call("u1"):
-                media_search.search("x")
+        with pytest.raises(RuntimeError), media_search.outbound_call("u1"):
+            media_search.search("x")
     with media_search.outbound_call("u1") as allowed:
         assert allowed
 

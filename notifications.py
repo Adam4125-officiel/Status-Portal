@@ -126,7 +126,7 @@ def _send_ntfy(title, message):
     # header values to be RFC 2047-encoded, and a service/incident name with an accent
     # or emoji would otherwise raise before the request is even sent.
     try:
-        requests.post(config.NTFY_URL, data=f"{title}\n{message}".encode("utf-8"), timeout=TIMEOUT)
+        requests.post(config.NTFY_URL, data=f"{title}\n{message}".encode(), timeout=TIMEOUT)
     except Exception as e:
         _logger.warning("ntfy failed: %s", e)
 

@@ -96,12 +96,12 @@ PAGES = [
 # a deliberate omission from a page somebody forgot to register.
 NON_PAGE_TEMPLATES = {"admin_base.html"}
 
-_JINJA = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.S)
-_TAG = re.compile(r"<[^>]+>", re.S)
-_LABEL = re.compile(r"<label\b[^>]*>(.*?)</label>", re.S | re.I)
-_HINT = re.compile(r'<div\b[^>]*class="[^"]*field-hint[^"]*"[^>]*>(.*?)</div>', re.S | re.I)
+_JINJA = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+_TAG = re.compile(r"<[^>]+>", re.DOTALL)
+_LABEL = re.compile(r"<label\b[^>]*>(.*?)</label>", re.DOTALL | re.IGNORECASE)
+_HINT = re.compile(r'<div\b[^>]*class="[^"]*field-hint[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE)
 _NAME = re.compile(r'\bname="([A-Za-z0-9_\[\]-]+)"')
-_H2 = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.S | re.I)
+_H2 = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.DOTALL | re.IGNORECASE)
 
 MAX_RESULTS = 12
 # A title longer than this is a hint that wandered into a label, not a label. Truncated

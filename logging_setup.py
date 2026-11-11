@@ -14,7 +14,6 @@ import time, so running the test suite (which imports these modules but never
 starts the background threads or the dev/production server) doesn't create
 log files as a side effect.
 """
-import datetime
 import logging
 import logging.handlers
 import os

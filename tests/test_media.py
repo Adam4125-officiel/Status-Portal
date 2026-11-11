@@ -10,14 +10,13 @@ given real instance. See docs/HISTORY.md.
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 import db
 import integrations
 import scheduler
-
 
 # ---------------------------------------------------------------------------
 # One configurable stand-in serving every endpoint these fetchers use
@@ -335,7 +334,7 @@ def test_get_cached_media_returns_copies(isolated_db):
 # ---------------------------------------------------------------------------
 # Who can actually see the section
 # ---------------------------------------------------------------------------
-import app as app_module  # noqa: E402
+import app as app_module
 
 
 def _enable_media(keys=("show_public_calendar",)):

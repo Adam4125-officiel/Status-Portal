@@ -3,9 +3,9 @@ db.py — The entire database layer (SQLite).
 No ORM, just plain SQL to stay readable and easy to modify.
 """
 import logging
+import os
 import re
 import sqlite3
-import os
 import threading
 from datetime import datetime, timedelta, timezone
 

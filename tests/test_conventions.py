@@ -63,7 +63,7 @@ def test_every_portal_env_var_is_documented_in_all_three_places():
     environment: block is silently ignored under Docker no matter how correctly the
     user set it."""
     declared = set(re.findall(r'os\.environ\.get\("(PORTAL_[A-Z0-9_]+)"', _read("config.py")))
-    documented = set(re.findall(r"^(PORTAL_[A-Z0-9_]+)=", _read(".env.example"), re.M))
+    documented = set(re.findall(r"^(PORTAL_[A-Z0-9_]+)=", _read(".env.example"), re.MULTILINE))
     composed = set(re.findall(r"- (PORTAL_[A-Z0-9_]+)=", _read("docker-compose.yml")))
 
     assert declared, "no PORTAL_* variables found in config.py - did the parsing break?"
@@ -543,7 +543,7 @@ _INLINE_HANDLER_EXPRESSIONS_ALLOWED = {
 # expression can't end the match early and hide the rest of it.
 _INLINE_HANDLER = re.compile(
     r"""\son[a-z]+\s*=\s*(?:"((?:\{\{.*?\}\}|[^"])*)"|'((?:\{\{.*?\}\}|[^'])*)')""",
-    re.I | re.S)
+    re.IGNORECASE | re.DOTALL)
 
 
 def test_no_template_values_inside_inline_event_handlers():
@@ -559,7 +559,7 @@ def test_no_template_values_inside_inline_event_handlers():
         name = os.path.relpath(path, "templates")
         for match in _INLINE_HANDLER.finditer(src):
             value = match.group(1) if match.group(1) is not None else match.group(2)
-            for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S):
+            for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.DOTALL):
                 if (name, expr) not in _INLINE_HANDLER_EXPRESSIONS_ALLOWED:
                     offenders.append(f"{path}:{src[:match.start()].count(chr(10)) + 1}: {{{{ {expr} }}}}")
     assert not offenders, (
@@ -578,7 +578,7 @@ def test_the_inline_handler_allow_list_has_no_stale_entries():
         name = os.path.relpath(path, "templates")
         for match in _INLINE_HANDLER.finditer(src):
             value = match.group(1) if match.group(1) is not None else match.group(2)
-            found.update((name, expr) for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.S))
+            found.update((name, expr) for expr in re.findall(r"\{\{\s*(.*?)\s*\}\}", value, re.DOTALL))
     stale = _INLINE_HANDLER_EXPRESSIONS_ALLOWED - found
     assert not stale, f"Allow-list entries that no longer match anything: {sorted(stale)}. Remove them."
 
@@ -606,7 +606,7 @@ def test_every_module_level_cache_is_reset_between_tests():
     missing = []
     for name, src in _python_modules():
         for global_name in re.findall(r"^(_[a-z0-9_]*(?:cache|state|salt)[a-z0-9_]*)\s*=\s*[\{\[]",
-                                       src, re.M):
+                                       src, re.MULTILINE):
             if global_name in conftest:
                 continue
             if global_name in cleared_by_helper.get(name, ""):

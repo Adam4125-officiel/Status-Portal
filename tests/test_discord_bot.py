@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import db
 import config
+import db
 import discord_bot
 import scheduler
 
@@ -237,7 +237,7 @@ def test_build_status_data_highload_section(isolated_db, monkeypatch):
     include = {"services": False, "incidents": False, "announcements": False,
                "maintenance": False, "resources": {}, "highload": True}
 
-    monkeypatch.setattr(discord_bot.monitoring, "get_resource_snapshot", lambda: {})
+    monkeypatch.setattr(discord_bot.monitoring, "get_resource_snapshot", dict)
     monkeypatch.setattr(discord_bot.integrations, "evaluate_high_load",
                          lambda snap: {"active": False, "reasons": []})
     data = discord_bot.build_status_data(include)
