@@ -290,3 +290,14 @@ after the merge, not on the feature branch.
    (via `SendUserFile`). A locally-run session usually has full `git`/`gh` access and
    can complete every step directly — this fallback is for when it can't, not a
    replacement for trying the real steps first.
+
+## Continuous integration (`.github/workflows/ci.yml`)
+
+- Push and pull requests run `python -m pytest -q` on Python 3.12. The job installs
+  `requirements-discord.txt` as well as `requirements-dev.txt`: several test modules
+  import discord.py and fail without it. A clean venv with only `requirements-dev.txt`
+  gives 28 failures in `tests/test_discord_bot.py` and similar, so do not drop it.
+- Ruff and pip-audit are advisory (`continue-on-error`) until their findings are
+  cleared. Ruff's default rule set changes between versions, so its count moves too.
+- Dependabot checks pip and GitHub Actions weekly. Security reports go through
+  GitHub's private reporting, described in `SECURITY.md`.
