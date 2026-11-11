@@ -76,7 +76,7 @@ def _configure_email(monkeypatch, **overrides):
     values = {"SMTP_HOST": "smtp.example", "SMTP_PORT": 587, "SMTP_USERNAME": "",
               "SMTP_PASSWORD": "", "SMTP_FROM": "portal@example.com",
               "SMTP_TO": "admin@example.com", "SMTP_SECURITY": "starttls",
-              "SMTP_TIMEOUT_SECONDS": 10}
+              "SMTP_TIMEOUT_SECONDS": 10, "SMTP_VERIFY_TLS": True}
     values.update(overrides)
     for key, value in values.items():
         monkeypatch.setattr(config, key, value)
@@ -86,8 +86,8 @@ class _FakeSMTP:
     """Records the conversation instead of having one."""
     instances = []
 
-    def __init__(self, host, port, timeout=None):
-        self.host, self.port, self.timeout = host, port, timeout
+    def __init__(self, host, port, timeout=None, context=None):
+        self.host, self.port, self.timeout, self.context = host, port, timeout, context
         self.started_tls = False
         self.login_args = None
         self.sent = []
@@ -99,8 +99,9 @@ class _FakeSMTP:
     def __exit__(self, *exc):
         return False
 
-    def starttls(self):
+    def starttls(self, context=None):
         self.started_tls = True
+        self.context = context
 
     def login(self, username, password):
         self.login_args = (username, password)
@@ -430,3 +431,31 @@ def test_every_other_webhook_post_is_unchanged(monkeypatch):
     monkeypatch.setattr(notifications.requests, "post", lambda *a, **k: calls.append(k))
     notifications.notify("Incident opened", "Jellyfin is down")
     assert calls[0]["json"] == {"content": "**Incident opened**\nJellyfin is down"}
+
+
+def test_starttls_verifies_certificate_and_hostname_by_default(monkeypatch):
+    _configure_email(monkeypatch, SMTP_SECURITY="starttls")
+    monkeypatch.setattr(notifications.smtplib, "SMTP", _FakeSMTP)
+    notifications.send_email("s", "m")
+    ctx = _FakeSMTP.instances[0].context
+    assert ctx.verify_mode == notifications.ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+def test_ssl_mode_verifies_certificate_by_default(monkeypatch):
+    _configure_email(monkeypatch, SMTP_SECURITY="ssl", SMTP_PORT=465)
+    monkeypatch.setattr(notifications.smtplib, "SMTP_SSL", _FakeSMTP)
+    notifications.send_email("s", "m")
+    ctx = _FakeSMTP.instances[0].context
+    assert ctx.verify_mode == notifications.ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+def test_verify_tls_false_disables_verification_explicitly(monkeypatch):
+    _configure_email(monkeypatch, SMTP_VERIFY_TLS=False)
+    monkeypatch.setattr(notifications.smtplib, "SMTP", _FakeSMTP)
+    notifications.send_email("s", "m")
+    ctx = _FakeSMTP.instances[0].context
+    assert ctx.verify_mode == notifications.ssl.CERT_NONE
+    assert ctx.check_hostname is False
+

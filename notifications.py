@@ -13,6 +13,7 @@ admin page knows it exists). A channel that sends perfectly but is invisible on
 import html
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 import requests
@@ -197,11 +198,15 @@ def _smtp_connection():
     An unrecognised value is treated as starttls rather than silently downgrading to
     plaintext - failing to connect is a far better outcome than quietly sending
     credentials in the clear."""
+    context = ssl.create_default_context()
+    if not config.SMTP_VERIFY_TLS:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
     if config.SMTP_SECURITY == "ssl":
         return smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT,
-                                 timeout=config.SMTP_TIMEOUT_SECONDS)
+                                 timeout=config.SMTP_TIMEOUT_SECONDS, context=context)
     smtp = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT,
                          timeout=config.SMTP_TIMEOUT_SECONDS)
     if config.SMTP_SECURITY != "none":
-        smtp.starttls()
+        smtp.starttls(context=context)
     return smtp
