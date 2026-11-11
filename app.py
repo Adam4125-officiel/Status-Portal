@@ -1664,17 +1664,31 @@ def api_status():
     })
 
 
+# Every key /api/status publishes per service. An allow-list on purpose: a column added
+# to `services` later must not become public by default. External dashboards read these
+# keys, so none may disappear. check_url is never published; run_target only when
+# show_run_target_public is set (see _api_service_view).
+_API_SERVICE_KEYS = frozenset({
+    "api_health_mode", "auto_check", "auto_incident", "description", "group_name", "icon",
+    "id", "ignore_in_overall_status", "last_checked", "manual_override", "name",
+    "response_ms", "retry_count", "retry_interval_seconds", "show_dependencies_public",
+    "show_report_button", "show_run_target_public", "slow_threshold_ms", "sort_order",
+    "startup_grace_seconds", "status", "url",
+    # computed per request
+    "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
+    "run_target_label", "dependency_names",
+})
+
+
 def _api_service_view(service):
-    """A service row as /api/status publishes it: every field it has always carried,
-    minus the two that map the private network. check_url is the address the portal
-    probes (LAN IPs and ports), for every service; the raw run_target names a VM or
-    host, and only goes out when show_run_target_public says so - the same opt-in the
-    HTML page applies via run_target_label. Everything else stays exactly as it was,
-    because external dashboards read this endpoint and a missing key breaks them."""
-    view = dict(service)
-    view.pop("check_url", None)
-    if not service.get("show_run_target_public"):
-        view.pop("run_target", None)
+    """A service row as /api/status publishes it: only the keys in _API_SERVICE_KEYS,
+    plus the raw run_target when show_run_target_public says so - the same opt-in the
+    HTML page applies via run_target_label. check_url (the LAN address the portal
+    probes) is never published. External dashboards read this endpoint, so a key must
+    not go missing."""
+    view = {k: v for k, v in service.items() if k in _API_SERVICE_KEYS}
+    if service.get("show_run_target_public") and "run_target" in service:
+        view["run_target"] = service["run_target"]
     return view
 
 

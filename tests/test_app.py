@@ -1696,6 +1696,17 @@ def test_api_status_keeps_every_other_service_field(client):
     assert set(published) == expected
 
 
+def test_api_status_publishes_only_the_allow_listed_keys(client):
+    """A column added to `services` must not reach /api/status by accident: the
+    published keys are an explicit list, so a new one fails here until someone decides."""
+    sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
+                              "run_target": "host", "show_run_target_public": 1})
+    published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
+    assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
+    row = db.get_service(sid)
+    assert set(row) - {"check_url", "run_target"} <= app_module._API_SERVICE_KEYS
+
+
 def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):
     resp = client.get("/")
     csp = resp.headers["Content-Security-Policy"]
