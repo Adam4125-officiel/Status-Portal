@@ -5663,3 +5663,55 @@ def test_forms_and_per_visitor_paths_are_never_cached(client, isolated_db, user_
 def test_new_installs_keep_two_weeks_of_check_results(isolated_db):
     assert app_module.DEFAULT_HISTORY_RETENTION_DAYS == 14
     assert app_module._history_retention_days() == 14
+
+
+# ---------- 90-day strip on the public cards ----------
+def _strip_for(sid):
+    app_module._uptime_strip_cache["fetched_at"] = 0.0
+    return app_module._cached_uptime_strips()[sid]
+
+
+def _daily(sid, day, checks, down=0, maintenance=0):
+    conn = db.get_db()
+    with conn:
+        conn.execute("""INSERT INTO status_daily (service_id, day, checks, down_checks,
+                        maintenance_checks, response_samples) VALUES (?, ?, ?, ?, ?, 0)""",
+                     (sid, day, checks, down, maintenance))
+    conn.close()
+
+
+def test_strip_has_one_bar_per_day_with_gaps_as_no_data(isolated_db):
+    sid = db.create_service({"name": "S", "url": ""})
+    today = datetime.now(timezone.utc).date()
+    _daily(sid, today.isoformat(), 10)
+    _daily(sid, (today - timedelta(days=1)).isoformat(), 100, down=2)
+    _daily(sid, (today - timedelta(days=2)).isoformat(), 10, down=5)
+    _daily(sid, (today - timedelta(days=3)).isoformat(), 4, maintenance=4)
+    _daily(sid, (today - timedelta(days=100)).isoformat(), 10)      # outside the window
+    strip = _strip_for(sid)
+    assert len(strip) == 90
+    assert strip[-1]["day"] == today.isoformat()
+    css = [d["css"] for d in strip[::-1][:6]]
+    assert css == ["ok", "warn", "crit", "maint", "nodata", "nodata"]
+    assert strip[-2]["label"].endswith("98.0% uptime")
+
+
+def test_strip_is_absent_for_a_service_without_history(isolated_db):
+    sid = db.create_service({"name": "Unchecked", "url": ""})
+    assert sid not in app_module._cached_uptime_strips()
+
+
+def test_public_card_shows_the_percentage_and_a_focusable_strip(client):
+    sid = db.create_service({"name": "Svc", "url": ""})
+    _daily(sid, datetime.now(timezone.utc).date().isoformat(), 10, down=1)
+    html = client.get("/").get_data(as_text=True)
+    assert "90.0% uptime" in html
+    assert html.count('class="uptime-strip__day') == 90
+    assert 'class="uptime-strip" role="group" tabindex="0"' in html
+
+
+def test_api_status_does_not_publish_the_strip(client):
+    sid = db.create_service({"name": "Svc", "url": ""})
+    _daily(sid, datetime.now(timezone.utc).date().isoformat(), 10)
+    svc = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
+    assert "uptime_strip" not in svc

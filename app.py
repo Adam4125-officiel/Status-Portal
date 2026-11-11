@@ -1097,9 +1097,58 @@ def _cached_uptime_percentages():
     return value
 
 
+# The 90-day strip on each public card. Same reasoning as the uptime figure above: a
+# day's bar changes at most once per check, so it is built once a minute for every
+# service rather than per request.
+_uptime_strip_cache = {"value": {}, "fetched_at": 0.0}
+_uptime_strip_cache_lock = threading.Lock()
+
+
+def _day_label(day, checks, down, maintenance):
+    counted = checks - maintenance
+    if counted <= 0:
+        return ("maint", "planned maintenance") if checks else ("nodata", "no data")
+    pct = round((counted - down) / counted * 100, 1)
+    # Green only for a day with no failed check at all; one blip is amber, a bad day red.
+    css = "ok" if down == 0 else ("warn" if pct >= 95 else "crit")
+    return css, f"{pct}% uptime"
+
+
+def _build_uptime_strips(daily):
+    """{service_id: [{"day", "css", "label"}, ...]} - 90 entries, oldest first, ending
+    today (UTC). Every service that has any row in the window gets a strip; the rest
+    are absent and their cards show no strip at all."""
+    today = datetime.now(timezone.utc).date()
+    days = [(today - timedelta(days=n)).isoformat()
+            for n in range(db.UPTIME_STRIP_DAYS - 1, -1, -1)]
+    strips = {}
+    for sid, rows in daily.items():
+        strip = []
+        for day in days:
+            counts = rows.get(day)
+            css, label = _day_label(day, *counts) if counts else ("nodata", "no data")
+            strip.append({"day": day, "css": css, "label": f"{day}: {label}"})
+        strips[sid] = strip
+    return strips
+
+
+def _cached_uptime_strips():
+    now = time.monotonic()
+    with _uptime_strip_cache_lock:
+        if (_uptime_strip_cache["fetched_at"]
+                and now - _uptime_strip_cache["fetched_at"] < UPTIME_CACHE_TTL_SECONDS):
+            return _uptime_strip_cache["value"]
+    value = _build_uptime_strips(db.get_daily_history())
+    with _uptime_strip_cache_lock:
+        _uptime_strip_cache["value"] = value
+        _uptime_strip_cache["fetched_at"] = now
+    return value
+
+
 def _enrich_services(services):
     open_reports = db.count_open_reports_by_service()
     uptimes = _cached_uptime_percentages()
+    strips = _cached_uptime_strips()
     service_names = {s["id"]: s["name"] for s in services}
     links_by_service = db.list_service_links_for_services([s["id"] for s in services])
     # One grouped query, and only for the services that publish their dependencies -
@@ -1109,6 +1158,7 @@ def _enrich_services(services):
     for s in services:
         s["links"] = links_by_service[s["id"]]
         s["uptime"] = uptimes.get(s["id"])
+        s["uptime_strip"] = strips.get(s["id"])
         s["in_grace_period"] = _within_grace_period(s)
         s["retrying"] = s["id"] in _retry_in_progress
         s["open_reports_count"] = open_reports.get(s["id"], 0)
@@ -3840,6 +3890,8 @@ def _clear_all_caches():
     edit over here to be covered by this button."""
     _uptime_cache["value"] = {}
     _uptime_cache["fetched_at"] = 0.0
+    _uptime_strip_cache["value"] = {}
+    _uptime_strip_cache["fetched_at"] = 0.0
     _integration_status_cache.clear()
     integrations.clear_caches()
     monitoring.clear_caches()

@@ -1724,6 +1724,28 @@ def get_uptime_percentage(service_id, days=UPTIME_WINDOW_DAYS):
     return _uptime_from_counts(row["checks"], row["down"], row["maintenance"]) if row else None
 
 
+UPTIME_STRIP_DAYS = 90
+
+
+def get_daily_history(days=UPTIME_STRIP_DAYS):
+    """{service_id: {day: (checks, down, maintenance)}} for the last `days` UTC days
+    (today included), from status_daily - one grouped query for every service, which
+    is what the public cards' day-by-day strip is drawn from. A day with no row simply
+    has no key: the caller shows that as "no data", which is not the same thing as
+    100%."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT service_id, day, checks, down_checks, maintenance_checks
+        FROM status_daily WHERE day >= ?
+    """, (_uptime_first_day(days),)).fetchall()
+    conn.close()
+    result = {}
+    for r in rows:
+        result.setdefault(r["service_id"], {})[r["day"]] = (
+            r["checks"], r["down_checks"], r["maintenance_checks"])
+    return result
+
+
 def prune_status_history(days):
     """Deletes check results older than `days` and returns how many rows went.
 

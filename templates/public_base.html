@@ -51,6 +51,7 @@
 <script>window.PORTAL_REFRESH_SECONDS = {{ refresh_seconds if auto_refresh is not defined or auto_refresh else 0 }};</script>
 <script src="{{ asset_url('js/public_refresh.js') }}"></script>
 <script src="{{ asset_url('js/local_time.js') }}"></script>
+<script src="{{ asset_url('js/uptime_strip.js') }}"></script>
 <script src="{{ asset_url('js/page_loading.js') }}"></script>
 {% block page_scripts %}{% endblock %}
 {% endif %}
