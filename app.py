@@ -2204,10 +2204,14 @@ def report_problem():
             return render_template("report.html", services=services,
                                     preselect_service_id=preselect_service_id, site_name=site_name,
                                     prefill_contact=request.form.get("contact", ""))
-        contact = request.form.get("contact", "").strip()[:200]
         service_id = request.form.get("service_id", type=int)
         service = db.get_service(service_id) if service_id else None
         user = current_user()
+        # A signed-in reporter has no free-text contact box: the report is attributed,
+        # the admin replies in the thread, and notifications have their own channels.
+        # A contact saved before that box went away is still attached to the report.
+        contact = (db.get_user_preferences(user["id"])["contact"] if user
+                   else request.form.get("contact", "").strip()[:200])
         db.create_problem_report(message[:2000], contact, service["id"] if service else None,
                                   reporter_user=(user or {}).get("name", "")[:100],
                                   reporter_user_id=(user or {}).get("id", ""))
@@ -2222,8 +2226,7 @@ def report_problem():
     session["report_form_rendered_at"] = time.time()
     user = current_user()
     return render_template("report.html", services=services, preselect_service_id=preselect_service_id,
-                            site_name=site_name,
-                            prefill_contact=db.get_user_preferences(user["id"])["contact"] if user else "")
+                            site_name=site_name, prefill_contact="")
 
 
 @app.route("/admin/reports")
@@ -2412,7 +2415,7 @@ def _save_account_prefs(user_id, form):
     if "notify_discord_id" not in errors:
         contact_fields["notify_discord_id"] = discord_id
     db.set_user_preferences(
-        user_id, theme=form.get("theme", "auto"), contact=form.get("contact", "").strip()[:200],
+        user_id, theme=form.get("theme", "auto"),
         **contact_fields,
         notify_email_reports=bool(form.get("notify_email_reports")),
         notify_email_requests=bool(form.get("notify_email_requests")),

@@ -4808,12 +4808,13 @@ def test_a_linked_incident_is_shown_on_the_account_page(client, user_auth, monke
 
 def test_saving_preferences_persists_them(client, user_auth, monkeypatch):
     _sign_in(client, monkeypatch)
-    resp = client.post("/account", data={"theme": "light", "contact": "me@example.invalid"},
-                       follow_redirects=True)
+    db.set_user_preferences("u1", contact="legacy contact")
+    resp = client.post("/account", data={"theme": "light"}, follow_redirects=True)
     assert "settings have been saved" in resp.data.decode()
     prefs = db.get_user_preferences("u1")
     assert prefs["theme"] == "light"
-    assert prefs["contact"] == "me@example.invalid"
+    # The free-text contact box is gone for signed-in visitors: saving never touches it.
+    assert prefs["contact"] == "legacy contact"
 
 
 def test_an_explicit_theme_is_rendered_into_the_html_tag(client, user_auth, monkeypatch):
@@ -4863,10 +4864,28 @@ def test_the_saved_flag_is_passed_through_for_the_local_sync(client, user_auth, 
     assert 'data-just-saved="0"' in client.get("/account").data.decode()
 
 
-def test_the_report_form_prefills_the_saved_contact(client, user_auth, monkeypatch):
+def test_a_signed_in_visitor_gets_no_free_text_contact_box(client, user_auth, monkeypatch):
     _sign_in(client, monkeypatch)
-    db.set_user_preferences("u1", contact="adam@example.invalid")
-    assert 'value="adam@example.invalid"' in client.get("/report").data.decode()
+    assert 'name="contact"' not in client.get("/report").data.decode()
+    assert 'name="contact"' not in client.get("/account").data.decode()
+
+
+def test_an_anonymous_report_keeps_its_contact_box(client, isolated_db):
+    assert 'name="contact"' in client.get("/report").data.decode()
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    client.post("/report", data={"message": "broken", "contact": "me@example.invalid"})
+    assert db.list_problem_reports()[0]["contact"] == "me@example.invalid"
+
+
+def test_a_signed_in_report_ignores_a_posted_contact_and_uses_the_saved_one(client, user_auth, monkeypatch):
+    _sign_in(client, monkeypatch)
+    db.set_user_preferences("u1", contact="saved@example.invalid")
+    client.get("/report")
+    with client.session_transaction() as sess:
+        sess["report_form_rendered_at"] = time.time() - 60
+    client.post("/report", data={"message": "broken", "contact": "other"})
+    assert db.list_problem_reports()[0]["contact"] == "saved@example.invalid"
 
 
 # ---- The admin side of replying ----
