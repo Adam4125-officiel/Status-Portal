@@ -173,10 +173,10 @@ def test_incident_open_branch_stays_level_triggered(func_name, previous_arg):
 
     Checked on the AST rather than by grepping, so a reworded but equivalent
     edge-trigger still fails."""
-    tree = ast.parse(_read("app.py"))
+    tree = ast.parse(_read("health.py"))
     func = next((n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
-    assert func is not None, f"{func_name}() not found in app.py - was it renamed?"
+    assert func is not None, f"{func_name}() not found in health.py - was it renamed?"
 
     opening_ifs = [node for node in ast.walk(func)
                    if isinstance(node, ast.If)
@@ -584,6 +584,7 @@ def test_every_module_level_cache_is_reset_between_tests():
     global that nothing clears."""
     conftest = _read("tests", "conftest.py")
     cleared_by_helper = {
+        "health.py": _read("health.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "monitoring.py": _read("monitoring.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "integrations.py": _read("integrations.py").split("def clear_caches")[-1].split("\ndef ")[0],
         "scheduler.py": _read("scheduler.py").split("def clear_caches")[-1].split("\ndef ")[0],
@@ -640,7 +641,7 @@ def test_no_new_bare_background_loops():
     allowed = {
         # The core health-check cycle. Not a task: switching it off from a browser
         # would also switch off incident detection.
-        "app.py": 1,
+        "health.py": 1,
         # Resource polling, which runs faster than SCHEDULER_TICK_SECONDS.
         "monitoring.py": 1,
         # The scheduler's own loop, which is what drives every task.

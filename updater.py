@@ -452,7 +452,7 @@ def _compare(current, latest):
 # ---------------------------------------------------------------------------
 # Cached update check (read by request handlers - never checked inline)
 # ---------------------------------------------------------------------------
-# Same rule and same shape as app.py's _integration_status_cache: an outbound HTTP
+# Same rule and same shape as health.py's _integration_status_cache: an outbound HTTP
 # call must never happen inside a Flask request handler. The `update_check` scheduled
 # task registered at the bottom of this section is what refills it; the About page
 # only ever reads it.

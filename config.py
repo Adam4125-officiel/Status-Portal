@@ -122,7 +122,7 @@ LOG_RETENTION_DAYS = int(os.environ.get("PORTAL_LOG_RETENTION_DAYS", "7"))
 
 # How many services run_health_checks() checks concurrently, instead of one at a
 # time. A service with retry_count/retry_interval_seconds set can block its own slot
-# for retry_count * retry_interval_seconds seconds (see app._check_service_status),
+# for retry_count * retry_interval_seconds seconds (see health._check_service_status),
 # and a plain unresponsive check_url still costs up to the 5s request timeout each -
 # fully sequential, a handful of unreachable services can push one health-check
 # cycle well past CHECK_INTERVAL_SECONDS. Static deployment config, so an env var -

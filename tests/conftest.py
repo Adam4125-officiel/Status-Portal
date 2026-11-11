@@ -5,6 +5,7 @@ import pytest
 import admin_search as admin_search_module
 import app as app_module
 import db
+import health as health_module
 import integrations as integrations_module
 import media_search as media_search_module
 import monitoring as monitoring_module
@@ -28,7 +29,6 @@ def _reset_module_state():
     file. tests/test_conventions.py enforces that every such global is named here."""
     # app.py's own caches and rate-limit counters, which have no shared helper: the
     # clear-caches button deliberately doesn't reset login/report throttling.
-    app_module._integration_status_cache.clear()
     app_module._uptime_cache["value"] = {}
     app_module._uptime_cache["fetched_at"] = 0.0
     app_module._uptime_strip_cache["value"] = {}
@@ -42,6 +42,7 @@ def _reset_module_state():
     app_module._user_login_state["locked_until"] = 0.0
     app_module._user_login_slots = threading.BoundedSemaphore(app_module.USER_LOGIN_MAX_CONCURRENT)
     # Modules that own their own clearing.
+    health_module.clear_caches()
     integrations_module.clear_caches()
     monitoring_module.clear_caches()
     # Not part of clear_caches() on purpose (a re-init leaks driver memory), so tests

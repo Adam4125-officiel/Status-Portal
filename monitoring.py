@@ -759,7 +759,7 @@ def _background_refresh_loop(interval_seconds):
 
 def start_background_refresh(interval_seconds=10):
     """Starts this module's polling loop in a background thread, mirroring
-    start_background_checker() in app.py and discord_bot.start(). Everything it
+    start_background_checker() in health.py and discord_bot.start(). Everything it
     refreshes is something a request handler would otherwise have to wait on, per
     the project's standing rule against slow I/O in the request path: the
     Windows-only PowerShell/CIM queries (VM list, CPU temp, per-disk details), and -
