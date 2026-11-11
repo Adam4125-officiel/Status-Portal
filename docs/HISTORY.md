@@ -2462,3 +2462,14 @@ no cache could keep the page. The token now renders only for an existing session
 a POST form, and an anonymous public page is sent `public, max-age=15`. Checked on a throwaway
 server: `/` anonymous has no `Set-Cookie` and is `public`; with the admin's cookie it is
 `private, no-cache`; `/admin/login` and `/report` are `no-store` and still carry the token.
+
+## Daily uptime aggregates (2026-11)
+
+`status_history` reached 161 MB for 15 services: one row per check, 90 days kept, and the
+uptime query walked the whole index. Each check now also adds to a `status_daily` row (one per
+service per UTC day, kept a year), filled once from the existing history on the first start.
+The uptime figures read it, so new installs keep only 14 days of per-check rows; an existing
+install that never saved the setting keeps its 90 days. A test compares the new figures with
+the old per-check query. Checked on a throwaway server with 50 days of history: the backfill
+gave 51 days and 200 checks, the setting was pinned to 90, and the page showed 74.6 % where the
+old query gave 75.0 % - the gap is the partial 31st day the old rolling window included.
