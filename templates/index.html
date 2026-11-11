@@ -18,6 +18,13 @@
       </div>
       <div class="status-hero__meta">{{ services|length }} service(s) tracked</div>
     </div>
+    {% if affected_services %}
+    <ul class="status-hero__affected">
+      {% for s in affected_services %}
+      <li><span class="led {{ status_css[s.status] }}"></span><a href="#service-{{ s.id }}">{{ s.name }}</a> <span class="status-hero__state {{ status_css[s.status] }}">{{ status_label[s.status] }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
     {% if high_load.active %}
     <div class="status-hero__row" style="margin-top: 6px;">
       <div class="status-hero__label" style="font-size: 13px; color: var(--warn);">
@@ -48,17 +55,6 @@
       {% endfor %}
     </div>
   </section>
-  {% endif %}
-
-  {# Main page only. The kiosk display mirrors this page's own status, so the way in
-     belongs beside it rather than in the shared nav, where it would follow a visitor
-     onto every sub-page. Hidden entirely when kiosk mode is off - the route 404s in
-     that state, and a link to a 404 is worse than no link. #}
-  {% if kiosk_enabled %}
-  <div class="kiosk-launch">
-    <a class="btn secondary" href="{{ url_for('kiosk') }}">📺 Kiosk mode</a>
-    <span class="kiosk-launch__hint">Full-screen rotating display, for a wall-mounted screen or a spare tablet.</span>
-  </div>
   {% endif %}
 
 {% endblock %}

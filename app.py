@@ -312,6 +312,13 @@ def _inject_branding():
     return {"site_logo_filename": filename, "site_logo_version": version}
 
 
+def _show_public_version():
+    """Whether the public footer shows the exact version and the project link. On by
+    default (an unset setting reads as on) so existing installs don't change; the
+    About page always shows the version to the admin regardless."""
+    return db.get_setting("show_public_version", "1") == "1"
+
+
 @app.context_processor
 def _inject_portal_version():
     """Exposes the running version to every template (currently just the public
@@ -319,7 +326,8 @@ def _inject_portal_version():
     same reasoning as _inject_branding()/csrf_token() being globals rather than
     hand-passed. VERSION_DISPLAY, not bare VERSION, so a +dev source checkout reads
     as one - same value the About page already shows the admin."""
-    return {"portal_version_display": config.VERSION_DISPLAY}
+    return {"portal_version_display": config.VERSION_DISPLAY,
+            "show_public_version": _show_public_version()}
 
 
 @app.context_processor
@@ -1641,6 +1649,11 @@ def index():
     incidents_hidden = not incidents and bool(db.list_incidents(limit=1))
     maintenance_windows = db.list_public_maintenance_windows()
     overall = compute_overall_status(services)
+    # What the banner lists when the overall status isn't "operational": same filter as
+    # compute_overall_status(), so the list can never name a service the headline ignores.
+    affected_services = [] if overall == "operational" else [
+        s for s in services
+        if s["status"] != "operational" and not s.get("ignore_in_overall_status")]
     site_name = db.get_setting("site_name", "Server")
     # Signed-in visitors only, and only when there's something to search. Both halves
     # matter: without sign-in the box would expose the whole library to anyone who can
@@ -1649,6 +1662,7 @@ def index():
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, overall=overall,
+                            affected_services=affected_services,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=site_name,
                             high_load=_high_load(),
@@ -1657,10 +1671,6 @@ def index():
                             nav_links=_public_page_links(),
                             page_summaries=_public_page_links(include_summaries=True),
                             search_enabled=search_enabled, active_page="status",
-                            # Main page only, not the shared nav: the kiosk link belongs
-                            # next to the status it mirrors, and a wall display isn't
-                            # something you launch from halfway down a sub-page.
-                            kiosk_enabled=kiosk_enabled(),
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -4416,6 +4426,7 @@ def admin_settings():
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
                             totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
+                            show_public_version=_show_public_version(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
                             kiosk_min_rotation=KIOSK_MIN_ROTATION_SECONDS,
                             kiosk_max_rotation=KIOSK_MAX_ROTATION_SECONDS,
@@ -4467,6 +4478,7 @@ def admin_settings_general():
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
+    db.set_setting("show_public_version", "1" if request.form.get("show_public_version") else "0")
     db.set_setting("kiosk_enabled", "1" if request.form.get("kiosk_enabled") else "0")
     db.set_setting("kiosk_rotation_seconds", _setting_digits(
         request.form.get("kiosk_rotation_seconds"), str(KIOSK_DEFAULT_ROTATION_SECONDS)))

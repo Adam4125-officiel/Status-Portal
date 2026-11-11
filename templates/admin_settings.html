@@ -12,6 +12,10 @@
     <div class="field-hint">Shown in the topbar and page title on the public portal.</div>
   </div>
   <div class="field">
+    <label class="field-check"><input type="checkbox" name="show_public_version" {{ 'checked' if show_public_version }}> Show version and project link in the public footer</label>
+    <div class="field-hint">Untick to keep the exact version out of public view. It always stays on the About page.</div>
+  </div>
+  <div class="field">
     <label>Public page: also show...</label>
     <div class="field-hint" style="margin-bottom: 8px;">Nothing below is shown publicly unless checked — pick only what you want visitors to see. Everything is always visible in the admin-only resources page regardless.</div>
     <div style="display: flex; flex-direction: column; gap: 6px;">
@@ -81,8 +85,8 @@
       tablet — no nav, no footer, one view at a time, rotating on a timer. The data
       underneath refreshes on the normal public-page cycle ({{ refresh_seconds }}s),
       without the page reloading and restarting the rotation.
-      While this is off the page returns 404 to everyone and the link disappears from
-      the public status page.
+      While this is off the page returns 404 to everyone.
+      {% if kiosk_enabled %}<a href="{{ url_for('kiosk') }}" target="_blank" rel="noopener">Open kiosk display ↗</a>{% endif %}
     </div>
     <div class="checkbox-list">
       <label class="field-check"><input type="checkbox" name="kiosk_enabled" {{ 'checked' if kiosk_enabled }}> Enable kiosk mode</label>

@@ -1799,15 +1799,23 @@ body.kiosk {
      target that has already moved would only add lag. */
 }
 
-/* The way in, on the public status page. */
-.kiosk-launch {
+.status-hero__affected {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 26px;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
 }
-.kiosk-launch__hint { font-size: 12px; color: var(--text-faint); }
+.status-hero__affected li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.status-hero__affected a { color: var(--text); font-weight: 600; }
+.status-hero__state { font-family: var(--font-mono); font-size: 12px; }
+.status-hero__state.crit { color: var(--crit); }
+.status-hero__state.warn { color: var(--warn); }
+.status-hero__state.maint { color: var(--maint); }
+.topbar__right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: flex-end; }
+.topbar__report { padding: 5px 12px; font-size: 12px; }
 
 /* ---------------------------------------------------------------------------
    Floating admin search (admin_search.js)

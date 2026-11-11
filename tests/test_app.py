@@ -5146,3 +5146,49 @@ def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch)
     finally:
         monkeypatch.delenv("PORTAL_HOST", raising=False)
         importlib.reload(config_module)
+
+
+# ---------------------------------------------------------------------------
+# Public home: banner names affected services, report button, footer version
+# ---------------------------------------------------------------------------
+
+def test_banner_lists_affected_services_linked_to_their_cards(client):
+    sid = db.create_service({"name": "Bazarr", "url": "http://bazarr.example"})
+    db.update_service_status_from_check(sid, "down", None)
+    html = client.get("/").data.decode()
+    assert 'class="status-hero__affected"' in html
+    assert f'href="#service-{sid}"' in html
+    assert f'id="service-{sid}"' in html
+    assert "Bazarr" in html.split('class="status-hero__affected"')[1].split("</ul>")[0]
+
+
+def test_banner_lists_nothing_when_operational_or_service_is_ignored(client):
+    assert 'class="status-hero__affected"' not in client.get("/").data.decode()
+    sid = db.create_service({"name": "Bazarr", "url": "http://bazarr.example",
+                             "ignore_in_overall_status": 1})
+    db.update_service_status_from_check(sid, "down", None)
+    assert 'class="status-hero__affected"' not in client.get("/").data.decode()
+
+
+def test_report_button_is_in_the_topbar(client):
+    html = client.get("/").data.decode()
+    assert 'class="btn secondary topbar__report"' in html
+    assert html.index("topbar__report") < html.index('class="page-nav"')
+
+
+def test_report_button_title_says_sign_in_when_login_is_required(client, monkeypatch):
+    monkeypatch.setattr(app_module, "_report_login_required", lambda: True)
+    assert "Sign in with your Jellyfin account to report a problem" in client.get("/").data.decode()
+
+
+def test_footer_version_and_project_link_can_be_hidden(client):
+    assert f"status-portal v{app_module.config.VERSION_DISPLAY}" in client.get("/").data.decode()
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={})
+    assert db.get_setting("show_public_version") == "0"
+    html = client.get("/").data.decode()
+    assert "status-portal v" not in html
+    assert updater.REPO_URL not in html
+    assert "RSS feed" in html and "Report a problem" in html
+    client.post("/admin/settings/general", data={"show_public_version": "on"})
+    assert updater.REPO_URL in client.get("/").data.decode()

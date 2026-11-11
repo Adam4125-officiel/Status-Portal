@@ -55,12 +55,19 @@ def test_enabling_makes_both_routes_available(client):
     assert client.get("/kiosk/views").status_code == 200
 
 
-def test_the_public_page_only_offers_the_link_when_kiosk_is_on(client):
-    """The other half of the switch: a link to a route that 404s is worse than no
-    link at all."""
-    assert b'href="/kiosk"' not in client.get("/").data
+def test_the_public_page_no_longer_offers_the_kiosk_link(client):
+    """The kiosk is an installation tool: its link lives next to its setting in the
+    admin, not on the page every visitor sees."""
     _enable()
-    assert b'href="/kiosk"' in client.get("/").data
+    assert b'href="/kiosk"' not in client.get("/").data
+    assert b"Kiosk mode" not in client.get("/").data
+
+
+def test_the_admin_setting_links_to_the_kiosk_only_when_it_is_on(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    assert b'href="/kiosk"' not in client.get("/admin/settings").data
+    _enable()
+    assert b'href="/kiosk"' in client.get("/admin/settings").data
 
 
 # ---------------------------------------------------------------------------
