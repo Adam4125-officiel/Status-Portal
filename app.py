@@ -366,7 +366,7 @@ def _inject_admin_badges():
     """Unread problem-report count for the admin nav's "Reports" badge - scoped to
     admin pages only (not computed on every public page load) since it's only ever
     displayed there."""
-    if not request.path.startswith("/admin/"):
+    if request.path != "/admin" and not request.path.startswith("/admin/"):
         return {}
     # Reads the update cache only (never checks GitHub here) - a miss or a failed
     # check simply means no badge, exactly like "no unread reports".
@@ -2958,7 +2958,95 @@ def admin_logout():
 @app.route("/admin")
 @login_required
 def admin_dashboard():
-    return redirect(url_for("admin_services"))
+    return render_template("admin_overview.html", items=_overview_items(), active="overview")
+
+
+def _overview_items():
+    """What on this portal wants the admin's attention, as (state, text, endpoint, link
+    text) rows, worst first, plus an all-clear list. Reads the database, the in-memory
+    caches and stored settings only - never a live call - so the landing page costs
+    the same as any other admin page.
+
+    `state` is "crit", "warn" or "ok"; an "ok" row is a check that passed, shown so the
+    page says what it looked at rather than merely being empty."""
+    rows = []
+
+    def add(state, text, endpoint, link_text):
+        rows.append((state, text, endpoint, link_text))
+
+    def plural(n, word):
+        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+    services = db.list_services()
+    down = [s["name"] for s in services if s["status"] == "down"]
+    degraded = [s["name"] for s in services if s["status"] == "degraded"]
+    open_incidents = db.count_open_incidents()
+    if down:
+        add("crit", f"Down: {', '.join(down)}", "admin_services", "Services")
+    if degraded:
+        add("warn", f"Degraded: {', '.join(degraded)}", "admin_services", "Services")
+    if open_incidents:
+        add("warn", f"{plural(open_incidents, 'open incident')}", "admin_incidents", "Incidents")
+    if not (down or degraded or open_incidents):
+        add("ok", "Every service is up and no incident is open", "admin_services", "Services")
+
+    unread = db.count_unread_problem_reports() + db.count_unseen_user_messages()
+    if unread:
+        add("warn", f"{plural(unread, 'unread report or reply')}", "admin_reports", "Reports")
+    pending = seerr_alerts.pending_count()
+    if pending:
+        add("warn", f"{plural(pending, 'Seerr request')} waiting for approval",
+            "admin_seerr_alerts", "Seerr approvals")
+
+    cached = updater.get_cached_update_status()
+    if cached and cached.get("update_available"):
+        add("warn", "A portal update is available", "admin_about", "Updates & backups")
+    arr_updates = version_checks.updates_available()
+    if arr_updates:
+        add("warn", f"{plural(arr_updates, 'app')} behind the latest version",
+            "admin_integrations", "Integrations")
+
+    failed_tasks = [t["label"] for t in scheduler.list_task_views() if t["last_status"] == "failed"]
+    if failed_tasks:
+        add("crit", f"Last run failed: {', '.join(failed_tasks)}", "admin_tasks", "Scheduled tasks")
+
+    cycle = db.get_setting(LAST_HEALTH_CYCLE_SETTING)
+    age = None
+    if cycle:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(cycle)).total_seconds()
+        except ValueError:
+            age = None
+    # Three missed cycles, not one: a cycle that runs long is normal, a silent one is not.
+    if age is None:
+        add("warn", "No health-check cycle has finished yet", "admin_tasks", "Scheduled tasks")
+    elif age > 3 * config.CHECK_INTERVAL_SECONDS:
+        add("crit", f"The last health-check cycle finished {int(age // 60)} minutes ago",
+            "admin_tasks", "Scheduled tasks")
+    else:
+        add("ok", f"Last health-check cycle finished {int(age // 60)} minutes ago",
+            "admin_tasks", "Scheduled tasks")
+
+    unreachable = [i["name"] for i in db.list_integrations() if i["enabled"]
+                   and (_integration_status_cache.get(i["id"]) or {}).get("status", {}).get(
+                       "reachable") is False]
+    if unreachable:
+        add("crit", f"Unreachable: {', '.join(unreachable)}", "admin_integrations", "Integrations")
+
+    failed_notifications = db.notification_queue_summary()["failed"]
+    if failed_notifications:
+        add("warn", f"{plural(failed_notifications, 'notification')} given up on after repeated failures",
+            "admin_user_notifications", "Per-user notifications")
+
+    findings = _security_checks()
+    if findings:
+        add("warn", f"{plural(len(findings), 'security check')} to look at",
+            "admin_security", "Security")
+    else:
+        add("ok", "Nothing to flag on the Security page", "admin_security", "Security")
+
+    order = {"crit": 0, "warn": 1, "ok": 2}
+    return sorted(rows, key=lambda r: order[r[0]])
 
 
 # ---- Services ----
@@ -4346,43 +4434,52 @@ def admin_integration_delete(iid):
 
 
 # ---- Settings ----
+def _change_admin_password(redirect_endpoint):
+    """The password-change form, shared by /admin/security and the older POST to
+    /admin/settings (kept so existing bookmarks and scripts still work). Returns a
+    redirect when it must not proceed (2FA gate), otherwise None; either way the
+    outcome has been flashed."""
+    current = request.form.get("current_password", "")
+    new = request.form.get("new_password", "")
+    confirm = request.form.get("confirm_password", "")
+    stored = db.get_setting("admin_password_hash")
+    # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
+    # a stolen session cookie this form was an unthrottled password-guessing loop.
+    if _login_locked():
+        flash("Too many incorrect attempts - try again in a few minutes.", "error")
+    elif not check_password_hash(stored, current):
+        _register_login_failure()
+        flash("Current password is incorrect.", "error")
+    elif len(new) < 6:
+        flash("New password must be at least 6 characters.", "error")
+    elif new != confirm:
+        flash("Passwords do not match.", "error")
+    else:
+        # With 2FA on, changing the password also needs a current code: it is the
+        # action that signs the real admin out and leaves a cookie thief in.
+        blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
+                                redirect_endpoint)
+        if blocked:
+            return blocked
+        if not twofactor.is_enabled():
+            _register_login_success()
+        db.set_setting("admin_password_hash", generate_password_hash(new))
+        # The natural reaction to a suspected compromise, so it has to actually
+        # lock out a copied cookie - every other admin session ends here.
+        _rotate_admin_session_epoch()
+        flash("Password changed.", "success")
+    return None
+
+
 @app.route("/admin/settings", methods=["GET", "POST"])
 @login_required
 def admin_settings():
     if request.method == "POST":
-        current = request.form.get("current_password", "")
-        new = request.form.get("new_password", "")
-        confirm = request.form.get("confirm_password", "")
-        stored = db.get_setting("admin_password_hash")
-        # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
-        # a stolen session cookie this form was an unthrottled password-guessing loop.
-        if _login_locked():
-            flash("Too many incorrect attempts - try again in a few minutes.", "error")
-        elif not check_password_hash(stored, current):
-            _register_login_failure()
-            flash("Current password is incorrect.", "error")
-        elif len(new) < 6:
-            flash("New password must be at least 6 characters.", "error")
-        elif new != confirm:
-            flash("Passwords do not match.", "error")
-        else:
-            # With 2FA on, changing the password also needs a current code: it is the
-            # action that signs the real admin out and leaves a cookie thief in.
-            blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
-                                    "admin_settings")
-            if blocked:
-                return blocked
-            if not twofactor.is_enabled():
-                _register_login_success()
-            db.set_setting("admin_password_hash", generate_password_hash(new))
-            # The natural reaction to a suspected compromise, so it has to actually
-            # lock out a copied cookie - every other admin session ends here.
-            _rotate_admin_session_epoch()
-            flash("Password changed.", "success")
+        # The password form moved to /admin/security; this POST is kept for old callers.
+        return _change_admin_password("admin_security") or redirect(url_for("admin_security"))
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
-                            totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
                             show_public_version=_show_public_version(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
@@ -4401,10 +4498,6 @@ def admin_settings():
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
                             lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
-                            admin_session_timeout_hours=db.get_setting(
-                                "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
-                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
-                            session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
                             status_history_retention_days=db.get_setting(
                                 "status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS)),
                             vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
@@ -4431,8 +4524,6 @@ def admin_settings_general():
     db.set_setting("media_calendar_days", _setting_digits(
         request.form.get("media_calendar_days"), str(integrations.DEFAULT_CALENDAR_DAYS)))
     db.set_setting("media_requires_login", "1" if request.form.get("media_requires_login") else "0")
-    for key, default in integrations.HIGHLOAD_DEFAULTS.items():
-        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
@@ -4449,13 +4540,19 @@ def admin_settings_general():
     db.set_setting("kiosk_views", ",".join(
         key for key in request.form.getlist("kiosk_views") if key in KIOSK_VIEW_LABELS))
     db.set_setting("public_history_days", _setting_digits(request.form.get("public_history_days"), ""))
+    flash("Public page settings saved.", "success")
+    return redirect(url_for("admin_settings") + "#public-page")
+
+
+# Each settings form writes only its own keys: a checkbox that is absent from the POST
+# reads as "unchecked", so a shared handler would reset the other forms' boxes.
+@app.route("/admin/settings/monitoring", methods=["POST"])
+@login_required
+def admin_settings_monitoring():
+    for key, default in integrations.HIGHLOAD_DEFAULTS.items():
+        db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     db.set_setting("lowdisk_percent_threshold",
                     _setting_digits(request.form.get("lowdisk_percent_threshold"), ""))
-    # Both stored as plain digit strings; a non-numeric submission falls back to the
-    # default rather than being stored blank, since neither has a meaningful
-    # "unset" state the way the two optional thresholds above do.
-    db.set_setting("admin_session_timeout_hours", _setting_digits(
-        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
     retention = db.parse_int(request.form.get("status_history_retention_days"))
     db.set_setting("status_history_retention_days",
                     str(retention) if retention else str(DEFAULT_HISTORY_RETENTION_DAYS))
@@ -4470,8 +4567,79 @@ def admin_settings_general():
                     "1" if request.form.get("service_default_show_run_target_public") else "0")
     db.set_setting("service_default_show_dependencies_public",
                     "1" if request.form.get("service_default_show_dependencies_public") else "0")
-    flash("Settings updated.", "success")
-    return redirect(url_for("admin_settings"))
+    flash("Monitoring settings saved.", "success")
+    return redirect(url_for("admin_settings") + "#monitoring")
+
+
+@app.route("/admin/settings/security", methods=["POST"])
+@login_required
+def admin_settings_security():
+    # Both stored as plain digit strings; a non-numeric submission falls back to the
+    # default rather than being stored blank, since neither has a meaningful
+    # "unset" state the way the two optional thresholds above do.
+    db.set_setting("admin_session_timeout_hours", _setting_digits(
+        request.form.get("admin_session_timeout_hours"), str(DEFAULT_SESSION_TIMEOUT_HOURS)))
+    flash("Security settings saved.", "success")
+    return redirect(url_for("admin_security") + "#session")
+
+
+def _security_checks():
+    """Findings for the Security page's checks panel, as (message, link endpoint or
+    None, link text). Empty means nothing to flag. Reads this request, settings and the
+    update cache only - never a live call."""
+    findings = []
+    if not twofactor.is_enabled():
+        findings.append(("Two-factor authentication is off, so the password alone opens "
+                         "this panel.", "admin_2fa", "Set it up"))
+    over_https = request.is_secure or request.headers.get(
+        "X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
+    if over_https and not config.FORCE_HTTPS_COOKIES:
+        findings.append(("This page was reached over HTTPS but the session cookie is not "
+                         "marked Secure. Set PORTAL_FORCE_HTTPS_COOKIES=true.", None, ""))
+    if not config.BEHIND_PROXY and any(h in request.headers for h in _FORWARDING_HEADERS):
+        findings.append(("Proxy headers (X-Forwarded-For and the like) arrived but "
+                         "PORTAL_BEHIND_PROXY is not set, so every visitor looks like "
+                         "the proxy and the sign-in lockout and rate limits see one client. "
+                         "Set PORTAL_BEHIND_PROXY=true if a proxy or tunnel is in front.",
+                         None, ""))
+    cached = updater.get_cached_update_status()
+    if cached and cached.get("update_available"):
+        findings.append(("A newer version is available.", "admin_about", "Open Updates"))
+    return findings
+
+
+@app.route("/admin/security", methods=["GET", "POST"])
+@login_required
+def admin_security():
+    """Everything about who can get into /admin, on one page. The pieces already
+    existed but were scattered (password and session timeout in Settings, 2FA in its
+    own menu entry, the two API keys on Channels and Display device); the handlers
+    they post to are unchanged."""
+    if request.method == "POST":
+        return _change_admin_password("admin_security") or redirect(url_for("admin_security"))
+    return render_template("admin_security.html", totp_enabled=twofactor.is_enabled(),
+                            admin_session_timeout_hours=db.get_setting(
+                                "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
+                            max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
+                            session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
+                            notify_api_key=db.get_setting(NOTIFY_API_KEY_SETTING, ""),
+                            device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
+                            findings=_security_checks(), active="security")
+
+
+@app.route("/admin/security/sign-out-others", methods=["POST"])
+@login_required
+def admin_security_sign_out_others():
+    """Ends every admin session except this one. The epoch rotation used to happen only
+    as a side effect of a password or 2FA change. Behind the 2FA code for the same
+    reason the password change is: a copied cookie must not be able to do it."""
+    blocked = _require_totp("Incorrect or missing 2FA code - nobody was signed out.",
+                            "admin_security")
+    if blocked:
+        return blocked
+    _rotate_admin_session_epoch()
+    flash("Every other admin session has been signed out.", "success")
+    return redirect(url_for("admin_security"))
 
 
 # ---- Notifications ----
@@ -4629,6 +4797,15 @@ def admin_notifications_test():
     return redirect(url_for("admin_notifications"))
 
 
+def _key_page(default_endpoint):
+    """Where a key regeneration returns to: the Security page when the button was
+    pressed there (a hidden `back=security` field), otherwise the page that owns the
+    key. Whitelisted rather than a free `next`, so it can't be an open redirect."""
+    if request.form.get("back") == "security":
+        return url_for("admin_security") + "#api-keys"
+    return url_for(default_endpoint)
+
+
 @app.route("/admin/notifications/api-key/regenerate", methods=["POST"])
 @login_required
 def admin_notifications_regenerate_api_key():
@@ -4641,7 +4818,7 @@ def admin_notifications_regenerate_api_key():
     db.set_setting(NOTIFY_API_KEY_SETTING, secrets.token_hex(24))
     flash("New API key generated. The old key stopped working immediately - update "
           "anything using it.", "success")
-    return redirect(url_for("admin_notifications"))
+    return redirect(_key_page("admin_notifications"))
 
 
 @app.route("/admin/device", methods=["GET", "POST"])
@@ -4688,7 +4865,7 @@ def admin_device_regenerate_key():
     db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
     flash("New display device key generated. The old key stopped working immediately - "
           "enter the new one on the display.", "success")
-    return redirect(url_for("admin_device"))
+    return redirect(_key_page("admin_device"))
 
 
 @app.route("/admin/settings/backup-db", methods=["POST"])

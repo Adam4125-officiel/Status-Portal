@@ -49,3 +49,18 @@ def test_reports_status_select_has_no_inline_handler(client):
     assert "js/admin_autosubmit.js" in html
     js = (ROOT / "static/js/admin_autosubmit.js").read_text()
     assert "requestSubmit" in js
+
+
+def test_admin_confirmations_use_data_confirm_not_inline_handlers(client):
+    _login(client)
+    html = client.get("/admin/services").get_data(as_text=True)
+    assert "js/confirm.js" in html
+    for path in sorted((ROOT / "templates").glob("admin_*.html")):
+        assert "return confirm(" not in path.read_text(), path.name
+
+
+def test_deleting_a_service_warns_that_its_maintenance_windows_go_too(client):
+    db.create_service({"name": "Plex", "url": "http://x", "check_type": "http"})
+    _login(client)
+    html = client.get("/admin/services").get_data(as_text=True)
+    assert re.search(r'data-confirm="Delete Plex\?[^"]*maintenance windows', html)

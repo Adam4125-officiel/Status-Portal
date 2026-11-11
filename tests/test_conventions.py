@@ -525,19 +525,7 @@ def test_no_native_multi_selects_in_templates():
 
 # Template expressions allowed inside an inline on*= handler, keyed by template and
 # the exact expression. Anything else fails the test below.
-_INLINE_HANDLER_EXPRESSIONS_ALLOWED = {
-    # The "Delete <name>?" confirms. The name is one the portal's own admin typed, so a
-    # quote in it is self-XSS with no privilege gained - the accepted exception
-    # CLAUDE.md describes. Don't copy the pattern for anything else.
-    ("admin_integrations.html", "i.name"),
-    ("admin_services.html", "s.name"),
-    # Only string constants chosen in the template itself; nothing from outside.
-    ("admin_maintenance.html",
-     "' This will restore its service(s) immediately.' if w.applied and not w.ended else ''"),
-    ("admin_notifications.html",
-     "'confirm(\\'Generate a new key? The current one will stop working immediately.\\')' "
-     "if notify_api_key else 'true'"),
-}
+_INLINE_HANDLER_EXPRESSIONS_ALLOWED = set()
 
 # An on*= attribute's value, treating {{ ... }} as atomic so a quote inside an
 # expression can't end the match early and hide the rest of it.

@@ -27,7 +27,7 @@
     {# Under 720px the menu is a <details> showing only the current page and the badge
        total (admin_nav.js collapses it there). It is rendered open, and the summary is
        hidden above 720px, so without JavaScript the menu is simply always visible. #}
-    {% set nav_labels = {"services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "about": "About"} %}
+    {% set nav_labels = {"overview": "Overview", "services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "security": "Security", "about": "Updates & backups"} %}
     {% set nav_badge_total = (unread_reports_count or 0) + (arr_updates_count or 0) + (seerr_pending_count or 0) + (1 if update_available else 0) %}
     <details class="admin-nav__menu" id="admin_nav_menu" open>
     <summary class="admin-nav__summary">
@@ -40,20 +40,23 @@
     {# Grouped by what an admin is trying to do, not by when the feature was added.
        Routes are deliberately unchanged - this is navigation only, so every existing
        bookmark still works. #}
+    <a href="{{ url_for('admin_dashboard') }}" class="{{ 'active' if active == 'overview' }}">Overview</a>
+
     <div class="admin-nav__group">Status</div>
     <a href="{{ url_for('admin_services') }}" class="{{ 'active' if active == 'services' }}">Services</a>
     <a href="{{ url_for('admin_incidents') }}" class="{{ 'active' if active == 'incidents' }}">Incidents</a>
     <a href="{{ url_for('admin_maintenance') }}" class="{{ 'active' if active == 'maintenance' }}">Maintenance</a>
     <a href="{{ url_for('admin_reports') }}" class="{{ 'active' if active == 'reports' }}">Reports{% if unread_reports_count %} <span class="nav-badge">{{ unread_reports_count }}</span>{% endif %}</a>
 
-    <div class="admin-nav__group">Content</div>
+    <div class="admin-nav__group">Public content</div>
     <a href="{{ url_for('admin_announcements') }}" class="{{ 'active' if active == 'announcements' }}">Announcements</a>
     <a href="{{ url_for('admin_info') }}" class="{{ 'active' if active == 'info' }}">Info page</a>
+    <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
 
-    <div class="admin-nav__group">Monitoring</div>
+    <div class="admin-nav__group">Connections</div>
     <a href="{{ url_for('admin_integrations') }}" class="{{ 'active' if active == 'integrations' }}">Integrations{% if arr_updates_count %} <span class="nav-badge">{{ arr_updates_count }}</span>{% endif %}</a>
-    <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources &amp; VMs</a>
-    <a href="{{ url_for('admin_tasks') }}" class="{{ 'active' if active == 'tasks' }}">Scheduled tasks</a>
+    <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
+    <a href="{{ url_for('admin_device') }}" class="{{ 'active' if active == 'device' }}">Display device</a>
 
     <div class="admin-nav__group">Notifications</div>
     <a href="{{ url_for('admin_notifications') }}" class="{{ 'active' if active == 'notifications' }}">Channels</a>
@@ -62,13 +65,14 @@
     <a href="{{ url_for('admin_seerr_alerts') }}" class="{{ 'active' if active == 'seerr-alerts' }}">Seerr approvals{% if seerr_pending_count %} <span class="nav-badge">{{ seerr_pending_count }}</span>{% endif %}</a>
 
     <div class="admin-nav__group">System</div>
-    <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
+    <a href="{{ url_for('admin_resources') }}" class="{{ 'active' if active == 'resources' }}">Resources &amp; VMs</a>
+    <a href="{{ url_for('admin_tasks') }}" class="{{ 'active' if active == 'tasks' }}">Scheduled tasks</a>
     <a href="{{ url_for('admin_logs') }}" class="{{ 'active' if active == 'logs' }}">Logs</a>
-    <a href="{{ url_for('admin_settings') }}" class="{{ 'active' if active == 'settings' }}">Settings</a>
-    <a href="{{ url_for('admin_device') }}" class="{{ 'active' if active == 'device' }}">Display device</a>
-    <a href="{{ url_for('admin_users') }}" class="{{ 'active' if active == 'users' }}">User accounts</a>
-    <a href="{{ url_for('admin_2fa') }}" class="{{ 'active' if active == '2fa' }}">Two-factor auth</a>
-    <a href="{{ url_for('admin_about') }}" class="{{ 'active' if active == 'about' }}">About{% if update_available %} <span class="nav-badge">1</span>{% endif %}</a>
+    <a href="{{ url_for('admin_system') }}" class="{{ 'active' if active == 'system' }}">System</a>
+    {# The Two-factor pages have no entry of their own: they are reached from Security, so
+       it stays highlighted while you are on one. #}
+    <a href="{{ url_for('admin_security') }}" class="{{ 'active' if active in ('security', '2fa') }}">Security</a>
+    <a href="{{ url_for('admin_about') }}" class="{{ 'active' if active == 'about' }}">Updates &amp; backups{% if update_available %} <span class="nav-badge">1</span>{% endif %}</a>
 
     <div class="back-link">
       <a href="{{ url_for('index') }}">← View portal</a><br>
@@ -105,5 +109,6 @@
 <script src="{{ asset_url('js/admin_flash.js') }}"></script>
 <script src="{{ asset_url('js/admin_nav.js') }}"></script>
 <script src="{{ asset_url('js/admin_autosubmit.js') }}"></script>
+<script src="{{ asset_url('js/confirm.js') }}"></script>
 <script src="{{ asset_url('js/admin_search.js') }}" data-search-url="{{ url_for('admin_search_results') }}"></script>
 {% endblock %}

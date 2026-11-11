@@ -169,8 +169,8 @@
 
 ## Admin panel navigation (`templates/admin_base.html`)
 
-- **The nav is grouped by what an admin is trying to do** (Status · Content ·
-  Monitoring · Notifications · System), not by when a feature was added. Group
+- **The nav is grouped by what an admin is trying to do** (Overview, then
+  Status · Public content · Connections · Notifications · System), not by when a feature was added. Group
   headings are `.admin-nav__group` spans, not nested lists — the nav is still a flat
   sequence of `<a>` tags, which is what keeps the `active` matching trivial.
 - **Grouping is presentation only: no route ever moves for it.** Bookmarks are the
@@ -178,9 +178,15 @@
   URL; if a genuinely new page is needed (as `/admin/notifications` was), add the
   route rather than relocating an existing one.
 - **`.admin-nav` needs `overflow-y: auto`.** The grouped nav is ~966px tall and a
-  laptop viewport is ~650–720px, so without it the bottom entries (About, Two-factor
-  auth) are simply unreachable — invisible to every route-level test and obvious the
+  laptop viewport is ~650–720px, so without it the bottom entries (Security, Updates &
+  backups) are simply unreachable — invisible to every route-level test and obvious the
   moment you open a browser at a real window height.
+- **`/admin` is an overview, not a redirect** (`_overview_items()`): rows of
+  crit/warn/ok, worst first, built only from the database, caches and settings - never a
+  live call. A new "needs attention" signal is one more `add()` there. It has no
+  trailing slash, so `_inject_admin_badges()` matches `/admin` explicitly as well as
+  `/admin/...`. The Two-factor pages have no menu entry; Security stays highlighted.
+  "About" is now "Updates & backups" (same `/admin/about` URL).
 - **Under 720px the menu is a `<details>`** (`#admin_nav_menu`) whose summary shows the
   current page (from the `nav_labels` map in `admin_base.html`, keyed by `active`) and
   the badge total. It is rendered `open` and the summary is hidden above 720px, so
@@ -277,6 +283,30 @@
 - The index is cached on the templates' mtimes (like `asset_url()`), so an edited label
   shows up without a restart while a search does no disk I/O. It's in
   `admin_search.clear_caches()` and `tests/conftest.py` like every other module cache.
+
+## Settings: three independent forms (`/admin/settings`)
+
+- **Public page, Monitoring and Security are three forms with three handlers**
+  (`admin_settings_general`, `admin_settings_monitoring`, `admin_settings_security`),
+  each with its own anchor (the Security form itself now renders on `/admin/security`). **Each handler writes only its own keys.** An unticked
+  checkbox is simply absent from a POST and reads as "off", so a handler that also
+  wrote another form's keys would reset that form's boxes on every save. A new
+  setting goes in the handler of the form that shows it; `test_each_settings_form_writes_only_its_own_keys`
+  covers it. The service defaults live in the Monitoring form (rule 8 still applies).
+
+## Security page (`/admin/security`)
+
+- One page for password, 2FA status (the setup itself stays on `/admin/2fa`), session
+  timeout, "Sign out all other sessions" (`_rotate_admin_session_epoch()`, behind
+  `_require_totp()`), both API keys and a checks panel (`_security_checks()`).
+- **Nothing it shows has a new handler.** The password form posts to `/admin/security`
+  (`_change_admin_password()`, shared with the older POST to `/admin/settings`, which
+  still works), the timeout to `/admin/settings/security`, the key buttons to their
+  original routes, which return here when the form carries `back=security` (`_key_page()`,
+  a whitelist, not a free `next`).
+- The checks read the request, settings and the update cache only. HTTPS counts as seen
+  from `request.is_secure` or an `X-Forwarded-Proto: https` header, because without
+  `PORTAL_BEHIND_PROXY` the first is false behind a tunnel.
 
 ## Keeping your place when a form submits (`admin_scroll_restore.js`, `admin_flash.js`)
 

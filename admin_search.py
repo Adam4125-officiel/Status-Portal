@@ -60,6 +60,7 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templat
 # `endpoint` is a Flask endpoint name; the search route resolves it with url_for(), so
 # a moved URL follows automatically.
 PAGES = [
+    ("admin_overview.html", "admin_dashboard", "Overview"),
     ("admin_services.html", "admin_services", "Services"),
     ("admin_service_form.html", "admin_service_new", "Services · New service"),
     ("admin_new_combined.html", "admin_new_combined", "Services · New service + check"),
@@ -86,9 +87,10 @@ PAGES = [
     ("admin_settings.html", "admin_settings", "Settings"),
     ("admin_device.html", "admin_device", "Display device"),
     ("admin_users.html", "admin_users", "User accounts"),
+    ("admin_security.html", "admin_security", "Security"),
     ("admin_2fa.html", "admin_2fa", "Two-factor auth"),
     ("admin_2fa_enable.html", "admin_2fa_enable", "Two-factor auth · Set up"),
-    ("admin_about.html", "admin_about", "About"),
+    ("admin_about.html", "admin_about", "Updates & backups"),
 ]
 
 # Templates that are page furniture rather than a page, so they have no entry above and

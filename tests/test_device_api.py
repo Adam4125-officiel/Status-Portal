@@ -650,9 +650,9 @@ def test_the_regenerate_confirm_is_a_constant_not_an_interpolated_value(client):
     """The inline-handler convention: nothing from outside goes inside an on*= attribute.
     The confirm text here is fixed, and only present once there is a key to lose."""
     _login(client)
-    assert "onsubmit" not in client.get("/admin/device").get_data(as_text=True)
+    assert "data-confirm" not in client.get("/admin/device").get_data(as_text=True)
     client.post("/admin/device", data={"device_api_enabled": "on"})
-    assert "onsubmit=\"return confirm(" in client.get("/admin/device").get_data(as_text=True)
+    assert "data-confirm=\"Generate a new key?" in client.get("/admin/device").get_data(as_text=True)
 
 
 def test_the_admin_search_finds_the_page_and_its_controls():
