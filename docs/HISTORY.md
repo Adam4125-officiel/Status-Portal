@@ -2355,3 +2355,10 @@ Two tests shared one name, so only the second ran; compose defaulted the search 
 limit to 20 while `config.py` says 40. Connections now use `synchronous=NORMAL` (safe
 under WAL, one fsync fewer per commit), each check's state and history row share a
 transaction, and check timing uses `time.perf_counter()`.
+
+## Admin on a phone (2026-11)
+
+At 390px the admin menu took about 1,070px before every page title and the Services table
+broke words mid-letter ("operat/ional"). The menu now collapses to a one-line summary
+under 720px, secondary Services columns are hidden there, and the Reports status select
+submits through a script (`requestSubmit()`) instead of an inline `onchange`.
