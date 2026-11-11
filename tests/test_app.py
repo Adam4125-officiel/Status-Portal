@@ -5524,3 +5524,19 @@ def test_admin_overview_flags_a_silent_health_check_loop(client):
     db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, old)
     _login(client)
     assert "finished 120 minutes ago" in client.get("/admin").get_data(as_text=True)
+
+
+def test_the_account_page_lists_only_the_visitors_own_requests(client, user_auth, monkeypatch):
+    base = {"status": 2, "mediaStatus": 3, "request_status_key": "pending",
+            "media_status_key": "processing", "request_status": "Pending approval",
+            "media_status_label": "Processing", "media_type": "movie", "year": None}
+    monkeypatch.setitem(app_module.integrations._media_cache, "user_requests", [
+        dict(base, title="My Film", requested_by="adam", requested_by_jellyfin_id="u1"),
+        dict(base, title="Someone Elses Film", requested_by="adam", requested_by_jellyfin_id="u2"),
+    ])
+    _sign_in(client, monkeypatch)
+    body = client.get("/account").data.decode()
+    assert "My Film" in body
+    assert "Someone Elses Film" not in body
+    assert "Pending approval" in body
+    assert "not listed on this page yet" not in body

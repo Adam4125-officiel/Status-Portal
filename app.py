@@ -2478,6 +2478,9 @@ def user_account():
         flash("Filled in your contact details from Seerr — edit or clear them below.", "success")
     return render_template("account.html",
                             reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
+                            my_requests=integrations.requests_for_jellyfin_user(user_id),
+                            requests_refreshed=integrations.get_cached_media()["refreshed_at"],
+                            requests_configured=integrations.seerr_integration() is not None,
                             prefs=prefs,
                             notifications_enabled=user_notify.is_enabled(),
                             seerr_account=seerr_account,

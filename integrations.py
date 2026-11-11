@@ -833,6 +833,9 @@ def fetch_seerr_requests(base_url, api_key, limit=20):
             # The Seerr user id, kept so a request can be traced back to the Jellyfin
             # account that made it - via Seerr's own jellyfinUserId link, never a guess.
             "requested_by_id": str(requested_by.get("id") or ""),
+            # Seerr's own link to the Jellyfin account, the only thing a request may be
+            # attributed to a visitor by - never display name, never e-mail.
+            "requested_by_jellyfin_id": str(requested_by.get("jellyfinUserId") or ""),
             "requested_at": entry.get("createdAt") or "",
             "pending": entry.get("status") == 1,
             "media_status": media_status,
@@ -1273,8 +1276,29 @@ def fetch_prowlarr_indexers(base_url, api_key):
 
 # What the media_refresh task publishes and the pages read. Empty lists are exactly
 # right before the first refresh, and after one that failed.
-_media_cache = {"calendar": [], "requests": [], "downloads": [], "indexers": [],
-                "refreshed_at": None, "errors": {}}
+_media_cache = {"calendar": [], "requests": [], "user_requests": [], "downloads": [],
+                "indexers": [], "refreshed_at": None, "errors": {}}
+
+# How many recent requests the refresh keeps for "My requests". Deeper than the 20 the
+# public section shows, so a visitor's own older requests don't fall off the list just
+# because other people have asked for things since.
+USER_REQUESTS_LIMIT = 100
+PUBLIC_REQUESTS_LIMIT = 20
+
+
+def requests_for_jellyfin_user(jellyfin_user_id):
+    """The cached Seerr requests made by one Jellyfin account. Reads the cache only.
+
+    Matched solely on the Jellyfin user id Seerr itself reports for the requester - an
+    exact comparison. Not by name, not by e-mail: two people can share a display name,
+    and a wrong match would show one person another's requests. A blank id on either
+    side matches nothing, so a request with no link (or a visitor with no id) is never
+    shown to anybody."""
+    wanted = str(jellyfin_user_id or "").strip()
+    if not wanted:
+        return []
+    return [dict(r) for r in _media_cache["user_requests"]
+            if r.get("requested_by_jellyfin_id") == wanted]
 
 
 def get_cached_media():
@@ -1357,11 +1381,15 @@ def refresh_media_cache():
     seerr = integrations_by_kind["jellyseerr"]
     if seerr:
         try:
-            _media_cache["requests"] = fetch_seerr_requests(seerr["base_url"], seerr["api_key"])
+            fetched = fetch_seerr_requests(seerr["base_url"], seerr["api_key"],
+                                           limit=USER_REQUESTS_LIMIT)
+            _media_cache["user_requests"] = fetched
+            _media_cache["requests"] = fetched[:PUBLIC_REQUESTS_LIMIT]
         except (requests.RequestException, ValueError) as e:
             errors["requests"] = str(e)
     else:
         _media_cache["requests"] = []
+        _media_cache["user_requests"] = []
 
     qbit = integrations_by_kind["qbittorrent"]
     if qbit:
@@ -1446,6 +1474,7 @@ def clear_caches():
     _jellyfin_activity_cache["running_tasks"] = []
     _media_cache["calendar"] = []
     _media_cache["requests"] = []
+    _media_cache["user_requests"] = []
     _media_cache["downloads"] = []
     _media_cache["indexers"] = []
     _media_cache["refreshed_at"] = None

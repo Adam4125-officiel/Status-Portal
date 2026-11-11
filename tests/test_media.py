@@ -578,3 +578,39 @@ def test_a_non_4k_requests_availability_still_reads_plain_status(isolated_db, st
     item = integrations.fetch_seerr_requests(stub, "key")[0]
     assert item["media_status_key"] == "available"
     assert item["is4k"] is False
+
+
+# ---------------------------------------------------------------------------
+# "My requests": attribution by Seerr's Jellyfin link, and nothing else
+# ---------------------------------------------------------------------------
+def _seerr_request(rid, display_name, email, jellyfin_id, title):
+    requested_by = {"id": 100 + rid, "displayName": display_name, "email": email}
+    if jellyfin_id is not None:
+        requested_by["jellyfinUserId"] = jellyfin_id
+    return {"id": rid, "status": 2, "createdAt": "2026-08-01T10:00:00Z",
+            "requestedBy": requested_by,
+            "media": {"mediaType": "movie", "status": 3, "title": title, "tmdbId": rid}}
+
+
+def test_the_reader_keeps_the_jellyfin_id_seerr_reports(stub):
+    route("GET", "/api/v1/request", {"results": [_seerr_request(1, "Adam", "a@x", "u1", "A")]})
+    assert integrations.fetch_seerr_requests(stub, "key")[0]["requested_by_jellyfin_id"] == "u1"
+
+
+def test_a_visitor_only_gets_requests_linked_to_their_jellyfin_id(isolated_db, stub):
+    """Same display name, same e-mail, no link: none of those are grounds to show
+    somebody else's request. Only the exact Jellyfin id Seerr reports is."""
+    route("GET", "/api/v1/request", {"results": [
+        _seerr_request(1, "Adam", "adam@example.com", "u1", "Mine"),
+        _seerr_request(2, "Adam", "adam@example.com", "u2", "Namesake"),
+        _seerr_request(3, "Adam", "adam@example.com", None, "Unlinked"),
+        _seerr_request(4, "Sam", "sam@example.com", "u3", "Other"),
+    ]})
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": stub,
+                            "api_key": "k", "enabled": 1})
+    integrations.refresh_media_cache()
+    assert [r["title"] for r in integrations.requests_for_jellyfin_user("u1")] == ["Mine"]
+    assert [r["title"] for r in integrations.requests_for_jellyfin_user("u2")] == ["Namesake"]
+    assert integrations.requests_for_jellyfin_user("") == []
+    assert integrations.requests_for_jellyfin_user(None) == []
+    assert integrations.requests_for_jellyfin_user("nobody") == []
