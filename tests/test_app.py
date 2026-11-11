@@ -5309,3 +5309,46 @@ def test_admin_nav_groups_and_the_updates_page_name(client):
     # Two-factor pages keep Security highlighted instead of having their own entry.
     tfa = client.get("/admin/2fa").get_data(as_text=True)
     assert 'class="active">Security' in tfa
+
+
+def test_admin_index_is_an_overview_not_a_redirect(client):
+    _login(client)
+    resp = client.get("/admin")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "<h1>Overview</h1>" in body and "Overview — Admin" in body
+    assert "Every service is up" in body
+    assert 'class="active">Overview' in body
+
+
+def test_admin_overview_surfaces_what_needs_attention(client):
+    sid = db.create_service({"name": "Plexish", "url": "http://x.example"})
+    db.update_service_status_from_check(sid, "down", 0)
+    db.create_incident({"title": "Outage", "service_id": sid, "status": "investigating",
+                        "severity": "major", "message": "m"})
+    db.enqueue_notification("u1", "x", "s", "b")
+    conn = db.get_db()
+    conn.execute("UPDATE notification_queue SET attempts=?", (db.MAX_NOTIFICATION_ATTEMPTS,))
+    conn.commit()
+    conn.close()
+    iid = db.create_integration({"name": "Radarr", "kind": "arr", "base_url": "http://r.example",
+                                 "api_key": "x", "enabled": 1})
+    app_module._integration_status_cache[iid] = {
+        "status": {"reachable": False, "version": None, "issues": []}, "checked_at": db.now_iso()}
+    _login(client)
+    body = client.get("/admin").get_data(as_text=True)
+    assert "Down: Plexish" in body
+    assert "1 open incident" in body
+    assert "Unreachable: Radarr" in body
+    assert "1 notification given up on" in body
+    assert "No health-check cycle has finished yet" in body
+    assert "Every service is up" not in body
+    # Worst first: the down service precedes the warnings.
+    assert body.index("Down: Plexish") < body.index("security check to look at")
+
+
+def test_admin_overview_flags_a_silent_health_check_loop(client):
+    old = (app_module.datetime.now(app_module.timezone.utc) - app_module.timedelta(hours=2)).isoformat()
+    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, old)
+    _login(client)
+    assert "finished 120 minutes ago" in client.get("/admin").get_data(as_text=True)

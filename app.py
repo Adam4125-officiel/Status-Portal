@@ -366,7 +366,7 @@ def _inject_admin_badges():
     """Unread problem-report count for the admin nav's "Reports" badge - scoped to
     admin pages only (not computed on every public page load) since it's only ever
     displayed there."""
-    if not request.path.startswith("/admin/"):
+    if request.path != "/admin" and not request.path.startswith("/admin/"):
         return {}
     # Reads the update cache only (never checks GitHub here) - a miss or a failed
     # check simply means no badge, exactly like "no unread reports".
@@ -2958,7 +2958,95 @@ def admin_logout():
 @app.route("/admin")
 @login_required
 def admin_dashboard():
-    return redirect(url_for("admin_services"))
+    return render_template("admin_overview.html", items=_overview_items(), active="overview")
+
+
+def _overview_items():
+    """What on this portal wants the admin's attention, as (state, text, endpoint, link
+    text) rows, worst first, plus an all-clear list. Reads the database, the in-memory
+    caches and stored settings only - never a live call - so the landing page costs
+    the same as any other admin page.
+
+    `state` is "crit", "warn" or "ok"; an "ok" row is a check that passed, shown so the
+    page says what it looked at rather than merely being empty."""
+    rows = []
+
+    def add(state, text, endpoint, link_text):
+        rows.append((state, text, endpoint, link_text))
+
+    def plural(n, word):
+        return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+    services = db.list_services()
+    down = [s["name"] for s in services if s["status"] == "down"]
+    degraded = [s["name"] for s in services if s["status"] == "degraded"]
+    open_incidents = db.count_open_incidents()
+    if down:
+        add("crit", f"Down: {', '.join(down)}", "admin_services", "Services")
+    if degraded:
+        add("warn", f"Degraded: {', '.join(degraded)}", "admin_services", "Services")
+    if open_incidents:
+        add("warn", f"{plural(open_incidents, 'open incident')}", "admin_incidents", "Incidents")
+    if not (down or degraded or open_incidents):
+        add("ok", "Every service is up and no incident is open", "admin_services", "Services")
+
+    unread = db.count_unread_problem_reports() + db.count_unseen_user_messages()
+    if unread:
+        add("warn", f"{plural(unread, 'unread report or reply')}", "admin_reports", "Reports")
+    pending = seerr_alerts.pending_count()
+    if pending:
+        add("warn", f"{plural(pending, 'Seerr request')} waiting for approval",
+            "admin_seerr_alerts", "Seerr approvals")
+
+    cached = updater.get_cached_update_status()
+    if cached and cached.get("update_available"):
+        add("warn", "A portal update is available", "admin_about", "Updates & backups")
+    arr_updates = version_checks.updates_available()
+    if arr_updates:
+        add("warn", f"{plural(arr_updates, 'app')} behind the latest version",
+            "admin_integrations", "Integrations")
+
+    failed_tasks = [t["label"] for t in scheduler.list_task_views() if t["last_status"] == "failed"]
+    if failed_tasks:
+        add("crit", f"Last run failed: {', '.join(failed_tasks)}", "admin_tasks", "Scheduled tasks")
+
+    cycle = db.get_setting(LAST_HEALTH_CYCLE_SETTING)
+    age = None
+    if cycle:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(cycle)).total_seconds()
+        except ValueError:
+            age = None
+    # Three missed cycles, not one: a cycle that runs long is normal, a silent one is not.
+    if age is None:
+        add("warn", "No health-check cycle has finished yet", "admin_tasks", "Scheduled tasks")
+    elif age > 3 * config.CHECK_INTERVAL_SECONDS:
+        add("crit", f"The last health-check cycle finished {int(age // 60)} minutes ago",
+            "admin_tasks", "Scheduled tasks")
+    else:
+        add("ok", f"Last health-check cycle finished {int(age // 60)} minutes ago",
+            "admin_tasks", "Scheduled tasks")
+
+    unreachable = [i["name"] for i in db.list_integrations() if i["enabled"]
+                   and (_integration_status_cache.get(i["id"]) or {}).get("status", {}).get(
+                       "reachable") is False]
+    if unreachable:
+        add("crit", f"Unreachable: {', '.join(unreachable)}", "admin_integrations", "Integrations")
+
+    failed_notifications = db.notification_queue_summary()["failed"]
+    if failed_notifications:
+        add("warn", f"{plural(failed_notifications, 'notification')} given up on after repeated failures",
+            "admin_user_notifications", "Per-user notifications")
+
+    findings = _security_checks()
+    if findings:
+        add("warn", f"{plural(len(findings), 'security check')} to look at",
+            "admin_security", "Security")
+    else:
+        add("ok", "Nothing to flag on the Security page", "admin_security", "Security")
+
+    order = {"crit": 0, "warn": 1, "ok": 2}
+    return sorted(rows, key=lambda r: order[r[0]])
 
 
 # ---- Services ----

@@ -60,6 +60,7 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templat
 # `endpoint` is a Flask endpoint name; the search route resolves it with url_for(), so
 # a moved URL follows automatically.
 PAGES = [
+    ("admin_overview.html", "admin_dashboard", "Overview"),
     ("admin_services.html", "admin_services", "Services"),
     ("admin_service_form.html", "admin_service_new", "Services · New service"),
     ("admin_new_combined.html", "admin_new_combined", "Services · New service + check"),

@@ -27,7 +27,7 @@
     {# Under 720px the menu is a <details> showing only the current page and the badge
        total (admin_nav.js collapses it there). It is rendered open, and the summary is
        hidden above 720px, so without JavaScript the menu is simply always visible. #}
-    {% set nav_labels = {"services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "security": "Security", "about": "Updates & backups"} %}
+    {% set nav_labels = {"overview": "Overview", "services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "security": "Security", "about": "Updates & backups"} %}
     {% set nav_badge_total = (unread_reports_count or 0) + (arr_updates_count or 0) + (seerr_pending_count or 0) + (1 if update_available else 0) %}
     <details class="admin-nav__menu" id="admin_nav_menu" open>
     <summary class="admin-nav__summary">
@@ -40,6 +40,8 @@
     {# Grouped by what an admin is trying to do, not by when the feature was added.
        Routes are deliberately unchanged - this is navigation only, so every existing
        bookmark still works. #}
+    <a href="{{ url_for('admin_dashboard') }}" class="{{ 'active' if active == 'overview' }}">Overview</a>
+
     <div class="admin-nav__group">Status</div>
     <a href="{{ url_for('admin_services') }}" class="{{ 'active' if active == 'services' }}">Services</a>
     <a href="{{ url_for('admin_incidents') }}" class="{{ 'active' if active == 'incidents' }}">Incidents</a>
