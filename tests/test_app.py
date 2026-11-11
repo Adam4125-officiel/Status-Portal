@@ -3406,7 +3406,7 @@ def test_notifications_test_button_is_disabled_with_no_channels(client, monkeypa
     assert b"Set up a channel above first" in resp.data
 
 
-def test_admin_settings_backup_db_returns_zip_with_consistent_snapshot(client):
+def test_admin_settings_backup_db_zip_contains_openable_database(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/settings/backup-db")
     assert resp.status_code == 200
