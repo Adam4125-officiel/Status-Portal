@@ -1026,7 +1026,7 @@ footer.foot {
   margin-bottom: 6px;
   color: var(--text-dim);
 }
-.field input[type=text], .field input[type=url], .field input[type=password],
+.field input[type=text], .field input[type=email], .field input[type=url], .field input[type=password],
 .field input[type=number], .field select, .field textarea {
   width: 100%;
   background: var(--bg-void);
@@ -2001,3 +2001,18 @@ body.kiosk {
 
 /* What "Load more" appended, wrapped so a page refresh can restore it: no box of its own. */
 .load-more-batch { display: contents; }
+
+.account-nav { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.account-nav a {
+  padding: 5px 12px; border: 1px solid var(--border); border-radius: 20px;
+  font-size: 13px; color: var(--text-dim);
+}
+.account-nav a:hover { color: var(--brand); text-decoration: none; border-color: var(--brand); }
+.account-section { scroll-margin-top: 16px; }
+.account-notify { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.account-notify th, .account-notify td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: center; }
+.account-notify thead th { font-size: 12px; color: var(--text-dim); }
+.account-notify th:first-child { text-align: left; font-weight: normal; }
+.account-notify td:first-of-type, .account-notify td { width: 72px; }
+.account-notify .field-hint { margin-top: 2px; }
+.account-notify__na { color: var(--text-faint); }
