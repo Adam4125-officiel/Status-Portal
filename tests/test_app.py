@@ -5028,7 +5028,7 @@ def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
 # End of a health-check cycle: heartbeat ping and last-cycle timestamp
 # ---------------------------------------------------------------------------
 
-def test_finish_health_cycle_records_time_and_pings_heartbeat(monkeypatch):
+def test_finish_health_cycle_records_time_and_pings_heartbeat(isolated_db, monkeypatch):
     calls = []
 
     class _Resp:
@@ -5043,7 +5043,7 @@ def test_finish_health_cycle_records_time_and_pings_heartbeat(monkeypatch):
     assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
 
 
-def test_finish_health_cycle_without_url_makes_no_request(monkeypatch):
+def test_finish_health_cycle_without_url_makes_no_request(isolated_db, monkeypatch):
     monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "")
 
     def boom(*a, **k):
