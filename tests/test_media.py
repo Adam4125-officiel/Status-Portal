@@ -614,3 +614,12 @@ def test_a_visitor_only_gets_requests_linked_to_their_jellyfin_id(isolated_db, s
     assert integrations.requests_for_jellyfin_user("") == []
     assert integrations.requests_for_jellyfin_user(None) == []
     assert integrations.requests_for_jellyfin_user("nobody") == []
+
+
+def test_a_visitors_requests_come_newest_first(isolated_db, monkeypatch):
+    monkeypatch.setitem(integrations._media_cache, "user_requests", [
+        {"title": "Old", "requested_at": "2026-01-01T00:00:00Z", "requested_by_jellyfin_id": "u1"},
+        {"title": "Undated", "requested_at": "", "requested_by_jellyfin_id": "u1"},
+        {"title": "New", "requested_at": "2026-03-01T00:00:00Z", "requested_by_jellyfin_id": "u1"},
+    ])
+    assert [r["title"] for r in integrations.requests_for_jellyfin_user("u1")] == ["New", "Old", "Undated"]

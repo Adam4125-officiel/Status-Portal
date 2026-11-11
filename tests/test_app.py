@@ -5558,6 +5558,40 @@ def test_the_account_page_lists_only_the_visitors_own_requests(client, user_auth
     assert "not listed on this page yet" not in body
 
 
+def _account_page_with_requests(client, monkeypatch, count):
+    base = {"request_status_key": "pending", "media_status_key": "processing",
+            "request_status": "Pending approval", "media_status_label": "Processing",
+            "media_type": "movie", "year": None, "requested_by_jellyfin_id": "u1"}
+    # Deliberately stored oldest first: the page must still put the newest on top.
+    monkeypatch.setitem(app_module.integrations._media_cache, "user_requests", [
+        dict(base, title=f"Film {i:02d}", requested_at=f"2026-01-{i + 1:02d}T10:00:00Z")
+        for i in range(count)])
+    _sign_in(client, monkeypatch)
+    return client.get("/account").data.decode()
+
+
+def test_the_account_page_has_no_fold_up_to_the_limit(client, user_auth, monkeypatch):
+    from routes.account import ACCOUNT_REQUESTS_VISIBLE
+    body = _account_page_with_requests(client, monkeypatch, ACCOUNT_REQUESTS_VISIBLE)
+    assert body.count('class="media-row"') == ACCOUNT_REQUESTS_VISIBLE
+    assert "<details" not in body
+
+
+def test_the_account_page_folds_older_requests_into_a_details(client, user_auth, monkeypatch):
+    from routes.account import ACCOUNT_REQUESTS_VISIBLE
+    total = ACCOUNT_REQUESTS_VISIBLE + 23
+    body = _account_page_with_requests(client, monkeypatch, total)
+    head, _, folded = body.partition('<details class="media-more">')
+    assert folded
+    assert head.count('class="media-row"') == ACCOUNT_REQUESTS_VISIBLE
+    inside = folded.partition("</details>")[0]
+    assert inside.count('class="media-row"') == 23
+    assert "Show 23 older requests" in inside
+    # Newest first: the last-created film leads, the oldest is inside the fold.
+    assert head.index(f"Film {total - 1:02d}") < head.index(f"Film {total - 2:02d}")
+    assert "Film 00" in inside and "Film 00" not in head
+
+
 def test_an_anonymous_visitor_reading_public_pages_gets_no_cookie(client, isolated_db, user_auth):
     """Rendering the CSRF token creates a session, so it used to hand every reader of
     the status page (every bot, every uptime probe) a cookie - which also made the page

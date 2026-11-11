@@ -108,8 +108,7 @@
     <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
       What you've asked for through Seerr, and where it stands. Refreshed every few minutes.
     </p>
-    <div class="media-list">
-      {% for r in my_requests %}
+    {% macro request_row(r) %}
       <div class="media-row">
         <div class="media-row__main">
           <span class="media-row__name">{{ r.title }}{% if r.year %} <span class="media-row__year">({{ r.year }})</span>{% endif %}</span>
@@ -120,8 +119,18 @@
         <span class="status-pill status-pill--{{ r.request_status_key }}">{{ r.request_status }}</span>
         <span class="status-pill status-pill--{{ r.media_status_key }}">{{ r.media_status_label }}</span>
       </div>
-      {% endfor %}
+    {% endmacro %}
+    <div class="media-list">
+      {% for r in my_requests %}{{ request_row(r) }}{% endfor %}
     </div>
+    {% if older_requests %}
+    <details class="media-more">
+      <summary>Show {{ older_requests|length }} older request{{ '' if older_requests|length == 1 else 's' }}</summary>
+      <div class="media-list">
+        {% for r in older_requests %}{{ request_row(r) }}{% endfor %}
+      </div>
+    </details>
+    {% endif %}
     {% elif not requests_configured %}
     <div class="empty-state">Request tracking isn't set up on this portal.</div>
     {% elif not requests_refreshed %}

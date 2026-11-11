@@ -1276,6 +1276,17 @@ footer.foot {
 .section__subtitle:first-of-type { margin-top: 0; }
 .section__footnote { font-size: 12px; color: var(--text-faint); margin-top: 14px; }
 .media-list { display: flex; flex-direction: column; gap: 6px; }
+/* Older rows of a list, folded away with a native <details> (no script). Same panel
+   look as .release-notes; the list inside keeps its own spacing. */
+.media-more {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--bg-panel-raised);
+}
+.media-more > summary { cursor: pointer; font-size: 13.5px; }
+.media-more[open] > summary { margin-bottom: 10px; }
 .media-row {
   display: flex;
   align-items: center;

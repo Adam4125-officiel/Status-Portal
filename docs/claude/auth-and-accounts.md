@@ -237,7 +237,9 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   nothing - when in doubt, show nothing. The list is read from the `media_refresh` cache
   (`integrations.requests_for_jellyfin_user()`, which keeps `USER_REQUESTS_LIMIT` = 100
   recent requests, deeper than the 20 the public section shows); the request handler
-  makes no Seerr call.
+  makes no Seerr call. The function returns them newest first, and the page shows the
+  first `ACCOUNT_REQUESTS_VISIBLE` (10, `routes/account.py`) with the rest in a native
+  `<details class="media-more">` ("Show N older requests"), no script.
 - **An admin reply is visible to exactly one person** — that reporter's account page
   and nowhere else, since the report's own text was never public either. Replying to
   an anonymous report is allowed but warns that nobody can see it; the textarea is
