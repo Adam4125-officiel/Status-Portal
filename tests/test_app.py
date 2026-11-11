@@ -5253,3 +5253,44 @@ def test_security_page_shows_both_api_keys_and_regenerates_them_in_place(client)
         assert db.get_setting(setting) != old
         # Without the hint it still returns to the page that owns the key.
         assert "/admin/security" not in client.post(path).headers["Location"]
+
+
+def test_security_checks_flag_2fa_off_and_clear_when_on(client):
+    _login_admin(client)
+    assert "Two-factor authentication is off" in client.get("/admin/security").get_data(as_text=True)
+    _enable_totp_directly()
+    body = client.get("/admin/security").get_data(as_text=True)
+    assert "Two-factor authentication is off" not in body
+    assert "Nothing to flag" in body
+
+
+def test_security_checks_flag_https_without_a_secure_cookie(client, monkeypatch):
+    _login_admin(client)
+    _enable_totp_directly()
+    monkeypatch.setattr(app_module.config, "FORCE_HTTPS_COOKIES", False)
+    plain = client.get("/admin/security").get_data(as_text=True)
+    assert "not marked Secure" not in plain
+    tunnelled = client.get("/admin/security", headers={"X-Forwarded-Proto": "https"}).get_data(as_text=True)
+    assert "not marked Secure" in tunnelled
+    monkeypatch.setattr(app_module.config, "FORCE_HTTPS_COOKIES", True)
+    assert "not marked Secure" not in client.get(
+        "/admin/security", headers={"X-Forwarded-Proto": "https"}).get_data(as_text=True)
+
+
+def test_security_checks_flag_proxy_headers_without_behind_proxy(client, monkeypatch):
+    _login_admin(client)
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", False)
+    assert "PORTAL_BEHIND_PROXY" not in client.get("/admin/security").get_data(as_text=True)
+    assert "PORTAL_BEHIND_PROXY" in client.get(
+        "/admin/security", headers={"CF-Connecting-IP": "203.0.113.9"}).get_data(as_text=True)
+    monkeypatch.setattr(app_module.config, "BEHIND_PROXY", True)
+    assert "PORTAL_BEHIND_PROXY" not in client.get(
+        "/admin/security", headers={"CF-Connecting-IP": "203.0.113.9"}).get_data(as_text=True)
+
+
+def test_security_checks_flag_an_available_update(client, monkeypatch):
+    _login_admin(client)
+    monkeypatch.setitem(app_module.updater._update_cache, "result", {"update_available": True})
+    assert "A newer version is available" in client.get("/admin/security").get_data(as_text=True)
+    monkeypatch.setitem(app_module.updater._update_cache, "result", {"update_available": False})
+    assert "A newer version is available" not in client.get("/admin/security").get_data(as_text=True)

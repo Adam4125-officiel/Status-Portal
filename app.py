@@ -4495,6 +4495,31 @@ def admin_settings_security():
     return redirect(url_for("admin_security") + "#session")
 
 
+def _security_checks():
+    """Findings for the Security page's checks panel, as (message, link endpoint or
+    None, link text). Empty means nothing to flag. Reads this request, settings and the
+    update cache only - never a live call."""
+    findings = []
+    if not twofactor.is_enabled():
+        findings.append(("Two-factor authentication is off, so the password alone opens "
+                         "this panel.", "admin_2fa", "Set it up"))
+    over_https = request.is_secure or request.headers.get(
+        "X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
+    if over_https and not config.FORCE_HTTPS_COOKIES:
+        findings.append(("This page was reached over HTTPS but the session cookie is not "
+                         "marked Secure. Set PORTAL_FORCE_HTTPS_COOKIES=true.", None, ""))
+    if not config.BEHIND_PROXY and any(h in request.headers for h in _FORWARDING_HEADERS):
+        findings.append(("Proxy headers (X-Forwarded-For and the like) arrived but "
+                         "PORTAL_BEHIND_PROXY is not set, so every visitor looks like "
+                         "the proxy and the sign-in lockout and rate limits see one client. "
+                         "Set PORTAL_BEHIND_PROXY=true if a proxy or tunnel is in front.",
+                         None, ""))
+    cached = updater.get_cached_update_status()
+    if cached and cached.get("update_available"):
+        findings.append(("A newer version is available.", "admin_about", "Open Updates"))
+    return findings
+
+
 @app.route("/admin/security", methods=["GET", "POST"])
 @login_required
 def admin_security():
@@ -4511,7 +4536,7 @@ def admin_security():
                             session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
                             notify_api_key=db.get_setting(NOTIFY_API_KEY_SETTING, ""),
                             device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
-                            active="security")
+                            findings=_security_checks(), active="security")
 
 
 @app.route("/admin/security/sign-out-others", methods=["POST"])

@@ -5,6 +5,19 @@
   <h1>Security</h1>
 </div>
 
+<h2 id="checks" class="settings-section-title">Checks</h2>
+<div class="form-panel" style="margin-bottom: 20px;">
+  {% if findings %}
+  <ul style="margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6;">
+    {% for message, endpoint, link_text in findings %}
+    <li>{{ message }}{% if endpoint %} <a href="{{ url_for(endpoint) }}">{{ link_text }}</a>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="service-card__status ok"><span class="led ok"></span>Nothing to flag</div>
+  {% endif %}
+</div>
+
 <nav class="settings-section-nav" aria-label="Security sections">
   <a href="#two-factor">Two-factor</a>
   <a href="#session">Sessions</a>
