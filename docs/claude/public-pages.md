@@ -132,7 +132,9 @@
 ## Kiosk mode (`/kiosk`, `templates/kiosk/`, `static/js/kiosk.js`)
 
 A full-screen display for a wall-mounted TV or a tablet left running: one view at a
-time, rotating on a timer, no nav and no footer. Off by default.
+time, rotating on a timer, no nav and no footer. Off by default. The only link to it
+is next to its setting in Admin > Settings (shown while it is on); the public page
+deliberately does not advertise it.
 
 - **A kiosk view is gated twice, and the second gate is the point.** `KIOSK_VIEWS`
   reuses `PUBLIC_PAGES`' `(predicate, context builder)` split, and `vms`/`resources`
@@ -303,3 +305,15 @@ time, rotating on a timer, no nav and no footer. Off by default.
   as "hide the button", not "block reporting"); if per-service access control is ever
   wanted it needs its own check inside `report_problem()`. No global default setting
   was added either — purely per-service.
+
+## Home banner, report button, footer version
+
+- **The banner names what is wrong.** `index()` builds `affected_services` with the
+  same `ignore_in_overall_status` filter as `compute_overall_status()` and empties it
+  when the overall status is operational; each entry links to `#service-<id>` on its
+  card. Keep both filters in step.
+- **"Report a problem" sits in the topbar** (and stays in the footer). Its link is
+  always `report_problem`, which itself handles `report_needs_login` by redirecting to
+  sign-in; only the tooltip changes.
+- **`show_public_version`** (default on, unset reads as on) controls the footer's
+  version and GitHub link via `_show_public_version()`. The About page always shows it.

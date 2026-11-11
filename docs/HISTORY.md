@@ -2362,3 +2362,10 @@ At 390px the admin menu took about 1,070px before every page title and the Servi
 broke words mid-letter ("operat/ional"). The menu now collapses to a one-line summary
 under 720px, secondary Services columns are hidden there, and the Reports status select
 submits through a script (`requestSubmit()`) instead of an inline `onchange`.
+
+## Public home quick wins (2026-11)
+
+With a service down, the banner only said "One or more services are down" and the
+culprit could be the ninth card, about 1,800px down on a phone. The banner now lists
+the affected services, each linked to its card; "Report a problem" moved to the topbar;
+the kiosk link moved to its admin setting; and the footer version can be hidden.
