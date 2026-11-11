@@ -14,6 +14,7 @@ import html
 import logging
 import smtplib
 import ssl
+import threading
 from email.message import EmailMessage
 
 import requests
@@ -109,6 +110,22 @@ def notify(title, message, *, allow_mentions=True):
         _send_ntfy(title, message)
     if email_configured():
         send_email(title, message)
+
+
+def notify_async(title, message, **kwargs):
+    """Fires notify() on its own one-shot daemon thread instead of inline - same
+    shape as app.py's _send_announcement_discord()/_restart_process() delayed action,
+    applied here because notify() itself can block on up to three sequential
+    outbound calls (Discord webhook, ntfy, SMTP - each with its own multi-second
+    timeout) and several of its callers are request handlers, including /report,
+    which is reachable by anyone with no login at all.
+
+    notify() is already fire-and-forget from every caller's point of view - nothing
+    reads a return value or shows delivery status in the response - so moving the
+    call off the request thread changes nothing about what happens, only how long
+    the request waits for it to."""
+    threading.Thread(target=notify, args=(title, message), kwargs=kwargs,
+                     daemon=True).start()
 
 
 def _send_discord(title, message, allow_mentions=True):

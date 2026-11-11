@@ -2059,7 +2059,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
     emails and five DMs in a row - reported 2026-09-05."""
     admin_calls = []
     subscriber_calls = []
-    monkeypatch.setattr(app_module, "_notify_async",
+    monkeypatch.setattr(app_module.notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
@@ -2091,7 +2091,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
 def test_single_service_maintenance_wording_is_unchanged(isolated_db, monkeypatch):
     """The grouping above must not turn a one-service window's message into a plural."""
     subscriber_calls = []
-    monkeypatch.setattr(app_module, "_notify_async", lambda title, msg: None)
+    monkeypatch.setattr(app_module.notifications, "notify_async", lambda title, msg: None)
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
                             subscriber_calls.append((event, subject, body)))
@@ -2113,7 +2113,7 @@ def test_two_separate_windows_still_notify_separately(isolated_db, monkeypatch):
     """Grouping is per window, not per run - two unrelated windows starting in the
     same cycle are two different things and must stay two notifications."""
     admin_calls = []
-    monkeypatch.setattr(app_module, "_notify_async",
+    monkeypatch.setattr(app_module.notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda *a, **kw: None)
