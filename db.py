@@ -1730,6 +1730,25 @@ def prune_status_history(days):
     return deleted
 
 
+# A year of daily rows is ~5,500 for 15 services: small enough that nothing needs to
+# trade it away, long enough for any uptime bar or year-on-year look.
+STATUS_DAILY_RETENTION_DAYS = 365
+
+
+def prune_status_daily(days=STATUS_DAILY_RETENTION_DAYS):
+    """Deletes daily aggregates for days more than `days` back and returns how many
+    rows went. Run by the same daily task as prune_status_history()."""
+    if not days or days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    conn = get_db()
+    cur = conn.execute("DELETE FROM status_daily WHERE day < ?", (cutoff,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
+
+
 # ---------- Integrations (read-only external service status) ----------
 def list_integrations():
     conn = get_db()

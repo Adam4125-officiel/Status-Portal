@@ -1512,3 +1512,17 @@ def test_backfill_runs_once_and_never_counts_a_check_twice(isolated_db):
     assert _daily_rows(sid) == before
     _rerun_backfill()  # even without the marker, existing days are left alone
     assert _daily_rows(sid) == before
+
+
+def test_daily_aggregates_are_kept_for_a_year(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    today = datetime.now(timezone.utc).date()
+    kept = (today - timedelta(days=365)).isoformat()
+    conn = db.get_db()
+    conn.executemany("INSERT INTO status_daily (service_id, day, checks) VALUES (?, ?, 1)",
+                     [(sid, (today - timedelta(days=366)).isoformat()), (sid, kept)])
+    conn.commit()
+    conn.close()
+    assert db.prune_status_daily() == 1
+    assert [r[1] for r in _daily_rows(sid)] == [kept]
+    assert db.prune_status_daily(0) == 0

@@ -5645,21 +5645,27 @@ def _prune_status_history_task():
     it last ran and how much it removed."""
     days = _history_retention_days()
     deleted = db.prune_status_history(days)
+    daily_deleted = db.prune_status_daily()
+    if daily_deleted:
+        _logger.info("Pruned %d status_daily rows older than %d days",
+                     daily_deleted, db.STATUS_DAILY_RETENTION_DAYS)
+    daily_note = (f" Removed {daily_deleted} daily summary row(s) older than "
+                  f"{db.STATUS_DAILY_RETENTION_DAYS} days." if daily_deleted else "")
     if deleted:
         _logger.info("Pruned %d status_history rows older than %d days", deleted, days)
-        return f"Removed {deleted} check result(s) older than {days} days."
+        return f"Removed {deleted} check result(s) older than {days} days.{daily_note}"
     # A normal success, not a TaskSkipped: there was nothing to do because the table
     # is already inside its retention window, which is the job working, not the job
     # being unconfigured.
-    return f"Nothing to remove - no check results are older than {days} days."
+    return f"Nothing to remove - no check results are older than {days} days.{daily_note}"
 
 
 scheduler.register(
     "prune_status_history",
     "Prune old check results",
     "Deletes individual health-check results older than the retention window set "
-    "under Settings. Every public page load reads this table, so keeping it trimmed "
-    "is what stops the page getting slower every week.",
+    "under Settings, and daily uptime summaries older than a year. Keeping them "
+    "trimmed is what stops the database and its backups growing every week.",
     _prune_status_history_task,
     default_schedule_kind="daily",
     default_daily_at="03:30",

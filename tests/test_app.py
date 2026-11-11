@@ -3916,6 +3916,15 @@ def test_history_prune_task_reports_what_it_removed(isolated_db, monkeypatch):
     assert "12" in message and str(app_module.DEFAULT_HISTORY_RETENTION_DAYS) in message
 
 
+def test_history_prune_task_also_trims_the_daily_aggregates(isolated_db, monkeypatch):
+    monkeypatch.setattr(db, "prune_status_history", lambda days: 0)
+    calls = []
+    monkeypatch.setattr(db, "prune_status_daily", lambda *a: calls.append(a) or 3)
+    message = app_module._prune_status_history_task()
+    assert calls == [()]
+    assert "3 daily summary" in message
+
+
 def test_history_prune_task_is_a_success_when_there_is_nothing_to_remove(isolated_db, monkeypatch):
     """Not a TaskSkipped: "nothing was old enough to delete" is the job working, not
     the job being unconfigured, and the two read very differently in the task list."""
