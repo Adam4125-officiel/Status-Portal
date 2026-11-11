@@ -1,7 +1,12 @@
 {% extends "public_base.html" %}
 {% block title %}Media activity — {{ site_name }}{% endblock %}
 {% block content %}
-{# Reuses the section partial the main page used to include, so the block's own
-   "is there anything to show" guard still applies and there is one copy of the markup. #}
+{# Signed-in visitors get the library search at the head of the tab; it submits to
+   /search. Typing in it holds the auto-refresh (main.js), so a query isn't wiped. The
+   activity block below keeps its own "is there anything to show" guard - `media` is
+   None when only the search applies. #}
+{% if search_enabled %}
+  {% include 'sections/_search_form.html' %}
+{% endif %}
 {% include 'sections/media.html' %}
 {% endblock %}

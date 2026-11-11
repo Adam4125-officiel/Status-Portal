@@ -364,7 +364,7 @@ def _inject_portal_user():
 @app.context_processor
 def _inject_public_chrome():
     """What public_base.html renders around every public page - the nav tabs, the
-    Search tab, the refresh interval, the footer's repo link - so no route has to
+    refresh interval, the footer's repo link - so no route has to
     thread it through by hand (the bug class CLAUDE.md used to warn about: a page that
     forgot one of them simply lacked the tab). Values a route passes explicitly win.
     Skipped on admin and kiosk pages, which never render it; the nav itself is only
@@ -376,7 +376,7 @@ def _inject_public_chrome():
         return chrome
     try:
         chrome["nav_links"] = _public_page_links()
-        chrome["search_enabled"] = bool(current_user()) and media_search.is_available()
+        chrome["search_enabled"] = _search_available()
     except Exception:
         # An error page must still render when the nav can't be built.
         _logger.exception("Could not build the public nav")
@@ -1296,11 +1296,18 @@ def _activity_context():
             "activity_idle": not activity.get("running_tasks") and not activity.get("transcoding")}
 
 
+def _search_available():
+    """The library search a signed-in visitor gets at the head of the Media tab."""
+    return bool(current_user()) and media_search.is_available()
+
+
 def _media_context():
     media_visible = _public_media_visibility()
-    if not any(media_visible.values()) or not _media_visible_to(current_user()):
+    show_media = any(media_visible.values()) and _media_visible_to(current_user())
+    if not show_media and not _search_available():
         return None
-    return {"media": integrations.get_cached_media(), "media_visible": media_visible}
+    return {"media": integrations.get_cached_media() if show_media else None,
+            "media_visible": media_visible}
 
 
 def _info_context():
@@ -1346,7 +1353,9 @@ def _activity_available():
 
 
 def _media_available():
-    return any(_public_media_visibility().values()) and _media_visible_to(current_user())
+    # Either the activity sections or, for a signed-in visitor, the search box.
+    return (any(_public_media_visibility().values()) and _media_visible_to(current_user())) \
+        or _search_available()
 
 
 def _info_available():

@@ -1,7 +1,7 @@
 {% extends "public_base.html" %}
 {# A form or a result the visitor is working in: never reload it under them. #}
 {% set auto_refresh = false %}
-{% set active_page = 'search' %}
+{% set active_page = 'media' %}
 {% block title %}Request {{ config.title }} — {{ site_name }}{% endblock %}
 {% block content %}
   <p class="back-link"><a href="{{ url_for('search', q=query) }}">← Back to search</a></p>

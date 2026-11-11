@@ -1,14 +1,10 @@
 {% extends "public_base.html" %}
 {# A form or a result the visitor is working in: never reload it under them. #}
 {% set auto_refresh = false %}
-{% set active_page = 'search' %}
+{% set active_page = 'media' %}
 {% block title %}Search — {{ site_name }}{% endblock %}
 {% block content %}
-  <form method="GET" action="{{ url_for('search') }}" class="search-form">
-    <input type="search" name="q" value="{{ query }}" placeholder="Film or series title…"
-           autocomplete="off" autofocus maxlength="100" aria-label="Search the library">
-    <button type="submit" class="btn">Search</button>
-  </form>
+  {% with search_autofocus = true %}{% include 'sections/_search_form.html' %}{% endwith %}
 
   <div id="search-results" data-live-url="{{ url_for('search_live') }}"
        data-min-length="{{ min_query_length }}">

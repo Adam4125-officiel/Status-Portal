@@ -33,9 +33,6 @@
     {% for link in nav_links %}
       <a href="{{ link.url }}" class="{{ 'active' if active_page == link.key }}">{{ link.label }}</a>
     {% endfor %}
-    {% if search_enabled %}
-      <a href="{{ url_for('search') }}" class="{{ 'active' if active_page == 'search' }}">Search</a>
-    {% endif %}
   </nav>
 
   {% with messages = get_flashed_messages(with_categories=true) %}

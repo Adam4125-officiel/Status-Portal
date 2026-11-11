@@ -3611,10 +3611,7 @@ def test_the_info_page_disappears_when_emptied(client, isolated_db):
     assert b"/info" not in client.get("/").data
 
 
-def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_db, monkeypatch):
-    """Regression: the nav is shared, but `search_enabled` was only computed by the main
-    page's route - so the Search tab existed only on the page that happened to pass it."""
-    db.set_setting("show_public_cpu", "1")
+def _sign_in_with_search(client):
     db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
                             "api_key": "k", "enabled": 1})
     db.set_setting("jellyfin_auth_enabled", "1")
@@ -3622,8 +3619,34 @@ def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_d
     with client.session_transaction() as sess:
         sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
                                "authenticated_at": 0}
+
+
+def test_search_lives_in_the_media_tab_not_a_tab_of_its_own(client, isolated_db):
+    """Four tabs: a signed-in visitor gets Media (with the search box at its head) and
+    no separate Search tab, on every page; an anonymous visitor gets neither."""
+    db.set_setting("show_public_cpu", "1")
+    assert b'href="/media"' not in client.get("/").data
+    _sign_in_with_search(client)
     for path in ("/", "/server", "/info"):
-        assert b'href="/search"' in client.get(path).data, path
+        body = client.get(path).data
+        assert b'href="/media"' in body, path
+        assert b">Search</a>" not in body, path
+    page = client.get("/media")
+    assert page.status_code == 200
+    assert b'class="search-form"' in page.data and b'action="/search"' in page.data
+
+
+def test_the_media_search_box_does_not_steal_focus(client, isolated_db):
+    _sign_in_with_search(client)
+    assert b"autofocus" not in client.get("/media").data
+    assert b"autofocus" in client.get("/search").data
+
+
+def test_an_anonymous_visitor_cannot_reach_the_search_only_media_page(client, isolated_db):
+    _sign_in_with_search(client)
+    with client.session_transaction() as sess:
+        sess.pop("portal_user")
+    assert client.get("/media").status_code == 404
 
 
 def test_every_public_page_shares_one_shell(client, isolated_db):
@@ -3638,16 +3661,10 @@ def test_every_public_page_shares_one_shell(client, isolated_db):
         assert b'class="brand__link"' in body, path
 
 
-def test_the_search_tab_is_active_on_search_pages(client, isolated_db):
-    db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
-                            "api_key": "k", "enabled": 1})
-    db.set_setting("jellyfin_auth_enabled", "1")
-    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
-    with client.session_transaction() as sess:
-        sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
-                               "authenticated_at": 0}
+def test_the_media_tab_is_active_on_search_pages(client, isolated_db):
+    _sign_in_with_search(client)
     body = client.get("/search").data.decode()
-    assert '<a href="/search" class="active">Search</a>' in body
+    assert '<a href="/media" class="active">' in body
 
 
 def test_pages_with_forms_do_not_auto_reload_but_status_does(client, isolated_db):
