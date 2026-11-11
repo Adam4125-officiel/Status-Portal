@@ -28,7 +28,15 @@
     </p>
   {% endif %}
 
+  <nav class="account-nav" aria-label="Account sections">
+    {% if not admin_viewing %}<a href="#reports">Reports</a>{% endif %}
+    {% if not admin_viewing %}<a href="#requests">Requests</a>{% endif %}
+    {% if notifications_enabled %}<a href="#notifications">Notifications</a>{% endif %}
+    <a href="#preferences">Preferences</a>
+  </nav>
+
   {% if not admin_viewing %}
+  <section id="reports" class="account-section">
   <h2 class="section-title">Your reports</h2>
   {% if reports %}
   <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
@@ -89,37 +97,44 @@
     follow what happens to it here.
   </div>
   {% endif %}
+  </section>
   {% endif %}
 
-  <h2 class="section-title" style="margin-top: 28px;">Settings</h2>
-  <form method="POST" class="form-panel" id="account-prefs"
-        data-just-saved="{{ '1' if just_saved else '0' }}" data-theme-pref="{{ prefs.theme }}">
-    <div class="field">
-      <label for="theme">Theme</label>
-      <select id="theme" name="theme">
-        <option value="auto" {{ 'selected' if prefs.theme == 'auto' }}>Auto — follow each device's setting</option>
-        <option value="dark" {{ 'selected' if prefs.theme == 'dark' }}>Dark</option>
-        <option value="light" {{ 'selected' if prefs.theme == 'light' }}>Light</option>
-      </select>
-      <div class="field-hint">
-        Applies to every device you sign in on. The ☀️/🌙 button in the corner still
-        works and takes priority on the device you press it — pressing it just updates
-        this setting too.
+  {% if not admin_viewing %}
+  <section id="requests" class="account-section">
+    <h2 class="section-title" style="margin-top: 28px;">Your requests</h2>
+    {% if my_requests %}
+    <p style="color: var(--text-dim); font-size: 13px; margin-top: -6px; margin-bottom: 14px;">
+      What you've asked for through Seerr, and where it stands. Refreshed every few minutes.
+    </p>
+    <div class="media-list">
+      {% for r in my_requests %}
+      <div class="media-row">
+        <div class="media-row__main">
+          <span class="media-row__name">{{ r.title }}{% if r.year %} <span class="media-row__year">({{ r.year }})</span>{% endif %}</span>
+          <span class="media-row__meta">
+            {{ r.media_type }}{% if r.is4k %} · 4K{% endif %}{% if r.requested_at %} · <span class="local-time" data-utc="{{ r.requested_at }}">{{ r.requested_at[:10] }}</span>{% endif %}
+          </span>
+        </div>
+        <span class="status-pill status-pill--{{ r.request_status_key }}">{{ r.request_status }}</span>
+        <span class="status-pill status-pill--{{ r.media_status_key }}">{{ r.media_status_label }}</span>
       </div>
+      {% endfor %}
     </div>
-    <div class="field">
-      <label for="contact">Contact details for your reports (optional)</label>
-      <input type="text" id="contact" name="contact" value="{{ prefs.contact }}"
-             placeholder="Email, Discord handle…">
-      <div class="field-hint">
-        Pre-fills the contact box when you report a problem, so you don't retype it.
-        The admin can already reply here without it — this is for if you'd rather be
-        reached somewhere specific.
-      </div>
-    </div>
-    {% if notifications_enabled %}
-    <hr style="border: none; border-top: 1px solid var(--border); margin: 22px 0;">
-    <h3 style="font-size: 14px; margin: 0 0 4px;">Notifications</h3>
+    {% elif not requests_configured %}
+    <div class="empty-state">Request tracking isn't set up on this portal.</div>
+    {% elif not requests_refreshed %}
+    <div class="empty-state">Your requests will appear here shortly — the portal hasn't loaded them yet.</div>
+    {% else %}
+    <div class="empty-state">No requests found for your account. Anything you request from <a href="{{ url_for('search') }}">Search</a> will show up here.</div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if notifications_enabled %}
+  <section id="notifications" class="account-section">
+    <h2 class="section-title" style="margin-top: 28px;">Notifications</h2>
+    <div class="form-panel">
     <p class="field-hint" style="margin-top: 0;">
       Where to reach you when something you're involved in happens. Leave both blank and
       nothing is ever sent — this is opt-in, and nothing here is shared with anyone else.
@@ -127,12 +142,12 @@
 
     <div class="field">
       <label for="notify_email">Email address</label>
-      <input type="email" id="notify_email" name="notify_email" value="{{ prefs.notify_email }}"
-             placeholder="you@example.com" autocomplete="email">
+      <input type="email" id="notify_email" name="notify_email" form="account-prefs"
+             value="{{ prefs.notify_email }}" placeholder="you@example.com" autocomplete="email">
     </div>
     <div class="field">
       <label for="notify_discord_id">Discord user ID</label>
-      <input type="text" id="notify_discord_id" name="notify_discord_id"
+      <input type="text" id="notify_discord_id" name="notify_discord_id" form="account-prefs"
              value="{{ prefs.notify_discord_id }}" inputmode="numeric"
              placeholder="123456789012345678">
       <div class="field-hint">
@@ -144,72 +159,56 @@
     </div>
 
     <div class="field">
-      <label>By email</label>
       <div class="field-hint">
         These control what this portal sends <em>you personally</em>. If your address is
         also on the administrator's own alert list, those alerts arrive regardless of
         what you choose here — they're a separate system, and only an administrator can
         change who is on it.
       </div>
-      <div class="checkbox-list">
-        <label class="field-check">
-          <input type="checkbox" name="notify_email_reports" {{ 'checked' if prefs.notify_email_reports }}>
-          Replies to my problem reports, and when one becomes an incident
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_email_requests" {{ 'checked' if prefs.notify_email_requests }}>
-          When something I requested becomes available (Seerr may already email you about this itself)
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_email_maintenance" {{ 'checked' if prefs.notify_email_maintenance }}>
-          Maintenance on any service (this one is chatty)
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_email_announcements" {{ 'checked' if prefs.notify_email_announcements }}>
-          Announcements the admin sends out
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_email_gamesportal" {{ 'checked' if prefs.notify_email_gamesportal }}>
-          Game requests from Games Portal
-        </label>
+      <div style="overflow-x: auto;">
+      <table class="account-notify">
+        <thead>
+          <tr><th scope="col">Event</th><th scope="col">Email</th><th scope="col">Discord</th></tr>
+        </thead>
+        <tbody>
+        <tr>
+          <th scope="row">Replies to my problem reports, and when one becomes an incident</th>
+          <td><input type="checkbox" name="notify_email_reports" form="account-prefs" aria-label="Replies to my problem reports, and when one becomes an incident by email" {{ 'checked' if prefs.notify_email_reports }}></td>
+          <td><input type="checkbox" name="notify_discord_reports" form="account-prefs" aria-label="Replies to my problem reports, and when one becomes an incident by Discord" {{ 'checked' if prefs.notify_discord_reports }}></td>
+        </tr>
+        <tr>
+          <th scope="row">When something I requested becomes available<div class="field-hint">Seerr may already notify you about this itself.</div></th>
+          <td><input type="checkbox" name="notify_email_requests" form="account-prefs" aria-label="When something I requested becomes available by email" {{ 'checked' if prefs.notify_email_requests }}></td>
+          <td><input type="checkbox" name="notify_discord_requests" form="account-prefs" aria-label="When something I requested becomes available by Discord" {{ 'checked' if prefs.notify_discord_requests }}></td>
+        </tr>
+        <tr>
+          <th scope="row">Maintenance on any service<div class="field-hint">Chatty.</div></th>
+          <td><input type="checkbox" name="notify_email_maintenance" form="account-prefs" aria-label="Maintenance on any service by email" {{ 'checked' if prefs.notify_email_maintenance }}></td>
+          <td><input type="checkbox" name="notify_discord_maintenance" form="account-prefs" aria-label="Maintenance on any service by Discord" {{ 'checked' if prefs.notify_discord_maintenance }}></td>
+        </tr>
+        <tr>
+          <th scope="row">Announcements the admin sends out</th>
+          <td><input type="checkbox" name="notify_email_announcements" form="account-prefs" aria-label="Announcements the admin sends out by email" {{ 'checked' if prefs.notify_email_announcements }}></td>
+          <td class="account-notify__na" title="Not available by Discord">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Game requests from Games Portal</th>
+          <td><input type="checkbox" name="notify_email_gamesportal" form="account-prefs" aria-label="Game requests from Games Portal by email" {{ 'checked' if prefs.notify_email_gamesportal }}></td>
+          <td><input type="checkbox" name="notify_discord_gamesportal" form="account-prefs" aria-label="Game requests from Games Portal by Discord" {{ 'checked' if prefs.notify_discord_gamesportal }}></td>
+        </tr>
+        <tr>
+          <th scope="row">Seerr events: approvals, declines, availability, and issues</th>
+          <td class="account-notify__na" title="Not available by email">—</td>
+          <td><input type="checkbox" name="notify_discord_seerr_events" form="account-prefs" aria-label="Seerr events: approvals, declines, availability, and issues by Discord" {{ 'checked' if prefs.notify_discord_seerr_events }}></td>
+        </tr>
+        </tbody>
+      </table>
       </div>
     </div>
-    <div class="field">
-      <label>By Discord DM</label>
-      <div class="checkbox-list">
-        <label class="field-check">
-          <input type="checkbox" name="notify_discord_reports" {{ 'checked' if prefs.notify_discord_reports }}>
-          Replies to my problem reports, and when one becomes an incident
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_discord_requests" {{ 'checked' if prefs.notify_discord_requests }}>
-          When something I requested becomes available (Seerr may already notify you about this itself)
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_discord_maintenance" {{ 'checked' if prefs.notify_discord_maintenance }}>
-          Maintenance on any service (this one is chatty)
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_discord_seerr_events" {{ 'checked' if prefs.notify_discord_seerr_events }}>
-          Seerr events — approvals, declines, availability, and issues
-        </label>
-        <label class="field-check">
-          <input type="checkbox" name="notify_discord_gamesportal" {{ 'checked' if prefs.notify_discord_gamesportal }}>
-          Game requests from Games Portal
-        </label>
-      </div>
-    </div>
-    {% endif %}
-
     <div class="form-actions">
-      <button type="submit" class="btn">Save settings</button>
-      {% if admin_viewing %}
-        <a href="{{ url_for('admin_users') }}" class="btn secondary">Back to User accounts</a>
-      {% else %}
-        <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
-      {% endif %}
+      <button type="submit" class="btn" form="account-prefs">Save settings</button>
     </div>
-  </form>
+    </div>
 
   {% if admin_viewing %}
   {# Admin-only. Outside the settings form above for the same reason the Seerr panel
@@ -338,6 +337,41 @@
     {% endif %}
   </div>
   {% endif %}
+  </section>
+  {% endif %}
+
+  <section id="preferences" class="account-section">
+    <h2 class="section-title" style="margin-top: 28px;">Preferences</h2>
+    <div class="form-panel">
+    <div class="field">
+      <label for="theme">Theme</label>
+      <select id="theme" name="theme" form="account-prefs">
+        <option value="auto" {{ 'selected' if prefs.theme == 'auto' }}>Auto — follow each device's setting</option>
+        <option value="dark" {{ 'selected' if prefs.theme == 'dark' }}>Dark</option>
+        <option value="light" {{ 'selected' if prefs.theme == 'light' }}>Light</option>
+      </select>
+      <div class="field-hint">
+        Applies to every device you sign in on. The ☀️/🌙 button in the corner still
+        works and takes priority on the device you press it — pressing it just updates
+        this setting too.
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn" form="account-prefs">Save settings</button>
+      {% if admin_viewing %}
+        <a href="{{ url_for('admin_users') }}" class="btn secondary">Back to User accounts</a>
+      {% else %}
+        <a href="{{ url_for('index') }}" class="btn secondary">Back to status</a>
+      {% endif %}
+    </div>
+    </div>
+  </section>
+
+  {# The one settings form. Its fields sit in the Notifications and Preferences sections
+     and join it through their form="account-prefs" attribute, so the sections can hold
+     other forms (Seerr, admin tools) without nesting. #}
+  <form method="POST" id="account-prefs"
+        data-just-saved="{{ '1' if just_saved else '0' }}" data-theme-pref="{{ prefs.theme }}"></form>
 </div>
 {% endblock %}
 {% block page_scripts %}

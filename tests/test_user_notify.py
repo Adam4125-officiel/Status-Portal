@@ -941,6 +941,66 @@ def test_a_visitor_can_save_their_own_contact_details(signed_in_visitor):
     assert prefs["notify_discord_reports"] is False
 
 
+def test_the_account_page_has_four_sections_with_navigation(signed_in_visitor):
+    db.set_setting("user_notifications_enabled", "1")
+    body = signed_in_visitor.get("/account").data.decode()
+    for name in ("reports", "requests", "notifications", "preferences"):
+        assert f'id="{name}"' in body
+        assert f'href="#{name}"' in body
+
+
+def test_the_notifications_section_is_absent_while_notifications_are_off(signed_in_visitor):
+    body = signed_in_visitor.get("/account").data.decode()
+    assert 'id="notifications"' not in body
+    assert 'href="#notifications"' not in body
+    assert 'id="preferences"' in body
+
+
+def test_notifications_are_a_table_with_one_row_per_event(signed_in_visitor):
+    import re
+    db.set_setting("user_notifications_enabled", "1")
+    body = signed_in_visitor.get("/account").data.decode()
+    table = body[body.index('<table class="account-notify">'):body.index("</table>")]
+    assert "<th scope=\"col\">Email</th>" in table and "<th scope=\"col\">Discord</th>" in table
+    assert len(re.findall(r"<tr>", table)) == 7  # header + six events
+    # Every checkbox the handler reads is still there under its old name, and joined
+    # to the one settings form.
+    expected = {"notify_email_reports", "notify_email_requests", "notify_email_maintenance",
+                "notify_email_announcements", "notify_email_gamesportal",
+                "notify_discord_reports", "notify_discord_requests", "notify_discord_maintenance",
+                "notify_discord_gamesportal", "notify_discord_seerr_events"}
+    assert set(re.findall(r'name="(notify_[a-z_]+)" form="account-prefs"', table)) == expected
+
+
+def test_an_unavailable_channel_shows_a_dash_not_a_checkbox(signed_in_visitor):
+    db.set_setting("user_notifications_enabled", "1")
+    body = signed_in_visitor.get("/account").data.decode()
+    assert "notify_discord_announcements" not in body
+    assert "notify_email_seerr_events" not in body
+    assert body.count("account-notify__na") == 2
+
+
+def test_the_settings_form_fields_all_belong_to_the_one_form(signed_in_visitor):
+    """Fields live in different sections, so each must name the form it joins."""
+    import re
+    db.set_setting("user_notifications_enabled", "1")
+    body = signed_in_visitor.get("/account").data.decode()
+    names = ["theme", "notify_email", "notify_discord_id"]
+    for name in names:
+        tag = re.search(r'<(?:input|select)[^>]*name="%s"[^>]*>' % name, body).group(0)
+        assert 'form="account-prefs"' in tag
+    assert body.count('id="account-prefs"') == 1
+
+
+def test_the_admin_view_of_an_account_keeps_the_same_sections(admin, isolated_db):
+    db.replace_jellyfin_users([{"id": "u1", "name": "adam"}])
+    db.set_setting("user_notifications_enabled", "1")
+    body = admin.get("/admin/users/u1/account").data.decode()
+    assert 'id="notifications"' in body and 'id="preferences"' in body
+    assert 'id="reports"' not in body and 'id="requests"' not in body
+    assert "Send test email" in body
+
+
 def test_importing_from_seerr_copies_the_details_and_records_the_link(signed_in_visitor, monkeypatch):
     db.set_setting("user_notifications_enabled", "1")
     db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
