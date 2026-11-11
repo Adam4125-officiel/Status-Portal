@@ -210,7 +210,7 @@ def test_a_health_check_response_is_always_closed(monkeypatch):
         responses.append(_FakeResponse(503))
         return responses[-1]
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     assert health_module._run_single_check("http://x", None)[0] == "degraded"
     assert responses[0].closed is True
 
@@ -220,9 +220,9 @@ def test_check_service_status_no_retry_marks_down_on_first_failure(monkeypatch):
 
     def fake_get(url, timeout, **kwargs):
         calls.append(url)
-        raise app_module.requests.RequestException("connection refused")
+        raise health_module.requests.RequestException("connection refused")
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
@@ -240,7 +240,7 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
     """A blip that resolves itself on the second attempt should never reach 'down'
     at all - this is the whole point of the retry feature."""
     responses = [
-        app_module.requests.RequestException("timeout"),
+        health_module.requests.RequestException("timeout"),
         _FakeResponse(200),
     ]
 
@@ -250,7 +250,7 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
@@ -267,7 +267,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
     _retry_in_progress - this is what index() reads to show a "retrying" badge -
     and must be cleared again once the check finishes either way."""
     responses = [
-        app_module.requests.RequestException("timeout"),
+        health_module.requests.RequestException("timeout"),
         _FakeResponse(200),
     ]
 
@@ -277,7 +277,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     seen_during_sleep = []
 
     def fake_sleep(seconds):
@@ -294,8 +294,8 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
 
 
 def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
-    monkeypatch.setattr(app_module.requests, "get",
-                         lambda url, timeout, **kw: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
+    monkeypatch.setattr(health_module.requests, "get",
+                         lambda url, timeout, **kw: (_ for _ in ()).throw(health_module.requests.RequestException("down")))
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
@@ -5224,7 +5224,7 @@ def test_finish_health_cycle_records_time_and_pings_heartbeat(isolated_db, monke
             pass
 
     monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/abc")
-    monkeypatch.setattr(app_module.requests, "get",
+    monkeypatch.setattr(health_module.requests, "get",
                         lambda url, timeout: calls.append((url, timeout)) or _Resp())
     health_module._finish_health_cycle()
     assert calls == [("https://ping.example/abc", 5)]
@@ -5237,17 +5237,17 @@ def test_finish_health_cycle_without_url_makes_no_request(isolated_db, monkeypat
     def boom(*a, **k):
         raise AssertionError("no request expected")
 
-    monkeypatch.setattr(app_module.requests, "get", boom)
+    monkeypatch.setattr(health_module.requests, "get", boom)
     health_module._finish_health_cycle()
     assert db.get_setting(health_module.LAST_HEALTH_CYCLE_SETTING)
 
 
 def test_finish_health_cycle_never_raises_and_does_not_log_the_url(monkeypatch, caplog):
     def boom(url, timeout):
-        raise app_module.requests.ConnectionError("https://ping.example/SECRET refused")
+        raise health_module.requests.ConnectionError("https://ping.example/SECRET refused")
 
     monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/SECRET")
-    monkeypatch.setattr(app_module.requests, "get", boom)
+    monkeypatch.setattr(health_module.requests, "get", boom)
     health_module._finish_health_cycle()
     assert "heartbeat ping failed" in caplog.text
     assert "SECRET" not in caplog.text
