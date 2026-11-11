@@ -11,10 +11,11 @@ import pyotp
 import pytest
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import admin_search
 import app as app_module
 import db
-import routes.api as routes_api
 import health as health_module
+import routes.api as routes_api
 import scheduler
 import twofactor
 import updater
@@ -5597,7 +5598,7 @@ def test_the_csrf_token_still_reaches_every_page_with_a_form(isolated_db, user_a
         resp = c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
                                             "csrf_token": token})
         assert resp.status_code == 302
-        for _template, endpoint, _label in app_module.admin_search.PAGES:
+        for _template, endpoint, _label in admin_search.PAGES:
             with app_module.app.test_request_context():
                 path = app_module.url_for(endpoint)
             page = c.get(path)
