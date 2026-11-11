@@ -74,6 +74,9 @@
   Both are pruned by the `prune_status_history` task. The one-time backfill from
   `status_history` is guarded by the `status_daily_backfilled` setting: **never make
   it re-run** - after pruning it would recount a day as fewer checks than it had.
+  The one thing a later start still does is sum history for days *after* the newest
+  daily row (`ON CONFLICT DO NOTHING`): those only exist when a version without the
+  table ran in between, i.e. an update rolled back for a few days and applied again.
   Anything iterating over all services uses `db.get_uptime_percentages()` (one
   grouped query), never the single-service form in a loop.
 - **The 90-day strip on the public cards is `_cached_uptime_strips()`**, built from

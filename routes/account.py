@@ -27,6 +27,10 @@ from app import (
     user_login_required,
 )
 
+# How many of the visitor's most recent Seerr requests "Your requests" shows outright;
+# any older ones sit in a collapsed <details> below them.
+ACCOUNT_REQUESTS_VISIBLE = 10
+
 # Logs under app.py's logger name, as these views did before they moved here.
 _logger = logging.getLogger("app")
 
@@ -158,9 +162,11 @@ def user_account():
         user_notify.adopt_seerr_contact(user_id, seerr_account)
         prefs = db.get_user_preferences(user_id)
         flash("Filled in your contact details from Seerr — edit or clear them below.", "success")
+    my_requests = integrations.requests_for_jellyfin_user(user_id)
     return render_template("account.html",
                             reports=db.attach_report_messages(db.list_reports_for_user(user_id)),
-                            my_requests=integrations.requests_for_jellyfin_user(user_id),
+                            my_requests=my_requests[:ACCOUNT_REQUESTS_VISIBLE],
+                            older_requests=my_requests[ACCOUNT_REQUESTS_VISIBLE:],
                             requests_refreshed=integrations.get_cached_media()["refreshed_at"],
                             requests_configured=integrations.seerr_integration() is not None,
                             prefs=prefs,

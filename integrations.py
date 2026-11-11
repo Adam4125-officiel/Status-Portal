@@ -1297,8 +1297,13 @@ def requests_for_jellyfin_user(jellyfin_user_id):
     wanted = str(jellyfin_user_id or "").strip()
     if not wanted:
         return []
-    return [dict(r) for r in _media_cache["user_requests"]
+    mine = [dict(r) for r in _media_cache["user_requests"]
             if r.get("requested_by_jellyfin_id") == wanted]
+    # Newest first, whatever order the cache holds (Seerr's "added" sort is meant to
+    # give that, but a page that cuts the list at N must not depend on it). createdAt
+    # is ISO-8601 UTC, so the strings sort chronologically; a missing date goes last.
+    # sorted() is stable, so ties keep Seerr's order.
+    return sorted(mine, key=lambda r: r.get("requested_at") or "", reverse=True)
 
 
 def get_cached_media():

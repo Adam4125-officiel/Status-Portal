@@ -508,6 +508,9 @@ def _finish_health_cycle():
 
 
 def run_health_checks():
+    # The only line this module logs in normal operation: once per process start, so
+    # instance/logs/app.log shows after an update that the loop is up (not per cycle).
+    _logger.info("health-check loop started, interval %s s", config.CHECK_INTERVAL_SECONDS)
     while True:
         try:
             # Runs before the per-service checks below, so a window that just started

@@ -2530,3 +2530,22 @@ directly needed one guard - the file aliases itself as `app` before importing `r
 or the routes would land on a second copy of the Flask object. Checked on a throwaway
 server started through `app.py`'s own `__main__`: first-run setup, every admin page and a
 settings save answered as before.
+
+## 2.0.0-rc.1 on a real Windows install (2026-11-11)
+
+v2.0.0-rc.1 was installed on the owner's real Windows portal through the in-app updater,
+from 1.12.2 on the unstable channel. The updater verified the archive (243 files, by size
+and SHA-256), backed up 184 files, reinstalled the dependencies from the hash-locked
+`requirements.txt`, and confirmed the restart on the new version; waitress was serving, the
+Discord bot reconnected and a Jellyfin sign-in worked. The owner then went through the
+public pages, the admin (login with 2FA, the split Settings, the Security page,
+confirmations, the phone layout), the mail, Discord and ntfy test notifications, the account
+page with "My requests" against a real Seerr, resources and Hyper-V VMs, a TCP check, and
+the scheduled backup and TLS certificate tasks through "Run now". All of it worked. Two
+findings came out of it: "My requests" listed every request (now the 10 most recent, the
+rest folded), and the log gave no sign that the health-check loop had started (now one INFO
+line at start).
+
+Not exercised yet: that update was done by the 1.12.2 updater, so the removal of retired
+files (`updater.RETIRED_FILES`) first runs for real on the update from rc.1 to the next
+version.
