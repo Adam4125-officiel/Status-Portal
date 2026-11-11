@@ -76,6 +76,12 @@
 
 ## Public page layout (`templates/sections/`, `templates/public/`)
 
+
+- **Fonts are self-hosted.** Space Grotesk, Inter and JetBrains Mono live in
+  `static/fonts/` (latin subset `woff2`, OFL licenses beside them) and are declared by
+  `@font-face` at the top of `style.css`. The CSP has no font host (`font-src 'self'`)
+  and `base.html` links nothing off-site. A new weight means a new file plus a rule;
+  do not reintroduce a CDN link.
 - **The public page is split in two kinds of thing.** `PUBLIC_SECTIONS` (announcements,
   services, incidents & maintenance) are blocks on the main page, reorderable by the
   admin. `PUBLIC_PAGES` (resources, VMs, Jellyfin activity, media, practical info) are

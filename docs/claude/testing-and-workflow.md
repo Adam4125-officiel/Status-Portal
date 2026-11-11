@@ -49,9 +49,7 @@
   `report_problem()` never passed `site_name` to `report.html`, silently leaving the
   topbar brand text and page title blank — every route-level pytest test for that route
   only checked for form-field presence, and `curl` output looked fine since the HTML was
-  syntactically valid, just missing content. (Red herring to ignore along the way: an
-  `ERR_CONNECTION_RESET` console error from the sandbox having no egress to
-  `fonts.googleapis.com` — unrelated to app code.)
+  syntactically valid, just missing content.
 - **The suite takes ~150s serially and ~75s with `pytest-xdist`**
   (`pip install pytest-xdist`, then `python -m pytest -q -n 8 -p no:cacheprovider`).
   Every test gets its own `tmp_path` database, so it is safe in parallel; worth it

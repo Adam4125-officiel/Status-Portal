@@ -2369,3 +2369,11 @@ With a service down, the banner only said "One or more services are down" and th
 culprit could be the ninth card, about 1,800px down on a phone. The banner now lists
 the affected services, each linked to its card; "Report a problem" moved to the topbar;
 the kiosk link moved to its admin setting; and the footer version can be hidden.
+
+## Fonts and the browser-cache page (2026-11)
+
+The three font families came from Google, which sent every visitor's IP there and made
+the page wait on a third-party host when the internet was down. They are now `woff2`
+files in `static/fonts/` and the two CSP exceptions are gone. The "Clear this browser's
+cache" page was removed (it only reached the browser that clicked it); the server-side
+button, which changes every asset URL, remains.
