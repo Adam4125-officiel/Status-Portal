@@ -1,31 +1,15 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
+{# A form or a result the visitor is working in: never reload it under them. #}
+{% set auto_refresh = false %}
 {% block title %}Report a problem — {{ site_name }}{% endblock %}
-{% block body %}
-<div class="wrap" style="max-width: 640px;">
-  <div class="topbar">
-    <div class="brand">
-      {% if site_logo_filename %}
-        <img class="brand-logo" src="{{ url_for('static', filename='uploads/' ~ site_logo_filename) }}?v={{ site_logo_version }}" alt="{{ site_name }}">
-      {% else %}
-        <span class="dot-server"></span>
-      {% endif %}
-      {{ site_name }}
-    </div>
-    <a href="{{ url_for('index') }}" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);">← Back to status</a>
-  </div>
-
+{% block content %}
+<div style="max-width: 640px;">
   <div class="admin-header">
     <h1>Report a problem</h1>
   </div>
   <p style="color: var(--text-dim); font-size: 13px; margin-top: -10px; margin-bottom: 20px;">
     Spotted something wrong? Let us know — this is a quick note to the admin, separate from the incident/maintenance history above.
   </p>
-
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, msg in messages %}
-      <div class="flash {{ category }}">{{ msg }}</div>
-    {% endfor %}
-  {% endwith %}
 
   <form method="POST" class="form-panel">
     <div class="field">

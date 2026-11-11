@@ -26,6 +26,8 @@
   }
 
   function wire(button) {
+    if (button.getAttribute('data-wired')) return;
+    button.setAttribute('data-wired', '1');
     button.addEventListener('click', function () {
       var seenSelector = button.getAttribute('data-seen-selector');
       var url = button.getAttribute('data-url');
@@ -46,7 +48,9 @@
             button.remove();
             return;
           }
-          button.insertAdjacentHTML('beforebegin', html);
+          // Wrapped so a refresh of the page can put the batch back (public_refresh.js).
+          button.insertAdjacentHTML('beforebegin',
+            '<div class="load-more-batch" data-for="' + button.id + '">' + html + '</div>');
           // Re-scanning the whole page is cheap here (at most a few dozen
           // timestamps) and avoids fragile DOM traversal to scope it to just
           // what was inserted.
@@ -71,5 +75,9 @@
     });
   }
 
-  document.querySelectorAll('.load-more-btn').forEach(wire);
+  // Also called after a refresh swaps fresh buttons in (public_refresh.js).
+  window.wireLoadMore = function (root) {
+    (root || document).querySelectorAll('.load-more-btn').forEach(wire);
+  };
+  window.wireLoadMore(document);
 })();

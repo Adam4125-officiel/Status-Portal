@@ -1,5 +1,6 @@
 import io
 import os
+from datetime import datetime, timedelta, timezone
 import re
 import sqlite3
 import tempfile
@@ -3495,18 +3496,17 @@ def test_service_without_url_hides_open_button(client):
 
 
 def test_public_page_shows_jellyfin_tasks_when_enabled(client):
-    """Jellyfin activity has its own page now; the main page links to it and summarises
-    it rather than carrying the whole block."""
+    """Jellyfin activity is a section of the Server tab; the main page doesn't carry it."""
     import integrations as integrations_module
     db.set_setting("show_public_jellyfin_tasks", "1")
     integrations_module._jellyfin_activity_cache["running_tasks"] = ["Trickplay Image Extraction"]
 
-    page = client.get("/activity")
+    page = client.get("/server")
+    assert b'id="activity"' in page.data
     assert b"Trickplay Image Extraction" in page.data
 
     main = client.get("/")
-    assert b"Jellyfin activity" in main.data          # linked and summarised
-    assert b"1 task(s) running" in main.data
+    assert b'href="/server"' in main.data
     assert b"Trickplay Image Extraction" not in main.data
 
 
@@ -3524,11 +3524,10 @@ def test_the_activity_page_says_so_when_nothing_is_running(client):
     and says nothing is running - a link that 404s half the time would be worse."""
     db.set_setting("show_public_jellyfin_tasks", "1")
     # _jellyfin_activity_cache["running_tasks"] is [] by default (reset per-test)
-    page = client.get("/activity")
+    page = client.get("/server")
     assert page.status_code == 200
-    # The page has to *say* it's idle - rendering nothing reads as broken.
+    # The section has to *say* it's idle - rendering nothing reads as broken.
     assert b"idling at the moment" in page.data
-    assert b"Idle right now" in client.get("/").data
 
 
 # ---------------------------------------------------------------------------
@@ -3544,7 +3543,7 @@ def test_the_main_page_keeps_the_is_it_working_content(client, isolated_db):
     assert b"service(s) tracked" in body
 
 
-@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+@pytest.mark.parametrize("path", ["/server", "/resources", "/vms", "/activity", "/media"])
 def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
     """The important half of the split. Moving a block to its own route must not become
     a way around the setting that hides it - so a page whose content is switched off
@@ -3553,7 +3552,7 @@ def test_a_switched_off_page_is_not_reachable_by_url(client, isolated_db, path):
     assert client.get(path).status_code == 404
 
 
-@pytest.mark.parametrize("path", ["/resources", "/vms", "/activity", "/media"])
+@pytest.mark.parametrize("path", ["/server", "/media"])
 def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
     """And it isn't advertised either: the nav is built from the same context builders
     the pages use, so a link can never point at something that would 404."""
@@ -3562,8 +3561,44 @@ def test_a_switched_off_page_is_not_linked(client, isolated_db, path):
 
 def test_switching_a_section_on_makes_its_page_reachable_and_linked(client, isolated_db):
     db.set_setting("show_public_cpu", "1")
-    assert client.get("/resources").status_code == 200
-    assert b"/resources" in client.get("/").data
+    assert client.get("/server").status_code == 200
+    assert b'href="/server"' in client.get("/").data
+
+
+def test_the_old_server_addresses_redirect_to_their_section(client, isolated_db):
+    """/resources, /vms and /activity became sections of /server; bookmarks keep working,
+    and only for a section that is switched on."""
+    db.set_setting("show_public_cpu", "1")
+    db.set_setting("show_public_vms", "1")
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    for old, anchor in (("/resources", "resources"), ("/vms", "vms"), ("/activity", "activity")):
+        resp = client.get(old)
+        assert resp.status_code in (301, 302), old
+        assert resp.headers["Location"].endswith("/server#" + anchor), old
+    db.set_setting("show_public_vms", "0")
+    assert client.get("/vms").status_code == 404
+
+
+def test_each_server_section_follows_its_own_visibility_rule(client, isolated_db):
+    """The Server tab exists for any one of its sections, but shows only those switched on."""
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    body = client.get("/server").data
+    assert b'id="activity"' in body
+    assert b'id="resources"' not in body and b'id="vms"' not in body
+    db.set_setting("show_public_cpu", "1")
+    body = client.get("/server").data
+    assert b'id="resources"' in body and b'id="activity"' in body
+
+
+def test_the_nav_has_one_tab_for_the_whole_server(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    db.set_setting("show_public_vms", "1")
+    db.set_setting("show_public_jellyfin_tasks", "1")
+    body = client.get("/").data
+    assert body.count(b'href="/server"') == 1
+    for old in (b'href="/resources"', b'href="/vms"', b'href="/activity"'):
+        assert old not in body
+    assert b"summary-card" not in body  # the "More" block is gone
 
 
 def test_the_info_page_disappears_when_emptied(client, isolated_db):
@@ -3577,10 +3612,7 @@ def test_the_info_page_disappears_when_emptied(client, isolated_db):
     assert b"/info" not in client.get("/").data
 
 
-def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_db, monkeypatch):
-    """Regression: the nav is shared, but `search_enabled` was only computed by the main
-    page's route - so the Search tab existed only on the page that happened to pass it."""
-    db.set_setting("show_public_cpu", "1")
+def _sign_in_with_search(client):
     db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
                             "api_key": "k", "enabled": 1})
     db.set_setting("jellyfin_auth_enabled", "1")
@@ -3588,13 +3620,134 @@ def test_the_search_tab_appears_on_every_page_not_just_status(client, isolated_d
     with client.session_transaction() as sess:
         sess["portal_user"] = {"id": "u1", "name": "adam", "jellyfin_admin": False,
                                "authenticated_at": 0}
-    for path in ("/", "/resources", "/info"):
-        assert b'href="/search"' in client.get(path).data, path
+
+
+def test_search_lives_in_the_media_tab_not_a_tab_of_its_own(client, isolated_db):
+    """Four tabs: a signed-in visitor gets Media (with the search box at its head) and
+    no separate Search tab, on every page; an anonymous visitor gets neither."""
+    db.set_setting("show_public_cpu", "1")
+    assert b'href="/media"' not in client.get("/").data
+    _sign_in_with_search(client)
+    for path in ("/", "/server", "/info"):
+        body = client.get(path).data
+        assert b'href="/media"' in body, path
+        assert b">Search</a>" not in body, path
+    page = client.get("/media")
+    assert page.status_code == 200
+    assert b'class="search-form"' in page.data and b'action="/search"' in page.data
+
+
+def test_the_media_search_box_does_not_steal_focus(client, isolated_db):
+    _sign_in_with_search(client)
+    assert b"autofocus" not in client.get("/media").data
+    assert b"autofocus" in client.get("/search").data
+
+
+def test_an_anonymous_visitor_cannot_reach_the_search_only_media_page(client, isolated_db):
+    _sign_in_with_search(client)
+    with client.session_transaction() as sess:
+        sess.pop("portal_user")
+    assert client.get("/media").status_code == 404
+
+
+def test_every_public_page_shares_one_shell(client, isolated_db):
+    """The tab bar and footer come from public_base.html on every public page - the
+    login page, the report form, the 404 - not only on the status page and sub-pages."""
+    db.set_setting("show_public_cpu", "1")
+    for path in ("/", "/server", "/report", "/login", "/no-such-page"):
+        body = client.get(path).data
+        assert b'class="page-nav"' in body, path
+        assert b'href="/server"' in body, path  # nav_links from the context processor
+        assert b'class="foot"' in body, path
+        assert b'class="brand__link"' in body, path
+
+
+def test_the_media_tab_is_active_on_search_pages(client, isolated_db):
+    _sign_in_with_search(client)
+    body = client.get("/search").data.decode()
+    assert '<a href="/media" class="active">' in body
+
+
+def test_pages_with_forms_do_not_auto_reload_but_status_does(client, isolated_db):
+    """A reload would wipe a half-written report, so form and error pages opt out
+    (refresh interval 0, no countdown); the status page keeps its refresh."""
+    for path in ("/report", "/login", "/no-such-page"):
+        body = client.get(path).data.decode()
+        assert "window.PORTAL_REFRESH_SECONDS = 0;" in body, path
+        assert "refresh-status" not in body, path
+    body = client.get("/").data.decode()
+    assert "window.PORTAL_REFRESH_SECONDS = 0;" not in body
+    assert 'id="refresh-status"' in body
+    assert "refresh-countdown" not in body
+
+
+def test_public_pages_refresh_in_place_instead_of_reloading(client, isolated_db):
+    """The public shell loads the script that swaps a fragment in, not the one that
+    calls window.location.reload()."""
+    body = client.get("/").data.decode()
+    assert "js/public_refresh.js" in body
+    assert "js/main.js" not in body
+    assert 'id="live-region" data-fragment-url="/?fragment=1"' in body
+    source = open(os.path.join(os.path.dirname(app_module.__file__), "static/js/public_refresh.js")).read()
+    assert "location.reload" not in source
+
+
+def test_the_fragment_is_only_the_live_region(client, isolated_db):
+    db.set_setting("show_public_cpu", "1")
+    full = client.get("/server").data.decode()
+    fragment = client.get("/server?fragment=1").data.decode()
+    assert "<html" in full and 'class="page-nav"' in full
+    assert "<html" not in fragment and 'class="page-nav"' not in fragment
+    assert 'class="foot"' not in fragment
+    assert "server-section" in fragment
+
+
+def test_the_fragment_answers_304_when_nothing_changed(client, isolated_db):
+    first = client.get("/?fragment=1")
+    etag = first.headers["ETag"]
+    assert first.headers["Cache-Control"] == "no-cache"
+    again = client.get("/?fragment=1", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.data == b""
+
+
+def test_the_fragment_etag_does_not_depend_on_gzip(client, isolated_db):
+    """gzip's header carries a timestamp: a tag taken over the compressed bytes would
+    change every second and no poll would ever get a 304."""
+    plain = client.get("/?fragment=1").headers["ETag"]
+    gzipped = client.get("/?fragment=1", headers={"Accept-Encoding": "gzip"})
+    assert gzipped.headers["ETag"] == plain
+
+
+def test_the_fragment_etag_changes_with_the_content(client, isolated_db):
+    before = client.get("/?fragment=1").headers["ETag"]
+    db.set_setting("site_name", "Other")  # outside the live region: the tag must not move
+    assert client.get("/?fragment=1").headers["ETag"] == before
+    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2000-01-01T00:00:00+00:00")
+    assert client.get("/?fragment=1").headers["ETag"] != before  # the stale banner appears
+
+
+def test_stale_banner_when_the_last_cycle_is_over_three_intervals_old(client, isolated_db, monkeypatch):
+    monkeypatch.setattr(app_module.config, "CHECK_INTERVAL_SECONDS", 120)
+    now = datetime.now(timezone.utc)
+
+    def banner(age_seconds):
+        db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING,
+                       (now - timedelta(seconds=age_seconds)).isoformat())
+        return [b"stale-banner" in client.get(p).data for p in ("/", "/?fragment=1")]
+
+    assert banner(3 * 120 - 30) == [False, False]
+    assert banner(3 * 120 + 60) == [True, True]
+    assert b"for 7 minutes" in client.get("/").data
+
+
+def test_no_stale_banner_before_the_first_cycle_has_finished(client, isolated_db):
+    assert b"stale-banner" not in client.get("/").data
 
 
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):
     db.set_setting("show_public_cpu", "1")
-    body = client.get("/resources").data
+    body = client.get("/server").data
     assert b'class="page-nav"' in body
     assert b">Status<" in body
 

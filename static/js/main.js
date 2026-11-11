@@ -1,4 +1,6 @@
 (function () {
+  // 0 means "this page opted out" (forms, search results, error pages): never reload.
+  if (window.PORTAL_REFRESH_SECONDS === 0) return;
   var REFRESH_SECONDS = window.PORTAL_REFRESH_SECONDS || 60;
   var remaining = REFRESH_SECONDS;
   var el = document.getElementById('refresh-countdown');

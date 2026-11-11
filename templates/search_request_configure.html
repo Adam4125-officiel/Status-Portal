@@ -1,20 +1,10 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
+{# A form or a result the visitor is working in: never reload it under them. #}
+{% set auto_refresh = false %}
+{% set active_page = 'media' %}
 {% block title %}Request {{ config.title }} — {{ site_name }}{% endblock %}
-{% block body %}
-<div class="wrap">
-  <div class="topbar">
-    <div>
-      <div class="topbar__brand">{{ site_name }}</div>
-      <div class="topbar__sub">Request configuration</div>
-    </div>
-    <a class="btn secondary" href="{{ url_for('search', q=query) }}">← Back to search</a>
-  </div>
-
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% for category, msg in messages %}
-      <div class="flash {{ category }}">{{ msg }}</div>
-    {% endfor %}
-  {% endwith %}
+{% block content %}
+  <p class="back-link"><a href="{{ url_for('search', q=query) }}">← Back to search</a></p>
 
   <div class="search-result search-result--detail">
     {% if config.poster_path %}
@@ -112,6 +102,7 @@
       </form>
     </div>
   </div>
-</div>
+{% endblock %}
+{% block page_scripts %}
 <script src="{{ asset_url('js/search_request_submit.js') }}"></script>
 {% endblock %}

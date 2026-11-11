@@ -1,0 +1,10 @@
+{% extends "public_base.html" %}
+{% block title %}Server — {{ site_name }}{% endblock %}
+{% block content %}
+{# Three sections, each with its own visibility rule (show_resources / show_vms /
+   show_activity come from _server_context). The ids are what /resources, /vms and
+   /activity redirect to. Each partial keeps its own "is there anything to show" guard. #}
+{% if show_resources %}<div id="resources" class="server-section">{% include 'sections/resources.html' %}</div>{% endif %}
+{% if show_vms %}<div id="vms" class="server-section">{% include 'sections/vms.html' %}</div>{% endif %}
+{% if show_activity %}<div id="activity" class="server-section">{% include 'sections/jellyfin_activity.html' %}</div>{% endif %}
+{% endblock %}

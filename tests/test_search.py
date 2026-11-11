@@ -543,13 +543,16 @@ def test_a_signed_in_visitor_can_reach_search(visitor):
 def test_search_is_not_linked_for_signed_out_visitors(client, isolated_db):
     db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
                             "api_key": "k", "enabled": 1})
-    assert b'href="/search"' not in client.get("/").data
+    body = client.get("/").data
+    assert b'href="/search"' not in body and b'href="/media"' not in body
 
 
-def test_search_is_linked_in_the_nav_for_a_signed_in_visitor(visitor):
-    """The box moved out of the main page's scroll into the shared page nav, alongside
-    the other pages - /search was always its own route."""
-    assert b'href="/search"' in visitor.get("/").data
+def test_search_is_reached_from_the_media_tab_for_a_signed_in_visitor(visitor):
+    """No tab of its own: the box sits at the head of the Media tab and submits to
+    /search, which was always its own route."""
+    assert b'href="/media"' in visitor.get("/").data
+    assert b'action="/search"' in visitor.get("/media").data
+    assert b'href="/search"' not in visitor.get("/").data
 
 
 def test_searching_is_rate_limited_per_session(visitor, monkeypatch):

@@ -44,9 +44,13 @@
   `urlencode(quote_via=quote)`; don't "simplify" it back to `params=`. The diagnostic
   builds its URL the same way on purpose: when it didn't, it reported "both calls
   succeeded" while search was broken, because it happened to use a one-word query.
-- **Anything the shared public nav renders must be passed by *every* route that renders
-  it.** `search_enabled` was computed only by `index()`, so the Search tab existed on the
-  Status page and nowhere else. `_render_public_page()` passes the same set.
+- **Every public page extends `public_base.html`, and the nav comes from a
+  `context_processor`.** `_inject_public_chrome()` supplies `nav_links`,
+  `search_enabled`, `refresh_seconds`, `repo_url` and `site_name`; a route must not pass
+  them (explicit values would win, but nobody should rely on that). `search_enabled` was
+  once computed only by `index()`, so the Search tab existed on the Status page alone.
+  A page with a form or a result in progress sets `{% set auto_refresh = false %}` at the
+  top of its template, otherwise the shell's reload wipes what the visitor typed.
 - **A page on its own needs an empty state; a block on a shared page doesn't.** The
   Jellyfin activity partial guarded itself into rendering nothing when idle, which is
   right inside a long scroll and reads as broken as a whole page. It now says so.

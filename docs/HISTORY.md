@@ -2414,3 +2414,25 @@ tasks, a stale health-check cycle, unreachable integrations and failed notificat
 Nine admin forms used an inline `onsubmit="return confirm(...)"`, each needing an allow-list entry
 in the inline-handler test. They now use the `data-confirm` pattern from the account page, shared in
 `static/js/confirm.js`. Deleting a service warns that its maintenance windows go with it.
+
+## One public shell (2026-11)
+
+`/search`, `/report`, `/account`, sign-in and the error pages used to extend `base.html`
+and each drew its own topbar, so clicking the Search tab landed on a page with no tabs
+and no footer. They now extend `public_base.html`, and the nav data comes from a
+context processor instead of every route.
+
+## Four public tabs (2026-11)
+
+The public nav had seven tabs (Status, resources, VMs, Jellyfin activity, media, info,
+Search), wrapping to three lines on a phone, and the main page repeated five of them as
+"More" cards. It is now Status, Server, Media and Info; the old addresses redirect to
+their section of `/server`, and search sits at the head of Media for signed-in visitors.
+
+## Silent refresh of public pages (2026-11)
+
+Every open public tab reloaded itself each minute, losing its scroll position and whatever
+"Load more" had unfolded, and the header counted down ("next refresh in 57s") instead of saying
+how fresh the data was. The pages now re-fetch their live region as a fragment with an ETag
+(a 304 when nothing changed), show "Updated 12 s ago", and warn when the last health-check cycle
+is more than three intervals old.

@@ -1,6 +1,8 @@
-{% extends "base.html" %}
+{% extends "public_base.html" %}
+{# A form or a result the visitor is working in: never reload it under them. #}
+{% set auto_refresh = false %}
 {% block title %}{{ code }} — Status Portal{% endblock %}
-{% block body %}
+{% block content %}
 <div class="login-shell">
   <div class="login-card" style="text-align: center;">
     <h1>{{ code }}</h1>

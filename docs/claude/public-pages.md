@@ -84,9 +84,13 @@
   do not reintroduce a CDN link.
 - **The public page is split in two kinds of thing.** `PUBLIC_SECTIONS` (announcements,
   services, incidents & maintenance) are blocks on the main page, reorderable by the
-  admin. `PUBLIC_PAGES` (resources, VMs, Jellyfin activity, media, practical info) are
-  pages of their own, reached from the shared `.page-nav` and summarised in one line on
-  the main page. The main page answers "is it working?"; everything else is a click away.
+  admin. `PUBLIC_PAGES` are the other three tabs of the shared `.page-nav`: **Server**
+  (`/server`: resources, VMs and Jellyfin activity as sections `#resources`, `#vms`,
+  `#activity`), **Media** (`/media`) and **Info**. The main page answers "is it
+  working?"; it carries no summary of the others. `/resources`, `/vms` and `/activity`
+  still exist but only redirect to their section, and 404 while that section is off.
+  Each section of Server keeps its own `show_public_*` predicate (`_server_context()`
+  builds only the ones that apply); the tab exists when any one does.
 - **Availability and content are two different questions, and the nav must only ask the
   cheap one.** Each entry in `PUBLIC_PAGES` has an availability predicate (settings
   only) *and* a context builder (which may poll the machine). Building the nav by
@@ -95,23 +99,47 @@
   falls back to a blocking sample. Jellyfin activity was paying for a disk and CPU poll
   it never displays, which is what made it look like it had hung. Anything touching the
   filesystem, the network or psutil belongs in the builder, never the predicate.
-- **`_request_snapshot()` memoises the resource snapshot on `g`.** The main page wants
-  it twice (high-load badge, resources summary) and it's the most expensive thing a
+- **`_request_snapshot()` memoises the resource snapshot on `g`.** The high-load badge
+  and the Server tab's cards can both want it, and it's the most expensive thing a
   public page does.
-- **A page's context builder is the single gate, used by the page *and* the nav *and*
-  the summary.** That is what stops a sub-page becoming a way around a `show_public_*`
+- **A page's context builder is the single gate, used by the page *and* the nav.**
+  That is what stops a sub-page becoming a way around a `show_public_*`
   setting or `media_requires_login`: if the builder returns `None` the route 404s, the
-  nav doesn't link it, and no summary mentions it — all three from the same call. Never
+  nav doesn't link it — both from the same call. Never
   render a sub-page from anything other than `_render_public_page()`.
+- **Search is not a tab.** A signed-in visitor (when `media_search.is_available()`) gets
+  the search box at the head of `/media`, which then exists even with every activity
+  part off; `/search`, its detail and request pages set `active_page = 'media'`. The box
+  is `sections/_search_form.html`, shared by both pages.
 - **A switched-off page 404s rather than rendering empty.** An empty page confirms the
   feature exists and is merely hidden; 404 is the same answer a visitor would get if it
   didn't exist.
-- **Auto-refresh lives in `public_base.html`, not `index.html`.** The public page used
-  to be one page that reloaded itself; after the split, putting the refresh script only
-  on the main page would silently freeze the resources and VM pages.
+- **`public_base.html` is the only public shell** (search, report, account, sign-in and
+  the error pages extend it too). Its nav data comes from `_inject_public_chrome()`, not
+  from routes. Pages with forms opt out of the auto-reload with
+  `{% set auto_refresh = false %}`.
+- **Auto-refresh lives in `public_base.html`, not `index.html`**, and it no longer
+  reloads. `static/js/public_refresh.js` re-fetches the `#live-region` from
+  `<same path>?fragment=1` every `refresh_seconds` and swaps its contents, so scroll
+  position and what "Load more" unfolded survive. With `public_fragment` set (the
+  `_is_public_fragment()` context value) `public_base.html` extends the bare
+  `_fragment.html` and renders only `{% block live %}`: the stale banner plus
+  `{% block content %}`. Anything that must update on refresh goes **inside** that block;
+  the topbar and footer are not refreshed.
+- **The fragment has an ETag and answers 304.** `_etag_public_fragment` is registered
+  *after* `_compress_response` so that it runs before it: the tag is over the plain HTML,
+  because gzip's header carries a timestamp and a tag over the compressed bytes would
+  change every second. An unchanged tag makes the script skip the swap. Anything
+  per-request in the live region (a timestamp, a token) would defeat this.
+- **"Load more" batches are wrapped in `.load-more-batch[data-for=<button id>]`** so a
+  swap can put them back in front of their button (minus items the first page now shows).
+  A new load-more button needs an `id`, and `wireLoadMore()` re-wires fresh buttons.
+- **`data_stale`**: the banner appears once `last_health_cycle_at` is older than
+  `STALE_AFTER_INTERVALS` (3) check intervals; no recorded cycle is not stale.
+- `main.js` (a reload, with a countdown) is now used only by the admin Resources page.
 - Each content block is its own partial under `templates/sections/<key>.html`, each
   owning its own "is there anything to show" guard, and the sub-page templates under
-  `templates/public/` just include the matching partial — one copy of the markup, and
+  `templates/public/` just include the matching partial(s) — one copy of the markup, and
   the guard still applies wherever it's rendered. The topbar/status-hero/footer are page
   chrome, not content, and stay hardcoded — deliberately never made reorderable.
 - `app._public_section_order()` reads the `public_layout_order` setting
@@ -161,8 +189,7 @@ deliberately does not advertise it.
   still polling it after the admin switched kiosk off. 404 rather than a redirect or an
   empty page, same as a switched-off public sub-page.
 - **It refreshes by polling for a server-rendered HTML fragment, not by reloading.**
-  `main.js`'s `window.location.reload()` is right for the public page and wrong here:
-  it flashes the screen and throws the rotation back to the first view every cycle, so
+  a full reload would be wrong here: it flashes the screen and throws the rotation back to the first view every cycle, so
   at a 60s refresh and a 20s rotation the later views are never reached at all.
   `/kiosk/views` is the same convention as `/api/incidents/more` and `/admin/logs/tail`
   - server-rendered HTML, never JSON, and the fragment the page includes on first load

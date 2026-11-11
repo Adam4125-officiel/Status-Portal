@@ -185,6 +185,24 @@ def _compress_response(response):
     return response
 
 
+@app.after_request
+def _etag_public_fragment(response):
+    """The polled live region of a public page (`?fragment=1`): an ETag over the rendered
+    body so an unchanged page costs a 304 with no body. no-cache = "always revalidate",
+    so the browser never serves a copy without asking. Registered after
+    _compress_response on purpose: Flask runs these in reverse order, so the tag is
+    computed over the plain HTML - gzip's header carries a timestamp, which would make
+    the tag change every second."""
+    if (request.method == "GET" and request.args.get("fragment") == "1"
+            and response.status_code == 200 and response.mimetype == "text/html"
+            and not response.direct_passthrough
+            and not request.path.startswith(("/admin", "/account"))):
+        response.add_etag()
+        response.headers["Cache-Control"] = "no-cache"
+        response.make_conditional(request)
+    return response
+
+
 @app.errorhandler(404)
 def handle_not_found(e):
     return render_template("error.html", code=404, message="Page not found."), 404
@@ -359,6 +377,62 @@ def _inject_portal_user():
             "report_needs_login": _report_login_required(),
             "user_theme": theme if theme in db.USER_THEMES else "auto",
             "unseen_replies": db.count_unseen_replies(user["id"]) if user else 0}
+
+
+def _is_public_fragment():
+    """True for `GET <public page>?fragment=1`: the page renders only its live region,
+    which static/js/public_refresh.js swaps in place instead of reloading the page."""
+    return request.method == "GET" and request.args.get("fragment") == "1"
+
+
+# The status data counts as stale once the last health-check cycle finished more than
+# this many check intervals ago (the cycle stalled, or the checker thread died).
+STALE_AFTER_INTERVALS = 3
+
+
+def _stale_data_minutes():
+    """Minutes since the last finished health-check cycle when that is more than
+    STALE_AFTER_INTERVALS intervals ago, else None. No recorded cycle (a fresh install
+    that has not finished its first one) is not stale: there is nothing to compare."""
+    raw = db.get_setting(LAST_HEALTH_CYCLE_SETTING)
+    if not raw:
+        return None
+    try:
+        last = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age <= STALE_AFTER_INTERVALS * config.CHECK_INTERVAL_SECONDS:
+        return None
+    return int(age // 60)
+
+
+@app.context_processor
+def _inject_public_chrome():
+    """What public_base.html renders around every public page - the nav tabs, the
+    refresh interval, the footer's repo link - so no route has to
+    thread it through by hand (the bug class CLAUDE.md used to warn about: a page that
+    forgot one of them simply lacked the tab). Values a route passes explicitly win.
+    Skipped on admin and kiosk pages, which never render it; the nav itself is only
+    settings-level predicates, no I/O."""
+    chrome = {"site_name": db.get_setting("site_name", "Server"),
+              "refresh_seconds": config.PUBLIC_REFRESH_SECONDS,
+              "repo_url": updater.REPO_URL, "active_page": None,
+              "public_fragment": _is_public_fragment(), "data_stale": False}
+    if request.path == "/admin" or request.path.startswith(("/admin/", "/kiosk")):
+        return chrome
+    try:
+        chrome["nav_links"] = _public_page_links()
+        chrome["search_enabled"] = _search_available()
+        stale_minutes = _stale_data_minutes()
+        chrome["data_stale"] = stale_minutes is not None
+        chrome["data_stale_minutes"] = stale_minutes
+    except Exception:
+        # An error page must still render when the nav can't be built.
+        _logger.exception("Could not build the public nav")
+    return chrome
 
 
 @app.context_processor
@@ -1034,7 +1108,7 @@ _PUBLIC_MEDIA_KEYS = ["show_public_calendar", "show_public_requests",
 def _public_media_visibility():
     """Memoised on Flask's `g`, same pattern as _request_snapshot() below - every
     public page calls this (and _public_resource_visibility()) from more than one of
-    its availability predicate/context builder/summary builder, and each one used to
+    its availability predicate/context builder, and each one used to
     re-read the same handful of settings rows from scratch (measured: 8 of the ~114
     SQLite connections a single '/' render made, all re-fetching the same 4 rows)."""
     if not hasattr(g, "_public_media_visibility"):
@@ -1115,8 +1189,7 @@ def _service_defaults():
 # announcements, services, incidents, info, resources, VMs, Jellyfin activity, media
 # and search - which buried the thing almost every visitor actually came for ("is it
 # working?") under everything else. What's left here is that question; the rest moved
-# to pages of their own (PUBLIC_PAGES below) and appears here only as a one-line
-# summary linking through.
+# to tabs of their own (PUBLIC_PAGES below).
 PUBLIC_SECTIONS = [
     ("announcements", "Announcements"),
     ("services", "Services"),
@@ -1229,9 +1302,8 @@ def _group_services(services):
 # ---------------------------------------------------------------------------
 # The public sub-pages
 # ---------------------------------------------------------------------------
-# Each of these was a block on the main page and is now a page of its own. The context
-# builder for each is shared between its page *and* the main page's summary line, which
-# is the point: the visibility rules (show_public_*, media_requires_login) are applied
+# Each of these was a block on the main page and is now a tab of its own. The same
+# predicate gates its route *and* its nav link, which is the point: the visibility rules (show_public_*, media_requires_login) are applied
 # once, in one place, so a sub-page cannot become a way around a setting that hides the
 # corresponding block. A page whose builder reports nothing to show is not linked and
 # 404s if requested directly - the same answer a visitor would get if it didn't exist,
@@ -1239,8 +1311,8 @@ def _group_services(services):
 def _request_snapshot():
     """One resource snapshot per request, memoised on Flask's `g`.
 
-    The main page can want it twice - once for the high-load badge and once for the
-    "Server resources" summary line - and a snapshot is the single most expensive thing
+    The main page's high-load badge and the Server tab's cards can both want it, and a
+    snapshot is the single most expensive thing
     a public page does (it reads every disk, and falls back to a blocking CPU sample
     when monitoring's cache is stale). Taking it twice for one page is pure waste."""
     if not hasattr(g, "_resource_snapshot"):
@@ -1276,11 +1348,18 @@ def _activity_context():
             "activity_idle": not activity.get("running_tasks") and not activity.get("transcoding")}
 
 
+def _search_available():
+    """The library search a signed-in visitor gets at the head of the Media tab."""
+    return bool(current_user()) and media_search.is_available()
+
+
 def _media_context():
     media_visible = _public_media_visibility()
-    if not any(media_visible.values()) or not _media_visible_to(current_user()):
+    show_media = any(media_visible.values()) and _media_visible_to(current_user())
+    if not show_media and not _search_available():
         return None
-    return {"media": integrations.get_cached_media(), "media_visible": media_visible}
+    return {"media": integrations.get_cached_media() if show_media else None,
+            "media_visible": media_visible}
 
 
 def _info_context():
@@ -1326,95 +1405,54 @@ def _activity_available():
 
 
 def _media_available():
-    return any(_public_media_visibility().values()) and _media_visible_to(current_user())
+    # Either the activity sections or, for a signed-in visitor, the search box.
+    return (any(_public_media_visibility().values()) and _media_visible_to(current_user())) \
+        or _search_available()
 
 
 def _info_available():
     return bool((db.get_info_page() or "").strip())
 
 
-def _resources_summary(ctx):
-    snapshot = ctx.get("snapshot") or {}
-    bits = []
-    if ctx["visible"].get("cpu") and snapshot.get("cpu_percent") is not None:
-        bits.append(f"CPU {snapshot['cpu_percent']}%")
-    if ctx["visible"].get("memory") and (snapshot.get("memory") or {}).get("percent") is not None:
-        bits.append(f"memory {snapshot['memory']['percent']}%")
-    if ctx["visible"].get("disks") and snapshot.get("disks"):
-        bits.append(f"{len(snapshot['disks'])} disk(s)")
-    return " · ".join(bits)
+def _server_available():
+    return _resources_available() or _vms_available() or _activity_available()
 
 
-def _vms_summary(ctx):
-    vms = ctx.get("vms") or []
-    if not vms:
-        return ""
-    running = sum(1 for vm in vms if (vm.get("state") or "").lower() == "running")
-    return f"{running} of {len(vms)} running"
+def _server_context():
+    """The Server tab: resources, VMs and Jellyfin activity as sections of one page.
+
+    Each section keeps its own visibility rule (its own predicate and builder); the page
+    exists when at least one of them does. A section that is off is simply absent, and
+    its builder is not run, so a visitor who may only see the VMs doesn't make the
+    server take a resource snapshot."""
+    context = {"visible": _public_resource_visibility()}
+    for key, available, build in (("resources", _resources_available, _resources_context),
+                                  ("vms", _vms_available, _vms_context),
+                                  ("activity", _activity_available, _activity_context)):
+        section = build() if available() else None
+        context[f"show_{key}"] = section is not None
+        context.update(section or {})
+    return context if any(context[f"show_{k}"] for k in ("resources", "vms", "activity")) else None
 
 
-def _activity_summary(ctx):
-    activity = ctx.get("jellyfin_activity") or {}
-    bits = []
-    if activity.get("transcoding"):
-        bits.append(f"{activity['transcoding']} transcoding")
-    tasks = activity.get("running_tasks") or []
-    if tasks:
-        bits.append(f"{len(tasks)} task(s) running")
-    return " · ".join(bits) if bits else "Idle right now"
-
-
-def _media_summary(ctx):
-    media, visible = ctx["media"], ctx["media_visible"]
-    bits = []
-    if visible.get("downloads") and media.get("downloads"):
-        bits.append(f"{len(media['downloads'])} downloading")
-    if visible.get("calendar") and media.get("calendar"):
-        bits.append(f"{len(media['calendar'])} coming soon")
-    if visible.get("requests") and media.get("requests"):
-        bits.append(f"{len(media['requests'])} request(s)")
-    return " · ".join(bits)
-
-
-# key -> (label, endpoint, availability predicate, context builder, summary builder).
-# The summary is the line shown on the main page; returning a falsy summary still links
-# the page, it just has nothing to say about it yet.
+# key -> (label, endpoint, availability predicate, context builder). These are the
+# public tabs after Status. Server holds three sections (resources, vms, activity) whose
+# old addresses redirect to their anchors; see _SERVER_SECTIONS.
 PUBLIC_PAGES = [
-    ("resources", "Server resources", "public_resources", _resources_available,
-     _resources_context, _resources_summary),
-    ("vms", "Virtual machines", "public_vms", _vms_available,
-     _vms_context, _vms_summary),
-    ("activity", "Jellyfin activity", "public_activity", _activity_available,
-     _activity_context, _activity_summary),
-    ("media", "Media activity", "public_media", _media_available,
-     _media_context, _media_summary),
-    ("info", "Practical info", "public_info", _info_available,
-     _info_context, lambda ctx: "How to connect, and what to do when something's wrong"),
+    ("server", "Server", "public_server", _server_available, _server_context),
+    ("media", "Media activity", "public_media", _media_available, _media_context),
+    ("info", "Practical info", "public_info", _info_available, _info_context),
 ]
 
 
-def _public_page_links(include_summaries=False):
-    """Which sub-pages a visitor can see right now, for the nav and the summaries.
+def _public_page_links():
+    """Which tabs a visitor can see right now, for the nav.
 
-    Availability comes from the cheap predicate; the (possibly expensive) context is
-    built only when a summary is actually wanted, i.e. on the main page. "Is it linked"
-    and "does it render" still agree, because the page route applies the same predicate
-    before rendering - a link to a page that would 404 is worse than no link."""
-    links = []
-    for key, label, endpoint, available, build_context, summarise in PUBLIC_PAGES:
-        if not available():
-            continue
-        entry = {"key": key, "label": label, "url": url_for(endpoint)}
-        if include_summaries:
-            try:
-                context = build_context()
-                entry["summary"] = (summarise(context) or "") if context else ""
-            except Exception:
-                # A summary is decoration; it must never be the reason a page 500s.
-                _logger.exception("Could not summarise public page '%s'", key)
-                entry["summary"] = ""
-        links.append(entry)
-    return links
+    Availability comes from the cheap predicate only; the page route applies the same
+    predicate before rendering - a link to a page that would 404 is worse than no
+    link."""
+    return [{"key": key, "label": label, "url": url_for(endpoint)}
+            for key, label, endpoint, available, _ in PUBLIC_PAGES if available()]
 
 
 def _render_public_page(key):
@@ -1422,7 +1460,7 @@ def _render_public_page(key):
     entry = next((p for p in PUBLIC_PAGES if p[0] == key), None)
     if entry is None:
         abort(404)
-    _, label, _, available, build_context, _ = entry
+    _, label, _, available, build_context = entry
     context = build_context() if available() else None
     if context is None:
         # Switched off, or not visible to this viewer. 404 rather than an empty page:
@@ -1431,28 +1469,39 @@ def _render_public_page(key):
         abort(404)
     return render_template(f"public/{key}.html", page_label=label, active_page=key,
                             site_name=db.get_setting("site_name", "Server"),
-                            nav_links=_public_page_links(),
-                            # The nav is shared, so everything it renders has to be
-                            # passed everywhere it appears - without this the Search tab
-                            # existed only on the page that happened to compute it.
-                            search_enabled=bool(current_user()) and media_search.is_available(),
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            repo_url=updater.REPO_URL, **context)
+                            **context)
+
+
+@app.route("/server")
+def public_server():
+    return _render_public_page("server")
+
+
+# The three pages that became sections of /server. Same rule as before: a section that
+# is switched off 404s rather than redirecting to a page that doesn't show it.
+_SERVER_SECTIONS = {"resources": _resources_available, "vms": _vms_available,
+                    "activity": _activity_available}
+
+
+def _redirect_to_server_section(key):
+    if not _SERVER_SECTIONS[key]():
+        abort(404)
+    return redirect(url_for("public_server") + "#" + key)
 
 
 @app.route("/resources")
 def public_resources():
-    return _render_public_page("resources")
+    return _redirect_to_server_section("resources")
 
 
 @app.route("/vms")
 def public_vms():
-    return _render_public_page("vms")
+    return _redirect_to_server_section("vms")
 
 
 @app.route("/activity")
 def public_activity():
-    return _render_public_page("activity")
+    return _redirect_to_server_section("activity")
 
 
 @app.route("/media")
@@ -1592,7 +1641,7 @@ def _kiosk_rendered_views():
             context = build_context()
         except Exception:
             # One broken view must not take the whole display down - the same
-            # reasoning as _public_page_links()' summary guard.
+            # reasoning as the one in every public builder.
             _logger.exception("Could not build kiosk view '%s'", key)
             continue
         if context:
@@ -1667,23 +1716,14 @@ def index():
         s for s in services
         if s["status"] != "operational" and not s.get("ignore_in_overall_status")]
     site_name = db.get_setting("site_name", "Server")
-    # Signed-in visitors only, and only when there's something to search. Both halves
-    # matter: without sign-in the box would expose the whole library to anyone who can
-    # load the page, and without an integration it would be a box that does nothing.
-    search_enabled = bool(current_user()) and media_search.is_available()
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, overall=overall,
                             affected_services=affected_services,
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=site_name,
                             high_load=_high_load(),
-                            # Both the nav and the one-line summaries come from the same
-                            # builders the pages themselves use.
-                            nav_links=_public_page_links(),
-                            page_summaries=_public_page_links(include_summaries=True),
-                            search_enabled=search_enabled, active_page="status",
-                            section_order=_public_section_order(), repo_url=updater.REPO_URL)
+                            active_page="status",
+                            section_order=_public_section_order())
 
 
 @app.route("/api/status")
@@ -2503,10 +2543,7 @@ def user_contact_prompt():
         return redirect(url_for("user_account"))
     return render_template("contact_prompt.html",
                             site_name=db.get_setting("site_name", "Server"),
-                            user=user, nav_links=_public_page_links(),
-                            search_enabled=bool(current_user()) and media_search.is_available(),
-                            refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
-                            repo_url=updater.REPO_URL, active_page=None)
+                            user=user)
 
 
 @app.route("/account/seerr/import", methods=["POST"])
