@@ -385,6 +385,30 @@ def _is_public_fragment():
     return request.method == "GET" and request.args.get("fragment") == "1"
 
 
+# The status data counts as stale once the last health-check cycle finished more than
+# this many check intervals ago (the cycle stalled, or the checker thread died).
+STALE_AFTER_INTERVALS = 3
+
+
+def _stale_data_minutes():
+    """Minutes since the last finished health-check cycle when that is more than
+    STALE_AFTER_INTERVALS intervals ago, else None. No recorded cycle (a fresh install
+    that has not finished its first one) is not stale: there is nothing to compare."""
+    raw = db.get_setting(LAST_HEALTH_CYCLE_SETTING)
+    if not raw:
+        return None
+    try:
+        last = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age <= STALE_AFTER_INTERVALS * config.CHECK_INTERVAL_SECONDS:
+        return None
+    return int(age // 60)
+
+
 @app.context_processor
 def _inject_public_chrome():
     """What public_base.html renders around every public page - the nav tabs, the
@@ -396,12 +420,15 @@ def _inject_public_chrome():
     chrome = {"site_name": db.get_setting("site_name", "Server"),
               "refresh_seconds": config.PUBLIC_REFRESH_SECONDS,
               "repo_url": updater.REPO_URL, "active_page": None,
-              "public_fragment": _is_public_fragment()}
+              "public_fragment": _is_public_fragment(), "data_stale": False}
     if request.path == "/admin" or request.path.startswith(("/admin/", "/kiosk")):
         return chrome
     try:
         chrome["nav_links"] = _public_page_links()
         chrome["search_enabled"] = _search_available()
+        stale_minutes = _stale_data_minutes()
+        chrome["data_stale"] = stale_minutes is not None
+        chrome["data_stale_minutes"] = stale_minutes
     except Exception:
         # An error page must still render when the nav can't be built.
         _logger.exception("Could not build the public nav")

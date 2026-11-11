@@ -3723,9 +3723,26 @@ def test_the_fragment_etag_changes_with_the_content(client, isolated_db):
     before = client.get("/?fragment=1").headers["ETag"]
     db.set_setting("site_name", "Other")  # outside the live region: the tag must not move
     assert client.get("/?fragment=1").headers["ETag"] == before
-    db.create_announcement({"title": "Heads up", "message": "Hi", "type": "info"})
-    assert client.get("/?fragment=1").headers["ETag"] != before
+    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2000-01-01T00:00:00+00:00")
+    assert client.get("/?fragment=1").headers["ETag"] != before  # the stale banner appears
 
+
+def test_stale_banner_when_the_last_cycle_is_over_three_intervals_old(client, isolated_db, monkeypatch):
+    monkeypatch.setattr(app_module.config, "CHECK_INTERVAL_SECONDS", 120)
+    now = datetime.now(timezone.utc)
+
+    def banner(age_seconds):
+        db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING,
+                       (now - timedelta(seconds=age_seconds)).isoformat())
+        return [b"stale-banner" in client.get(p).data for p in ("/", "/?fragment=1")]
+
+    assert banner(3 * 120 - 30) == [False, False]
+    assert banner(3 * 120 + 60) == [True, True]
+    assert b"for 7 minutes" in client.get("/").data
+
+
+def test_no_stale_banner_before_the_first_cycle_has_finished(client, isolated_db):
+    assert b"stale-banner" not in client.get("/").data
 
 
 def test_every_sub_page_carries_the_shared_nav(client, isolated_db):

@@ -55,6 +55,6 @@
 {% block page_scripts %}{% endblock %}
 {% endif %}
 {% endblock %}
-{# What changes between refreshes: the page's own
+{# Everything that changes between refreshes: the stale-data warning and the page's own
    content. The wrapper above is what gets its children replaced. #}
-{% block live %}{% block content %}{% endblock %}{% endblock %}
+{% block live %}{% if data_stale %}<div class="flash error stale-banner" role="alert">Status checks have not run for {{ data_stale_minutes }} minutes. What is shown below may be out of date.</div>{% endif %}{% block content %}{% endblock %}{% endblock %}
