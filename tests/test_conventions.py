@@ -704,3 +704,41 @@ def test_a_confirmation_panel_on_an_auto_refreshing_page_holds_the_refresh():
         f"Confirmation panel without data-holds-refresh at {offenders}. Add the attribute to the "
         "panel's <div> (e.g. <div id=\"x-confirm\" data-holds-refresh ...>): without it the page's "
         "auto-refresh reloads it away while somebody is typing a 2FA code into it.")
+
+
+def _template_sets_post_form_flag(name, seen=()):
+    """Whether `name`, or a template it extends, sets has_post_form."""
+    if name in seen:
+        return False
+    source = _read("templates", name)
+    if re.search(r"{%-?\s*set\s+has_post_form\s*=\s*true", source):
+        return True
+    parent = re.search(r'{%-?\s*extends\s+"([^"]+)"', source)
+    return bool(parent) and _template_sets_post_form_flag(parent.group(1), seen + (name,))
+
+
+def test_every_template_with_a_post_form_renders_the_csrf_token():
+    """base.html renders the CSRF token only for a visitor who already has a session or
+    a page that sets has_post_form: rendering it creates a session, and an anonymous
+    reader of a public page must stay cookieless so the page can be cached. A page with
+    a POST form that doesn't set the flag would render without a token, and its form
+    would fail with a 400 for anyone arriving without a session.
+
+    base.html's own form (Sign out) only renders for a signed-in visitor, who has a
+    session, so it is the one exception."""
+    templates_dir = os.path.join(REPO, "templates")
+    missing = []
+    for root, _dirs, files in os.walk(templates_dir):
+        for filename in files:
+            if not filename.endswith(".html"):
+                continue
+            name = os.path.relpath(os.path.join(root, filename), templates_dir).replace(os.sep, "/")
+            if name == "base.html":
+                continue
+            if re.search(r'method="post"', _read("templates", name), re.IGNORECASE) \
+                    and not _template_sets_post_form_flag(name):
+                missing.append(name)
+    assert not missing, (
+        f"{missing} contain a POST form but never set has_post_form, so an anonymous "
+        "visitor gets no CSRF token. Add `{% set has_post_form = true %}` at the top "
+        "level of the template (next to its {% extends %}).")

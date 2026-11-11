@@ -1,6 +1,7 @@
 {% extends "public_base.html" %}
 {# A form or a result the visitor is working in: never reload it under them. #}
 {% set auto_refresh = false %}
+{% set has_post_form = true %}
 {% block title %}Report a problem — {{ site_name }}{% endblock %}
 {% block content %}
 <div style="max-width: 640px;">

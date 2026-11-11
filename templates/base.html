@@ -6,7 +6,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {# The token lives in the session, so rendering it creates one. Only a page with a POST
+     form (it sets has_post_form) or a visitor who already has a session gets it: an
+     anonymous reader of a public page stays cookieless, which is what lets a cache in
+     front of the portal keep the page (see app.py _apply_cache_policy). #}
+  {% if session or has_post_form %}
   <meta name="csrf-token" content="{{ csrf_token() }}">
+  {% endif %}
   <title>{% block title %}Status Portal{% endblock %}</title>
   <link rel="stylesheet" href="{{ asset_url('css/style.css') }}">
   <link rel="alternate" type="application/rss+xml" title="Status feed" href="{{ url_for('feed') }}">

@@ -125,11 +125,34 @@
   psutil's *first* `interval=None` call always answers 0.0, which is why
   `_refresh_cpu_cache()` won't publish a window shorter than
   `MIN_CPU_SAMPLE_WINDOW_SECONDS`.
-- **Everything under `/admin` and `/account` is sent `Cache-Control: no-store`**
-  (`set_security_headers`), so neither the back button nor a shared machine can bring
-  a signed-in page back after logout. It overrides `send_file()`'s own header too,
-  which the backup and log downloads want anyway. Public pages and `/static/` are
-  untouched.
+- **HTML gets one of three `Cache-Control` values, all from `_apply_cache_policy()`**
+  (called by `set_security_headers`, so it runs last and wins):
+  - `/admin`, `/account`, `/search`, `/login`, `/report` (`_NEVER_CACHED_PATHS`):
+    `no-store`, so neither the back button nor a shared machine can bring a signed-in
+    page back after logout. It overrides `send_file()`'s own header too, which the
+    backup and log downloads want anyway.
+  - Any other page when the request carries a session cookie, or the response starts
+    one: `private, no-cache`. Never `public` - the page holds a name, a sign-out button,
+    a CSRF token. `no-cache` rather than `no-store` keeps the polled fragment's 304.
+  - An anonymous `GET` that answers 200/304 and sets no cookie:
+    `public, max-age=15` (`PUBLIC_CACHE_SECONDS`) with `Vary: Cookie`.
+  `/static/` and non-HTML responses are untouched. **The anonymous tier only works
+  while an anonymous page sets no cookie**: `base.html` renders the CSRF token (which
+  creates the session) only for an existing session or a page with
+  `has_post_form`. Anything else that writes to `session` on an anonymous public
+  request silently makes every public page uncacheable again - and
+  `test_an_anonymous_visitor_reading_public_pages_gets_no_cookie` fails.
+- **Cloudflare ignores `Vary: Cookie`; the cache rule has to bypass on the cookie.**
+  Cloudflare does not cache HTML by default. The rule to create (by the user, in the
+  dashboard, Caching → Cache Rules) for the portal's hostname:
+  - When: hostname equals the portal's, and the `session` cookie is absent
+    (`not http.cookie contains "session="`), and the path does not start with
+    `/admin`, `/account`, `/search`, `/login`, `/report`, `/api`.
+  - Then: *Eligible for cache*; Edge TTL *Use cache-control header if present, bypass
+    cache if not*; Browser TTL *Respect origin*.
+  With that rule an anonymous visitor can still get a copy of the status page (at most
+  15 s old, then whatever Cloudflare still holds as stale) when the origin is down, and a
+  signed-in visitor or the admin always reaches the origin.
 - **`set_security_headers` also sets `base-uri 'self'`, `form-action 'self'` and
   `object-src 'none'`** (not covered by `default-src`), `Permissions-Policy` and
   `Cross-Origin-Opener-Policy: same-origin`. A form posting to another site would now be
