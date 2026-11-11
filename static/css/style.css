@@ -130,7 +130,6 @@
   color: var(--brand);
   cursor: pointer;
 }
-.admin-nav .link-button { font-size: inherit; color: var(--text-faint); }
 .link-button:hover { text-decoration: underline; }
 .user-chip__out:hover { border-color: var(--brand-dim); color: var(--text-primary); text-decoration: none; }
 /* The unread-reply dot on the sign-in chip. The only thing that tells a user an
