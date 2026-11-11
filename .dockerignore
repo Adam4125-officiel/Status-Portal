@@ -5,3 +5,7 @@ instance/
 .gitignore
 .env
 README.md
+.venv/
+.claude/
+.github/
+.pytest_cache/
