@@ -4509,6 +4509,8 @@ def admin_security():
                                 "admin_session_timeout_hours", str(DEFAULT_SESSION_TIMEOUT_HOURS)),
                             max_session_timeout_hours=MAX_SESSION_TIMEOUT_HOURS,
                             session_cookie_max_age_days=config.SESSION_COOKIE_MAX_AGE_DAYS,
+                            notify_api_key=db.get_setting(NOTIFY_API_KEY_SETTING, ""),
+                            device_api_key=db.get_setting(DEVICE_API_KEY_SETTING, ""),
                             active="security")
 
 
@@ -4682,6 +4684,15 @@ def admin_notifications_test():
     return redirect(url_for("admin_notifications"))
 
 
+def _key_page(default_endpoint):
+    """Where a key regeneration returns to: the Security page when the button was
+    pressed there (a hidden `back=security` field), otherwise the page that owns the
+    key. Whitelisted rather than a free `next`, so it can't be an open redirect."""
+    if request.form.get("back") == "security":
+        return url_for("admin_security") + "#api-keys"
+    return url_for(default_endpoint)
+
+
 @app.route("/admin/notifications/api-key/regenerate", methods=["POST"])
 @login_required
 def admin_notifications_regenerate_api_key():
@@ -4694,7 +4705,7 @@ def admin_notifications_regenerate_api_key():
     db.set_setting(NOTIFY_API_KEY_SETTING, secrets.token_hex(24))
     flash("New API key generated. The old key stopped working immediately - update "
           "anything using it.", "success")
-    return redirect(url_for("admin_notifications"))
+    return redirect(_key_page("admin_notifications"))
 
 
 @app.route("/admin/device", methods=["GET", "POST"])
@@ -4741,7 +4752,7 @@ def admin_device_regenerate_key():
     db.set_setting(DEVICE_API_KEY_SETTING, secrets.token_hex(24))
     flash("New display device key generated. The old key stopped working immediately - "
           "enter the new one on the display.", "success")
-    return redirect(url_for("admin_device"))
+    return redirect(_key_page("admin_device"))
 
 
 @app.route("/admin/settings/backup-db", methods=["POST"])

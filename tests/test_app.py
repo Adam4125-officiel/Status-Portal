@@ -5236,3 +5236,20 @@ def test_sign_out_all_other_sessions_needs_a_2fa_code_when_enabled(client):
     assert thief.get("/admin/services").status_code == 200
     client.post("/admin/security/sign-out-others", data={"totp_code": pyotp.TOTP(secret).now()})
     assert thief.get("/admin/services").status_code == 302
+
+
+def test_security_page_shows_both_api_keys_and_regenerates_them_in_place(client):
+    _login_admin(client)
+    db.set_setting(app_module.NOTIFY_API_KEY_SETTING, "n" * 48)
+    db.set_setting(app_module.DEVICE_API_KEY_SETTING, "d" * 48)
+    body = client.get("/admin/security").get_data(as_text=True)
+    assert "n" * 48 in body and "d" * 48 in body
+
+    for path, setting in (("/admin/notifications/api-key/regenerate", app_module.NOTIFY_API_KEY_SETTING),
+                          ("/admin/device/key/regenerate", app_module.DEVICE_API_KEY_SETTING)):
+        old = db.get_setting(setting)
+        resp = client.post(path, data={"back": "security"})
+        assert resp.headers["Location"].endswith("/admin/security#api-keys")
+        assert db.get_setting(setting) != old
+        # Without the hint it still returns to the page that owns the key.
+        assert "/admin/security" not in client.post(path).headers["Location"]

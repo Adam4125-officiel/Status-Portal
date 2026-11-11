@@ -9,6 +9,8 @@
   <a href="#two-factor">Two-factor</a>
   <a href="#session">Sessions</a>
   <a href="#password">Password</a>
+  <a href="#api-keys">API keys</a>
+  <a href="#api-keys">API keys</a>
 </nav>
 
 <h2 id="two-factor" class="settings-section-title">Two-factor authentication</h2>
@@ -74,4 +76,31 @@
     <button type="submit" class="btn">Change password</button>
   </div>
 </form>
+
+<h2 id="api-keys" class="settings-section-title">API keys</h2>
+{% for label, field, key, endpoint, hint in [
+  ("Notification API key", "notify_api_key", notify_api_key, "admin_notifications_regenerate_api_key",
+   "Lets another app (such as the games portal) send notifications through /api/notify/*."),
+  ("Display device key", "device_api_key", device_api_key, "admin_device_regenerate_key",
+   "Lets a display read the device API. Switch the device API on or off on the Display device page.")] %}
+<form method="POST" action="{{ url_for(endpoint) }}" class="form-panel" style="margin-bottom: 20px;"
+      {% if key %}onsubmit="return confirm('Generate a new key? The current one will stop working immediately.')"{% endif %}>
+  <input type="hidden" name="back" value="security">
+  {% if key %}
+  <div class="field">
+    <label for="{{ field }}">{{ label }}</label>
+    <input type="text" id="{{ field }}" value="{{ key }}" readonly onclick="this.select()">
+    <div class="field-hint">{{ hint }} Regenerating stops the old key immediately.</div>
+  </div>
+  {% else %}
+  <div class="field">
+    <label>{{ label }}</label>
+    <div class="field-hint">No key generated yet - the API refuses every request until one exists. {{ hint }}</div>
+  </div>
+  {% endif %}
+  <div class="form-actions">
+    <button type="submit" class="btn secondary">{{ 'Regenerate key' if key else 'Generate key' }}</button>
+  </div>
+</form>
+{% endfor %}
 {% endblock %}
