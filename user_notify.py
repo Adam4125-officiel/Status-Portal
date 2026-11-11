@@ -315,6 +315,21 @@ def contact_for(user_id):
             prefs["notify_discord_id"] or cached.get("discord_id", ""))
 
 
+def contact_errors(email=None, discord_id=None):
+    """{field: message} for each contact detail that can't be stored. Blank is legal
+    (clearing a field). The one rule set for every path that writes these two fields."""
+    errors = {}
+    if email and not db.looks_like_email(email.strip()):
+        errors["notify_email"] = (f"{email.strip()!r} doesn't look like a complete email "
+                                   "address, so it wasn't saved.")
+    discord_id = (discord_id or "").strip()
+    if discord_id and not (discord_id.isascii() and discord_id.isdigit()
+                           and len(discord_id) <= 32):
+        errors["notify_discord_id"] = ("The Discord user ID should be digits only, so it "
+                                        "wasn't saved.")
+    return errors
+
+
 def save_contact(jellyfin_user_id, email=None, discord_id=None):
     """Stores a contact detail and pushes it to Seerr. Returns (ok, message).
 
@@ -334,11 +349,14 @@ def save_contact(jellyfin_user_id, email=None, discord_id=None):
         # exclusively for users who have a Seerr account linked - so an unlinked user
         # could save anything at all and only find out when a notification silently
         # failed. Blank stays legal: clearing the field is a real thing to want.
-        if email and not db.looks_like_email(email):
-            return False, (f"{email!r} doesn't look like a complete email address, "
-                            "so it wasn't saved.")
+        errors = contact_errors(email=email)
+        if errors:
+            return False, errors["notify_email"]
         fields["notify_email"] = email
     if discord_id is not None:
+        errors = contact_errors(discord_id=discord_id)
+        if errors:
+            return False, errors["notify_discord_id"]
         fields["notify_discord_id"] = discord_id.strip()
     if not fields:
         return True, ""
@@ -357,7 +375,8 @@ def save_contact(jellyfin_user_id, email=None, discord_id=None):
             email=fields.get("notify_email"), discord_id=fields.get("notify_discord_id"))
     except (requests.RequestException, ValueError) as e:
         _logger.warning("Saved contact details locally but could not push them to Seerr: %s", e)
-        return False, f"Saved here, but Seerr couldn't be updated ({e})."
+        return False, ("Saved here, but Seerr couldn't be updated "
+                       f"({integrations.describe_request_error(e)}).")
 
     db.set_user_preferences(jellyfin_user_id, seerr_user_id=account["id"])
     db.upsert_seerr_contact(jellyfin_user_id, account["id"],

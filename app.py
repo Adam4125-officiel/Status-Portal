@@ -2316,10 +2316,19 @@ def user_login():
 # POST handler and the admin-viewing-a-user's-account route (see
 # admin_user_account()) - one place naming the fields so the two can't drift apart.
 def _save_account_prefs(user_id, form):
+    """Saves the form; returns the list of error messages for contact fields that were
+    invalid (those fields are left as they were, everything else is saved)."""
+    email = form.get("notify_email", "").strip()[:200]
+    discord_id = form.get("notify_discord_id", "").strip()[:32]
+    errors = user_notify.contact_errors(email=email, discord_id=discord_id)
+    contact_fields = {}
+    if "notify_email" not in errors:
+        contact_fields["notify_email"] = email
+    if "notify_discord_id" not in errors:
+        contact_fields["notify_discord_id"] = discord_id
     db.set_user_preferences(
         user_id, theme=form.get("theme", "auto"), contact=form.get("contact", "").strip()[:200],
-        notify_email=form.get("notify_email", "").strip()[:200],
-        notify_discord_id=form.get("notify_discord_id", "").strip()[:32],
+        **contact_fields,
         notify_email_reports=bool(form.get("notify_email_reports")),
         notify_email_requests=bool(form.get("notify_email_requests")),
         notify_email_maintenance=bool(form.get("notify_email_maintenance")),
@@ -2330,6 +2339,7 @@ def _save_account_prefs(user_id, form):
         notify_email_announcements=bool(form.get("notify_email_announcements")),
         notify_email_gamesportal=bool(form.get("notify_email_gamesportal")),
         notify_discord_gamesportal=bool(form.get("notify_discord_gamesportal")))
+    return list(errors.values())
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -2350,8 +2360,11 @@ def user_account():
     user_id = user["id"]
 
     if request.method == "POST":
-        _save_account_prefs(user_id, request.form)
-        flash("Your settings have been saved.", "success")
+        errors = _save_account_prefs(user_id, request.form)
+        for message in errors:
+            flash(message, "error")
+        flash("Your settings have been saved." if not errors
+              else "The rest of your settings have been saved.", "success")
         # saved=1 tells the page to bring this browser's own stored theme into line
         # with what was just saved - otherwise the setting would appear to do nothing
         # on the very device it was changed from, because a local choice made with
@@ -2494,7 +2507,7 @@ def user_account_push_seerr_contact():
                                          discord_id=prefs["notify_discord_id"] or None)
     except (requests.RequestException, ValueError) as e:
         _logger.warning("Could not push contact details to Seerr: %s", e)
-        flash(f"Couldn't update Seerr: {e}", "error")
+        flash(f"Couldn't update Seerr: {integrations.describe_request_error(e)}", "error")
         return redirect(url_for("user_account"))
     db.set_user_preferences(user["id"], seerr_user_id=account["id"])
     user_notify._invalidate_seerr_account_cache(user["id"])
@@ -4871,7 +4884,9 @@ def admin_user_account(user_id):
                                message="No such user in the cached Jellyfin user list."), 404
 
     if request.method == "POST":
-        _save_account_prefs(user_id, request.form)
+        errors = _save_account_prefs(user_id, request.form)
+        for message in errors:
+            flash(message, "error")
         flash(f"Saved settings for {target['name']}.", "success")
         return redirect(url_for("admin_user_account", user_id=user_id))
 

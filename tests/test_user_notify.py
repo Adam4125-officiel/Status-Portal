@@ -1670,3 +1670,54 @@ def test_the_account_page_for_a_mirrored_user_makes_no_seerr_call(seerr_http, si
     body = signed_in_visitor.get("/account").data.decode()
     assert "Adam in Seerr" in body
     assert seerr_http.calls == []
+
+
+def test_the_account_form_rejects_invalid_contact_values_but_saves_the_rest(signed_in_visitor):
+    db.set_setting("user_notifications_enabled", "1")
+    db.set_user_preferences("u1", notify_email="old@example.invalid", notify_discord_id="42")
+    resp = signed_in_visitor.post("/account", data={
+        "theme": "dark", "contact": "", "notify_email": "not an address",
+        "notify_discord_id": "abc; drop", "notify_email_reports": "on"},
+        follow_redirects=True)
+    prefs = db.get_user_preferences("u1")
+    assert prefs["notify_email"] == "old@example.invalid"
+    assert prefs["notify_discord_id"] == "42"
+    assert prefs["theme"] == "dark"
+    assert prefs["notify_email_reports"] is True
+    assert b"doesn&#39;t look like a complete email" in resp.data or b"look like a complete email" in resp.data
+    assert b"digits only" in resp.data
+
+
+def test_a_seerr_push_failure_shows_no_internal_address(signed_in_visitor, monkeypatch):
+    import requests
+    db.set_setting("user_notifications_enabled", "1")
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam", "email": "",
+                                 "discord_id": "", "jellyfin_user_id": "u1"}])
+    def boom(*a, **k):
+        raise requests.ConnectionError("HTTPConnectionPool(host='seerr.internal', port=5055)")
+    monkeypatch.setattr(integrations, "push_seerr_contact", boom)
+    resp = signed_in_visitor.post("/account/seerr/push", follow_redirects=True)
+    assert b"seerr.internal" not in resp.data
+    assert b"couldn" in resp.data.lower()
+
+
+def test_save_contact_failure_message_hides_the_exception_text(enabled, monkeypatch):
+    import requests
+    db.create_integration({"name": "Seerr", "kind": "jellyseerr", "base_url": "http://s",
+                            "api_key": "k", "enabled": 1})
+    _seerr_users(monkeypatch, [{"id": "3", "display_name": "Adam", "email": "",
+                                 "discord_id": "", "jellyfin_user_id": "u1"}])
+    def boom(*a, **k):
+        raise requests.ConnectionError("host seerr.internal:5055")
+    monkeypatch.setattr(integrations, "push_seerr_contact", boom)
+    ok, message = user_notify.save_contact("u1", email="me@example.invalid")
+    assert ok is False
+    assert "seerr.internal" not in message
+
+
+def test_save_contact_rejects_a_non_numeric_discord_id(enabled):
+    ok, message = user_notify.save_contact("u1", discord_id="abc; drop")
+    assert ok is False
+    assert db.get_user_preferences("u1")["notify_discord_id"] == ""
