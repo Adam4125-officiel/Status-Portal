@@ -256,36 +256,50 @@ HISTORY_RETENTION_SETTING = "status_history_retention_days"
 LEGACY_HISTORY_RETENTION_DAYS = 90
 
 
+# Sums status_history into status_daily for every UTC day after the one given ('' = all
+# of them). ON CONFLICT DO NOTHING: a day that already has its row is never recounted.
+_STATUS_DAILY_FROM_HISTORY_SQL = """
+    INSERT INTO status_daily (service_id, day, checks, down_checks, maintenance_checks,
+                              avg_response_ms, response_samples)
+    SELECT service_id, substr(checked_at, 1, 10), COUNT(*),
+           SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END),
+           SUM(CASE WHEN status = 'maintenance' THEN 1 ELSE 0 END),
+           AVG(response_ms), COUNT(response_ms)
+    FROM status_history
+    WHERE service_id IN (SELECT id FROM services) AND substr(checked_at, 1, 10) > ?
+    GROUP BY service_id, substr(checked_at, 1, 10)
+    ON CONFLICT (service_id, day) DO NOTHING
+"""
+
+
 def _backfill_status_daily(conn, is_new_install=False):
     """Fills status_daily from status_history, once: on the first start of a version
     that has the table, so an upgraded install keeps the uptime it already had.
 
     Runs before the health-check loop starts, so the history it reads is complete, and
     the rows it writes plus the marker setting are one transaction: a crash leaves
-    neither. From then on every check adds to its day directly, which is why this must
-    not run again - pruned history would recount a day as fewer checks than it had.
-    ON CONFLICT DO NOTHING keeps an existing day as it is if it ever does (a restored
-    file whose marker went missing).
+    neither. From then on every check adds to its day directly, which is why the full
+    pass must not run again - pruned history would recount a day as fewer checks than
+    it had. ON CONFLICT DO NOTHING keeps an existing day as it is if it ever does (a
+    restored file whose marker went missing).
+
+    Once the marker exists, a start only fills days *after* the newest daily row. There
+    are none unless a version without the table ran in between (an update rolled back
+    for a few days, then applied again): it wrote history but no daily rows, and those
+    days would otherwise stay "no data" and drop out of the uptime figure for good.
 
     The same one-time step keeps an existing install's per-check retention where it
     was: one that never saved the setting gets the old 90-day default written down, so
     only new installs start on the shorter default. A saved value is never touched."""
     if conn.execute("SELECT 1 FROM settings WHERE key=?",
                     (STATUS_DAILY_BACKFILLED_SETTING,)).fetchone():
+        newest_day = conn.execute("SELECT MAX(day) FROM status_daily").fetchone()[0]
+        if newest_day:
+            with conn:
+                conn.execute(_STATUS_DAILY_FROM_HISTORY_SQL, (newest_day,))
         return
     with conn:
-        conn.execute("""
-            INSERT INTO status_daily (service_id, day, checks, down_checks, maintenance_checks,
-                                      avg_response_ms, response_samples)
-            SELECT service_id, substr(checked_at, 1, 10), COUNT(*),
-                   SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN status = 'maintenance' THEN 1 ELSE 0 END),
-                   AVG(response_ms), COUNT(response_ms)
-            FROM status_history
-            WHERE service_id IN (SELECT id FROM services)
-            GROUP BY service_id, substr(checked_at, 1, 10)
-            ON CONFLICT (service_id, day) DO NOTHING
-        """)
+        conn.execute(_STATUS_DAILY_FROM_HISTORY_SQL, ("",))
         if not is_new_install:
             conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
                          (HISTORY_RETENTION_SETTING, str(LEGACY_HISTORY_RETENTION_DAYS)))
@@ -1264,7 +1278,7 @@ def delete_announcement(aid):
     conn.close()
 
 
-# ---------- Announcement send history (see app.py's admin_announcement_send()) ----------
+# ---------- Announcement send history (see routes/admin_content.py's admin_announcement_send()) ----------
 def record_announcement_send(announcement_id, title, channels, recipient_count=0):
     """One row per send. discord_detail starts blank and is filled in later by
     set_announcement_send_detail() once the background Discord post finishes - the
@@ -1351,7 +1365,7 @@ def list_incidents(limit=None, exclude_ids=None, max_age_days=None, open_only=Fa
     age counts toward the cutoff, since an ongoing problem shouldn't disappear
     from the public page just because it started a while ago.
 
-    exclude_ids drives "load more" pagination (see app.py's api_incidents_more()):
+    exclude_ids drives "load more" pagination (see routes/api.py's api_incidents_more()):
     the client sends the ids it is already displaying, and this returns the next
     page of whatever is left, newest-first, with no age filter applied. That is
     deliberately NOT a positional OFFSET and NOT an id cursor, both of which were

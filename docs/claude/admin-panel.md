@@ -102,7 +102,7 @@
   (`_attach_report_services()`). `test_the_public_page_query_count_does_not_grow_with_the_data`
   fails if a per-item query in a loop comes back.
 - **Low disk space alert** (`monitoring.evaluate_low_disk()` +
-  `app._check_low_disk_space()`) extends the already-cross-platform per-disk
+  `health._check_low_disk_space()`) extends the already-cross-platform per-disk
   `percent`/`free_gb` (`_get_disk_snapshots()`) with an admin threshold, same
   settings-page shape as the high-load thresholds — but deliberately a
   **separate** check, not folded into `evaluate_high_load()`, since a disk can be
@@ -124,7 +124,7 @@
   Discord, `python app.py` killed and restarted against the same database — the
   notification fired exactly once per disk across both runs, never a second
   time after restart.
-- **TLS certificate expiry alert** (`app._check_tls_certificates()`, scheduler task
+- **TLS certificate expiry alert** (`health._check_tls_certificates()`, scheduler task
   `tls_certificates`, daily 04:00): same shape as the low-disk alert -
   notification-only, **edge-triggered** (once when a certificate falls inside the
   window, silent reset once it is back outside, i.e. renewed), state in `settings`

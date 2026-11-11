@@ -13,11 +13,12 @@ from waitress import serve
 import config
 import db
 import discord_bot
+import health
 import logging_setup
 import monitoring
 import scheduler
 import updater
-from app import app, start_background_checker
+from app import app
 
 if __name__ == "__main__":
     logging_setup.init_logging()
@@ -25,7 +26,7 @@ if __name__ == "__main__":
     # If the previous shutdown was an in-app update restarting into a new version,
     # this is where that gets confirmed (or reported as not having taken effect).
     updater.check_pending_marker()
-    start_background_checker()
+    health.start_background_checker()
     monitoring.start_background_refresh(config.RESOURCE_REFRESH_SECONDS)
     scheduler.start()
     discord_bot.start()

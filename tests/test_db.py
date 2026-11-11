@@ -1479,6 +1479,30 @@ def test_the_daily_row_is_written_with_the_history_row_or_not_at_all(isolated_db
     assert _daily_rows(sid) == []
 
 
+def test_days_written_by_a_rolled_back_version_are_filled_on_the_next_start(isolated_db):
+    """An update rolled back for a few days and applied again: the old version wrote
+    history but no daily rows. Those days are summed at the next start; days up to the
+    newest daily row are left alone (their history may be pruned or partial)."""
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    conn = db.get_db()
+    conn.execute("INSERT INTO status_daily (service_id, day, checks, down_checks, maintenance_checks, "
+                 "avg_response_ms, response_samples) VALUES (?, '2026-01-02', 50, 0, 0, 10.0, 50)", (sid,))
+    conn.commit()
+    conn.close()
+    _insert_history([(sid, "operational", 7, "2026-01-01T12:00:00+00:00"),   # before: not recounted
+                     (sid, "down", None, "2026-01-02T12:00:00+00:00"),       # newest day: kept as is
+                     (sid, "down", None, "2026-01-03T10:00:00+00:00"),       # the gap
+                     (sid, "operational", 9, "2026-01-03T11:00:00+00:00"),
+                     (sid, "operational", 5, "2026-01-04T00:00:00+00:00")])
+
+    db.init_db()
+    db.init_db()  # and a second start changes nothing
+
+    assert _daily_rows(sid) == [(sid, "2026-01-02", 50, 0, 0, 10.0, 50),
+                                (sid, "2026-01-03", 2, 1, 0, 9.0, 1),
+                                (sid, "2026-01-04", 1, 0, 0, 5.0, 1)]
+
+
 def test_backfill_builds_the_same_rows_as_live_checks(isolated_db):
     """An upgraded install's existing history is summed per UTC day once, at start,
     to exactly what counting each check as it happened would have given."""

@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import app as app_module
 import db
+import health as health_module
 
 
 def _expiry_in(days):
@@ -19,7 +19,7 @@ def _expiry_in(days):
 @pytest.fixture
 def notified(monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(health_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
     return calls
 
 
@@ -30,47 +30,47 @@ def _https_service(url="https://example.test", **extra):
 def test_warns_once_per_crossing_and_again_after_renewal(isolated_db, notified, monkeypatch):
     sid = _https_service()
     days = {"left": 5}
-    monkeypatch.setattr(app_module, "_read_cert_expiry", lambda host, port: _expiry_in(days["left"]))
+    monkeypatch.setattr(health_module, "_read_cert_expiry", lambda host, port: _expiry_in(days["left"]))
 
-    app_module._check_tls_certificates()
-    app_module._check_tls_certificates()
+    health_module._check_tls_certificates()
+    health_module._check_tls_certificates()
     assert [c[0] for c in notified] == ["TLS certificate expiring"]
     assert "Wiki" in notified[0][1]
     assert db.get_tls_expiry(sid) != ""
 
     days["left"] = 60  # renewed: silent, state reset
-    app_module._check_tls_certificates()
+    health_module._check_tls_certificates()
     assert len(notified) == 1 and db.get_tls_alert_state(sid) is False
 
     days["left"] = 3  # runs low again: a new crossing
-    app_module._check_tls_certificates()
+    health_module._check_tls_certificates()
     assert len(notified) == 2
 
 
 def test_warning_survives_a_restart(isolated_db, notified, monkeypatch):
     sid = _https_service()
     db.set_tls_alert_state(sid, True)
-    monkeypatch.setattr(app_module, "_read_cert_expiry", lambda host, port: _expiry_in(2))
-    app_module._check_tls_certificates()
+    monkeypatch.setattr(health_module, "_read_cert_expiry", lambda host, port: _expiry_in(2))
+    health_module._check_tls_certificates()
     assert notified == []
 
 
 def test_threshold_setting_and_default(isolated_db, notified, monkeypatch):
     _https_service()
-    monkeypatch.setattr(app_module, "_read_cert_expiry", lambda host, port: _expiry_in(20))
-    assert app_module._tls_alert_days() == 14
-    app_module._check_tls_certificates()
+    monkeypatch.setattr(health_module, "_read_cert_expiry", lambda host, port: _expiry_in(20))
+    assert health_module._tls_alert_days() == 14
+    health_module._check_tls_certificates()
     assert notified == []
     db.set_setting("tls_expiry_alert_days", "30")
-    app_module._check_tls_certificates()
+    health_module._check_tls_certificates()
     assert len(notified) == 1
 
 
 def test_unreadable_certificate_changes_nothing(isolated_db, notified, monkeypatch):
     sid = _https_service()
     db.set_tls_alert_state(sid, True)
-    monkeypatch.setattr(app_module, "_read_cert_expiry", lambda host, port: None)
-    app_module._check_tls_certificates()
+    monkeypatch.setattr(health_module, "_read_cert_expiry", lambda host, port: None)
+    health_module._check_tls_certificates()
     assert notified == [] and db.get_tls_alert_state(sid) is True
 
 
@@ -79,16 +79,16 @@ def test_only_auto_checked_https_http_services_are_read(isolated_db, monkeypatch
     _https_service("https://tcp.test:443", check_type="tcp")
     _https_service("https://off.test", auto_check=0)
     seen = []
-    monkeypatch.setattr(app_module, "_read_cert_expiry", lambda host, port: seen.append((host, port)))
+    monkeypatch.setattr(health_module, "_read_cert_expiry", lambda host, port: seen.append((host, port)))
     _https_service("https://wiki.test:8443/path")
-    app_module._check_tls_certificates()
+    health_module._check_tls_certificates()
     assert seen == [("wiki.test", 8443)]
 
 
 def test_task_is_skipped_without_https_services(isolated_db):
     import scheduler
     with pytest.raises(scheduler.TaskSkipped):
-        app_module._tls_certificates_task()
+        health_module._tls_certificates_task()
 
 
 def test_deleting_a_service_drops_its_state(isolated_db):
@@ -137,7 +137,7 @@ def test_reads_a_real_self_signed_certificate(tmp_path):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        expires = app_module._read_cert_expiry("127.0.0.1", port)
+        expires = health_module._read_cert_expiry("127.0.0.1", port)
     finally:
         server.close()
         thread.join(timeout=5)
@@ -150,4 +150,4 @@ def test_unreachable_host_reads_as_none():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    assert app_module._read_cert_expiry("127.0.0.1", port) is None
+    assert health_module._read_cert_expiry("127.0.0.1", port) is None

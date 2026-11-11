@@ -133,7 +133,7 @@ def clear_caches():
     """Drops every cached live find_seerr_account() lookup - purely derived data that
     rebuilds itself on the next /account or /admin/users/<id>/account page load, same
     shape as integrations.clear_caches()/monitoring.clear_caches(). Wired into the
-    admin System page's "Clear cached data" button (app._clear_all_caches())."""
+    admin System page's "Clear cached data" button (routes.admin_system._clear_all_caches())."""
     with _seerr_account_cache_lock:
         _seerr_account_cache.clear()
 
@@ -265,7 +265,7 @@ def _live_seerr_account(integration, jellyfin_user_id):
 
 def _invalidate_seerr_account_cache(jellyfin_user_id):
     """Called right after this portal successfully changes what Seerr holds for someone
-    (save_contact() and app.user_account_push_seerr_contact(), after a successful
+    (save_contact() and routes.account.user_account_push_seerr_contact(), after a successful
     push_seerr_contact()). Their next lookup then asks Seerr instead of the mirror -
     otherwise the account page's "Linked to X in Seerr, which has: ..." line would go
     on showing the pre-push values until the next hourly sync - and writes the fresh

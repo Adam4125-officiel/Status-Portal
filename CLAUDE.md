@@ -79,9 +79,10 @@ have bitten someone on exactly that change.
 | Any DB schema change | *`docs/claude/conventions.md`: Conventions* → `_ensure_column()`; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → indexes go in `init_db()`'s list |
 | A new per-service field | *`docs/claude/conventions.md`: Conventions* → "three places, not one" (main form, wizard, Service defaults) |
 | A new setting of any kind | *`docs/claude/conventions.md`: Conventions* → the config split (env var vs DB row), and "a new `PORTAL_*` env var means three files" |
-| Anything in `run_health_checks()` or a status value | *`docs/claude/conventions.md`: Conventions* → level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
+| Anything in `health.py` (`run_health_checks()`) or a status value | *`docs/claude/conventions.md`: Conventions* → `health.py` never imports `app`; level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
 | Anything a request handler calls | *`docs/claude/conventions.md`: Conventions* → no slow I/O in a request handler; *`docs/claude/monitoring.md`: Monitoring architecture*; *`docs/claude/sessions-caching-db.md`: Sessions/caching* |
 | Login, sessions, cookies, CSRF | *`docs/claude/sessions-caching-db.md`: Sessions, caching and DB performance*; *`docs/claude/auth-and-accounts.md`: Two-factor authentication* |
+| A new route, or moving one | *`docs/claude/conventions.md`: Conventions* → routes live in `routes/`, plain `@app.route`, `portal.NAME` for anything the tests patch |
 | A new admin route | *`docs/claude/conventions.md`: Conventions* → CSRF is automatic under `/admin/`; `_require_totp()` for destructive actions only |
 | A template's CSS/JS reference | *`docs/claude/conventions.md`: Conventions* → always `asset_url()`; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → `SEND_FILE_MAX_AGE_DEFAULT` is 30 days |
 | Anything rendering a timestamp | *`docs/claude/conventions.md`: Conventions* → server-side UTC + `local-time` spans; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → ISO strings only |
@@ -159,12 +160,12 @@ DB-backed Settings pages, not a code edit.
 | Public page layout (`templates/sections/`, `templates/public/`) | `docs/claude/public-pages.md` |
 | Kiosk mode (`/kiosk`, `templates/kiosk/`, `static/js/kiosk.js`) | `docs/claude/public-pages.md` |
 | Two-factor authentication (`twofactor.py`) | `docs/claude/auth-and-accounts.md` |
-| Public "report a problem" form (`app.py`) | `docs/claude/public-pages.md` |
+| Public "report a problem" form (`routes/public.py`) | `docs/claude/public-pages.md` |
 | Reading the logs from the admin panel (`/admin/logs`, `logging_setup.py`) | `docs/claude/logging.md` |
-| Component restart controls (`app.py`, `discord_bot.py`) | `docs/claude/restore-and-restart.md` |
+| Component restart controls (`routes/`, `discord_bot.py`) | `docs/claude/restore-and-restart.md` |
 | Restoring the database (`/admin/about/restore-db`, `db.py`) | `docs/claude/restore-and-restart.md` |
-| Custom logo / branding (`app.py`, `static/uploads/`) | `docs/claude/admin-panel.md` |
-| Admin quick wins, service→VM/host mapping, service dependencies, low disk alert (`app.py`, `db.py`, `monitoring.py` — added 2026-08-12) | `docs/claude/admin-panel.md` |
+| Custom logo / branding (`routes/`, `static/uploads/`) | `docs/claude/admin-panel.md` |
+| Admin quick wins, service→VM/host mapping, service dependencies, low disk alert (`routes/`, `db.py`, `monitoring.py` — added 2026-08-12) | `docs/claude/admin-panel.md` |
 | Sessions, caching and DB performance (added 2026-08-19, v1.6.1) | `docs/claude/sessions-caching-db.md` |
 | Scheduled tasks (`scheduler.py`, `/admin/tasks`) — added 2026-08-21, v1.7.0 | `docs/claude/scheduler.md` |
 | Admin panel navigation (`templates/admin_base.html`) | `docs/claude/admin-panel.md` |
@@ -174,11 +175,11 @@ DB-backed Settings pages, not a code edit.
 | Jellyfin-backed user accounts (`jellyfin_auth.py`, `/admin/users`, `/login`) — added 2026-08-21, v1.7.0 | `docs/claude/auth-and-accounts.md` |
 | The user account page (`/account`) — added 2026-08-21, v1.7.0 | `docs/claude/auth-and-accounts.md` |
 | Per-user notifications (`user_notify.py`, `/admin/notifications/users`, `/account`) | `docs/claude/notifications.md` |
-| Announcements pushed as notifications (`app.py`, `db.py` — added 2026-08-28) | `docs/claude/announcements.md` |
+| Announcements pushed as notifications (`routes/`, `db.py` — added 2026-08-28) | `docs/claude/announcements.md` |
 | Unified search (`media_search.py`, `/search`) | `docs/claude/search-and-requests.md` |
 | Requesting through Seerr (`integrations.request_via_seerr()`) — read before touching it | `docs/claude/search-and-requests.md` |
 | Talking to Jellyfin (`jellyfin_auth.auth_headers()`) — the 12.0 auth migration | `docs/claude/search-and-requests.md` |
-| Cross-repo: gamesportal integration (`integrations.py`, `version_checks.py`, `user_notify.py`, `app.py` — added 2026-09-12) | `docs/claude/gamesportal.md` |
+| Cross-repo: gamesportal integration (`integrations.py`, `version_checks.py`, `user_notify.py`, `routes/` — added 2026-09-12) | `docs/claude/gamesportal.md` |
 | Display device API (`device_api.py`, `GET /api/device/summary`) — added 2026-10-06, v1.10.0; extended in v1.11.0, v1.11.1 and v1.12.0 | `docs/claude/device-api.md` |
 | Keeping rules enforceable (`tests/test_conventions.py`) | `docs/claude/testing-and-workflow.md` |
 | Testing/verification habits (established over many sessions — keep following them) | `docs/claude/testing-and-workflow.md` |

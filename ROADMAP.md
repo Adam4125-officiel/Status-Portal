@@ -79,9 +79,9 @@ Rules that follow from that, none of them optional:
 - **Reuse `media_search.py`, don't reimplement it.** The merge/dedupe (title *and*
   year), the "search is unavailable" state distinct from "nothing found", and
   `SEARCH_TIMEOUT_SECONDS` are all the point of that module. The request path is
-  the awkward part: the actual submit logic currently lives inside `app.py`'s
-  `search_request()` route, and `discord_bot.py` cannot import `app.py` (circular —
-  `app.py` imports the bot). Extracting it into `media_search.py` first, the way
+  the awkward part: the actual submit logic currently lives inside the
+  `search_request()` route (`routes/search.py`), and `discord_bot.py` cannot import
+  `app.py` or `routes/` (circular — `app.py` imports the bot). Extracting it into `media_search.py` first, the way
   `integrations.evaluate_high_load()` was extracted so both callers could share it,
   is the real work of this item.
 - **The admin-only request fields must not exist here at all.** Root folder,
@@ -107,7 +107,7 @@ Rules that follow from that, none of them optional:
 **Priority:** Medium-High — `/requests` and `/search` are small on top of what
 exists and are the two people would use daily · **Effort:** M for the two read
 commands; M-L including `/request`, almost all of it in extracting the submit path
-out of `app.py` cleanly rather than in the Discord surface itself.
+out of `routes/search.py` cleanly rather than in the Discord surface itself.
 
 ## Architecture
 

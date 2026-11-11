@@ -9,7 +9,7 @@
   with plain `CREATE TABLE IF NOT EXISTS`.
 - **Never call slow/external I/O directly inside a Flask request handler.** Standard
   pattern: a background thread polls and writes to a module-level cache dict
-  (`app._integration_status_cache`-style); request handlers only ever *read* the
+  (`health._integration_status_cache`-style); request handlers only ever *read* the
   cache. The one sanctioned exception is an explicit one-shot admin action the user
   knows will be slow (the "Check now" button, `perform_update()`) — never something
   that fires automatically or on every page load. This rule exists because it already
@@ -72,17 +72,41 @@
   check code. The fix is in the service (listen on IPv6 too) or the check URL
   (`127.0.0.1` instead of `localhost`). Ask which before touching `_run_single_check()`
   (`docs/HISTORY.md` -> "The 2-second localhost").
+- **The health check lives in `health.py`, and `health.py` never imports `app`.**
+  Checks, status merges, the incident lifecycle, the integration-status cache, the
+  low-disk alert and the TLS task are there; `app.py` reads `health.*` and calls
+  `health.start_background_checker()`. A helper both need goes in a module both
+  import (as `notifications.notify_async()` did), not in `app.py`. Tests patch these
+  names on `health`, not on `app` - patching `app` no longer reaches the loop. The TLS
+  task is registered by `health.register_tasks()`, called from `app.py` after
+  `prune_status_history`, because `/admin/tasks` lists tasks in registration order.
+- **Routes live in `routes/`, one module per domain; `app.py` keeps the shared
+  plumbing.** `routes/public.py` (status page, sub-pages, kiosk, `/report`),
+  `account.py` (visitor sign-in and account), `search.py`, `api.py` (`/api/*`, badges,
+  feed), and `admin_home.py`, `admin_content.py`, `admin_integrations.py`,
+  `admin_settings.py`, `admin_system.py`, `admin_users.py`. Each registers on the one
+  Flask object with plain `@app.route` (no blueprint), so endpoint names are bare
+  function names and `url_for("admin_logs")` keeps working - never add a blueprint
+  prefix, it would rename every endpoint. `app.py` imports these modules at its end,
+  so a route module may `from app import` any helper. Hooks, context processors,
+  session and CSRF helpers, `login_required`, shared constants and every
+  `scheduler.register()` stay in `app.py` (`/admin/tasks` lists tasks in registration
+  order). A name the tests replace on `app` (`_restart_process`, `LOGO_UPLOAD_DIR`,
+  `_report_login_required`, `_user_login_slots`...) is read as `portal.NAME` at call
+  time (`import app as portal`), never from-imported - the copy would miss the patch.
+  A new route goes in the module of its domain; the convention checks parse `app.py`
+  and `routes/` together.
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
-  `app._within_grace_period(service)` gates the call to
+  `health._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —
   status and response time are still recorded on every cycle regardless, so the
   public page reflects reality during the grace window, it just won't open an
-  incident over it. Measured from `app._APP_START` (process start), not from
+  incident over it. Measured from `health._APP_START` (process start), not from
   anything service-specific — good enough since services are expected to boot
   around the same time as the portal itself, not something to over-engineer.
 - **`retry_count`/`retry_interval_seconds` (per service) retry a 'down' result inline
-  before it's ever recorded, not after.** `app._check_service_status()` wraps
-  `app._run_single_check()` — only a `down` outcome is retried (degraded/slow/
+  before it's ever recorded, not after.** `health._check_service_status()` wraps
+  `health._run_single_check()` — only a `down` outcome is retried (degraded/slow/
   operational are never worth retrying, and only `down` ever opens an auto-incident),
   the first non-down result wins immediately, and this blocks the background
   health-check thread for up to `retry_count * retry_interval_seconds` seconds for
@@ -91,7 +115,7 @@
   service gets via `_ensure_column`) preserves the exact original single-attempt
   behavior.
 - **`services.check_type` is `http` (default) or `tcp`; the probe is chosen inside
-  `app._run_single_check()`, nowhere else.** `tcp` treats `check_url` as `host:port`
+  `health._run_single_check()`, nowhere else.** `tcp` treats `check_url` as `host:port`
   and connects with a 5 s limit (`_run_tcp_check()`); a target that is not host:port
   is `down`. It returns the same `(status, elapsed_ms)` as HTTP, so retries, the merge
   with API/dependency health, `record_check_result()` and the incident lifecycle are
@@ -218,7 +242,7 @@
 - **A "merge two status sources into one" feature (per-service `api_health_mode`) must
   still produce a single final status that feeds both the public display and
   `_handle_incident_lifecycle`, never two independent decisions.**
-  `app._merge_api_health(status, api_health_mode, integration_reachable)` folds a
+  `health._merge_api_health(status, api_health_mode, integration_reachable)` folds a
   linked integration's cached reachability into the web-check's own `status` *before*
   `db.update_service_status_from_check`/`_handle_incident_lifecycle` are called in
   `run_health_checks()`. This is what preserves the level-triggered invariant above,

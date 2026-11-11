@@ -240,7 +240,7 @@
   refusal costs nothing. Don't collapse the two back together.
 - **A notification about several things at once is one notification.**
   `db.process_maintenance_windows()` reports one event *per service* because that's the
-  granularity the status flip works at - but `app._process_maintenance_and_notify()`
+  granularity the status flip works at - but `health._process_maintenance_and_notify()`
   groups those back up by `(window id, transition)` before sending anything. Looping
   straight over the events sent one message per service down every channel at once
   (Discord webhook, ntfy, admin email *and* each opted-in visitor's email and DM), so
@@ -267,7 +267,7 @@
   second path around `EVENT_CHANNEL_PREFERENCE`, not a bug.** It backs the per-user
   "test notification" buttons (`/admin/users/<id>/test/discord`,
   `/admin/users/<id>/test/email`) *and* the free-text "Send a message" panel
-  (`/admin/users/<id>/message`, `app.admin_user_message()`) the same way — both are
+  (`/admin/users/<id>/message`, `routes.admin_users.admin_user_message()`) the same way — both are
   one-to-one admin-initiated actions, not automated events, so they **bypass the
   recipient's channel preferences entirely** — a person who switched Discord off
   still needs to be reachable for an admin test or a direct message. It still

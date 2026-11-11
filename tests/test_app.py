@@ -11,8 +11,12 @@ import pyotp
 import pytest
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import admin_search
 import app as app_module
 import db
+import health as health_module
+import notifications
+import routes.api as routes_api
 import scheduler
 import twofactor
 import updater
@@ -109,27 +113,27 @@ class _FakeResponse:
 def test_check_status_for_response_only_5xx_is_degraded():
     # A 401/403 login prompt (e.g. Bazarr's Basic Auth) or a 404 still means the
     # server answered - only an actual server-side (5xx) error counts against it.
-    assert app_module._check_status_for_response(_FakeResponse(200), 50, None) == "operational"
-    assert app_module._check_status_for_response(_FakeResponse(401), 50, None) == "operational"
-    assert app_module._check_status_for_response(_FakeResponse(403), 50, None) == "operational"
-    assert app_module._check_status_for_response(_FakeResponse(404), 50, None) == "operational"
-    assert app_module._check_status_for_response(_FakeResponse(500), 50, None) == "degraded"
-    assert app_module._check_status_for_response(_FakeResponse(503), 50, None) == "degraded"
+    assert health_module._check_status_for_response(_FakeResponse(200), 50, None) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(401), 50, None) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(403), 50, None) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(404), 50, None) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(500), 50, None) == "degraded"
+    assert health_module._check_status_for_response(_FakeResponse(503), 50, None) == "degraded"
 
 
 def test_check_status_for_response_502_is_down():
     # 502 means whatever's in front of the service (reverse proxy/gateway)
     # couldn't reach it - treated as "down", not "degraded", unlike other 5xx.
-    assert app_module._check_status_for_response(_FakeResponse(502), 50, None) == "down"
-    assert app_module._check_status_for_response(_FakeResponse(502), 5000, 2000) == "down"
+    assert health_module._check_status_for_response(_FakeResponse(502), 50, None) == "down"
+    assert health_module._check_status_for_response(_FakeResponse(502), 5000, 2000) == "down"
 
 
 def test_check_status_for_response_slow_threshold():
-    assert app_module._check_status_for_response(_FakeResponse(200), 100, 2000) == "operational"
-    assert app_module._check_status_for_response(_FakeResponse(200), 2500, 2000) == "slow"
-    assert app_module._check_status_for_response(_FakeResponse(200), 2500, None) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(200), 100, 2000) == "operational"
+    assert health_module._check_status_for_response(_FakeResponse(200), 2500, 2000) == "slow"
+    assert health_module._check_status_for_response(_FakeResponse(200), 2500, None) == "operational"
     # A slow response that's also a server error stays degraded, not slow.
-    assert app_module._check_status_for_response(_FakeResponse(500), 2500, 2000) == "degraded"
+    assert health_module._check_status_for_response(_FakeResponse(500), 2500, 2000) == "degraded"
 
 
 def test_enrich_services_attaches_grace_and_retry_flags(isolated_db):
@@ -141,23 +145,23 @@ def test_enrich_services_attaches_grace_and_retry_flags(isolated_db):
     assert service["in_grace_period"] is True
     assert service["retrying"] is False
 
-    app_module._retry_in_progress.add(sid)
+    health_module._retry_in_progress.add(sid)
     try:
         services = app_module._enrich_services(db.list_services())
         service = next(s for s in services if s["id"] == sid)
         assert service["retrying"] is True
     finally:
-        app_module._retry_in_progress.discard(sid)
+        health_module._retry_in_progress.discard(sid)
 
 
 def test_within_grace_period(monkeypatch):
-    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic())
-    assert app_module._within_grace_period({"startup_grace_seconds": 60}) is True
-    assert app_module._within_grace_period({"startup_grace_seconds": 0}) is False
-    assert app_module._within_grace_period({"startup_grace_seconds": None}) is False
+    monkeypatch.setattr(health_module, "_APP_START", app_module.time.monotonic())
+    assert health_module._within_grace_period({"startup_grace_seconds": 60}) is True
+    assert health_module._within_grace_period({"startup_grace_seconds": 0}) is False
+    assert health_module._within_grace_period({"startup_grace_seconds": None}) is False
 
-    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic() - 120)
-    assert app_module._within_grace_period({"startup_grace_seconds": 60}) is False
+    monkeypatch.setattr(health_module, "_APP_START", app_module.time.monotonic() - 120)
+    assert health_module._within_grace_period({"startup_grace_seconds": 60}) is False
 
 
 def test_a_health_check_never_downloads_the_body():
@@ -190,7 +194,7 @@ def test_a_health_check_never_downloads_the_body():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         started = time.monotonic()
-        status, elapsed_ms = app_module._run_single_check(
+        status, elapsed_ms = health_module._run_single_check(
             f"http://127.0.0.1:{server.server_port}/", slow_threshold_ms=None)
         took = time.monotonic() - started
     finally:
@@ -208,8 +212,8 @@ def test_a_health_check_response_is_always_closed(monkeypatch):
         responses.append(_FakeResponse(503))
         return responses[-1]
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
-    assert app_module._run_single_check("http://x", None)[0] == "degraded"
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
+    assert health_module._run_single_check("http://x", None)[0] == "degraded"
     assert responses[0].closed is True
 
 
@@ -218,15 +222,15 @@ def test_check_service_status_no_retry_marks_down_on_first_failure(monkeypatch):
 
     def fake_get(url, timeout, **kwargs):
         calls.append(url)
-        raise app_module.requests.RequestException("connection refused")
+        raise health_module.requests.RequestException("connection refused")
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
     service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 0,
                "retry_interval_seconds": 5}
-    status, elapsed_ms = app_module._check_service_status(service)
+    status, elapsed_ms = health_module._check_service_status(service)
 
     assert status == "down"
     assert elapsed_ms is None
@@ -238,7 +242,7 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
     """A blip that resolves itself on the second attempt should never reach 'down'
     at all - this is the whole point of the retry feature."""
     responses = [
-        app_module.requests.RequestException("timeout"),
+        health_module.requests.RequestException("timeout"),
         _FakeResponse(200),
     ]
 
@@ -248,13 +252,13 @@ def test_check_service_status_retries_and_recovers(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
     service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 3,
                "retry_interval_seconds": 10}
-    status, elapsed_ms = app_module._check_service_status(service)
+    status, elapsed_ms = health_module._check_service_status(service)
 
     assert status == "operational"
     assert sleeps == [10]  # stopped retrying the moment it recovered - not all 3 attempts
@@ -265,7 +269,7 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
     _retry_in_progress - this is what index() reads to show a "retrying" badge -
     and must be cleared again once the check finishes either way."""
     responses = [
-        app_module.requests.RequestException("timeout"),
+        health_module.requests.RequestException("timeout"),
         _FakeResponse(200),
     ]
 
@@ -275,31 +279,31 @@ def test_check_service_status_tracks_retry_in_progress(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(health_module.requests, "get", fake_get)
     seen_during_sleep = []
 
     def fake_sleep(seconds):
-        seen_during_sleep.append(42 in app_module._retry_in_progress)
+        seen_during_sleep.append(42 in health_module._retry_in_progress)
 
     monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
 
     service = {"id": 42, "check_url": "http://x", "slow_threshold_ms": None,
                "retry_count": 3, "retry_interval_seconds": 10}
-    app_module._check_service_status(service)
+    health_module._check_service_status(service)
 
     assert seen_during_sleep == [True]
-    assert 42 not in app_module._retry_in_progress  # cleared once the check finished
+    assert 42 not in health_module._retry_in_progress  # cleared once the check finished
 
 
 def test_check_service_status_exhausts_all_retries_then_down(monkeypatch):
-    monkeypatch.setattr(app_module.requests, "get",
-                         lambda url, timeout, **kw: (_ for _ in ()).throw(app_module.requests.RequestException("down")))
+    monkeypatch.setattr(health_module.requests, "get",
+                         lambda url, timeout, **kw: (_ for _ in ()).throw(health_module.requests.RequestException("down")))
     sleeps = []
     monkeypatch.setattr(app_module.time, "sleep", lambda s: sleeps.append(s))
 
     service = {"check_url": "http://x", "slow_threshold_ms": None, "retry_count": 2,
                "retry_interval_seconds": 3}
-    status, elapsed_ms = app_module._check_service_status(service)
+    status, elapsed_ms = health_module._check_service_status(service)
 
     assert status == "down"
     assert sleeps == [3, 3]  # both retries used, still down
@@ -934,19 +938,19 @@ def test_before_request_hooks_keep_their_order():
 def test_auto_incident_lifecycle_opens_and_resolves(isolated_db):
     service = db.list_services()[0]
 
-    app_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
+    health_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
     incident = db.get_open_auto_incident_for_service(service["id"])
     assert incident is not None
     assert incident["status"] == "investigating"
 
-    app_module._handle_incident_lifecycle(service, previous_status="down", new_status="operational")
+    health_module._handle_incident_lifecycle(service, previous_status="down", new_status="operational")
     assert db.get_incident(incident["id"])["status"] == "resolved"
 
 
 def test_auto_incident_no_duplicate_while_still_down(isolated_db):
     service = db.list_services()[0]
-    app_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
-    app_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
+    health_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
+    health_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
     assert len(db.list_incidents()) == 1
 
 
@@ -964,7 +968,7 @@ def test_auto_incident_opens_even_when_previous_status_was_already_down(isolated
     service = db.list_services()[0]
     assert db.get_open_auto_incident_for_service(service["id"]) is None
 
-    app_module._handle_incident_lifecycle(service, previous_status="down", new_status="down")
+    health_module._handle_incident_lifecycle(service, previous_status="down", new_status="down")
 
     incident = db.get_open_auto_incident_for_service(service["id"])
     assert incident is not None, "an incident must open even without a fresh transition into 'down'"
@@ -978,7 +982,7 @@ def test_integration_auto_incident_opens_even_when_previous_reachable_was_alread
     integration = {"id": 1, "name": "Jellyfin", "service_id": service_id}
     assert db.get_open_auto_incident_for_service(service_id) is None
 
-    app_module._handle_integration_incident_lifecycle(integration, previous_reachable=False, new_reachable=False)
+    health_module._handle_integration_incident_lifecycle(integration, previous_reachable=False, new_reachable=False)
 
     incident = db.get_open_auto_incident_for_service(service_id)
     assert incident is not None
@@ -1049,21 +1053,21 @@ def test_grace_period_gate_suppresses_incident_lifecycle(isolated_db, monkeypatc
     its incident-opening gate is `if s["auto_incident"] and not
     _within_grace_period(s): _handle_incident_lifecycle(...)` - this exercises that
     exact combination against a real service row."""
-    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic())
+    monkeypatch.setattr(health_module, "_APP_START", app_module.time.monotonic())
     service = db.list_services()[0]
     db.update_service(service["id"], {**service, "startup_grace_seconds": 60, "auto_incident": 1})
     service = db.get_service(service["id"])
 
     calls = []
-    monkeypatch.setattr(app_module, "_handle_incident_lifecycle", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(health_module, "_handle_incident_lifecycle", lambda *a, **k: calls.append(a))
 
-    if service["auto_incident"] and not app_module._within_grace_period(service):
-        app_module._handle_incident_lifecycle(service, "operational", "down")
+    if service["auto_incident"] and not health_module._within_grace_period(service):
+        health_module._handle_incident_lifecycle(service, "operational", "down")
     assert calls == []  # still within the grace window - suppressed
 
-    monkeypatch.setattr(app_module, "_APP_START", app_module.time.monotonic() - 120)
-    if service["auto_incident"] and not app_module._within_grace_period(service):
-        app_module._handle_incident_lifecycle(service, "operational", "down")
+    monkeypatch.setattr(health_module, "_APP_START", app_module.time.monotonic() - 120)
+    if service["auto_incident"] and not health_module._within_grace_period(service):
+        health_module._handle_incident_lifecycle(service, "operational", "down")
     assert len(calls) == 1  # grace window elapsed - fires normally
 
 
@@ -1224,7 +1228,7 @@ def test_public_page_never_fetches_integrations_live(client, monkeypatch):
     integrations.fetch_integration_status() directly on every request, so a slow or
     unreachable integration (confirmed: ~10s for the *Arr v3->v1 fallback alone) could
     block every single page load, including every auto-refresh cycle. Status must only
-    ever come from the background-refreshed cache (app._integration_status_cache)."""
+    ever come from the background-refreshed cache (health._integration_status_cache)."""
     import integrations as integrations_module
 
     def _boom(*args, **kwargs):
@@ -1250,7 +1254,7 @@ def test_integration_status_cache_populates_public_display(isolated_db):
     service = [s for s in services if s["id"] == sid][0]
     assert service["integration_status"] is None  # nothing cached yet
 
-    app_module._integration_status_cache[iid] = {
+    health_module._integration_status_cache[iid] = {
         "status": {"reachable": True, "version": "3.0", "issues": [], "error": None},
         "checked_at": "2026-01-01T00:00:00",
     }
@@ -1267,11 +1271,11 @@ def test_integration_auto_incident_opens_and_resolves(isolated_db):
         "api_key": "x", "enabled": 1, "service_id": sid, "auto_incident": 1,
     }))
 
-    app_module._handle_integration_incident_lifecycle(integ, previous_reachable=True, new_reachable=False)
+    health_module._handle_integration_incident_lifecycle(integ, previous_reachable=True, new_reachable=False)
     incident = db.get_open_auto_incident_for_service(sid)
     assert incident is not None
 
-    app_module._handle_integration_incident_lifecycle(integ, previous_reachable=False, new_reachable=True)
+    health_module._handle_integration_incident_lifecycle(integ, previous_reachable=False, new_reachable=True)
     assert db.get_incident(incident["id"])["status"] == "resolved"
 
 
@@ -1297,7 +1301,7 @@ def test_integration_auto_incident_no_transition_on_first_check(isolated_db):
     with _pytest.MonkeyPatch.context() as mp:
         mp.setattr(integrations_module, "fetch_integration_status",
                    lambda integ: {"reachable": False, "version": None, "issues": [], "error": "down"})
-        app_module._refresh_integration_cache()
+        health_module._refresh_integration_cache()
     assert db.get_open_auto_incident_for_service(sid) is None
 
 
@@ -1343,13 +1347,13 @@ def test_integration_checks_run_in_parallel_in_real_time(isolated_db):
             db.create_integration({"name": f"Arr {n}", "kind": "arr", "base_url": url,
                                     "api_key": "k", "enabled": 1})
         started = time.monotonic()
-        app_module._refresh_integration_cache()
+        health_module._refresh_integration_cache()
         elapsed = time.monotonic() - started
     finally:
         server.shutdown()
     assert elapsed < 2.5, f"took {elapsed:.1f}s - the checks ran one after another"
-    assert len(app_module._integration_status_cache) == 3
-    assert all(e["status"]["reachable"] for e in app_module._integration_status_cache.values())
+    assert len(health_module._integration_status_cache) == 3
+    assert all(e["status"]["reachable"] for e in health_module._integration_status_cache.values())
 
 
 def test_integration_lifecycle_stays_level_triggered_with_real_fetches(isolated_db):
@@ -1362,13 +1366,13 @@ def test_integration_lifecycle_stays_level_triggered_with_real_fetches(isolated_
     iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": _closed_port_url(),
                                   "api_key": "k", "enabled": 1, "service_id": sid,
                                   "auto_incident": 1})
-    app_module._refresh_integration_cache()
+    health_module._refresh_integration_cache()
     assert db.get_open_auto_incident_for_service(sid) is None
 
-    app_module._refresh_integration_cache()
+    health_module._refresh_integration_cache()
     incident = db.get_open_auto_incident_for_service(sid)
     assert incident is not None
-    app_module._refresh_integration_cache()
+    health_module._refresh_integration_cache()
     assert db.get_open_auto_incident_for_service(sid)["id"] == incident["id"]  # not a second one
 
     server, url = _slow_arr_server(0)
@@ -1378,51 +1382,51 @@ def test_integration_lifecycle_stays_level_triggered_with_real_fetches(isolated_
         conn.execute("UPDATE integrations SET base_url=? WHERE id=?", (url, integ["id"]))
         conn.commit()
         conn.close()
-        app_module._refresh_integration_cache()
+        health_module._refresh_integration_cache()
     finally:
         server.shutdown()
     assert db.get_incident(incident["id"])["status"] == "resolved"
 
 
 def test_merge_api_health_off_passes_through_unchanged():
-    assert app_module._merge_api_health("operational", "off", False) == "operational"
-    assert app_module._merge_api_health("operational", "degrade", None) == "operational"
+    assert health_module._merge_api_health("operational", "off", False) == "operational"
+    assert health_module._merge_api_health("operational", "degrade", None) == "operational"
 
 
 def test_merge_api_health_ignored_while_integration_reachable():
-    assert app_module._merge_api_health("operational", "down", True) == "operational"
+    assert health_module._merge_api_health("operational", "down", True) == "operational"
 
 
 def test_merge_api_health_degrade_mode_raises_operational_and_slow():
-    assert app_module._merge_api_health("operational", "degrade", False) == "degraded"
-    assert app_module._merge_api_health("slow", "degrade", False) == "degraded"
+    assert health_module._merge_api_health("operational", "degrade", False) == "degraded"
+    assert health_module._merge_api_health("slow", "degrade", False) == "degraded"
 
 
 def test_merge_api_health_degrade_mode_never_overrides_down():
-    assert app_module._merge_api_health("down", "degrade", False) == "down"
+    assert health_module._merge_api_health("down", "degrade", False) == "down"
 
 
 def test_merge_api_health_down_mode_always_wins():
-    assert app_module._merge_api_health("operational", "down", False) == "down"
-    assert app_module._merge_api_health("degraded", "down", False) == "down"
+    assert health_module._merge_api_health("operational", "down", False) == "down"
+    assert health_module._merge_api_health("degraded", "down", False) == "down"
 
 
 def test_merge_dependency_health_raises_operational_and_slow_on_down_dependency():
-    assert app_module._merge_dependency_health("operational", ["down"]) == "degraded"
-    assert app_module._merge_dependency_health("slow", ["down"]) == "degraded"
+    assert health_module._merge_dependency_health("operational", ["down"]) == "degraded"
+    assert health_module._merge_dependency_health("slow", ["down"]) == "degraded"
 
 
 def test_merge_dependency_health_ignores_merely_degraded_dependency():
-    assert app_module._merge_dependency_health("operational", ["degraded"]) == "operational"
+    assert health_module._merge_dependency_health("operational", ["degraded"]) == "operational"
 
 
 def test_merge_dependency_health_never_overrides_down_or_maintenance():
-    assert app_module._merge_dependency_health("down", ["down"]) == "down"
-    assert app_module._merge_dependency_health("maintenance", ["down"]) == "maintenance"
+    assert health_module._merge_dependency_health("down", ["down"]) == "down"
+    assert health_module._merge_dependency_health("maintenance", ["down"]) == "maintenance"
 
 
 def test_merge_dependency_health_passes_through_with_no_dependencies():
-    assert app_module._merge_dependency_health("operational", []) == "operational"
+    assert health_module._merge_dependency_health("operational", []) == "operational"
 
 
 def test_admin_service_edit_saves_dependencies(client):
@@ -1457,25 +1461,25 @@ def test_a_junk_dependency_id_is_skipped_not_a_500(client):
 
 def test_linked_integration_reachable_none_when_no_integration(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
-    assert app_module._linked_integration_reachable(sid) is None
+    assert health_module._linked_integration_reachable(sid) is None
 
 
 def test_linked_integration_reachable_none_when_not_yet_checked(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
                             "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
-    assert app_module._linked_integration_reachable(sid) is None
+    assert health_module._linked_integration_reachable(sid) is None
 
 
 def test_linked_integration_reachable_reads_cached_status(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
                                   "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 1})
-    app_module._integration_status_cache[iid] = {
+    health_module._integration_status_cache[iid] = {
         "status": {"reachable": False, "version": None, "issues": [], "error": "down"},
         "checked_at": "2026-01-01T00:00:00",
     }
-    assert app_module._linked_integration_reachable(sid) is False
+    assert health_module._linked_integration_reachable(sid) is False
 
 
 def test_linked_integration_reachable_ignores_hidden_integration(isolated_db):
@@ -1485,11 +1489,11 @@ def test_linked_integration_reachable_ignores_hidden_integration(isolated_db):
     sid = db.create_service({"name": "Sonarr", "url": "http://sonarr.example"})
     iid = db.create_integration({"name": "Sonarr", "kind": "arr", "base_url": "http://sonarr.example",
                                   "api_key": "x", "enabled": 1, "service_id": sid, "show_on_public": 0})
-    app_module._integration_status_cache[iid] = {
+    health_module._integration_status_cache[iid] = {
         "status": {"reachable": False, "version": None, "issues": [], "error": "down"},
         "checked_at": "2026-01-01T00:00:00",
     }
-    assert app_module._linked_integration_reachable(sid) is None
+    assert health_module._linked_integration_reachable(sid) is None
 
 
 def test_admin_service_form_saves_api_health_mode(client):
@@ -1588,7 +1592,7 @@ def test_report_problem_page_shows_site_name(client):
 
 def test_report_problem_post_creates_report_and_notifies(client, monkeypatch):
     notified = []
-    monkeypatch.setattr(app_module.notifications, "notify",
+    monkeypatch.setattr(notifications, "notify",
                         lambda title, msg, **kw: notified.append((title, msg, kw)))
     sid = db.list_services()[0]["id"]
 
@@ -1745,9 +1749,9 @@ def test_api_status_publishes_only_the_allow_listed_keys(client):
     sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
                               "run_target": "host", "show_run_target_public": 1})
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
-    assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
+    assert set(published) == routes_api._API_SERVICE_KEYS | {"run_target"}
     row = db.get_service(sid)
-    assert set(row) - {"check_url", "check_type", "run_target"} <= app_module._API_SERVICE_KEYS
+    assert set(row) - {"check_url", "check_type", "run_target"} <= routes_api._API_SERVICE_KEYS
 
 
 def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):
@@ -2012,11 +2016,11 @@ def test_admin_maintenance_window_with_past_start_applies_immediately(client):
 
 def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     service = db.list_services()[0]
 
-    app_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
-    app_module._handle_incident_lifecycle(service, previous_status="down", new_status="operational")
+    health_module._handle_incident_lifecycle(service, previous_status="operational", new_status="down")
+    health_module._handle_incident_lifecycle(service, previous_status="down", new_status="operational")
 
     assert calls[0][0] == "Incident opened"
     assert calls[1][0] == "Incident resolved"
@@ -2024,7 +2028,7 @@ def test_auto_incident_lifecycle_fires_notifications(isolated_db, monkeypatch):
 
 def test_incident_update_fires_notification(client, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     db.create_incident({"title": "Test outage", "status": "investigating"})
     iid = db.list_incidents()[0]["id"]
@@ -2038,12 +2042,12 @@ def test_incident_update_fires_notification(client, monkeypatch):
 
 def test_maintenance_events_fire_notifications(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     sid = db.list_services()[0]["id"]
     db.create_maintenance_window({
         "service_id": sid, "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
     })
-    app_module._process_maintenance_and_notify()
+    health_module._process_maintenance_and_notify()
 
     # Both start and end are due at once here (window fully in the past) - both fire.
     titles = [c[0] for c in calls]
@@ -2059,7 +2063,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
     emails and five DMs in a row - reported 2026-09-05."""
     admin_calls = []
     subscriber_calls = []
-    monkeypatch.setattr(app_module, "_notify_async",
+    monkeypatch.setattr(notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
@@ -2071,7 +2075,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
         "title": "Upgrade", "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
     }, service_ids=ids)
 
-    app_module._process_maintenance_and_notify()
+    health_module._process_maintenance_and_notify()
 
     # Both transitions are due at once (the window is entirely in the past), so this
     # is exactly two notifications - one per transition - not two per service.
@@ -2091,7 +2095,7 @@ def test_multi_service_maintenance_sends_one_notification_not_one_per_service(
 def test_single_service_maintenance_wording_is_unchanged(isolated_db, monkeypatch):
     """The grouping above must not turn a one-service window's message into a plural."""
     subscriber_calls = []
-    monkeypatch.setattr(app_module, "_notify_async", lambda title, msg: None)
+    monkeypatch.setattr(notifications, "notify_async", lambda title, msg: None)
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda event, subject, body, **kw:
                             subscriber_calls.append((event, subject, body)))
@@ -2101,7 +2105,7 @@ def test_single_service_maintenance_wording_is_unchanged(isolated_db, monkeypatc
         "starts_at": "2000-01-01T00:00", "ends_at": "2000-01-02T00:00",
     })
 
-    app_module._process_maintenance_and_notify()
+    health_module._process_maintenance_and_notify()
 
     name = db.get_service(sid)["name"]
     assert subscriber_calls[0][1] == f"Maintenance started: {name}"
@@ -2113,7 +2117,7 @@ def test_two_separate_windows_still_notify_separately(isolated_db, monkeypatch):
     """Grouping is per window, not per run - two unrelated windows starting in the
     same cycle are two different things and must stay two notifications."""
     admin_calls = []
-    monkeypatch.setattr(app_module, "_notify_async",
+    monkeypatch.setattr(notifications, "notify_async",
                         lambda title, msg: admin_calls.append((title, msg)))
     monkeypatch.setattr(app_module.user_notify, "notify_service_subscribers",
                         lambda *a, **kw: None)
@@ -2125,47 +2129,47 @@ def test_two_separate_windows_still_notify_separately(isolated_db, monkeypatch):
             "starts_at": "2000-01-01T00:00", "ends_at": "2099-01-01T00:00",
         })
 
-    app_module._process_maintenance_and_notify()
+    health_module._process_maintenance_and_notify()
 
     assert len(admin_calls) == 2
     assert {c[1] for c in admin_calls} == {"Alpha: Upgrade A", "Beta: Upgrade B"}
 
 
 def test_service_list_phrase_reads_as_prose():
-    assert app_module._service_list_phrase([]) == ""
-    assert app_module._service_list_phrase(["Alpha"]) == "Alpha"
-    assert app_module._service_list_phrase(["Alpha", "Beta"]) == "Alpha and Beta"
-    assert app_module._service_list_phrase(["A", "B", "C"]) == "A, B and C"
+    assert health_module._service_list_phrase([]) == ""
+    assert health_module._service_list_phrase(["Alpha"]) == "Alpha"
+    assert health_module._service_list_phrase(["Alpha", "Beta"]) == "Alpha and Beta"
+    assert health_module._service_list_phrase(["A", "B", "C"]) == "A, B and C"
 
 
 def test_lowdisk_threshold_blank_means_disabled(isolated_db):
-    assert app_module._lowdisk_threshold() is None
+    assert health_module._lowdisk_threshold() is None
     db.set_setting("lowdisk_percent_threshold", "90")
-    assert app_module._lowdisk_threshold() == 90
+    assert health_module._lowdisk_threshold() == 90
 
 
 def test_check_low_disk_space_fires_once_on_cross_and_once_on_recovery(isolated_db, monkeypatch):
     db.set_setting("lowdisk_percent_threshold", "90")
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
 
     low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
-    app_module._check_low_disk_space(low)
+    health_module._check_low_disk_space(low)
     assert [c[0] for c in calls] == ["Low disk space"]
 
     # Still low on the next cycle - no repeat notification.
-    app_module._check_low_disk_space(low)
+    health_module._check_low_disk_space(low)
     assert [c[0] for c in calls] == ["Low disk space"]
 
     recovered = {"disks": [{"path": "/", "display_name": "/", "percent": 50, "free_gb": 40}]}
-    app_module._check_low_disk_space(recovered)
+    health_module._check_low_disk_space(recovered)
     assert [c[0] for c in calls] == ["Low disk space", "Disk space back to normal"]
 
 
 def test_check_low_disk_space_noop_when_threshold_unset(isolated_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
-    app_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    health_module._check_low_disk_space({"disks": [{"path": "/", "display_name": "/", "percent": 99, "free_gb": 1}]})
     assert calls == []
 
 
@@ -2178,10 +2182,10 @@ def test_low_disk_alert_state_survives_restart_no_duplicate_notification(isolate
     db.set_setting("lowdisk_percent_threshold", "90")
     db.set_low_disk_alert_state("/", True)
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
 
     still_low = {"disks": [{"path": "/", "display_name": "/", "percent": 95, "free_gb": 2}]}
-    app_module._check_low_disk_space(still_low)
+    health_module._check_low_disk_space(still_low)
 
     assert calls == []
 
@@ -3281,8 +3285,8 @@ def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
     # Every reader answers exactly as it would for an unset value.
     assert app_module._public_history_days() is None
     assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
-    assert app_module._lowdisk_threshold() is None
-    assert app_module._tls_alert_days() == app_module.DEFAULT_TLS_ALERT_DAYS
+    assert health_module._lowdisk_threshold() is None
+    assert health_module._tls_alert_days() == health_module.DEFAULT_TLS_ALERT_DAYS
     assert app_module._kiosk_rotation_seconds() == app_module.KIOSK_DEFAULT_ROTATION_SECONDS
     assert app_module._session_timeout_seconds() == app_module.DEFAULT_SESSION_TIMEOUT_HOURS * 3600
     assert app_module.integrations.high_load_thresholds()["cpu_percent"] == 90
@@ -3335,7 +3339,7 @@ def test_public_history_days_blank_means_unlimited(client):
 def test_notifications_test_button_sends_via_shared_dispatch(client, monkeypatch):
     monkeypatch.setattr(app_module.config, "DISCORD_WEBHOOK_URL", "https://discord.example/webhook")
     calls = []
-    monkeypatch.setattr(app_module.notifications, "notify", lambda title, msg: calls.append((title, msg)))
+    monkeypatch.setattr(notifications, "notify", lambda title, msg: calls.append((title, msg)))
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
     resp = client.post("/admin/notifications/test", follow_redirects=True)
     assert resp.status_code == 200
@@ -3726,7 +3730,7 @@ def test_the_fragment_etag_changes_with_the_content(client, isolated_db):
     before = client.get("/?fragment=1").headers["ETag"]
     db.set_setting("site_name", "Other")  # outside the live region: the tag must not move
     assert client.get("/?fragment=1").headers["ETag"] == before
-    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2000-01-01T00:00:00+00:00")
+    db.set_setting(health_module.LAST_HEALTH_CYCLE_SETTING, "2000-01-01T00:00:00+00:00")
     assert client.get("/?fragment=1").headers["ETag"] != before  # the stale banner appears
 
 
@@ -3735,7 +3739,7 @@ def test_stale_banner_when_the_last_cycle_is_over_three_intervals_old(client, is
     now = datetime.now(timezone.utc)
 
     def banner(age_seconds):
-        db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING,
+        db.set_setting(health_module.LAST_HEALTH_CYCLE_SETTING,
                        (now - timedelta(seconds=age_seconds)).isoformat())
         return [b"stale-banner" in client.get(p).data for p in ("/", "/?fragment=1")]
 
@@ -3960,7 +3964,7 @@ def test_clear_caches_empties_every_in_memory_cache(client):
 
     app_module._uptime_cache["value"] = {1: 99.0}
     app_module._uptime_cache["fetched_at"] = time.monotonic()
-    app_module._integration_status_cache[1] = {
+    health_module._integration_status_cache[1] = {
         "status": {"reachable": True, "version": "1", "issues": [], "error": None},
         "checked_at": db.now_iso()}
     integrations_module._jellyfin_activity_cache["running_tasks"] = ["Scan"]
@@ -3973,7 +3977,7 @@ def test_clear_caches_empties_every_in_memory_cache(client):
     assert resp.status_code == 302
 
     assert app_module._uptime_cache["value"] == {}
-    assert app_module._integration_status_cache == {}
+    assert health_module._integration_status_cache == {}
     assert integrations_module._jellyfin_activity_cache["running_tasks"] == []
     assert monitoring_module._volume_label_cache == {}
     assert monitoring_module._CPU_CACHE["updated_at"] is None
@@ -4018,7 +4022,7 @@ def test_system_page_lists_caches_and_integration_reachability(client):
     iid = db.create_integration({"name": "Jellyfin", "kind": "jellyfin", "base_url": "http://x",
                                   "api_key": "k", "enabled": 1, "service_id": sid,
                                   "show_on_public": 1, "auto_incident": 0})
-    app_module._integration_status_cache[iid] = {
+    health_module._integration_status_cache[iid] = {
         "status": {"reachable": False, "version": None, "issues": [], "error": "boom"},
         "checked_at": db.now_iso()}
 
@@ -5200,7 +5204,7 @@ def test_report_problem_post_without_opening_form_is_refused(client):
 
 
 def test_report_problem_one_form_view_authorises_one_post(client, monkeypatch):
-    monkeypatch.setattr(app_module.notifications, "notify", lambda *a, **kw: None)
+    monkeypatch.setattr(notifications, "notify", lambda *a, **kw: None)
     app_module._report_state["window_start"] = 0.0
     app_module._report_state["count"] = 0
     with client.session_transaction() as sess:
@@ -5222,11 +5226,11 @@ def test_finish_health_cycle_records_time_and_pings_heartbeat(isolated_db, monke
             pass
 
     monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/abc")
-    monkeypatch.setattr(app_module.requests, "get",
+    monkeypatch.setattr(health_module.requests, "get",
                         lambda url, timeout: calls.append((url, timeout)) or _Resp())
-    app_module._finish_health_cycle()
+    health_module._finish_health_cycle()
     assert calls == [("https://ping.example/abc", 5)]
-    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+    assert db.get_setting(health_module.LAST_HEALTH_CYCLE_SETTING)
 
 
 def test_finish_health_cycle_without_url_makes_no_request(isolated_db, monkeypatch):
@@ -5235,18 +5239,18 @@ def test_finish_health_cycle_without_url_makes_no_request(isolated_db, monkeypat
     def boom(*a, **k):
         raise AssertionError("no request expected")
 
-    monkeypatch.setattr(app_module.requests, "get", boom)
-    app_module._finish_health_cycle()
-    assert db.get_setting(app_module.LAST_HEALTH_CYCLE_SETTING)
+    monkeypatch.setattr(health_module.requests, "get", boom)
+    health_module._finish_health_cycle()
+    assert db.get_setting(health_module.LAST_HEALTH_CYCLE_SETTING)
 
 
 def test_finish_health_cycle_never_raises_and_does_not_log_the_url(monkeypatch, caplog):
     def boom(url, timeout):
-        raise app_module.requests.ConnectionError("https://ping.example/SECRET refused")
+        raise health_module.requests.ConnectionError("https://ping.example/SECRET refused")
 
     monkeypatch.setattr(app_module.config, "HEARTBEAT_URL", "https://ping.example/SECRET")
-    monkeypatch.setattr(app_module.requests, "get", boom)
-    app_module._finish_health_cycle()
+    monkeypatch.setattr(health_module.requests, "get", boom)
+    health_module._finish_health_cycle()
     assert "heartbeat ping failed" in caplog.text
     assert "SECRET" not in caplog.text
 
@@ -5254,7 +5258,7 @@ def test_finish_health_cycle_never_raises_and_does_not_log_the_url(monkeypatch, 
 def test_admin_tasks_shows_last_health_cycle(client, demo_task):
     _login(client)
     assert "not yet" in client.get("/admin/tasks").data.decode()
-    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2026-11-11T10:20:30+00:00")
+    db.set_setting(health_module.LAST_HEALTH_CYCLE_SETTING, "2026-11-11T10:20:30+00:00")
     assert "2026-11-11 10:20" in client.get("/admin/tasks").data.decode()
 
 
@@ -5517,7 +5521,7 @@ def test_admin_overview_surfaces_what_needs_attention(client):
     conn.close()
     iid = db.create_integration({"name": "Radarr", "kind": "arr", "base_url": "http://r.example",
                                  "api_key": "x", "enabled": 1})
-    app_module._integration_status_cache[iid] = {
+    health_module._integration_status_cache[iid] = {
         "status": {"reachable": False, "version": None, "issues": []}, "checked_at": db.now_iso()}
     _login(client)
     body = client.get("/admin").get_data(as_text=True)
@@ -5533,7 +5537,7 @@ def test_admin_overview_surfaces_what_needs_attention(client):
 
 def test_admin_overview_flags_a_silent_health_check_loop(client):
     old = (app_module.datetime.now(app_module.timezone.utc) - app_module.timedelta(hours=2)).isoformat()
-    db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, old)
+    db.set_setting(health_module.LAST_HEALTH_CYCLE_SETTING, old)
     _login(client)
     assert "finished 120 minutes ago" in client.get("/admin").get_data(as_text=True)
 
@@ -5595,7 +5599,7 @@ def test_the_csrf_token_still_reaches_every_page_with_a_form(isolated_db, user_a
         resp = c.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123",
                                             "csrf_token": token})
         assert resp.status_code == 302
-        for _template, endpoint, _label in app_module.admin_search.PAGES:
+        for _template, endpoint, _label in admin_search.PAGES:
             with app_module.app.test_request_context():
                 path = app_module.url_for(endpoint)
             page = c.get(path)

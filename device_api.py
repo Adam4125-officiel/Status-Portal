@@ -1,6 +1,6 @@
 """The compact JSON summary served to small display devices (Status-ESP).
 
-Pure shaping, no Flask and no database: ``app.api_device_summary()`` gathers the rows
+Pure shaping, no Flask and no database: ``routes.api.api_device_summary()`` gathers the rows
 from the existing caches/queries and hands them in, and this module decides what a
 screen the size of a postage stamp gets to see. That split is what keeps it testable
 with plain dicts, and what lets the admin page render a *real* example (``example()``)

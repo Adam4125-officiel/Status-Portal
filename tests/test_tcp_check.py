@@ -3,8 +3,8 @@ import socket
 
 import pytest
 
-import app as app_module
 import db
+import health as health_module
 
 
 @pytest.fixture
@@ -32,30 +32,30 @@ def _login(client):
 
 
 def test_tcp_check_open_port_is_operational(listening_port):
-    status, elapsed_ms = app_module._run_single_check(f"127.0.0.1:{listening_port}", None, "tcp")
+    status, elapsed_ms = health_module._run_single_check(f"127.0.0.1:{listening_port}", None, "tcp")
     assert status == "operational"
     assert elapsed_ms is not None
 
 
 def test_tcp_check_closed_port_is_down(closed_port):
-    assert app_module._run_single_check(f"127.0.0.1:{closed_port}", None, "tcp") == ("down", None)
+    assert health_module._run_single_check(f"127.0.0.1:{closed_port}", None, "tcp") == ("down", None)
 
 
 def test_tcp_check_slow_threshold(listening_port, monkeypatch):
     ticks = iter([0.0, 0.5])
-    monkeypatch.setattr(app_module.time, "perf_counter", lambda: next(ticks))
-    status, elapsed_ms = app_module._run_single_check(f"127.0.0.1:{listening_port}", 100, "tcp")
+    monkeypatch.setattr(health_module.time, "perf_counter", lambda: next(ticks))
+    status, elapsed_ms = health_module._run_single_check(f"127.0.0.1:{listening_port}", 100, "tcp")
     assert (status, elapsed_ms) == ("slow", 500)
 
 
 @pytest.mark.parametrize("target", ["", "localhost", "host:", "host:abc", "host:0", "host:70000", ":80"])
 def test_tcp_check_target_that_is_not_host_port_is_down(target):
-    assert app_module._run_single_check(target, None, "tcp") == ("down", None)
+    assert health_module._run_single_check(target, None, "tcp") == ("down", None)
 
 
 def test_tcp_target_parsing_tolerates_scheme_path_and_ipv6():
-    assert app_module._split_host_port("tcp://nas.lan:445/") == ("nas.lan", 445)
-    assert app_module._split_host_port("[::1]:80") == ("::1", 80)
+    assert health_module._split_host_port("tcp://nas.lan:445/") == ("nas.lan", 445)
+    assert health_module._split_host_port("[::1]:80") == ("::1", 80)
 
 
 def test_tcp_check_timeout_is_five_seconds(monkeypatch):
@@ -65,8 +65,8 @@ def test_tcp_check_timeout_is_five_seconds(monkeypatch):
         seen["timeout"] = timeout
         raise socket.timeout()
 
-    monkeypatch.setattr(app_module.socket, "create_connection", fake_connect)
-    assert app_module._run_single_check("nas:445", None, "tcp")[0] == "down"
+    monkeypatch.setattr(health_module.socket, "create_connection", fake_connect)
+    assert health_module._run_single_check("nas:445", None, "tcp")[0] == "down"
     assert seen["timeout"] == 5
 
 
@@ -79,8 +79,8 @@ def test_http_stays_the_default_check(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(app_module.requests, "get", lambda url, **kw: calls.append(url) or Resp())
-    assert app_module._run_single_check("http://x", None)[0] == "operational"
+    monkeypatch.setattr(health_module.requests, "get", lambda url, **kw: calls.append(url) or Resp())
+    assert health_module._run_single_check("http://x", None)[0] == "operational"
     assert calls == ["http://x"]
 
 
@@ -92,19 +92,19 @@ def test_tcp_service_retries_like_http(monkeypatch):
         seen.append((target, check_type))
         return next(results)
 
-    monkeypatch.setattr(app_module, "_run_single_check", fake_check)
-    monkeypatch.setattr(app_module.time, "sleep", lambda s: None)
+    monkeypatch.setattr(health_module, "_run_single_check", fake_check)
+    monkeypatch.setattr(health_module.time, "sleep", lambda s: None)
     service = {"check_url": "nas:445", "check_type": "tcp", "slow_threshold_ms": None,
                "retry_count": 1, "retry_interval_seconds": 1}
-    assert app_module._check_service_status(service) == ("operational", 3)
+    assert health_module._check_service_status(service) == ("operational", 3)
     assert seen == [("nas:445", "tcp")] * 2
 
 
 def test_tcp_service_without_check_type_key_uses_http(monkeypatch):
     seen = []
-    monkeypatch.setattr(app_module, "_run_single_check",
+    monkeypatch.setattr(health_module, "_run_single_check",
                         lambda url, thr, check_type="http": seen.append(check_type) or ("operational", 1))
-    app_module._check_service_status({"check_url": "http://x", "slow_threshold_ms": None})
+    health_module._check_service_status({"check_url": "http://x", "slow_threshold_ms": None})
     assert seen == ["http"]
 
 
@@ -113,7 +113,7 @@ def test_tcp_down_opens_an_incident_and_is_recorded(client, closed_port):
                              "check_url": f"127.0.0.1:{closed_port}", "check_type": "tcp"})
     service = db.get_service(sid)
     assert service["check_type"] == "tcp"
-    app_module._check_and_record_service(service, {})
+    health_module._check_and_record_service(service, {})
     after = db.get_service(sid)
     assert after["status"] == "down"
 
