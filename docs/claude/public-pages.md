@@ -106,6 +106,10 @@
 - **A switched-off page 404s rather than rendering empty.** An empty page confirms the
   feature exists and is merely hidden; 404 is the same answer a visitor would get if it
   didn't exist.
+- **`public_base.html` is the only public shell** (search, report, account, sign-in and
+  the error pages extend it too). Its nav data comes from `_inject_public_chrome()`, not
+  from routes. Pages with forms opt out of the auto-reload with
+  `{% set auto_refresh = false %}`.
 - **Auto-refresh lives in `public_base.html`, not `index.html`.** The public page used
   to be one page that reloaded itself; after the split, putting the refresh script only
   on the main page would silently freeze the resources and VM pages.

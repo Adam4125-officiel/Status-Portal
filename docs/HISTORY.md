@@ -2414,3 +2414,10 @@ tasks, a stale health-check cycle, unreachable integrations and failed notificat
 Nine admin forms used an inline `onsubmit="return confirm(...)"`, each needing an allow-list entry
 in the inline-handler test. They now use the `data-confirm` pattern from the account page, shared in
 `static/js/confirm.js`. Deleting a service warns that its maintenance windows go with it.
+
+## One public shell (2026-11)
+
+`/search`, `/report`, `/account`, sign-in and the error pages used to extend `base.html`
+and each drew its own topbar, so clicking the Search tab landed on a page with no tabs
+and no footer. They now extend `public_base.html`, and the nav data comes from a
+context processor instead of every route.
