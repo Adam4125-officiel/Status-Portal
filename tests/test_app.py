@@ -1727,13 +1727,13 @@ def test_api_status_never_leaks_check_urls_or_unpublished_run_targets(client):
 
 
 def test_api_status_keeps_every_other_service_field(client):
-    """External devices read this endpoint, so the trim is exactly those two keys -
-    nothing else may disappear."""
+    """External devices read this endpoint, so the trim is exactly those keys (the
+    probe address and how it is probed stay private) - nothing else may disappear."""
     sid = db.create_service({"name": "Svc", "url": "https://s.example", "check_url": "http://h/",
                               "run_target": "host"})
     row = db.get_service(sid)
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
-    expected = (set(row) - {"check_url", "run_target"}) | {
+    expected = (set(row) - {"check_url", "check_type", "run_target"}) | {
         "links", "uptime", "in_grace_period", "retrying", "open_reports_count",
         "run_target_label", "dependency_names"}
     assert set(published) == expected
@@ -1747,7 +1747,7 @@ def test_api_status_publishes_only_the_allow_listed_keys(client):
     published = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
     assert set(published) == app_module._API_SERVICE_KEYS | {"run_target"}
     row = db.get_service(sid)
-    assert set(row) - {"check_url", "run_target"} <= app_module._API_SERVICE_KEYS
+    assert set(row) - {"check_url", "check_type", "run_target"} <= app_module._API_SERVICE_KEYS
 
 
 def test_security_headers_cover_base_uri_forms_objects_and_browser_features(client):
@@ -3272,7 +3272,7 @@ def test_api_maintenance_history_never_500s_on_a_hostile_offset(client, offset):
                                   "kiosk_rotation_seconds", "lowdisk_percent_threshold",
                                   "media_calendar_days", "status_history_retention_days",
                                   "admin_session_timeout_hours", "jellyfin_auth_integration_id",
-                                  "seerr_integration_id"])
+                                  "seerr_integration_id", "tls_expiry_alert_days"])
 def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
     """A value like "²" stored before the write side was fixed (or edited in by hand)
     must read as unset, not raise on every page that reads it."""
@@ -3282,6 +3282,7 @@ def test_a_non_ascii_digit_setting_never_breaks_a_page(client, key):
     assert app_module._public_history_days() is None
     assert app_module._history_retention_days() == app_module.DEFAULT_HISTORY_RETENTION_DAYS
     assert app_module._lowdisk_threshold() is None
+    assert app_module._tls_alert_days() == app_module.DEFAULT_TLS_ALERT_DAYS
     assert app_module._kiosk_rotation_seconds() == app_module.KIOSK_DEFAULT_ROTATION_SECONDS
     assert app_module._session_timeout_seconds() == app_module.DEFAULT_SESSION_TIMEOUT_HOURS * 3600
     assert app_module.integrations.high_load_thresholds()["cpu_percent"] == 90

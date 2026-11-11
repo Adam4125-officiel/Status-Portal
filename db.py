@@ -700,6 +700,7 @@ def init_db():
     _ensure_column(conn, "services", "retry_interval_seconds", "INTEGER NOT NULL DEFAULT 5")
     _ensure_column(conn, "services", "ignore_in_overall_status", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "services", "api_health_mode", "TEXT NOT NULL DEFAULT 'off'")
+    _ensure_column(conn, "services", "check_type", "TEXT NOT NULL DEFAULT 'http'")
     _ensure_column(conn, "services", "show_report_button", "INTEGER NOT NULL DEFAULT 1")
     # '' = not mapped, 'host' = the machine this portal itself runs on, 'vm:<name>' =
     # a Hyper-V VM by name (no stable numeric VM id is available - see monitoring.py).
@@ -1010,6 +1011,14 @@ def _slow_threshold_ms(data):
 API_HEALTH_MODES = ("off", "degrade", "down")
 
 
+CHECK_TYPES = ("http", "tcp")
+
+
+def _check_type(data):
+    kind = data.get("check_type", "http")
+    return kind if kind in CHECK_TYPES else "http"
+
+
 def _api_health_mode(data):
     mode = data.get("api_health_mode", "off")
     return mode if mode in API_HEALTH_MODES else "off"
@@ -1053,8 +1062,8 @@ def _canonical_group_name(conn, raw, exclude_service_id=None):
 def create_service(data):
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button, run_target, show_run_target_public, show_dependencies_public)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO services (name, description, url, icon, status, manual_override, auto_check, check_url, sort_order, group_name, auto_incident, slow_threshold_ms, startup_grace_seconds, retry_count, retry_interval_seconds, ignore_in_overall_status, api_health_mode, show_report_button, run_target, show_run_target_public, show_dependencies_public, check_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (data["name"], data.get("description", ""), data.get("url", ""), data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""), int(data.get("sort_order", 0)),
@@ -1063,7 +1072,8 @@ def create_service(data):
           int(data.get("retry_count") or 0), int(data.get("retry_interval_seconds") or 5),
           int(data.get("ignore_in_overall_status", 0)), _api_health_mode(data),
           int(data.get("show_report_button", 1)), data.get("run_target", "").strip(),
-          int(data.get("show_run_target_public", 0)), int(data.get("show_dependencies_public", 0))))
+          int(data.get("show_run_target_public", 0)), int(data.get("show_dependencies_public", 0)),
+          _check_type(data)))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -1077,7 +1087,7 @@ def update_service(service_id, data):
         auto_check=?, check_url=?, sort_order=?, group_name=?, auto_incident=?,
         slow_threshold_ms=?, startup_grace_seconds=?, retry_count=?, retry_interval_seconds=?,
         ignore_in_overall_status=?, api_health_mode=?, show_report_button=?, run_target=?,
-        show_run_target_public=?, show_dependencies_public=? WHERE id=?
+        show_run_target_public=?, show_dependencies_public=?, check_type=? WHERE id=?
     """, (data["name"], data.get("description", ""), data["url"], data.get("icon", "⚙"),
           data.get("status", "operational"), int(data.get("manual_override", 0)),
           int(data.get("auto_check", 0)), data.get("check_url", ""),
@@ -1087,7 +1097,7 @@ def update_service(service_id, data):
           int(data.get("retry_interval_seconds") or 5), int(data.get("ignore_in_overall_status", 0)),
           _api_health_mode(data), int(data.get("show_report_button", 1)),
           data.get("run_target", "").strip(), int(data.get("show_run_target_public", 0)),
-          int(data.get("show_dependencies_public", 0)), service_id))
+          int(data.get("show_dependencies_public", 0)), _check_type(data), service_id))
     conn.commit()
     conn.close()
 
@@ -1128,6 +1138,8 @@ def delete_service(service_id):
     # before that column did) never had that FK constraint defined in the first place.
     conn.execute("UPDATE integrations SET service_id=NULL WHERE service_id=?", (service_id,))
     conn.execute("DELETE FROM services WHERE id=?", (service_id,))
+    conn.execute("DELETE FROM settings WHERE key IN (?, ?)",
+                 (f"tls_alert_state:{service_id}", f"tls_expiry:{service_id}"))
     conn.commit()
     conn.close()
 
@@ -2147,6 +2159,26 @@ def get_low_disk_alert_state(path):
 
 def set_low_disk_alert_state(path, is_low):
     set_setting(f"lowdisk_alert_state:{path}", "1" if is_low else "0")
+
+
+def get_tls_alert_state(service_id):
+    """Whether the daily certificate check already warned about this service's
+    certificate (it is inside the warning window). Persisted in `settings` like the
+    low-disk state, so a restart cannot re-send a warning."""
+    return get_setting(f"tls_alert_state:{service_id}") == "1"
+
+
+def set_tls_alert_state(service_id, warned):
+    set_setting(f"tls_alert_state:{service_id}", "1" if warned else "0")
+
+
+def get_tls_expiry(service_id):
+    """The certificate expiry (ISO date, UTC) the daily check last read, or ''."""
+    return get_setting(f"tls_expiry:{service_id}", "")
+
+
+def set_tls_expiry(service_id, expires_on):
+    set_setting(f"tls_expiry:{service_id}", expires_on)
 
 
 # ---------- Discord bot status-message tracking ----------

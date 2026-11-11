@@ -90,6 +90,15 @@
   handler), not a bug. `retry_count=0` (the default, and the value every pre-existing
   service gets via `_ensure_column`) preserves the exact original single-attempt
   behavior.
+- **`services.check_type` is `http` (default) or `tcp`; the probe is chosen inside
+  `app._run_single_check()`, nowhere else.** `tcp` treats `check_url` as `host:port`
+  and connects with a 5 s limit (`_run_tcp_check()`); a target that is not host:port
+  is `down`. It returns the same `(status, elapsed_ms)` as HTTP, so retries, the merge
+  with API/dependency health, `record_check_result()` and the incident lifecycle are
+  shared and must stay so. `check_type` is, like `check_url`, **never published** by
+  `/api/status`. It has no Settings default on purpose (it is per-target, not a
+  habit). Any new probe kind is a branch in `_run_single_check()` plus an entry in
+  `db.CHECK_TYPES`, not a second code path in the loop.
 - **`_refresh_integration_cache()` fetches in parallel and decides sequentially.** The
   network calls go through a `HEALTH_CHECK_WORKERS`-bounded pool, like the service
   checks, because one after another a few down integrations (10s per *Arr, 30s per

@@ -12,6 +12,8 @@ import os
 import platform
 import re
 import secrets
+import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -23,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from functools import wraps
+from urllib.parse import urlparse
 
 import requests
 from flask import (
@@ -1829,7 +1832,7 @@ def api_status():
 
 # Every key /api/status publishes per service. An allow-list on purpose: a column added
 # to `services` later must not become public by default. External dashboards read these
-# keys, so none may disappear. check_url is never published; run_target only when
+# keys, so none may disappear. check_url and check_type are never published; run_target only when
 # show_run_target_public is set (see _api_service_view).
 _API_SERVICE_KEYS = frozenset({
     "api_health_mode", "auto_check", "auto_incident", "description", "group_name", "icon",
@@ -3183,7 +3186,8 @@ def _overview_items():
 @login_required
 def admin_services():
     services = db.list_services()
-    return render_template("admin_services.html", services=services, hostname=platform.node(), active="services")
+    tls_expiry = {s["id"]: db.get_tls_expiry(s["id"]) for s in services}
+    return render_template("admin_services.html", services=services, tls_expiry=tls_expiry, hostname=platform.node(), active="services")
 
 
 @app.route("/admin/services/new", methods=["GET", "POST"])
@@ -4629,6 +4633,7 @@ def admin_settings():
                             service_defaults=_service_defaults(),
                             public_history_days=db.get_setting("public_history_days", ""),
                             lowdisk_percent_threshold=db.get_setting("lowdisk_percent_threshold", ""),
+                            tls_expiry_alert_days=db.get_setting("tls_expiry_alert_days", ""),
                             status_history_retention_days=db.get_setting(
                                 "status_history_retention_days", str(DEFAULT_HISTORY_RETENTION_DAYS)),
                             vms=monitoring.get_cached_vm_snapshot(), hostname=platform.node(),
@@ -4684,6 +4689,8 @@ def admin_settings_monitoring():
         db.set_setting(f"highload_{key}", _setting_digits(request.form.get(f"highload_{key}"), default))
     db.set_setting("lowdisk_percent_threshold",
                     _setting_digits(request.form.get("lowdisk_percent_threshold"), ""))
+    db.set_setting("tls_expiry_alert_days",
+                    _setting_digits(request.form.get("tls_expiry_alert_days"), ""))
     retention = db.parse_int(request.form.get("status_history_retention_days"))
     db.set_setting("status_history_retention_days",
                     str(retention) if retention else str(DEFAULT_HISTORY_RETENTION_DAYS))
@@ -5559,14 +5566,54 @@ def _within_grace_period(service):
     return grace > 0 and (time.monotonic() - _APP_START) < grace
 
 
-def _run_single_check(check_url, slow_threshold_ms):
-    """One HTTP attempt against check_url. Returns (status, elapsed_ms).
+TCP_CHECK_TIMEOUT_SECONDS = 5
+
+
+def _split_host_port(target):
+    """(host, port) from a 'host:port' string, or None when it is not one. Accepts
+    '[::1]:80' for IPv6 and tolerates a leading scheme or a trailing path, which people
+    paste out of habit."""
+    target = str(target or "").strip()
+    if "://" in target:
+        target = target.split("://", 1)[1]
+    target = target.split("/", 1)[0]
+    host, sep, port = target.rpartition(":")
+    host = host.strip("[]")
+    if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
+        return None
+    return host, int(port)
+
+
+def _run_tcp_check(target, slow_threshold_ms):
+    """One TCP attempt: is the port open? Returns (status, elapsed_ms), the same shape
+    and the same states as the HTTP check - connected is operational (slow past the
+    threshold), anything else, including a target that is not host:port, is down."""
+    endpoint = _split_host_port(target)
+    if endpoint is None:
+        return "down", None
+    start = time.perf_counter()
+    try:
+        with socket.create_connection(endpoint, timeout=TCP_CHECK_TIMEOUT_SECONDS):
+            pass
+    except OSError:
+        return "down", None
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    if slow_threshold_ms and elapsed_ms > slow_threshold_ms:
+        return "slow", elapsed_ms
+    return "operational", elapsed_ms
+
+
+def _run_single_check(check_url, slow_threshold_ms, check_type="http"):
+    """One attempt against check_url (an HTTP request, or a TCP connect to host:port
+    when check_type is "tcp"). Returns (status, elapsed_ms).
 
     Streamed, and closed as soon as the status line and headers are in: the verdict
     only ever depends on the status code (see _check_status_for_response), so
     downloading the body - a whole web app's HTML, every cycle, for every service -
     was pure waste. elapsed_ms is therefore time to the response headers, not to
     the last byte of the body."""
+    if check_type == "tcp":
+        return _run_tcp_check(check_url, slow_threshold_ms)
     start = time.perf_counter()
     try:
         r = requests.get(check_url, timeout=5, stream=True)
@@ -5595,14 +5642,15 @@ def _check_service_status(service):
     "retrying" instead of silently keeping the last-known status - narrow (only
     matters if a request lands in the same seconds-long window), but real, since
     this loop can block for up to retry_count * retry_interval_seconds."""
-    status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+    check_type = service.get("check_type") or "http"
+    status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"], check_type)
     retries_left = service.get("retry_count") or 0
     interval = service.get("retry_interval_seconds") or 0
     try:
         while status == "down" and retries_left > 0:
             _retry_in_progress.add(service.get("id"))
             time.sleep(interval)
-            status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"])
+            status, elapsed_ms = _run_single_check(service["check_url"], service["slow_threshold_ms"], check_type)
             retries_left -= 1
     finally:
         _retry_in_progress.discard(service.get("id"))
@@ -5723,6 +5771,108 @@ scheduler.register(
     _prune_status_history_task,
     default_schedule_kind="daily",
     default_daily_at="03:30",
+)
+
+
+TLS_CHECK_TIMEOUT_SECONDS = 5
+DEFAULT_TLS_ALERT_DAYS = 14
+
+
+def _tls_alert_days():
+    return db.parse_int(db.get_setting("tls_expiry_alert_days", "")) or DEFAULT_TLS_ALERT_DAYS
+
+
+def _peer_cert_expiry(host, port, context):
+    with socket.create_connection((host, port), timeout=TLS_CHECK_TIMEOUT_SECONDS) as raw:
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            return tls.getpeercert(binary_form=True) if context.verify_mode == ssl.CERT_NONE \
+                else tls.getpeercert()
+
+
+def _read_cert_expiry(host, port):
+    """When the certificate served at host:port expires (aware UTC datetime), or None
+    when it cannot be read. Never raises. A certificate that does not verify is still
+    read - an internal service with a self-signed certificate expires like any other -
+    by fetching it unverified and trusting exactly that certificate for a second,
+    decoded handshake (the standard library only decodes verified certificates). An
+    already-expired certificate fails verification with a specific code and is
+    reported as expiring now."""
+    try:
+        context = ssl.create_default_context()
+        try:
+            cert = _peer_cert_expiry(host, port, context)
+        except ssl.SSLCertVerificationError as e:
+            if e.verify_code == 10:  # X509_V_ERR_CERT_HAS_EXPIRED
+                return datetime.now(timezone.utc)
+            loose = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            loose.check_hostname = False
+            loose.verify_mode = ssl.CERT_NONE
+            der = _peer_cert_expiry(host, port, loose)
+            pinned = ssl.create_default_context(cadata=ssl.DER_cert_to_PEM_cert(der))
+            pinned.check_hostname = False
+            cert = _peer_cert_expiry(host, port, pinned)
+        return datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), timezone.utc)
+    except (OSError, ssl.SSLError, KeyError, ValueError):
+        return None
+
+
+def _https_endpoint(service):
+    """(host, port) of an auto-checked HTTP service whose check URL is https, or None."""
+    if (service.get("check_type") or "http") != "http" or not service["auto_check"]:
+        return None
+    parsed = urlparse(service["check_url"] or "")
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    try:
+        return parsed.hostname, parsed.port or 443
+    except ValueError:
+        return None
+
+
+def _check_tls_certificates():
+    """Edge-triggered like the low-disk alert: one notification when a certificate
+    first falls inside the warning window, nothing more until it has been renewed
+    (back outside the window) and runs low again. The warned/not-warned state is in
+    the database, so a restart cannot repeat a warning. Notification-only; the
+    expiry date is shown on the admin Services page, never publicly."""
+    window = _tls_alert_days()
+    checked = 0
+    for s in db.list_services():
+        endpoint = _https_endpoint(s)
+        if endpoint is None:
+            continue
+        checked += 1
+        expires = _read_cert_expiry(*endpoint)
+        if expires is None:
+            continue  # unreachable today - keep the last known state
+        days_left = (expires - datetime.now(timezone.utc)).days
+        db.set_tls_expiry(s["id"], expires.date().isoformat())
+        inside = days_left < window
+        if inside and not db.get_tls_alert_state(s["id"]):
+            when = ("has expired" if expires <= datetime.now(timezone.utc)
+                    else f"expires on {expires.date().isoformat()} ({days_left} day(s) left)")
+            notifications.notify("TLS certificate expiring",
+                                  f"The certificate for {s['name']} {when}.")
+        db.set_tls_alert_state(s["id"], inside)
+    return checked
+
+
+def _tls_certificates_task():
+    checked = _check_tls_certificates()
+    if not checked:
+        raise scheduler.TaskSkipped("No service is checked over HTTPS.")
+    return f"Read the certificate of {checked} HTTPS service(s)."
+
+
+scheduler.register(
+    "tls_certificates",
+    "Check TLS certificate expiry",
+    "Reads the certificate of every service checked over HTTPS once a day and sends a "
+    "notification, once, when one has fewer days left than the limit set under "
+    "Settings. The expiry date shows on the Services page.",
+    _tls_certificates_task,
+    default_schedule_kind="daily",
+    default_daily_at="04:00",
 )
 
 

@@ -10,7 +10,7 @@
 <div class="admin-table">
   <table>
     <thead>
-      <tr><th>Service</th><th class="col-secondary">Group</th><th class="col-secondary">Runs on</th><th class="col-short">Status</th><th class="col-short">Auto-check</th><th class="col-secondary">Link</th><th></th></tr>
+      <tr><th>Service</th><th class="col-secondary">Group</th><th class="col-secondary">Runs on</th><th class="col-short">Status</th><th class="col-short">Auto-check</th><th class="col-secondary">TLS expires</th><th class="col-secondary">Link</th><th></th></tr>
     </thead>
     <tbody>
       {% for s in services %}
@@ -24,6 +24,7 @@
         </td>
         <td class="col-short">{{ s.status }}{% if s.manual_override %} (forced){% endif %}{% if s.ignore_in_overall_status %} <span style="color: var(--text-faint);">(ignored)</span>{% endif %}</td>
         <td class="col-short">{{ 'yes' if s.auto_check else 'no' }}</td>
+        <td class="col-secondary">{{ tls_expiry.get(s.id) or '—' }}</td>
         <td class="col-secondary">{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url }}</a>{% else %}—{% endif %}</td>
         <td class="actions">
           <a href="{{ url_for('badge_service', service_id=s.id) }}" target="_blank" title="Embeddable SVG status badge">Badge</a>
