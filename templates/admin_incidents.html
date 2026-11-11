@@ -20,7 +20,7 @@
         <td class="actions">
           <a href="{{ url_for('admin_incident_edit', iid=i.id) }}">Edit</a>
           <form action="{{ url_for('admin_incident_delete', iid=i.id) }}" method="POST" style="display:inline"
-                onsubmit="return confirm('Delete this incident?');">
+                data-confirm="Delete this incident?">
             <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
           </form>
         </td>

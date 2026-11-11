@@ -126,7 +126,7 @@
     <p class="field-hint">No key generated yet - the API refuses every request until one exists.</p>
   {% endif %}
   <form method="POST" action="{{ url_for('admin_notifications_regenerate_api_key') }}"
-        onsubmit="return {{ 'confirm(\'Generate a new key? The current one will stop working immediately.\')' if notify_api_key else 'true' }}">
+        {% if notify_api_key %}data-confirm="Generate a new key? The current one will stop working immediately."{% endif %}>
     <button type="submit" class="btn secondary">{{ 'Regenerate key' if notify_api_key else 'Generate key' }}</button>
   </form>
 </div>

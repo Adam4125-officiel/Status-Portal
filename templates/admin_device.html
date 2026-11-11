@@ -42,7 +42,7 @@
   {% else %}
     <p class="field-hint">No key generated yet — the display API refuses every request until one exists.</p>
   {% endif %}
-  <form method="POST" action="{{ url_for('admin_device_regenerate_key') }}" {% if device_api_key %}onsubmit="return confirm('Generate a new key? The current one will stop working immediately, and the display will need the new one.')"{% endif %}>
+  <form method="POST" action="{{ url_for('admin_device_regenerate_key') }}" {% if device_api_key %}data-confirm="Generate a new key? The current one will stop working immediately, and the display will need the new one."{% endif %}>
     <button type="submit" class="btn secondary">{{ 'Regenerate key' if device_api_key else 'Generate key' }}</button>
   </form>
 </div>

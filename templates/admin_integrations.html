@@ -157,7 +157,7 @@
         {% endif %}
         <a href="{{ url_for('admin_integration_edit', iid=i.id) }}" style="margin-left: 8px;">Edit</a>
         <form action="{{ url_for('admin_integration_delete', iid=i.id) }}" method="POST" style="display:inline; margin-left: 8px;"
-              onsubmit="return confirm('Delete {{ i.name }}?');">
+              data-confirm="Delete {{ i.name }}?">
           <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
         </form>
       </div>

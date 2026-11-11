@@ -51,7 +51,7 @@
         <td class="actions">
           <a href="{{ url_for('admin_announcement_edit', aid=a.id) }}">Edit</a>
           <form action="{{ url_for('admin_announcement_delete', aid=a.id) }}" method="POST" style="display:inline"
-                onsubmit="return confirm('Delete this announcement?');">
+                data-confirm="Delete this announcement?">
             <button type="submit" class="btn danger" style="padding:4px 10px;">Delete</button>
           </form>
         </td>

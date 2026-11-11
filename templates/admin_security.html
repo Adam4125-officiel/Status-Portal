@@ -97,7 +97,7 @@
   ("Display device key", "device_api_key", device_api_key, "admin_device_regenerate_key",
    "Lets a display read the device API. Switch the device API on or off on the Display device page.")] %}
 <form method="POST" action="{{ url_for(endpoint) }}" class="form-panel" style="margin-bottom: 20px;"
-      {% if key %}onsubmit="return confirm('Generate a new key? The current one will stop working immediately.')"{% endif %}>
+      {% if key %}data-confirm="Generate a new key? The current one will stop working immediately."{% endif %}>
   <input type="hidden" name="back" value="security">
   {% if key %}
   <div class="field">
