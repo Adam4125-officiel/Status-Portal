@@ -248,6 +248,13 @@
     <label for="confirm_password">Confirm new password</label>
     <input type="password" id="confirm_password" name="confirm_password" required>
   </div>
+  {% if totp_enabled %}
+  <div class="field">
+    <label for="totp_code">2FA code</label>
+    <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*"
+           autocomplete="one-time-code" required>
+  </div>
+  {% endif %}
   <div class="form-actions">
     <button type="submit" class="btn">Change password</button>
   </div>

@@ -628,6 +628,28 @@ def is_first_run():
     return db.get_setting("admin_password_hash") is None
 
 
+PASSWORD_RESET_FLAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "instance", "RESET_PASSWORD")
+
+
+def _check_and_process_password_reset_flag():
+    """Host-level password recovery, modelled on twofactor.check_and_process_reset_flag():
+    an empty file at instance/RESET_PASSWORD, seen on a hit of /admin/login, erases the
+    admin password hash, signs out every admin session and deletes itself. The portal is
+    then back at first-run setup (which _first_run_setup_allowed() keeps to the local
+    network). Leaves 2FA alone."""
+    if not os.path.exists(PASSWORD_RESET_FLAG_PATH):
+        return False
+    db.delete_setting("admin_password_hash")
+    _rotate_admin_session_epoch()
+    try:
+        os.remove(PASSWORD_RESET_FLAG_PATH)
+    except OSError:
+        _logger.exception("Password reset flag file found but could not be removed")
+    _logger.warning("Admin password erased via host-level RESET_PASSWORD flag file")
+    return True
+
+
 # Tailscale hands out addresses from here (RFC 6598 shared space), and ipaddress
 # doesn't count it as private, but a tailnet is exactly the kind of "my own network"
 # this portal is set up from.
@@ -2753,6 +2775,7 @@ def admin_login():
     # reset (see twofactor.py) takes effect the moment someone next loads this
     # page - no app restart needed.
     twofactor.check_and_process_reset_flag()
+    _check_and_process_password_reset_flag()
     first_run = is_first_run()
     awaiting_totp = session.get("awaiting_totp", False)
 
@@ -4231,13 +4254,26 @@ def admin_settings():
         new = request.form.get("new_password", "")
         confirm = request.form.get("confirm_password", "")
         stored = db.get_setting("admin_password_hash")
-        if not check_password_hash(stored, current):
+        # Same counter as the login page, _require_totp() and /admin/2fa/disable: with
+        # a stolen session cookie this form was an unthrottled password-guessing loop.
+        if _login_locked():
+            flash("Too many incorrect attempts - try again in a few minutes.", "error")
+        elif not check_password_hash(stored, current):
+            _register_login_failure()
             flash("Current password is incorrect.", "error")
         elif len(new) < 6:
             flash("New password must be at least 6 characters.", "error")
         elif new != confirm:
             flash("Passwords do not match.", "error")
         else:
+            # With 2FA on, changing the password also needs a current code: it is the
+            # action that signs the real admin out and leaves a cookie thief in.
+            blocked = _require_totp("Incorrect or missing 2FA code - password not changed.",
+                                    "admin_settings")
+            if blocked:
+                return blocked
+            if not twofactor.is_enabled():
+                _register_login_success()
             db.set_setting("admin_password_hash", generate_password_hash(new))
             # The natural reaction to a suspected compromise, so it has to actually
             # lock out a copied cookie - every other admin session ends here.
@@ -4246,6 +4282,7 @@ def admin_settings():
     section_order = _public_section_order()
     section_labels = dict(PUBLIC_SECTIONS)
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
+                            totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
                             kiosk_min_rotation=KIOSK_MIN_ROTATION_SECONDS,

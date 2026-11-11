@@ -1,3 +1,4 @@
+from werkzeug.security import check_password_hash
 import io
 import os
 import re
@@ -4866,3 +4867,51 @@ def test_the_step_up_panels_ask_for_the_2fa_code_and_no_word_to_type(client, mon
         with open(os.path.join(static_js, f"{script}.js"), encoding="utf-8") as f:
             source = f.read()
         assert "EXPECTED_WORD" not in source and "expectedWord" not in source, script
+
+
+def _login_admin(client):
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+
+
+def _change_password(client, current, **extra):
+    return client.post("/admin/settings", data={"current_password": current,
+                                                 "new_password": "changed456",
+                                                 "confirm_password": "changed456", **extra})
+
+
+def test_password_change_form_locks_after_repeated_wrong_passwords(client):
+    _login_admin(client)
+    for _ in range(app_module.LOGIN_LOCKOUT_THRESHOLD):
+        _change_password(client, "wrong")
+    # Locked: even the right password is refused now.
+    _change_password(client, "testpass123")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+
+
+def test_password_change_with_2fa_requires_a_code(client):
+    _login_admin(client)
+    secret = _enable_totp_directly()
+    _change_password(client, "testpass123")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+    _change_password(client, "testpass123", totp_code="000000")
+    assert check_password_hash(db.get_setting("admin_password_hash"), "testpass123")
+    _change_password(client, "testpass123", totp_code=pyotp.TOTP(secret).now())
+    assert check_password_hash(db.get_setting("admin_password_hash"), "changed456")
+
+
+def test_reset_password_flag_erases_hash_and_is_self_cleaning(client, monkeypatch, tmp_path):
+    flag = tmp_path / "RESET_PASSWORD"
+    monkeypatch.setattr(app_module, "PASSWORD_RESET_FLAG_PATH", str(flag))
+    _login_admin(client)
+    secret = _enable_totp_directly()
+    thief = _copy_of_session_cookie(client)
+
+    client.get("/admin/login")
+    assert db.get_setting("admin_password_hash") is not None  # no file: no-op
+
+    flag.write_text("")
+    client.get("/admin/login")
+    assert db.get_setting("admin_password_hash") is None
+    assert not flag.exists()
+    assert twofactor.is_enabled() is True and db.get_setting("admin_totp_secret") == secret
+    assert thief.get("/admin/services").status_code == 302  # sessions rotated out
