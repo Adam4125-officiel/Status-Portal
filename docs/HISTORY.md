@@ -2355,3 +2355,25 @@ Two tests shared one name, so only the second ran; compose defaulted the search 
 limit to 20 while `config.py` says 40. Connections now use `synchronous=NORMAL` (safe
 under WAL, one fsync fewer per commit), each check's state and history row share a
 transaction, and check timing uses `time.perf_counter()`.
+
+## Admin on a phone (2026-11)
+
+At 390px the admin menu took about 1,070px before every page title and the Services table
+broke words mid-letter ("operat/ional"). The menu now collapses to a one-line summary
+under 720px, secondary Services columns are hidden there, and the Reports status select
+submits through a script (`requestSubmit()`) instead of an inline `onchange`.
+
+## Public home quick wins (2026-11)
+
+With a service down, the banner only said "One or more services are down" and the
+culprit could be the ninth card, about 1,800px down on a phone. The banner now lists
+the affected services, each linked to its card; "Report a problem" moved to the topbar;
+the kiosk link moved to its admin setting; and the footer version can be hidden.
+
+## Fonts and the browser-cache page (2026-11)
+
+The three font families came from Google, which sent every visitor's IP there and made
+the page wait on a third-party host when the internet was down. They are now `woff2`
+files in `static/fonts/` and the two CSP exceptions are gone. The "Clear this browser's
+cache" page was removed (it only reached the browser that clicked it); the server-side
+button, which changes every asset URL, remains.

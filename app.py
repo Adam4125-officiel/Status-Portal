@@ -96,14 +96,13 @@ def set_security_headers(response):
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
-        # image.tmdb.org is the one exception, for search-result posters - same class
-        # of scoped, named-host exception as the two fonts.google* hosts above, not a
-        # general relaxation. Jellyfin-only results (no TMDB poster_path) stay
-        # text-only rather than proxying Jellyfin's own image endpoint through a
-        # request handler, which the no-live-outbound-I/O rule elsewhere exists to
-        # avoid.
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
+        # image.tmdb.org is the one exception, for search-result posters - a scoped,
+        # named-host exception, not a general relaxation. Jellyfin-only results (no
+        # TMDB poster_path) stay text-only rather than proxying Jellyfin's own image
+        # endpoint through a request handler, which the no-live-outbound-I/O rule
+        # elsewhere exists to avoid.
         "img-src 'self' data: https://image.tmdb.org; "
         "script-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
@@ -312,6 +311,13 @@ def _inject_branding():
     return {"site_logo_filename": filename, "site_logo_version": version}
 
 
+def _show_public_version():
+    """Whether the public footer shows the exact version and the project link. On by
+    default (an unset setting reads as on) so existing installs don't change; the
+    About page always shows the version to the admin regardless."""
+    return db.get_setting("show_public_version", "1") == "1"
+
+
 @app.context_processor
 def _inject_portal_version():
     """Exposes the running version to every template (currently just the public
@@ -319,7 +325,8 @@ def _inject_portal_version():
     same reasoning as _inject_branding()/csrf_token() being globals rather than
     hand-passed. VERSION_DISPLAY, not bare VERSION, so a +dev source checkout reads
     as one - same value the About page already shows the admin."""
-    return {"portal_version_display": config.VERSION_DISPLAY}
+    return {"portal_version_display": config.VERSION_DISPLAY,
+            "show_public_version": _show_public_version()}
 
 
 @app.context_processor
@@ -1641,6 +1648,11 @@ def index():
     incidents_hidden = not incidents and bool(db.list_incidents(limit=1))
     maintenance_windows = db.list_public_maintenance_windows()
     overall = compute_overall_status(services)
+    # What the banner lists when the overall status isn't "operational": same filter as
+    # compute_overall_status(), so the list can never name a service the headline ignores.
+    affected_services = [] if overall == "operational" else [
+        s for s in services
+        if s["status"] != "operational" and not s.get("ignore_in_overall_status")]
     site_name = db.get_setting("site_name", "Server")
     # Signed-in visitors only, and only when there's something to search. Both halves
     # matter: without sign-in the box would expose the whole library to anyone who can
@@ -1649,6 +1661,7 @@ def index():
     return render_template("index.html", services=services, groups=groups, announcements=announcements,
                             incidents=incidents, incidents_hidden=incidents_hidden,
                             maintenance_windows=maintenance_windows, overall=overall,
+                            affected_services=affected_services,
                             refresh_seconds=config.PUBLIC_REFRESH_SECONDS,
                             site_name=site_name,
                             high_load=_high_load(),
@@ -1657,10 +1670,6 @@ def index():
                             nav_links=_public_page_links(),
                             page_summaries=_public_page_links(include_summaries=True),
                             search_enabled=search_enabled, active_page="status",
-                            # Main page only, not the shared nav: the kiosk link belongs
-                            # next to the status it mirrors, and a wall display isn't
-                            # something you launch from halfway down a sub-page.
-                            kiosk_enabled=kiosk_enabled(),
                             section_order=_public_section_order(), repo_url=updater.REPO_URL)
 
 
@@ -3672,60 +3681,6 @@ def admin_system_clear_caches():
     return redirect(url_for("admin_system"))
 
 
-def _all_static_asset_urls():
-    """Every CSS/JS file this app serves, as cache-busted URLs. Used by the
-    clear-browser-cache page to re-fetch each one with `cache: 'reload'`, which is
-    what actually replaces a browser's stored copy - a directory listing rather than
-    a hand-maintained list, so a file added later can't be quietly left behind."""
-    urls = []
-    for subdir in ("css", "js"):
-        directory = os.path.join(app.root_path, "static", subdir)
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        urls += [asset_url(f"{subdir}/{name}") for name in names
-                 if name.endswith((".css", ".js"))]
-    logo = db.get_setting("site_logo_filename", "")
-    if logo:
-        urls.append(url_for("static", filename=f"uploads/{logo}"))
-    return urls
-
-
-@app.route("/admin/system/clear-browser-cache", methods=["POST"])
-@login_required
-def admin_system_clear_browser_cache():
-    """Clears *this* browser's own cached copy of the site - a different thing from
-    the server-side button next to it, and worth keeping separate rather than merging
-    the two.
-
-    The server-side one changes what every visitor is *asked* to download (it bumps
-    the ?v= salt, so their next request is for a URL they've never seen). This one
-    only reaches the browser that clicked it, because that's all a web page can
-    reach - there is no way to reach into someone else's browser and evict a file.
-    Which is exactly why both exist: this one is for "I'm looking at a stale page
-    right now", the other is for "make sure nobody else is".
-
-    Two mechanisms, because neither is sufficient alone:
-
-    - The Clear-Site-Data response header is the standards-based way, and it clears
-      things a page cannot touch itself. Chrome and Edge only honor it in a secure
-      context, and this portal is very often served over plain HTTP on a LAN or
-      Tailscale, so it can't be relied on here.
-    - The page's own script then re-does what it can reach (Cache Storage, service
-      workers, DOM storage) and re-fetches every asset with `cache: 'reload'`, which
-      forces a network fetch and replaces the stored copy.
-
-    Deliberately NOT sending the "cookies" directive: that would clear the session
-    cookie and sign the admin out as a side effect of a cache action."""
-    theme = request.form.get("theme", "")
-    response = Response(render_template("admin_clear_browser_cache.html",
-                                         assets=_all_static_asset_urls(), theme=theme,
-                                         active="system"))
-    response.headers["Clear-Site-Data"] = '"cache", "storage"'
-    return response
-
-
 @app.route("/admin/system/restart", methods=["POST"])
 @login_required
 def admin_system_restart():
@@ -4416,6 +4371,7 @@ def admin_settings():
     return render_template("admin_settings.html", check_interval=config.CHECK_INTERVAL_SECONDS,
                             totp_enabled=twofactor.is_enabled(),
                             kiosk_enabled=kiosk_enabled(),
+                            show_public_version=_show_public_version(),
                             kiosk_rotation_seconds=_kiosk_rotation_seconds(),
                             kiosk_min_rotation=KIOSK_MIN_ROTATION_SECONDS,
                             kiosk_max_rotation=KIOSK_MAX_ROTATION_SECONDS,
@@ -4467,6 +4423,7 @@ def admin_settings_general():
     layout_order = request.form.get("layout_order", "").strip()
     if layout_order:
         db.set_setting("public_layout_order", layout_order)
+    db.set_setting("show_public_version", "1" if request.form.get("show_public_version") else "0")
     db.set_setting("kiosk_enabled", "1" if request.form.get("kiosk_enabled") else "0")
     db.set_setting("kiosk_rotation_seconds", _setting_digits(
         request.form.get("kiosk_rotation_seconds"), str(KIOSK_DEFAULT_ROTATION_SECONDS)))

@@ -181,6 +181,15 @@
   laptop viewport is ~650–720px, so without it the bottom entries (About, Two-factor
   auth) are simply unreachable — invisible to every route-level test and obvious the
   moment you open a browser at a real window height.
+- **Under 720px the menu is a `<details>`** (`#admin_nav_menu`) whose summary shows the
+  current page (from the `nav_labels` map in `admin_base.html`, keyed by `active`) and
+  the badge total. It is rendered `open` and the summary is hidden above 720px, so
+  without JS it is always visible; `admin_nav.js` closes it on narrow screens. A new
+  admin page needs an entry in `nav_labels` too.
+- **Admin tables on a phone:** `.col-secondary` cells are hidden under 720px and
+  `.col-short` cells never break mid-word. Use them on new wide tables.
+- **Auto-submitting a `<select>` in admin:** `data-autosubmit` (handled by
+  `admin_autosubmit.js`, which uses `requestSubmit()`), never an `onchange` attribute.
 - **A page's `<h1>`, its `{% block title %}` and its nav label must all match**, and
   the nav label is now also the thing that decides the other two when they disagree.
   Renaming a nav entry means checking all three (this is why "Discord Bot — Servers"

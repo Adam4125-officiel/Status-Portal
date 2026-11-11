@@ -90,9 +90,8 @@
   caller that doesn't pass specific ones — see request configuration below for where a
   real picker now exists. Seerr rejects a series request with no seasons at all.
 - **Posters are TMDB images (`image.tmdb.org`), one scoped CSP `img-src` exception** —
-  same class of named-host exception the `fonts.google*` entries already are, not a
-  general relaxation. `poster_path` was already threaded through `search_seerr()` →
-  `media_search.merge()`; only the rendering was missing. A Jellyfin-only result (no
+  a scoped, named-host exception, not a general relaxation. `poster_path` was
+  already threaded through `search_seerr()` → `media_search.merge()`; only the rendering was missing. A Jellyfin-only result (no
   Seerr/TMDB match) stays text-only rather than proxying Jellyfin's own image endpoint
   through a request handler — that would be exactly the live-outbound-I/O-in-a-handler
   problem this app avoids everywhere else.

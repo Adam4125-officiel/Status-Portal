@@ -3861,56 +3861,27 @@ def test_system_page_lists_caches_and_integration_reachability(client):
     assert "Jellyfin" in body and "not reachable" in body
 
 
-def test_clear_browser_cache_sends_clear_site_data_without_touching_cookies(client):
-    """The 'cookies' directive would sign the admin out as a side effect of a cache
-    action - the one directive this must never send."""
+def test_fonts_are_self_hosted_and_csp_allows_no_font_host(client):
+    resp = client.get("/login")
+    html = resp.data.decode()
+    csp = resp.headers["Content-Security-Policy"]
+    assert "googleapis" not in html and "gstatic" not in html
+    assert "googleapis" not in csp and "gstatic" not in csp
+    assert "font-src 'self'" in csp
+    css = open(os.path.join(app_module.app.root_path, "static", "css", "style.css")).read()
+    files = re.findall(r'url\("\.\./fonts/([^"]+\.woff2)"\)', css)
+    assert len(files) == 8
+    for name in files:
+        assert os.path.isfile(os.path.join(app_module.app.root_path, "static", "fonts", name))
+        assert client.get(f"/static/fonts/{name}").status_code == 200
+
+
+def test_browser_cache_page_is_gone_but_server_side_clear_remains(client):
     client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    resp = client.post("/admin/system/clear-browser-cache", data={"theme": "dark"})
-    assert resp.status_code == 200
-    header = resp.headers["Clear-Site-Data"]
-    assert '"cache"' in header and '"storage"' in header
-    assert "cookies" not in header
-    with client.session_transaction() as sess:
-        assert sess["logged_in"] is True
-
-
-def test_clear_browser_cache_page_lists_every_static_asset(client):
-    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    body = client.post("/admin/system/clear-browser-cache", data={"theme": ""}).data.decode()
-    # Handed to the page as a data attribute, not interpolated into inline JS.
-    assert "data-assets=" in body
-    for name in ("js/main.js", "js/theme.js", "css/style.css"):
-        assert name in body
-    assert "data-theme=\"\"" in body
-
-
-def test_clear_browser_cache_carries_the_theme_through(client):
-    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    body = client.post("/admin/system/clear-browser-cache", data={"theme": "light"}).data.decode()
-    assert 'data-theme="light"' in body
-
-
-def test_clear_browser_cache_requires_login(client):
-    resp = client.post("/admin/system/clear-browser-cache", data={})
-    assert resp.status_code == 302
-    assert "/admin/login" in resp.headers["Location"]
-
-
-def test_static_asset_list_covers_new_files_automatically(client, tmp_path, monkeypatch):
-    """Enumerated from the directory, not a hand-maintained list - a JS file added
-    later must not be silently left out of the re-fetch."""
-    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
-    new_file = os.path.join(app_module.app.root_path, "static", "js", "_tmp_probe.js")
-    with open(new_file, "w", encoding="utf-8") as f:
-        f.write("// temporary probe file\n")
-    try:
-        with app_module.app.test_request_context():
-            urls = app_module._all_static_asset_urls()
-        assert any("_tmp_probe.js" in u for u in urls)
-        # And every entry is cache-busted, not a bare static URL.
-        assert all("?v=" in u for u in urls)
-    finally:
-        os.remove(new_file)
+    assert client.post("/admin/system/clear-browser-cache", data={}).status_code == 404
+    body = client.get("/admin/system").data.decode()
+    assert "Clear this browser" not in body
+    assert "Clear server-side cached data" in body
 
 
 # ---------------------------------------------------------------------------
@@ -5146,3 +5117,49 @@ def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch)
     finally:
         monkeypatch.delenv("PORTAL_HOST", raising=False)
         importlib.reload(config_module)
+
+
+# ---------------------------------------------------------------------------
+# Public home: banner names affected services, report button, footer version
+# ---------------------------------------------------------------------------
+
+def test_banner_lists_affected_services_linked_to_their_cards(client):
+    sid = db.create_service({"name": "Bazarr", "url": "http://bazarr.example"})
+    db.update_service_status_from_check(sid, "down", None)
+    html = client.get("/").data.decode()
+    assert 'class="status-hero__affected"' in html
+    assert f'href="#service-{sid}"' in html
+    assert f'id="service-{sid}"' in html
+    assert "Bazarr" in html.split('class="status-hero__affected"')[1].split("</ul>")[0]
+
+
+def test_banner_lists_nothing_when_operational_or_service_is_ignored(client):
+    assert 'class="status-hero__affected"' not in client.get("/").data.decode()
+    sid = db.create_service({"name": "Bazarr", "url": "http://bazarr.example",
+                             "ignore_in_overall_status": 1})
+    db.update_service_status_from_check(sid, "down", None)
+    assert 'class="status-hero__affected"' not in client.get("/").data.decode()
+
+
+def test_report_button_is_in_the_topbar(client):
+    html = client.get("/").data.decode()
+    assert 'class="btn secondary topbar__report"' in html
+    assert html.index("topbar__report") < html.index('class="page-nav"')
+
+
+def test_report_button_title_says_sign_in_when_login_is_required(client, monkeypatch):
+    monkeypatch.setattr(app_module, "_report_login_required", lambda: True)
+    assert "Sign in with your Jellyfin account to report a problem" in client.get("/").data.decode()
+
+
+def test_footer_version_and_project_link_can_be_hidden(client):
+    assert f"status-portal v{app_module.config.VERSION_DISPLAY}" in client.get("/").data.decode()
+    client.post("/admin/login", data={"password": "testpass123", "confirm": "testpass123"})
+    client.post("/admin/settings/general", data={})
+    assert db.get_setting("show_public_version") == "0"
+    html = client.get("/").data.decode()
+    assert "status-portal v" not in html
+    assert updater.REPO_URL not in html
+    assert "RSS feed" in html and "Report a problem" in html
+    client.post("/admin/settings/general", data={"show_public_version": "on"})
+    assert updater.REPO_URL in client.get("/").data.decode()

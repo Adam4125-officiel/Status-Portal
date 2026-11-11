@@ -4,7 +4,7 @@
   {% if group.name %}<div class="group-title">{{ group.name }}</div>{% endif %}
   <div class="services-grid">
     {% for s in group.services %}
-      <div class="service-card">
+      <div class="service-card" id="service-{{ s.id }}">
         <div class="service-card__head">
           <div class="service-card__title">
             <span class="service-card__icon">{{ s.icon }}</span>{{ s.name }}

@@ -139,31 +139,18 @@
   `asset_url()` (or `site_logo_version`), it will be cached for a month. The DB backup
   download passes `max_age=0` explicitly for the same reason - it's a point-in-time
   file, not a versioned asset.
-- **`/admin/system` has *two* cache buttons and they are not redundant - don't merge
-  them.** They act on different machines, and only one of them can act on a machine
-  you don't control:
-  - *Clear server-side cached data* clears each module's caches via its own
-    `clear_caches()`, not by reaching into other modules' globals from `app.py` (add a
-    cache -> add it to that module's `clear_caches()`/`cache_summary()`, not to a list
-    in `app.py`). It also bumps `asset_cache_salt`, appended to `asset_url()`'s `?v=`,
-    which is the *only* mechanism that reaches **other people's** browsers - it changes
-    the URL they're asked for, so a stale copy can't answer. The salt is a settings row
-    (a restart that forgot it would hand every browser back the URL it already cached)
-    and is **random, not a timestamp**: two clicks in the same second would otherwise
-    produce an identical "bust".
-  - *Clear this browser's cache* only reaches the browser that clicked it, because
-    that is all a web page can reach. It sends `Clear-Site-Data: "cache", "storage"`
-    **and** re-does the work in JS, because Chrome/Edge only honor that header in a
-    secure context and this portal is very often plain HTTP on a LAN/Tailscale. The
-    JS half is what actually does the job in practice: `caches.delete()`, service
-    worker unregistration, DOM storage, then `fetch(url, {cache: 'reload'})` over
-    every asset (enumerated from the static directory by `_all_static_asset_urls()`,
-    never a hand-maintained list). **Never add the `"cookies"` directive** - it would
-    sign the admin out as a side effect of a cache action. The dark/light choice is
-    carried through the wipe and put back deliberately; it's a preference, not stale
-    data.
-
-  Neither is behind `_require_totp()` - nothing is destroyed and nothing goes offline.
+- **`/admin/system` has one cache button: *Clear server-side cached data*.** It clears
+  each module's caches via its own `clear_caches()`, not by reaching into other
+  modules' globals from `app.py` (add a cache -> add it to that module's
+  `clear_caches()`/`cache_summary()`, not to a list in `app.py`). It also bumps
+  `asset_cache_salt`, appended to `asset_url()`'s `?v=`, which is the *only*
+  mechanism that reaches **other people's** browsers - it changes the URL they're
+  asked for, so a stale copy can't answer. The salt is a settings row (a restart that
+  forgot it would hand every browser back the URL it already cached) and is **random,
+  not a timestamp**: two clicks in the same second would otherwise produce an
+  identical "bust". A per-browser "clear this browser's cache" page used to sit next
+  to it and was removed: it only reached the browser that clicked it. Not behind
+  `_require_totp()` - nothing is destroyed and nothing goes offline.
 - **`_uptime_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
   resets them** alongside `_integration_status_cache` and the Jellyfin cache. A new
   module-level cache needs the same treatment or it leaks across tests.
