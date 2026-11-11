@@ -5697,4 +5697,4 @@ if __name__ == "__main__":
     scheduler.start()
     discord_bot.start()
     # debug must stay False whenever this is reachable outside localhost.
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=config.HOST, port=config.PORT, debug=False)

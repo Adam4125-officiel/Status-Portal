@@ -108,6 +108,9 @@ SECRET_KEY = _load_or_create_secret_key()
 # The server-side idle check in app.py is the authoritative one; this is the backstop.
 SESSION_COOKIE_MAX_AGE_DAYS = 30
 PORT = int(os.environ.get("PORTAL_PORT", "5000"))
+# Address the server binds. 0.0.0.0 = every interface; set 127.0.0.1 when a reverse
+# proxy or tunnel on the same machine is the only thing that should reach it.
+HOST = os.environ.get("PORTAL_HOST", "0.0.0.0").strip() or "0.0.0.0"
 
 # Backend health-check frequency (server-side polling of each service's check_url).
 CHECK_INTERVAL_SECONDS = int(os.environ.get("PORTAL_CHECK_INTERVAL_SECONDS", "120"))

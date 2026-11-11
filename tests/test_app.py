@@ -5100,3 +5100,16 @@ def test_admin_tasks_shows_last_health_cycle(client, demo_task):
     assert "not yet" in client.get("/admin/tasks").data.decode()
     db.set_setting(app_module.LAST_HEALTH_CYCLE_SETTING, "2026-11-11T10:20:30+00:00")
     assert "2026-11-11 10:20" in client.get("/admin/tasks").data.decode()
+
+
+def test_portal_host_defaults_to_all_interfaces_and_is_configurable(monkeypatch):
+    import importlib
+    import config as config_module
+    try:
+        monkeypatch.delenv("PORTAL_HOST", raising=False)
+        assert importlib.reload(config_module).HOST == "0.0.0.0"
+        monkeypatch.setenv("PORTAL_HOST", "127.0.0.1")
+        assert importlib.reload(config_module).HOST == "127.0.0.1"
+    finally:
+        monkeypatch.delenv("PORTAL_HOST", raising=False)
+        importlib.reload(config_module)
