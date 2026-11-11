@@ -76,6 +76,13 @@
   it re-run** - after pruning it would recount a day as fewer checks than it had.
   Anything iterating over all services uses `db.get_uptime_percentages()` (one
   grouped query), never the single-service form in a loop.
+- **The 90-day strip on the public cards is `_cached_uptime_strips()`**, built from
+  `db.get_daily_history()` (one grouped query) and cached 60 s like the percentage. It
+  lives on the service dict as `uptime_strip` and is **not** in `_API_SERVICE_KEYS`, so
+  `/api/status` does not publish it. A day with no row is grey "no data", never green.
+  Green is a day with no failed check; amber is under 5 % failed, red above.
+  `uptime_strip.js` makes it readable by touch and keyboard, and `public_refresh.js`
+  holds its swap while the strip has focus.
 - **Indexes go in `init_db()`'s explicit list, not inline in `CREATE TABLE`.** Same
   reasoning as `_ensure_column()`: `CREATE TABLE IF NOT EXISTS` is a no-op on an
   existing database, so an inline index would never appear on any real user's
@@ -175,7 +182,7 @@
   identical "bust". A per-browser "clear this browser's cache" page used to sit next
   to it and was removed: it only reached the browser that clicked it. Not behind
   `_require_totp()` - nothing is destroyed and nothing goes offline.
-- **`_uptime_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
+- **`_uptime_cache`, `_uptime_strip_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
   resets them** alongside `_integration_status_cache` and the Jellyfin cache. A new
   module-level cache needs the same treatment or it leaks across tests.
 - **`local_time.js` is loaded once in `admin_base.html`, not per admin template.**

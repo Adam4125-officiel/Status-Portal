@@ -2473,3 +2473,12 @@ install that never saved the setting keeps its 90 days. A test compares the new 
 the old per-check query. Checked on a throwaway server with 50 days of history: the backfill
 gave 51 days and 200 checks, the setting was pinned to 90, and the page showed 74.6 % where the
 old query gave 75.0 % - the gap is the partial 31st day the old rolling window included.
+
+## Uptime strip on the public cards (2026-11)
+
+The card's only history was a 4 px bar coloured by the current status, with the 30-day
+figure in a tooltip nobody could read on a phone. It is now the figure as text plus 90 bars,
+one per UTC day, from `status_daily`. Checked on a throwaway server at 390 px: gaps render
+grey, a maintenance-only day takes the maintenance colour, and the bars stay distinct.
+Not checked in a real browser: the touch drag and arrow-key reading (unit tests cover the
+markup only).
