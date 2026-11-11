@@ -88,14 +88,34 @@
   restore by hand rather than claiming it was handled — there's a test for that case.
   **This retry path has never actually fired in the wild** — see the verification
   records in `docs/HISTORY.md` before assuming it's proven.
-- **An update never deletes a file that a later release removed.** Only files present
-  in the incoming archive are written; anything the old version shipped that the new
-  one dropped just stays on disk. This is identical to the extract-the-zip-over-the-
-  folder process that predates the updater, and it's harmless (Python only imports
-  what's referenced, Flask only serves what's routed), but don't assume a post-update
-  tree is byte-identical to a fresh extraction — it's a superset. Deleting the
-  difference would mean trusting a computed file list to remove things, which is a
-  much worse failure mode than leaving a stale file behind.
+- **Files a release dropped are removed only through `instance/installed_files.json`**
+  **and `RETIRED_FILES`.**
+  Each successful update records the files it wrote there (written last, after
+  dependencies installed). The next update backs up, then deletes, the files from
+  that list the new archive no longer has (`_stale_files`), and only after every new
+  file is in place. Rules that must survive any rework:
+  - **No list, or an unreadable one, deletes nothing but `RETIRED_FILES`.** Without a
+    list a dropped file can't be told from one the admin added; never infer the list
+    from what's on disk. An install updated by a version without the list gets a
+    first list from the *next* archive, which never names what was dropped earlier -
+    so `RETIRED_FILES` names those exact paths and they go through the same filter.
+  - **Deleting a file a release shipped → add its path to `RETIRED_FILES`** in the
+    same commit. Installs that skip straight from a pre-list version to a later one
+    only have that constant to go on. A test checks each entry is absent from the
+    repo and not protected.
+  - **An entry is re-validated like an archive member and skipped, never acted on,**
+    if it is protected (`_is_protected`, case-insensitive), absolute, has `..`, or
+    leaves the app root. The worst a bad entry may cause is a stale file left behind.
+  - **Paths are compared case-insensitively (`_path_key`) on every platform.** On
+    Windows `Foo.py` and `foo.py` are one file; a case-only rename compared exactly
+    would delete the file the update just wrote.
+  - **A file that can't be deleted (Windows lock) doesn't undo the update.** It stays,
+    is kept in the new list, and the next update retries. Leaving it is how every
+    update behaved before, not a half-updated tree.
+  - **Rollback puts removed files back and restores the previous list** (the
+    manifest's `removed` and `installed_before`; `update.py rollback --emergency`
+    does both too). A backup made before this existed has no `installed_before`, and
+    rollback then leaves the list alone.
 - **Nothing in `updater.py` may read a DB setting without going through
   `_read_setting()`.** `sqlite3.connect()` *creates* an empty file for a path that
   doesn't exist, so a bare `db.get_setting()` from the CLI would leave a zero-table
