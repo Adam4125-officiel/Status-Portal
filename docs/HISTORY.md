@@ -2341,3 +2341,10 @@ are POST buttons. `awaiting_totp` had no date, leaving a password-verified sessi
 replayable for the code step indefinitely; it now expires after 5 minutes. The database
 backup download needed only a session although the file holds the TOTP seed and API keys;
 it is a POST behind `_require_totp()`, like the restore.
+
+## Visitor sign-in concurrency and listen address (2026-11)
+
+`/login` called Jellyfin with no cap, and the lockout counter only moves after a reply,
+so about a dozen simultaneous slow sign-ins could hold every waitress thread; it now
+shares the search's bounded-semaphore pattern. The server bound `0.0.0.0` unconditionally
+and `python app.py` ignored `PORTAL_PORT`; both now read `config.HOST` and `config.PORT`.
