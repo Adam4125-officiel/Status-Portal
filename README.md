@@ -54,7 +54,7 @@ the [project website](https://adam4125-officiel.github.io/Status-Portal/) and th
 
 ## Quick start
 
-Needs Python 3.10 or newer.
+Needs Python 3.11 or newer.
 
 ```bash
 cd status-portal

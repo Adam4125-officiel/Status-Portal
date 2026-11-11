@@ -131,7 +131,7 @@ change the shape and the example changes with it.
   that an absent/blank `sections=` means, `OPT_IN_SECTIONS = ("vms",)` is accepted only when
   named, and `ALL_SECTIONS` is what the 400 lists as valid. The answer is `{"total", "running",
   "items": [{"name", "state", "up"}]}` (up to `VM_ITEMS` = 10, by name), read from
-  `monitoring.get_cached_vm_snapshot()` - the cache the public `/vms` page reads, no PowerShell
+  `monitoring.get_cached_vm_snapshot()` - the cache the VMs section of the public `/server` page reads, no PowerShell
   in the request - and, like the resources, **not gated by `show_public_vms`** (the key is the
   gate). `state` is Hyper-V's own word and `up` the portal's short uptime text, meaningless for a
   VM that is not running; no VMs is an empty list, an unreadable cache is `null`. The largest
