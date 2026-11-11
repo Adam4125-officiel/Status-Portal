@@ -580,7 +580,7 @@ def test_the_admin_page_renders_with_matching_title_heading_and_nav_label(client
     assert "<title>Display device" in body
     assert "<h1>Display device</h1>" in body
     nav = body[body.index('<nav class="admin-nav">'):body.index("</nav>")]
-    assert ">Display device</a>" in nav and "class=\"active\"" in nav.split("Display device")[0][-120:]
+    assert ">Display device</a>" in nav and "class=\"active\"" in nav.split(">Display device</a>")[0][-120:]
 
 
 def test_the_page_says_how_to_configure_the_display_and_shows_a_real_example(client):

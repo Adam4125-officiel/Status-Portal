@@ -732,6 +732,7 @@ footer.foot {
 }
 .admin-nav a:hover { background: var(--bg-panel-raised); text-decoration: none; color: var(--text-primary); }
 .admin-nav a.active { background: var(--brand-dim); color: var(--brand); }
+.admin-nav__summary { display: none; }
 .nav-badge {
   display: inline-block;
   min-width: 16px;
@@ -910,6 +911,10 @@ footer.foot {
      Browsers without :has() simply don't apply it and get the previous behaviour. */
   .admin-table > table:has(thead) { min-width: 520px; }
   .admin-table th, .admin-table td { padding: 9px 10px; }
+  /* Short columns keep their words whole ("operational", not "operat/ional"), and
+     columns that live on the edit page anyway are dropped. */
+  .admin-table .col-short { white-space: nowrap; overflow-wrap: normal; }
+  .admin-table .col-secondary { display: none; }
 }
 
 /* Label/value pairs inside a .form-panel (the About page's version, paths and

@@ -24,6 +24,17 @@
 
 <div class="admin-shell">
   <nav class="admin-nav">
+    {# Under 720px the menu is a <details> showing only the current page and the badge
+       total (admin_nav.js collapses it there). It is rendered open, and the summary is
+       hidden above 720px, so without JavaScript the menu is simply always visible. #}
+    {% set nav_labels = {"services": "Services", "incidents": "Incidents", "maintenance": "Maintenance", "reports": "Reports", "announcements": "Announcements", "info": "Info page", "integrations": "Integrations", "resources": "Resources & VMs", "tasks": "Scheduled tasks", "notifications": "Channels", "discord-bot": "Discord bot", "user-notifications": "Per-user notifications", "seerr-alerts": "Seerr approvals", "system": "System", "logs": "Logs", "settings": "Settings", "device": "Display device", "users": "User accounts", "2fa": "Two-factor auth", "about": "About"} %}
+    {% set nav_badge_total = (unread_reports_count or 0) + (arr_updates_count or 0) + (seerr_pending_count or 0) + (1 if update_available else 0) %}
+    <details class="admin-nav__menu" id="admin_nav_menu" open>
+    <summary class="admin-nav__summary">
+      <span aria-hidden="true">☰</span>
+      <span class="admin-nav__current">{{ nav_labels.get(active, 'Admin') }}</span>
+      {% if nav_badge_total %}<span class="nav-badge">{{ nav_badge_total }}</span>{% endif %}
+    </summary>
     <div class="admin-nav__brand">⚙ Admin</div>
 
     {# Grouped by what an admin is trying to do, not by when the feature was added.
@@ -65,6 +76,7 @@
         <button type="submit" class="link-button">Log out</button>
       </form>
     </div>
+    </details>
   </nav>
   <main class="admin-main">
     {# Pinned to the viewport rather than sitting in the flow: admin_scroll_restore.js
@@ -91,5 +103,7 @@
    admin page has, so wiring them per-template is how one page ends up missing it. #}
 <script src="{{ asset_url('js/admin_scroll_restore.js') }}"></script>
 <script src="{{ asset_url('js/admin_flash.js') }}"></script>
+<script src="{{ asset_url('js/admin_nav.js') }}"></script>
+<script src="{{ asset_url('js/admin_autosubmit.js') }}"></script>
 <script src="{{ asset_url('js/admin_search.js') }}" data-search-url="{{ url_for('admin_search_results') }}"></script>
 {% endblock %}
