@@ -230,6 +230,14 @@ of personal settings. Reached by clicking the username in the sign-in chip.
   check and global limit exist because it's open to anonymous visitors; every message
   here is attributable to a signed-in Jellyfin account the admin can block outright
   from `/admin/users`. If that ever stops being true, this needs revisiting.
+- **"Your requests" attributes a Seerr request only by the Jellyfin user id Seerr
+  reports for its requester** (`requestedBy.jellyfinUserId`, kept as
+  `requested_by_jellyfin_id`). Never by display name, never by e-mail: names collide and
+  a wrong match shows one person another's requests. A blank id on either side matches
+  nothing - when in doubt, show nothing. The list is read from the `media_refresh` cache
+  (`integrations.requests_for_jellyfin_user()`, which keeps `USER_REQUESTS_LIMIT` = 100
+  recent requests, deeper than the 20 the public section shows); the request handler
+  makes no Seerr call.
 - **An admin reply is visible to exactly one person** — that reporter's account page
   and nowhere else, since the report's own text was never public either. Replying to
   an anonymous report is allowed but warns that nobody can see it; the textarea is

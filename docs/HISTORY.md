@@ -2444,5 +2444,12 @@ for notifications, and a free-text contact box that signed-in visitors no longer
 It is now Reports, Requests, Notifications and Preferences with anchor links; notifications
 are a table (one row per event, Email and Discord columns, a dash where a channel does not
 exist). Signed-in visitors lose the free-text contact box on `/account` and `/report`;
-anonymous reports keep it. The Requests section is a placeholder until the visitor's Seerr
-requests are listed.
+anonymous reports keep it. The Requests section was a placeholder until the visitor's Seerr
+requests were listed.
+
+## "Your requests" on the account page (2026-11)
+
+The Requests section now lists the visitor's Seerr requests and their state, from the
+`media_refresh` cache. The refresh keeps the last 100 requests (the public section still shows
+20) and records Seerr's Jellyfin link for each requester; only that link attributes a request to
+a visitor. Checked on a throwaway server: the visitor sees their own request and not another's.
