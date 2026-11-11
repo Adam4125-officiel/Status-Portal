@@ -63,18 +63,26 @@
   `app.permanent_session_lifetime` at cookie-set time, and mutating that per-request
   is a cross-thread global write under waitress. `admin_session_timeout_hours` (DB
   setting, live-editable) is clamped to it.
-- **`status_history` is the only unbounded table, and every query against it runs on
-  a public page load.** Two things keep it from becoming the app's slowest part, and
-  both matter: `idx_status_history_service_checked` is deliberately
-  `(service_id, checked_at, status)` - the third column is what makes it a *covering*
-  index for the uptime aggregate (131ms -> 43ms; a 2-column version drops back to a
-  table scan, and there's a test asserting `EXPLAIN QUERY PLAN` still says COVERING
-  INDEX) - and `prune_status_history()` runs daily from the health-check loop.
-  Before this, `get_uptime_percentage()` full-scanned the whole table *once per
-  service* on every page load: ~1s for 17 services at 90 days of history, growing
-  forever. Anything iterating over all services must use
-  `db.get_uptime_percentages()` (one grouped query), never the single-service form
-  in a loop.
+- **Uptime figures come from `status_daily`, never from `status_history`.** Every
+  check adds to its service's row for that UTC day (`_add_to_daily()`, in the same
+  transaction as the history row - `record_check_result()` and
+  `record_status_history()` both do it; a new writer of `status_history` must too).
+  `get_uptime_percentages()` sums whole UTC days (30 = today and the 29 before), so it
+  can differ from the old per-check count only through the partial 31st day back.
+  Daily rows are kept 365 days, per-check rows `status_history_retention_days` (14 by
+  default; installs that existed before had 90 written into their settings once).
+  Both are pruned by the `prune_status_history` task. The one-time backfill from
+  `status_history` is guarded by the `status_daily_backfilled` setting: **never make
+  it re-run** - after pruning it would recount a day as fewer checks than it had.
+  Anything iterating over all services uses `db.get_uptime_percentages()` (one
+  grouped query), never the single-service form in a loop.
+- **The 90-day strip on the public cards is `_cached_uptime_strips()`**, built from
+  `db.get_daily_history()` (one grouped query) and cached 60 s like the percentage. It
+  lives on the service dict as `uptime_strip` and is **not** in `_API_SERVICE_KEYS`, so
+  `/api/status` does not publish it. A day with no row is grey "no data", never green.
+  Green is a day with no failed check; amber is under 5 % failed, red above.
+  `uptime_strip.js` makes it readable by touch and keyboard, and `public_refresh.js`
+  holds its swap while the strip has focus.
 - **Indexes go in `init_db()`'s explicit list, not inline in `CREATE TABLE`.** Same
   reasoning as `_ensure_column()`: `CREATE TABLE IF NOT EXISTS` is a no-op on an
   existing database, so an inline index would never appear on any real user's
@@ -174,7 +182,7 @@
   identical "bust". A per-browser "clear this browser's cache" page used to sit next
   to it and was removed: it only reached the browser that clicked it. Not behind
   `_require_totp()` - nothing is destroyed and nothing goes offline.
-- **`_uptime_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
+- **`_uptime_cache`, `_uptime_strip_cache` and `_asset_salt` are module-level globals, so `tests/conftest.py`
   resets them** alongside `_integration_status_cache` and the Jellyfin cache. A new
   module-level cache needs the same treatment or it leaks across tests.
 - **`local_time.js` is loaded once in `admin_base.html`, not per admin template.**

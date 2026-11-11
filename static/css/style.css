@@ -543,18 +543,41 @@ body.no-visitor-controls .topbar { padding-right: 46px; }
   letter-spacing: 0;
 }
 
-/* A simple visual indicator, not a history/timeline - full-width, colored to match
-   the service's *current* status only (see status_css in index.html). The 30-day
-   uptime % is still tracked (get_uptime_percentage()) and surfaces as a hover
-   tooltip rather than a visible fraction. */
-.status-bar {
-  height: 4px;
-  border-radius: 2px;
+/* 90-day strip: one bar per UTC day, oldest on the left. Grey is "no data" (the
+   service was not checked that day), which is not the same as green. */
+.uptime__figure {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
 }
-.status-bar.ok { background: var(--ok); }
-.status-bar.warn { background: var(--warn); }
-.status-bar.crit { background: var(--crit); }
-.status-bar.maint { background: var(--maint); }
+.uptime-strip {
+  display: flex;
+  gap: 1px;
+  height: 22px;
+  border-radius: 3px;
+}
+.uptime-strip:focus-visible { outline: 2px solid var(--text-faint); outline-offset: 2px; }
+.uptime-strip__day {
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 1px;
+  background: var(--text-faint);
+  opacity: 1;
+  cursor: pointer;
+}
+.uptime-strip__day.ok { background: var(--ok); }
+.uptime-strip__day.warn { background: var(--warn); }
+.uptime-strip__day.crit { background: var(--crit); }
+.uptime-strip__day.maint { background: var(--maint); }
+.uptime-strip__day.selected { outline: 2px solid var(--text-primary); outline-offset: 0; position: relative; }
+.uptime__readout {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  min-height: 15px;
+  margin-top: 3px;
+}
 
 .service-card__note {
   font-family: var(--font-mono);

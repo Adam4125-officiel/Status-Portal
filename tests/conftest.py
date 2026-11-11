@@ -31,6 +31,8 @@ def _reset_module_state():
     app_module._integration_status_cache.clear()
     app_module._uptime_cache["value"] = {}
     app_module._uptime_cache["fetched_at"] = 0.0
+    app_module._uptime_strip_cache["value"] = {}
+    app_module._uptime_strip_cache["fetched_at"] = 0.0
     app_module._asset_salt["value"] = None
     app_module._login_state["failures"] = 0
     app_module._login_state["locked_until"] = 0.0

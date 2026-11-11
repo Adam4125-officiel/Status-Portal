@@ -33,6 +33,8 @@
     }
     var active = document.activeElement;
     if (!active) return false;
+    // Someone reading the 90-day strip with the keyboard: a swap would drop the focus.
+    if (active.classList && active.classList.contains('uptime-strip')) return true;
     if (active.tagName === 'TEXTAREA' || active.tagName === 'SELECT') return true;
     return active.tagName === 'INPUT' && !TEXT_LESS_INPUTS.test(active.type || '');
   }
