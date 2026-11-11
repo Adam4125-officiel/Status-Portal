@@ -648,19 +648,81 @@ def test_prune_status_history_drops_only_rows_past_the_cutoff(isolated_db):
     assert db.prune_status_history(None) == 0
 
 
-def test_uptime_query_is_answered_from_a_covering_index(isolated_db):
-    """Guards the index actually being used - a plain (service_id, checked_at) index
-    still 'works' but drops back to a full table scan for this query, which is the
-    slow behavior this replaced."""
+def _uptime_from_history(days=30):
+    """The per-check query get_uptime_percentages() ran before status_daily existed."""
     conn = db.get_db()
-    plan = conn.execute("""
-        EXPLAIN QUERY PLAN
-        SELECT service_id, COUNT(*), SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute("""
+        SELECT service_id, COUNT(*) AS total,
+               SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS down_count
         FROM status_history WHERE checked_at >= ? AND status != 'maintenance'
         GROUP BY service_id
-    """, ("2000-01-01",)).fetchall()
+    """, (cutoff,)).fetchall()
     conn.close()
-    assert any("COVERING INDEX idx_status_history_service_checked" in row[3] for row in plan), plan
+    return {r["service_id"]: round((r["total"] - r["down_count"]) / r["total"] * 100, 1)
+            for r in rows if r["total"]}
+
+
+def test_uptime_from_daily_rows_matches_the_old_per_check_query(isolated_db):
+    """Same figures as counting status_history over 30 days, for history spread over
+    the window and beyond it. The only possible difference is the partial 31st day
+    back, which the old query half-counted - no check is placed there."""
+    import random
+    rng = random.Random(1234)
+    services = [db.create_service({"name": f"S{i}", "url": "", "check_url": "", "description": ""})
+                for i in range(5)]
+    now = datetime.now(timezone.utc)
+    window_start = datetime.combine(now.date() - timedelta(days=29), datetime.min.time(),
+                                    tzinfo=timezone.utc)
+    span = (now - window_start).total_seconds()
+    rows = []
+    for i, sid in enumerate(services):
+        weights = {"operational": 80, "down": 3 + 7 * i, "slow": 5, "degraded": 3, "maintenance": 4}
+        for _ in range(400):
+            status = rng.choices(list(weights), list(weights.values()))[0]
+            when = window_start + timedelta(seconds=rng.uniform(1, span - 1))
+            rows.append((sid, status, rng.choice([None, rng.randint(5, 900)]), when.isoformat()))
+        for _ in range(50):  # long before the window: excluded by both
+            when = now - timedelta(days=rng.uniform(32, 120))
+            rows.append((sid, rng.choice(["operational", "down"]), 10, when.isoformat()))
+    # Only maintenance in the window: no data, in both.
+    only_maintenance = db.create_service({"name": "M", "url": "", "check_url": "", "description": ""})
+    rows.append((only_maintenance, "maintenance", None, now.isoformat()))
+    _insert_history(rows)
+    _rerun_backfill()
+
+    expected = _uptime_from_history()
+    assert len(expected) == 5
+    assert db.get_uptime_percentages() == expected
+    for sid in services + [only_maintenance]:
+        assert db.get_uptime_percentage(sid) == expected.get(sid)
+
+
+def test_uptime_survives_the_detail_being_pruned(isolated_db):
+    """The point of the aggregates: the uptime no longer needs 30 days of status_history."""
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    db.record_status_history(sid, "operational", 10)
+    db.record_status_history(sid, "down", None)
+    conn = db.get_db()
+    conn.execute("DELETE FROM status_history")
+    conn.commit()
+    conn.close()
+    assert db.get_uptime_percentages() == {sid: 50.0}
+    assert db.get_uptime_percentage(sid) == 50.0
+
+
+def test_uptime_window_is_whole_utc_days_ending_today(isolated_db):
+    sid = db.create_service({"name": "S", "url": "", "check_url": "", "description": ""})
+    today = datetime.now(timezone.utc).date()
+    conn = db.get_db()
+    conn.executemany(
+        "INSERT INTO status_daily (service_id, day, checks, down_checks) VALUES (?, ?, ?, ?)",
+        [(sid, (today - timedelta(days=29)).isoformat(), 4, 1),   # first day in
+         (sid, (today - timedelta(days=30)).isoformat(), 4, 4)])  # one day out
+    conn.commit()
+    conn.close()
+    assert db.get_uptime_percentage(sid) == 75.0
+    assert db.get_uptime_percentage(sid, days=31) == 37.5
 
 
 def test_the_open_auto_incident_lookup_uses_its_index(isolated_db):

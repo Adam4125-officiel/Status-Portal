@@ -817,16 +817,16 @@ def init_db():
     # both new and existing databases.
     #
     # status_history is the one that actually hurt: it gains a row per service per
-    # check forever (a 120s interval and 15 services is ~324k rows a month), and
-    # get_uptime_percentages() reads a 30-day slice of it on every single public page
-    # load. Unindexed, that's a full scan of the whole table per page.
+    # check (a 120s interval and 15 services is ~324k rows a month), and
+    # get_uptime_percentages() used to read a 30-day slice of it on every single
+    # public page load. Unindexed, that was a full scan of the whole table per page.
+    # The uptime figures now come from status_daily instead.
     for ddl in (
-        # status is in the index, not just the two lookup columns, so
-        # get_uptime_percentages() can be answered entirely from the index without
-        # touching the table at all (SQLite reports it as a COVERING INDEX). Measured
-        # 131ms -> 43ms over 30 days of history for 17 services. A (service_id,
-        # checked_at) index is a prefix of this one, so this replaces it rather than
-        # sitting alongside it.
+        # status is in the index, not just the two lookup columns, so a per-service
+        # count over a time range is answered from the index alone (a COVERING INDEX).
+        # Measured 131ms -> 43ms over 30 days of history for 17 services, back when
+        # get_uptime_percentages() ran that count. A (service_id, checked_at) index is
+        # a prefix of this one, so this replaces it rather than sitting alongside it.
         "CREATE INDEX IF NOT EXISTS idx_status_history_service_checked "
         "ON status_history (service_id, checked_at, status)",
         "CREATE INDEX IF NOT EXISTS idx_status_history_checked "
@@ -1651,53 +1651,63 @@ def record_status_history(service_id, status, response_ms):
 UPTIME_WINDOW_DAYS = 30
 
 
+def _uptime_first_day(days):
+    """The first UTC day of a `days`-day uptime window that ends today: 30 days means
+    today and the 29 before it. A window of whole days, because that is what
+    status_daily holds - the old per-check query started exactly 30*24h ago, so the
+    two differ only by the part of the 31st day back that it used to include."""
+    return (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
+
+
+def _uptime_from_counts(checks, down, maintenance):
+    counted = (checks or 0) - (maintenance or 0)
+    if counted <= 0:
+        return None
+    return round((counted - (down or 0)) / counted * 100, 1)
+
+
 def get_uptime_percentages(days=UPTIME_WINDOW_DAYS):
-    """{service_id: percentage} for every service that has history in the window -
+    """{service_id: percentage} for every service that has checks in the window -
     the share of recorded checks that were NOT 'down'. Checks logged while the
     service was in 'maintenance' are excluded entirely (planned maintenance
-    shouldn't count against uptime). A service with no history in the window is
-    simply absent from the dict, which callers render as "no data" - same meaning as
-    the None that get_uptime_percentage() returns for one service.
+    shouldn't count against uptime). A service with no counted check in the window
+    is simply absent from the dict, which callers render as "no data" - same meaning
+    as the None that get_uptime_percentage() returns for one service.
 
-    One grouped query for all services, counted by SQLite, rather than one query per
-    service each materializing every matching row into Python. That matters because
-    this runs on every public page load and every /api/status hit: the per-service
-    version measured ~1s for 17 services against 90 days of history, and grew with
-    the table forever. Backed by idx_status_history_service_checked (see init_db)."""
+    Read from status_daily (one row per service per day, at most 365 kept), not from
+    status_history: this runs on every public page load and every /api/status hit,
+    and summing a few hundred daily rows costs the same whatever the check interval
+    or the detail retention. It used to count status_history itself, which grew with
+    the table."""
     conn = get_db()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     rows = conn.execute("""
-        SELECT service_id,
-               COUNT(*) AS total,
-               SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS down_count
-        FROM status_history
-        WHERE checked_at >= ? AND status != 'maintenance'
+        SELECT service_id, SUM(checks) AS checks, SUM(down_checks) AS down,
+               SUM(maintenance_checks) AS maintenance
+        FROM status_daily WHERE day >= ?
         GROUP BY service_id
-    """, (cutoff,)).fetchall()
+    """, (_uptime_first_day(days),)).fetchall()
     conn.close()
-    return {
-        r["service_id"]: round((r["total"] - r["down_count"]) / r["total"] * 100, 1)
-        for r in rows if r["total"]
-    }
+    result = {}
+    for r in rows:
+        value = _uptime_from_counts(r["checks"], r["down"], r["maintenance"])
+        if value is not None:
+            result[r["service_id"]] = value
+    return result
 
 
 def get_uptime_percentage(service_id, days=UPTIME_WINDOW_DAYS):
     """Single-service form of get_uptime_percentages(). Returns None if there's no
-    history yet (e.g. a service with auto-check off, which never gets a
-    status_history row). Kept for callers that only need one service; anything
-    iterating over every service should use the grouped version instead."""
+    history yet (e.g. a service with auto-check off, which is never checked). Kept
+    for callers that only need one service; anything iterating over every service
+    should use the grouped version instead."""
     conn = get_db()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     row = conn.execute("""
-        SELECT COUNT(*) AS total,
-               SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS down_count
-        FROM status_history
-        WHERE service_id=? AND checked_at >= ? AND status != 'maintenance'
-    """, (service_id, cutoff)).fetchone()
+        SELECT SUM(checks) AS checks, SUM(down_checks) AS down,
+               SUM(maintenance_checks) AS maintenance
+        FROM status_daily WHERE service_id=? AND day >= ?
+    """, (service_id, _uptime_first_day(days))).fetchone()
     conn.close()
-    if not row or not row["total"]:
-        return None
-    return round((row["total"] - row["down_count"]) / row["total"] * 100, 1)
+    return _uptime_from_counts(row["checks"], row["down"], row["maintenance"]) if row else None
 
 
 def prune_status_history(days):
