@@ -34,7 +34,7 @@ _logger = logging.getLogger(__name__)
 _APP_START = time.monotonic()
 
 # Service ids currently mid-retry-loop in _check_service_status() (see below) - read
-# by app.py's index() so a public-page hit during that window can show "retrying" instead of
+# by routes/public.py's index() so a public-page hit during that window can show "retrying" instead of
 # silently keeping the last-known status.
 _retry_in_progress = set()
 
@@ -105,7 +105,7 @@ def _service_list_phrase(names):
 
 
 def _process_maintenance_and_notify():
-    """Also called directly from app.py's admin_maintenance_new()/admin_maintenance_edit()
+    """Also called directly from routes/admin_content.py's admin_maintenance_new()/admin_maintenance_edit()
     (a request handler), not just from the health-check loop below - db.process_
     maintenance_windows() above already applied the actual status flip by the time
     this loop runs, so backgrounding only the notify() call doesn't delay that; see

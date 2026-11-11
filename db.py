@@ -1264,7 +1264,7 @@ def delete_announcement(aid):
     conn.close()
 
 
-# ---------- Announcement send history (see app.py's admin_announcement_send()) ----------
+# ---------- Announcement send history (see routes/admin_content.py's admin_announcement_send()) ----------
 def record_announcement_send(announcement_id, title, channels, recipient_count=0):
     """One row per send. discord_detail starts blank and is filled in later by
     set_announcement_send_detail() once the background Discord post finishes - the
@@ -1351,7 +1351,7 @@ def list_incidents(limit=None, exclude_ids=None, max_age_days=None, open_only=Fa
     age counts toward the cutoff, since an ongoing problem shouldn't disappear
     from the public page just because it started a while ago.
 
-    exclude_ids drives "load more" pagination (see app.py's api_incidents_more()):
+    exclude_ids drives "load more" pagination (see routes/api.py's api_incidents_more()):
     the client sends the ids it is already displaying, and this returns the next
     page of whatever is left, newest-first, with no age filter applied. That is
     deliberately NOT a positional OFFSET and NOT an id cursor, both of which were

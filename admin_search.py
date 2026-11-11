@@ -117,7 +117,7 @@ _cache_lock = threading.Lock()
 
 def clear_caches():
     """Drops the built index. Wired into the admin System page's "Clear cached data"
-    button (app._clear_all_caches()), same as every other module-level cache here."""
+    button (routes.admin_system._clear_all_caches()), same as every other module-level cache here."""
     with _cache_lock:
         _cache["entries"] = None
         _cache["stamp"] = None

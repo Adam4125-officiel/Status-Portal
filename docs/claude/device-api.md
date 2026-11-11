@@ -38,7 +38,7 @@ change the shape and the example changes with it.
   this is not. What must hold, and is tested with every `show_public_*` off, is that the
   numbers are unreachable without the key. The admin page says so in as many words.
 - **Bounded by construction, proven against the worst case.** `device_api.py` is pure
-  shaping (no Flask, no database; `app.api_device_summary()` gathers rows and hands them
+  shaping (no Flask, no database; `routes.api.api_device_summary()` gathers rows and hands them
   in). Every list has a fixed cap (`SERVICE_ITEMS`, `INCIDENT_ITEMS`, …) with a count
   beside it for "+N more", and every string a fixed cap in UTF-8 **bytes**, not
   characters (an emoji is four). `test_the_worst_possible_response_is_under_the_hard_cap`

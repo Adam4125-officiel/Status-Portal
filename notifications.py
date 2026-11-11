@@ -114,7 +114,7 @@ def notify(title, message, *, allow_mentions=True):
 
 def notify_async(title, message, **kwargs):
     """Fires notify() on its own one-shot daemon thread instead of inline - same
-    shape as app.py's _send_announcement_discord()/_restart_process() delayed action,
+    shape as routes/admin_content.py's _send_announcement_discord() and app.py's _restart_process() delayed action,
     applied here because notify() itself can block on up to three sequential
     outbound calls (Discord webhook, ntfy, SMTP - each with its own multi-second
     timeout) and several of its callers are request handlers, including /report,

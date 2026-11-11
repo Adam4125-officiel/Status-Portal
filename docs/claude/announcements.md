@@ -46,7 +46,7 @@
   behaves_as_before`) pinning that. Deliberately *not* a standalone broadcast tool with
   its own history unrelated to the banners — asked and confirmed when this was
   designed, to avoid two overlapping "tell everyone something" concepts.
-- **One shared implementation, three entry points.** `app._dispatch_announcement_send
+- **One shared implementation, three entry points.** `routes.admin_content._dispatch_announcement_send
   (aid, title, message, channels)` is what actually sends — the create form's "Publish
   and send" (checkboxes on the same form as title/message, not a separate page),
   the edit form's equivalent, and the list page's per-row "Send" (for re-sending: a

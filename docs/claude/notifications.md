@@ -267,7 +267,7 @@
   second path around `EVENT_CHANNEL_PREFERENCE`, not a bug.** It backs the per-user
   "test notification" buttons (`/admin/users/<id>/test/discord`,
   `/admin/users/<id>/test/email`) *and* the free-text "Send a message" panel
-  (`/admin/users/<id>/message`, `app.admin_user_message()`) the same way — both are
+  (`/admin/users/<id>/message`, `routes.admin_users.admin_user_message()`) the same way — both are
   one-to-one admin-initiated actions, not automated events, so they **bypass the
   recipient's channel preferences entirely** — a person who switched Discord off
   still needs to be reachable for an admin test or a direct message. It still

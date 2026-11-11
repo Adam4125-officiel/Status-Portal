@@ -80,6 +80,22 @@
   names on `health`, not on `app` - patching `app` no longer reaches the loop. The TLS
   task is registered by `health.register_tasks()`, called from `app.py` after
   `prune_status_history`, because `/admin/tasks` lists tasks in registration order.
+- **Routes live in `routes/`, one module per domain; `app.py` keeps the shared
+  plumbing.** `routes/public.py` (status page, sub-pages, kiosk, `/report`),
+  `account.py` (visitor sign-in and account), `search.py`, `api.py` (`/api/*`, badges,
+  feed), and `admin_home.py`, `admin_content.py`, `admin_integrations.py`,
+  `admin_settings.py`, `admin_system.py`, `admin_users.py`. Each registers on the one
+  Flask object with plain `@app.route` (no blueprint), so endpoint names are bare
+  function names and `url_for("admin_logs")` keeps working - never add a blueprint
+  prefix, it would rename every endpoint. `app.py` imports these modules at its end,
+  so a route module may `from app import` any helper. Hooks, context processors,
+  session and CSRF helpers, `login_required`, shared constants and every
+  `scheduler.register()` stay in `app.py` (`/admin/tasks` lists tasks in registration
+  order). A name the tests replace on `app` (`_restart_process`, `LOGO_UPLOAD_DIR`,
+  `_report_login_required`, `_user_login_slots`...) is read as `portal.NAME` at call
+  time (`import app as portal`), never from-imported - the copy would miss the patch.
+  A new route goes in the module of its domain; the convention checks parse `app.py`
+  and `routes/` together.
 - **`startup_grace_seconds` (per service) suppresses auto-incidents, not checks.**
   `health._within_grace_period(service)` gates the call to
   `_handle_incident_lifecycle()`/`_handle_integration_incident_lifecycle()` only —

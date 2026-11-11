@@ -2517,3 +2517,16 @@ whole suite passes with the tests now patching `health`, `/admin/tasks` keeps it
 throwaway server checked an HTTP and a TCP service, opened incidents for the unreachable ones
 and recorded the end of the cycle. One visible difference: the loop's log lines now carry
 `[health]` instead of `[app]`.
+
+## Routes split out of `app.py` (2026-11)
+
+After the health check left, `app.py` still held every route in about 5 500 lines. The
+views moved, unchanged and one domain per commit, into `routes/` (public, account, search,
+API, and five admin modules), each registering on the same `app` object; `app.py` keeps the
+hooks, session helpers, shared constants and task registrations, and is down to about 2 100
+lines. No route address or endpoint name changed: the URL map, the request hooks and the
+task order were compared before and after and are identical. Running `python app.py`
+directly needed one guard - the file aliases itself as `app` before importing `routes/`,
+or the routes would land on a second copy of the Flask object. Checked on a throwaway
+server started through `app.py`'s own `__main__`: first-run setup, every admin page and a
+settings save answered as before.

@@ -82,6 +82,7 @@ have bitten someone on exactly that change.
 | Anything in `health.py` (`run_health_checks()`) or a status value | *`docs/claude/conventions.md`: Conventions* → `health.py` never imports `app`; level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
 | Anything a request handler calls | *`docs/claude/conventions.md`: Conventions* → no slow I/O in a request handler; *`docs/claude/monitoring.md`: Monitoring architecture*; *`docs/claude/sessions-caching-db.md`: Sessions/caching* |
 | Login, sessions, cookies, CSRF | *`docs/claude/sessions-caching-db.md`: Sessions, caching and DB performance*; *`docs/claude/auth-and-accounts.md`: Two-factor authentication* |
+| A new route, or moving one | *`docs/claude/conventions.md`: Conventions* → routes live in `routes/`, plain `@app.route`, `portal.NAME` for anything the tests patch |
 | A new admin route | *`docs/claude/conventions.md`: Conventions* → CSRF is automatic under `/admin/`; `_require_totp()` for destructive actions only |
 | A template's CSS/JS reference | *`docs/claude/conventions.md`: Conventions* → always `asset_url()`; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → `SEND_FILE_MAX_AGE_DEFAULT` is 30 days |
 | Anything rendering a timestamp | *`docs/claude/conventions.md`: Conventions* → server-side UTC + `local-time` spans; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → ISO strings only |

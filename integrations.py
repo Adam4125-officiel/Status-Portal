@@ -1169,7 +1169,7 @@ def push_seerr_contact(base_url, api_key, seerr_user_id, email=None, discord_id=
     reachable from a sync or a background task.
 
     **Validated here, not only in the form the value first came from** - both
-    admin_user_contact() and user_account_push_seerr_contact() (app.py) already show
+    admin_user_contact() and user_account_push_seerr_contact() (routes/) already show
     the value on the page before this is ever called, but neither actually checks its
     shape, and a value can also arrive here via save_contact() straight from an
     unvalidated text field. This is the one function that actually reaches Seerr, so a
