@@ -119,6 +119,19 @@
   font-family: var(--font-mono);
   white-space: nowrap;
 }
+/* A POST button that has to read as the link it replaced (sign out, log out). */
+.inline-form { display: inline; margin: 0; }
+.user-chip__out { cursor: pointer; }
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--brand);
+  cursor: pointer;
+}
+.admin-nav .link-button { font-size: inherit; color: var(--text-faint); }
+.link-button:hover { text-decoration: underline; }
 .user-chip__out:hover { border-color: var(--brand-dim); color: var(--text-primary); text-decoration: none; }
 /* The unread-reply dot on the sign-in chip. The only thing that tells a user an
    answer is waiting, so it has to read as a notification rather than decoration. */

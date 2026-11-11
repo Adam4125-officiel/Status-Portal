@@ -581,7 +581,7 @@ def _enforce_user_session():
 
 # POST paths outside /admin/ that still need CSRF protection. /report is
 # conditional rather than listed here - see _csrf_required_for().
-_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/account", "/account/theme", "/search/request"}
+_CSRF_PROTECTED_PUBLIC_PATHS = {"/login", "/logout", "/account", "/account/theme", "/search/request"}
 
 
 def _csrf_required_for(path, method):
@@ -2792,7 +2792,7 @@ def user_account_theme():
     return ("", 204)
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def user_logout():
     """Ends only the visitor session - see _end_user_session() for why this must not
     be session.clear()."""
@@ -2888,7 +2888,7 @@ def admin_login():
     return render_template("login.html", first_run=first_run, awaiting_totp=awaiting_totp)
 
 
-@app.route("/admin/logout")
+@app.route("/admin/logout", methods=["POST"])
 def admin_logout():
     _end_admin_session()
     return redirect(url_for("index"))

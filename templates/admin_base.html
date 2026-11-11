@@ -61,7 +61,9 @@
 
     <div class="back-link">
       <a href="{{ url_for('index') }}">← View portal</a><br>
-      <a href="{{ url_for('admin_logout') }}">Log out</a>
+      <form method="POST" action="{{ url_for('admin_logout') }}" class="inline-form">
+        <button type="submit" class="link-button">Log out</button>
+      </form>
     </div>
   </nav>
   <main class="admin-main">
