@@ -2506,3 +2506,14 @@ one per UTC day, from `status_daily`. Checked on a throwaway server at 390 px: g
 grey, a maintenance-only day takes the maintenance colour, and the bars stay distinct.
 Not checked in a real browser: the touch drag and arrow-key reading (unit tests cover the
 markup only).
+
+## Health check moved out of `app.py` (2026-11)
+
+`app.py` was over 6 000 lines, with the background health check in the middle of the routes.
+The loop, the checks, the status merges, the incident lifecycle, the integration-status cache
+and the TLS task moved unchanged to `health.py`, which never imports `app`; `_notify_async()`
+became `notifications.notify_async()` so the loop could use it. No behaviour change: the
+whole suite passes with the tests now patching `health`, `/admin/tasks` keeps its order, and a
+throwaway server checked an HTTP and a TCP service, opened incidents for the unreachable ones
+and recorded the end of the cycle. One visible difference: the loop's log lines now carry
+`[health]` instead of `[app]`.

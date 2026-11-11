@@ -79,7 +79,7 @@ have bitten someone on exactly that change.
 | Any DB schema change | *`docs/claude/conventions.md`: Conventions* → `_ensure_column()`; *`docs/claude/sessions-caching-db.md`: Sessions/caching* → indexes go in `init_db()`'s list |
 | A new per-service field | *`docs/claude/conventions.md`: Conventions* → "three places, not one" (main form, wizard, Service defaults) |
 | A new setting of any kind | *`docs/claude/conventions.md`: Conventions* → the config split (env var vs DB row), and "a new `PORTAL_*` env var means three files" |
-| Anything in `run_health_checks()` or a status value | *`docs/claude/conventions.md`: Conventions* → level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
+| Anything in `health.py` (`run_health_checks()`) or a status value | *`docs/claude/conventions.md`: Conventions* → `health.py` never imports `app`; level-triggered `_handle_incident_lifecycle`, the `slow` tier, `_merge_api_health`/`_merge_dependency_health` |
 | Anything a request handler calls | *`docs/claude/conventions.md`: Conventions* → no slow I/O in a request handler; *`docs/claude/monitoring.md`: Monitoring architecture*; *`docs/claude/sessions-caching-db.md`: Sessions/caching* |
 | Login, sessions, cookies, CSRF | *`docs/claude/sessions-caching-db.md`: Sessions, caching and DB performance*; *`docs/claude/auth-and-accounts.md`: Two-factor authentication* |
 | A new admin route | *`docs/claude/conventions.md`: Conventions* → CSRF is automatic under `/admin/`; `_require_totp()` for destructive actions only |
