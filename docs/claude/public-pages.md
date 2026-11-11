@@ -264,7 +264,9 @@ time, rotating on a timer, no nav and no footer. Off by default.
   positioning, not `display:none`/`type=hidden` which some bots skip — a filled
   honeypot silently "succeeds" without writing a row, so a bot gets no signal it was
   caught), a minimum-time-to-fill check (`session["report_form_rendered_at"]` vs
-  `REPORT_MIN_SECONDS_TO_FILL`), and a rate limit
+  `REPORT_MIN_SECONDS_TO_FILL`; a missing value means the form was never opened and
+  is refused, and it is popped after an accepted report so one GET authorises one
+  POST), and a rate limit
   (`_report_state`/`_report_rate_limited()`, mirroring `_login_state`'s shape). No
   external rate-limiting library was added for this one route.
 - **The report notification is sent with `allow_mentions=False`**, which adds

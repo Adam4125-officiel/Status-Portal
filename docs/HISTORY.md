@@ -2295,3 +2295,12 @@ It now shares the login lockout counter and, when 2FA is on, requires a current 
 `_require_totp()` (the user explicitly agreed to extend that helper to it). Since the
 password had no recovery path, `instance/RESET_PASSWORD` was added next to `RESET_2FA`.
 The minimum length stays at 6.
+
+## SMTP certificate check, report-form timing, email subject (2026-11)
+
+`starttls()` and `SMTP_SSL` ran without a context, so Python skipped certificate and
+host-name verification; both now use a default context, with `PORTAL_SMTP_VERIFY_TLS=false`
+as an explicit opt-out. `/report` treated a missing `report_form_rendered_at` as "rendered
+long ago", so a cookie-less POST passed the minimum-fill-time check; it is now refused and
+the value is cleared after an accepted report. A multi-line email subject raised
+`ValueError` out of `notify()`; line breaks become spaces.

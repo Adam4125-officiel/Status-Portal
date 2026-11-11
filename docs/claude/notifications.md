@@ -25,6 +25,10 @@
 - **An unrecognised `PORTAL_SMTP_SECURITY` upgrades to STARTTLS, never downgrades to
   plaintext.** Failing to connect is a far better outcome than quietly sending
   credentials in the clear because someone typo'd the value.
+- **The SMTP certificate is verified by default** (`ssl.create_default_context()` for
+  both STARTTLS and SSL). `PORTAL_SMTP_VERIFY_TLS=false` is the explicit opt-out for a
+  self-signed local relay. `build_email()` flattens line breaks in the subject to
+  spaces, since a header can't hold them and `notify()` must never raise.
 - **The HTML body is built with `html.escape()`, not a Jinja template.**
   `notifications.py` is called from the background health-check thread, where there is
   no app or request context to render a template in — and this module deliberately
