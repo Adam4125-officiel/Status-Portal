@@ -5754,3 +5754,33 @@ def test_api_status_does_not_publish_the_strip(client):
     _daily(sid, datetime.now(timezone.utc).date().isoformat(), 10)
     svc = next(s for s in client.get("/api/status").get_json()["services"] if s["id"] == sid)
     assert "uptime_strip" not in svc
+
+
+def test_the_health_loop_logs_its_start_once_not_every_cycle(isolated_db, monkeypatch, caplog):
+    """Normal operation logs nothing else, so this line is how app.log shows the loop is
+    running after an update. Two cycles, one line."""
+    class Stop(Exception):
+        pass
+
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise Stop
+
+    monkeypatch.setattr(health_module, "_process_maintenance_and_notify", lambda: None)
+    monkeypatch.setattr(health_module, "_refresh_integration_cache", lambda: None)
+    monkeypatch.setattr(health_module, "_check_low_disk_space", lambda snapshot: None)
+    monkeypatch.setattr(health_module.monitoring, "get_resource_snapshot", lambda: {})
+    monkeypatch.setattr(health_module, "_finish_health_cycle", lambda: None)
+    monkeypatch.setattr(health_module.db, "list_services", lambda: [])
+    monkeypatch.setattr(health_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(health_module.config, "CHECK_INTERVAL_SECONDS", 45)
+    with caplog.at_level("INFO", logger=health_module.__name__):
+        with pytest.raises(Stop):
+            health_module.run_health_checks()
+    started = [r for r in caplog.records if "health-check loop started" in r.getMessage()]
+    assert len(started) == 1
+    assert started[0].levelname == "INFO"
+    assert started[0].getMessage() == "health-check loop started, interval 45 s"
