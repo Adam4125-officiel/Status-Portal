@@ -277,6 +277,28 @@
     </div>
   </form>
 
+  <h3 style="font-size: 13px; margin: 18px 0 6px;">Daily automatic backup</h3>
+  <p style="font-size: 12px; color: var(--text-faint); margin-top: 0;">
+    The <strong>{{ db_backup_task.label }}</strong> task
+    ({% if db_backup_task.enabled %}{% if db_backup_task.schedule_kind == 'daily' %}daily at {{ db_backup_task.daily_at }} UTC{% else %}every {{ db_backup_task.interval_minutes }} min{% endif %}{% else %}currently disabled{% endif %})
+    keeps the newest seven copies in <code>instance/db_backups/</code>; change it on
+    <a href="{{ url_for('admin_tasks') }}">Scheduled tasks</a>.
+    {% if db_backup_task.last_run_at %}Last run: {{ db_backup_task.last_status }},
+    <span class="local-time" data-utc="{{ db_backup_task.last_run_at }}">{{ db_backup_task.last_run_at[:16].replace('T', ' ') }} UTC</span>.{% else %}It has not run yet.{% endif %}
+  </p>
+  {% if scheduled_db_backups %}
+  <table class="info-table">
+    {% for b in scheduled_db_backups %}
+    <tr>
+      <th style="font-weight: normal;"><code>{{ b.name }}</code></th>
+      <td>{{ b.size_mb }} MB ·
+        <span class="local-time" data-utc="{{ b.created_at }}">{{ b.created_at[:16].replace('T', ' ') }} UTC</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
   {% if db_backups %}
   <h3 style="font-size: 13px; margin: 18px 0 6px;">Saved before a previous restore</h3>
   <p style="font-size: 12px; color: var(--text-faint); margin-top: 0;">

@@ -3802,6 +3802,8 @@ def admin_about():
         releases_url=updater.RELEASES_PAGE_URL,
         backups=list(reversed(updater.list_backups()))[:5],
         db_backups=list_db_safety_backups(),
+        scheduled_db_backups=list_db_safety_backups(SCHEDULED_BACKUP_PREFIX),
+        db_backup_task=scheduler.task_view(scheduler.get_task("db_backup")),
         python_version=sys.version.split()[0],
         platform_name=f"{platform.system()} {platform.release()}".strip(),
         db_path=db.DB_PATH,
@@ -3930,6 +3932,11 @@ def admin_update():
 # else. Neither can restore the other.
 DB_SAFETY_BACKUP_DIR = os.path.join(config.APP_ROOT, "instance", "db_backups")
 KEEP_DB_SAFETY_BACKUPS = 5
+# The daily `db_backup` task writes into the same folder under its own prefix. Listing
+# and pruning are per prefix, so neither kind of copy can ever push out the other.
+SAFETY_BACKUP_PREFIX = "portal-before-restore-"
+SCHEDULED_BACKUP_PREFIX = "portal-scheduled-"
+KEEP_SCHEDULED_DB_BACKUPS = 7
 
 # An extracted database is capped separately from the upload itself, so a small zip
 # that expands to an enormous file (a zip bomb) is refused before it is written out.
@@ -4018,17 +4025,20 @@ def _db_safety_snapshot():
     could catch a torn write from the background health-check thread."""
     os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"portal-before-restore-{stamp}.db")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"{SAFETY_BACKUP_PREFIX}{stamp}.db")
     db.backup_to_file(path)
     return path
 
 
-def list_db_safety_backups():
-    """Newest first. A local os.listdir + stat, the same cheap class of call as
+def list_db_safety_backups(prefix=None):
+    """Newest first. `prefix` selects the kind of copy; the default is the
+    "before a restore" ones. A local os.listdir + stat, the same cheap class of call as
     asset_url()'s getmtime - not the kind of slow outbound I/O the no-blocking-in-a-
     request-handler rule is about, and not worth a cache."""
     try:
-        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR) if n.endswith(".db")]
+        prefix = SAFETY_BACKUP_PREFIX if prefix is None else prefix
+        names = [n for n in os.listdir(DB_SAFETY_BACKUP_DIR)
+                 if n.endswith(".db") and n.startswith(prefix)]
     except OSError:
         return []
     entries = []
@@ -4044,16 +4054,50 @@ def list_db_safety_backups():
     return sorted(entries, key=lambda e: e["created_at"], reverse=True)
 
 
-def _prune_db_safety_backups():
-    """Keeps the newest KEEP_DB_SAFETY_BACKUPS. Reads the module constant inside the
+def _prune_db_safety_backups(prefix=None, keep=None):
+    """Keeps the newest KEEP_DB_SAFETY_BACKUPS (of the given prefix). Reads the module constant inside the
     function rather than as a default argument, so a monkeypatched value in a test is
     actually honoured - a default arg binds at def time, the same trap that made
     updater._prune_backups pass for the wrong reason once."""
-    for entry in list_db_safety_backups()[KEEP_DB_SAFETY_BACKUPS:]:
+    keep = KEEP_DB_SAFETY_BACKUPS if keep is None else keep
+    for entry in list_db_safety_backups(prefix)[keep:]:
         try:
             os.remove(entry["path"])
         except OSError:
             _logger.warning("Could not prune old database snapshot %s", entry["name"])
+
+
+def _db_backup_task():
+    """Body of the `db_backup` scheduled task: a consistent snapshot of the database
+    into instance/db_backups/, keeping the newest KEEP_SCHEDULED_DB_BACKUPS. Only
+    "portal-scheduled-*" files are ever pruned - the before-restore copies are not
+    this task's to delete."""
+    os.makedirs(DB_SAFETY_BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(DB_SAFETY_BACKUP_DIR, f"{SCHEDULED_BACKUP_PREFIX}{stamp}.db")
+    try:
+        db.backup_to_file(path)
+    except Exception:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+        raise
+    _prune_db_safety_backups(SCHEDULED_BACKUP_PREFIX, KEEP_SCHEDULED_DB_BACKUPS)
+    return f"Saved {os.path.basename(path)}."
+
+
+scheduler.register(
+    "db_backup",
+    "Back up the database",
+    "Saves a consistent copy of the database to instance/db_backups/ every day and "
+    "keeps the newest seven. The database holds all settings, integrations and "
+    "history, so this is the copy to reach for if the disk or the file is damaged.",
+    _db_backup_task,
+    default_schedule_kind="daily",
+    default_daily_at="03:00",
+)
 
 
 @app.route("/admin/about/restore-db", methods=["POST"])
