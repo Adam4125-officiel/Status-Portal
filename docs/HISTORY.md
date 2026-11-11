@@ -2304,3 +2304,11 @@ as an explicit opt-out. `/report` treated a missing `report_form_rendered_at` as
 long ago", so a cookie-less POST passed the minimum-fill-time check; it is now refused and
 the value is cleared after an accepted report. A multi-line email subject raised
 `ValueError` out of `notify()`; line breaks become spaces.
+
+## Headers, uploads sandbox, /api/status allow-list (2026-11)
+
+The CSP lacked `base-uri`, `form-action` and `object-src`, and there was no
+`Permissions-Policy` or COOP; all are added. An uploaded SVG logo opened directly would run
+script on the portal origin, so `/static/uploads/` is served with `CSP: sandbox`.
+`/api/status` published every `services` column except two; it now uses an allow-list equal
+to the keys published before, so new columns stay private until chosen.
