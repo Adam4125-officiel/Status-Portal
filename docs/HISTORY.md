@@ -2348,3 +2348,10 @@ it is a POST behind `_require_totp()`, like the restore.
 so about a dozen simultaneous slow sign-ins could hold every waitress thread; it now
 shares the search's bounded-semaphore pattern. The server bound `0.0.0.0` unconditionally
 and `python app.py` ignored `PORTAL_PORT`; both now read `config.HOST` and `config.PORT`.
+
+## Small cleanups (2026-11)
+
+Two tests shared one name, so only the second ran; compose defaulted the search rate
+limit to 20 while `config.py` says 40. Connections now use `synchronous=NORMAL` (safe
+under WAL, one fsync fewer per commit), each check's state and history row share a
+transaction, and check timing uses `time.perf_counter()`.
